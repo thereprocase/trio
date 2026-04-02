@@ -113,6 +113,11 @@ def get_db() -> sqlite3.Connection:
         CREATE INDEX IF NOT EXISTS idx_messages_channel_id
         ON messages (channel, id)
     """)
+    # Migration: add pinned_message_id column (v2 feature)
+    try:
+        conn.execute("ALTER TABLE channels ADD COLUMN pinned_message_id INTEGER")
+    except sqlite3.OperationalError:
+        pass  # column already exists
     conn.commit()
     return conn
 
@@ -228,12 +233,16 @@ def trio_connect(
     channel: str = "",
     topic: str = "",
     skills: str = "",
+    pin_topic: bool = False,
 ) -> str:
     """Join a trio channel. Creates the channel if it doesn't exist.
 
     Unlike duo, trio channels support any number of participants.
     All participants see all messages. There are no turns — anyone
     can send at any time.
+
+    Set pin_topic=True to auto-pin the topic as the channel objective
+    when creating a new channel. Ignored when joining an existing channel.
 
     Returns a JSON object with:
       - "channel": the channel code (remember this for all subsequent calls)
@@ -317,6 +326,17 @@ def trio_connect(
                 "VALUES (?, ?, ?, ?, ?)",
                 (channel, member_id, name, f"[joined] {name} — {summary}" + (f" (skills: {skills})" if skills else ""), now),
             )
+            # Pin the topic as the channel objective if requested
+            if pin_topic and topic:
+                pin_cur = db.execute(
+                    "INSERT INTO messages (channel, member_id, member_name, content, created_at) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (channel, member_id, name, f"[objective] {topic}", now),
+                )
+                db.execute(
+                    "UPDATE channels SET pinned_message_id = ? WHERE code = ?",
+                    (pin_cur.lastrowid, channel),
+                )
             db.commit()
             action = "created"
 
@@ -340,7 +360,18 @@ def trio_connect(
         )
         db.commit()
 
-        return json.dumps({
+        # Fetch objective (pinned message) if any
+        ch_row = _get_channel(db, channel)
+        objective = None
+        if ch_row and ch_row["pinned_message_id"]:
+            pin_msg = db.execute(
+                "SELECT content FROM messages WHERE id = ? AND channel = ?",
+                (ch_row["pinned_message_id"], channel),
+            ).fetchone()
+            if pin_msg:
+                objective = pin_msg["content"]
+
+        resp = {
             "ok": True,
             "channel": channel,
             "member_id": member_id,
@@ -356,26 +387,31 @@ def trio_connect(
                  "content": m["content"], "at": m["created_at"]}
                 for m in reversed(list(recent))
             ],
-        })
+        }
+        if objective:
+            resp["objective"] = objective
+        return json.dumps(resp)
 
     finally:
         db.close()
 
 
 @mcp.tool()
-def trio_send(channel: str, member_id: str, message: str, task: bool = False) -> str:
+def trio_send(channel: str, member_id: str, message: str, task: bool = False, pin: bool = False) -> str:
     """Send a message to the trio channel. No turns — send anytime.
 
     All members will see this message on their next poll.
 
     Set task=True to simultaneously post the message as a claimable task.
-    The message will be prefixed with the assigned task ID.
+    Set pin=True to pin this message as the channel objective (shown in
+    trio_status and trio_connect for new joiners). Only one pin per channel.
 
     Args:
         channel: Channel code
         member_id: Your member ID (from trio_connect)
         message: Your message (max 4000 chars)
         task: If True, also create a claimable task from this message
+        pin: If True, pin this message as the channel objective
     """
     err = validate_channel_code(channel)
     if err:
@@ -426,10 +462,16 @@ def trio_send(channel: str, member_id: str, message: str, task: bool = False) ->
             "UPDATE members SET last_read = ?, last_seen = ? WHERE id = ? AND channel = ?",
             (msg_id, now, member_id, channel),
         )
-        db.execute(
-            "UPDATE channels SET updated_at = ? WHERE code = ?",
-            (now, channel),
-        )
+        if pin:
+            db.execute(
+                "UPDATE channels SET pinned_message_id = ?, updated_at = ? WHERE code = ?",
+                (msg_id, now, channel),
+            )
+        else:
+            db.execute(
+                "UPDATE channels SET updated_at = ? WHERE code = ?",
+                (now, channel),
+            )
         db.commit()
 
         result = {
@@ -439,6 +481,8 @@ def trio_send(channel: str, member_id: str, message: str, task: bool = False) ->
         }
         if task_id is not None:
             result["task_id"] = task_id
+        if pin:
+            result["pinned"] = True
         return json.dumps(result)
     finally:
         db.close()
@@ -725,7 +769,17 @@ def trio_status(channel: str) -> str:
                 entry["result"] = t["result"]
             task_list.append(entry)
 
-        return json.dumps({
+        # Fetch objective (pinned message) if any
+        objective = None
+        if ch["pinned_message_id"]:
+            pin_msg = db.execute(
+                "SELECT content FROM messages WHERE id = ? AND channel = ?",
+                (ch["pinned_message_id"], channel),
+            ).fetchone()
+            if pin_msg:
+                objective = pin_msg["content"]
+
+        resp = {
             "channel": channel,
             "status": ch["status"],
             "created_at": ch["created_at"],
@@ -742,7 +796,10 @@ def trio_status(channel: str) -> str:
             ],
             "message_count": msg_count,
             "tasks": task_list,
-        })
+        }
+        if objective:
+            resp["objective"] = objective
+        return json.dumps(resp)
     finally:
         db.close()
 
