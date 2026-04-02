@@ -790,11 +790,10 @@ def trio_complete(channel: str, member_id: str, task_id: int, result: str = "") 
 
 @mcp.tool()
 def trio_release(channel: str, member_id: str, task_id: int) -> str:
-    """Release a claimed task back to open.
+    """Release a claimed task back to open. Self-release only.
 
-    If you are the claimer, release is always allowed.
-    If someone else claimed it, release is only allowed if their
-    last_seen exceeds STALE_THRESHOLD_SECONDS (they've gone silent).
+    Only the member who claimed the task can release it.
+    To free another member's tasks, use trio_cull (requires user permission).
 
     Args:
         channel: Channel code
@@ -822,15 +821,14 @@ def trio_release(channel: str, member_id: str, task_id: int) -> str:
         if task["status"] == "done":
             return json.dumps({"error": f"Task #{task_id} is already done. Cannot release."})
 
-        # Check authorization: self-release always OK, else check staleness
+        # Self-release only — no releasing other members' tasks
         if task["claimed_by"] != member_id:
             claimer = _get_member(db, channel, task["claimed_by"])
-            if claimer and _is_member_active(claimer["last_seen"]):
-                claimer_name = claimer["name"] if claimer else task["claimed_by"]
-                return json.dumps({
-                    "error": f"Task #{task_id} is claimed by {claimer_name} who is still active. "
-                             f"Only stale members' tasks can be released by others."
-                })
+            claimer_name = claimer["name"] if claimer else task["claimed_by"]
+            return json.dumps({
+                "error": f"Task #{task_id} is claimed by {claimer_name}. "
+                         f"Only the claimer can release a task. Use trio_cull to remove a member and free their tasks."
+            })
 
         now = now_iso()
         db.execute(
