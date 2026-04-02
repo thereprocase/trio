@@ -108,9 +108,17 @@ def get_db() -> sqlite3.Connection:
             FOREIGN KEY (channel) REFERENCES channels(code)
         )
     """)
+    # Index for efficient unread-message queries in trio_poll
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_messages_channel_id
+        ON messages (channel, id)
+    """)
     conn.commit()
     return conn
 
+
+MAX_SUMMARY_LENGTH = 200
+MAX_SKILLS_LENGTH = 200
 
 CONVERSATIONS_DIR = DB_DIR / "conversations"
 
@@ -250,6 +258,10 @@ def trio_connect(
 
     if not name:
         name = f"Agent-{generate_member_id()[:4]}"
+
+    # Cap input lengths to prevent bloated join messages and status renders
+    summary = summary[:MAX_SUMMARY_LENGTH] if summary else ""
+    skills = skills[:MAX_SKILLS_LENGTH] if skills else ""
 
     member_id = generate_member_id()
     now = now_iso()
@@ -831,6 +843,10 @@ def trio_cleanup(channel: str = "", all_ended: bool = False) -> str:
             err = validate_channel_code(channel)
             if err:
                 return json.dumps({"error": err})
+            # Guard: refuse to delete active channels
+            ch = _get_channel(db, channel)
+            if ch and ch["status"] == "active":
+                return json.dumps({"error": f'Channel "{channel}" is still active. End it first with trio_end.'})
             db.execute("DELETE FROM tasks WHERE channel = ?", (channel,))
             db.execute("DELETE FROM messages WHERE channel = ?", (channel,))
             db.execute("DELETE FROM members WHERE channel = ?", (channel,))
