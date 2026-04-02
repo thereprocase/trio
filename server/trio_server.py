@@ -579,11 +579,10 @@ def trio_poll(channel: str, member_id: str, wait_seconds: int = 15) -> str:
             ).fetchall()
 
             if unread:
-                # Update watermark to latest message id (including own)
-                max_id = db.execute(
-                    "SELECT MAX(id) FROM messages WHERE channel = ?",
-                    (channel,),
-                ).fetchone()[0] or member["last_read"]
+                # Advance watermark to the max ID of returned messages only.
+                # Using MAX(id) over the whole channel could skip messages
+                # committed concurrently with a higher ID than what we fetched.
+                max_id = max(m["id"] for m in unread)
                 db.execute(
                     "UPDATE members SET last_read = ? WHERE id = ? AND channel = ?",
                     (max_id, member_id, channel),
@@ -737,9 +736,13 @@ def trio_complete(channel: str, member_id: str, task_id: int, result: str = "") 
             ).fetchone()
             if not task:
                 return json.dumps({"error": f"Task #{task_id} not found."})
+            if task["status"] == "done":
+                return json.dumps({"error": f"Task #{task_id} is already done."})
+            if task["status"] == "open":
+                return json.dumps({"error": f"Task #{task_id} is not claimed yet. Claim it first."})
             if task["claimed_by"] != member_id:
-                return json.dumps({"error": "You didn't claim this task."})
-            return json.dumps({"error": f"Task is {task['status']}, not claimed."})
+                return json.dumps({"error": f"Task #{task_id} is claimed by someone else."})
+            return json.dumps({"error": f"Task #{task_id} cannot be completed (status: {task['status']})."})
 
         # Read back the task description for the done message
         task_row = db.execute(

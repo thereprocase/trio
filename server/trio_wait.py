@@ -99,11 +99,8 @@ def poll_for_messages(channel, member_id):
             ).fetchall()
 
             if unread:
-                # Advance watermark
-                max_id = db.execute(
-                    "SELECT MAX(id) FROM messages WHERE channel = ?",
-                    (channel,),
-                ).fetchone()[0] or last_read
+                # Advance watermark to max of returned messages only
+                max_id = max(m["id"] for m in unread)
                 db.execute(
                     "UPDATE members SET last_read = ? WHERE channel = ? AND id = ?",
                     (max_id, channel, member_id),
