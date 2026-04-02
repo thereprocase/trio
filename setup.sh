@@ -124,7 +124,17 @@ fi
 # so they run without permission prompts. This file is separate from
 # ~/.claude.json and can be safely edited.
 
+# Convert settings path to native OS format (same as server path above)
 SETTINGS_JSON="${CLAUDE_DIR}/settings.json"
+case "$PLATFORM" in
+    windows)
+        if command -v cygpath &>/dev/null; then
+            SETTINGS_JSON=$(cygpath -w "$SETTINGS_JSON")
+        else
+            SETTINGS_JSON=$(echo "$SETTINGS_JSON" | sed 's|^/\([a-zA-Z]\)/|\1:\\|' | sed 's|/|\\|g')
+        fi
+        ;;
+esac
 TRIO_TOOLS=(
     "mcp__trio__trio_connect"
     "mcp__trio__trio_send"
