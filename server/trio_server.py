@@ -28,6 +28,7 @@ DB_PATH = DB_DIR / "trio.db"
 CHANNEL_CODE_PATTERN = re.compile(r"^[a-z0-9][a-z0-9\-]{0,31}$")
 MAX_MESSAGE_LENGTH = 4000
 MAX_MEMBERS = 20
+STALE_THRESHOLD_SECONDS = 300  # 5 minutes without heartbeat = stale
 
 mcp = FastMCP("trio")
 
@@ -169,7 +170,7 @@ def export_conversation(db: sqlite3.Connection, channel: str) -> Path | None:
             f"",
         ]
         for m in members:
-            status = "active" if m["active"] else "left"
+            status = "active" if _is_member_active(m["last_seen"]) else "stale"
             lines.append(f"- **{m['name']}** ({status}): {m['summary']}")
             if m["skills"]:
                 lines.append(f"  Skills: {m['skills']}")
@@ -225,6 +226,17 @@ def _get_member(db, channel, member_id):
         "SELECT * FROM members WHERE channel = ? AND id = ?",
         (channel, member_id),
     ).fetchone()
+
+
+def _is_member_active(last_seen: str | None) -> bool:
+    """Compute liveness from last_seen timestamp vs wall clock."""
+    if not last_seen:
+        return False
+    try:
+        seen = datetime.fromisoformat(last_seen)
+        return (datetime.now(timezone.utc) - seen).total_seconds() < STALE_THRESHOLD_SECONDS
+    except (ValueError, TypeError):
+        return False
 
 
 # ── MCP Tools ────────────────────────────────────────────────────────────────
@@ -287,9 +299,9 @@ def trio_connect(
             if existing["status"] == "ended":
                 return json.dumps({"error": f'Channel "{channel}" has ended.'})
 
-            # Check member count
+            # Check member count (all members who ever joined)
             count = db.execute(
-                "SELECT COUNT(*) FROM members WHERE channel = ? AND active = 1",
+                "SELECT COUNT(*) FROM members WHERE channel = ?",
                 (channel,),
             ).fetchone()[0]
             if count >= MAX_MEMBERS:
@@ -346,7 +358,7 @@ def trio_connect(
 
         # Gather current state for the joiner
         members = db.execute(
-            "SELECT id, name, summary, skills, active FROM members WHERE channel = ? ORDER BY joined_at",
+            "SELECT id, name, summary, skills, last_seen FROM members WHERE channel = ? ORDER BY joined_at",
             (channel,),
         ).fetchall()
 
@@ -383,7 +395,7 @@ def trio_connect(
             "action": action,
             "members": [
                 {"id": m["id"], "name": m["name"], "summary": m["summary"],
-                 "skills": m["skills"], "active": bool(m["active"])}
+                 "skills": m["skills"], "active": _is_member_active(m["last_seen"])}
                 for m in members
             ],
             "recent_messages": [
@@ -461,18 +473,18 @@ def trio_send(channel: str, member_id: str, message: str, task: bool = False, pi
         if "@" in content:
             content_lower = content.lower()
             if "@all" in content_lower:
-                # Broadcast mention — all active members
+                # Broadcast mention — all joined members
                 all_members = db.execute(
-                    "SELECT id FROM members WHERE channel = ? AND active = 1",
+                    "SELECT id FROM members WHERE channel = ?",
                     (channel,),
                 ).fetchall()
                 mention_ids = [m["id"] for m in all_members]
             else:
-                active_members = db.execute(
-                    "SELECT id, name FROM members WHERE channel = ? AND active = 1",
+                all_members = db.execute(
+                    "SELECT id, name FROM members WHERE channel = ?",
                     (channel,),
                 ).fetchall()
-                for m in active_members:
+                for m in all_members:
                     if f"@{m['name'].lower()}" in content_lower:
                         mention_ids.append(m["id"])
         mentions_json = json.dumps(mention_ids) if mention_ids else ""
@@ -553,9 +565,15 @@ def trio_poll(channel: str, member_id: str, wait_seconds: int = 15) -> str:
                     "FROM messages WHERE channel = ? AND id > ? ORDER BY id",
                     (channel, member["last_read"]),
                 ).fetchall()
+                # Resolve ended_by member_id to display name
+                ended_by_name = ch["ended_by"]
+                if ch["ended_by"]:
+                    ender = _get_member(db, channel, ch["ended_by"])
+                    if ender:
+                        ended_by_name = ender["name"]
                 return json.dumps({
                     "event": "ended",
-                    "ended_by": ch["ended_by"],
+                    "ended_by": ended_by_name,
                     "unread": [
                         {"id": m["id"], "from": m["member_name"] or m["member_id"],
                          "content": m["content"], "at": m["created_at"]}
@@ -771,6 +789,78 @@ def trio_complete(channel: str, member_id: str, task_id: int, result: str = "") 
 
 
 @mcp.tool()
+def trio_release(channel: str, member_id: str, task_id: int) -> str:
+    """Release a claimed task back to open.
+
+    If you are the claimer, release is always allowed.
+    If someone else claimed it, release is only allowed if their
+    last_seen exceeds STALE_THRESHOLD_SECONDS (they've gone silent).
+
+    Args:
+        channel: Channel code
+        member_id: Your member ID
+        task_id: The task ID to release
+    """
+    err = validate_channel_code(channel)
+    if err:
+        return json.dumps({"error": err})
+
+    db = get_db()
+    try:
+        member = _get_member(db, channel, member_id)
+        if not member:
+            return json.dumps({"error": "You are not a member of this channel."})
+
+        task = db.execute(
+            "SELECT * FROM tasks WHERE id = ? AND channel = ?",
+            (task_id, channel),
+        ).fetchone()
+        if not task:
+            return json.dumps({"error": f"Task #{task_id} not found."})
+        if task["status"] == "open":
+            return json.dumps({"error": f"Task #{task_id} is already open."})
+        if task["status"] == "done":
+            return json.dumps({"error": f"Task #{task_id} is already done. Cannot release."})
+
+        # Check authorization: self-release always OK, else check staleness
+        if task["claimed_by"] != member_id:
+            claimer = _get_member(db, channel, task["claimed_by"])
+            if claimer and _is_member_active(claimer["last_seen"]):
+                claimer_name = claimer["name"] if claimer else task["claimed_by"]
+                return json.dumps({
+                    "error": f"Task #{task_id} is claimed by {claimer_name} who is still active. "
+                             f"Only stale members' tasks can be released by others."
+                })
+
+        now = now_iso()
+        db.execute(
+            "UPDATE tasks SET claimed_by = NULL, status = 'open', updated_at = ? "
+            "WHERE id = ? AND channel = ?",
+            (now, task_id, channel),
+        )
+
+        # Post release message
+        task_desc = task["description"]
+        claimer = _get_member(db, channel, task["claimed_by"])
+        claimer_name = claimer["name"] if claimer else task["claimed_by"]
+        db.execute(
+            "INSERT INTO messages (channel, member_id, member_name, content, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (channel, member_id, member["name"],
+             f"[released #{task_id}] {task_desc} (was claimed by {claimer_name})", now),
+        )
+        db.commit()
+
+        return json.dumps({
+            "ok": True,
+            "task_id": task_id,
+            "released_from": claimer_name,
+        })
+    finally:
+        db.close()
+
+
+@mcp.tool()
 def trio_status(channel: str) -> str:
     """Get full details for a trio channel: members, all tasks, message count.
 
@@ -840,7 +930,7 @@ def trio_status(channel: str) -> str:
                     "name": m["name"],
                     "summary": m["summary"],
                     "skills": m["skills"],
-                    "active": bool(m["active"]),
+                    "active": _is_member_active(m["last_seen"]),
                     "last_seen": m["last_seen"],
                 }
                 for m in members
@@ -915,23 +1005,27 @@ def trio_list() -> str:
     try:
         channels = db.execute(
             "SELECT c.code, c.status, c.created_at, c.updated_at, "
-            "(SELECT COUNT(*) FROM members m WHERE m.channel = c.code AND m.active = 1) as member_count, "
             "(SELECT COUNT(*) FROM messages m WHERE m.channel = c.code) as message_count "
             "FROM channels c ORDER BY c.updated_at DESC",
         ).fetchall()
 
-        return json.dumps({
-            "channels": [
-                {
-                    "channel": c["code"],
-                    "status": c["status"],
-                    "members": c["member_count"],
-                    "messages": c["message_count"],
-                    "updated_at": c["updated_at"],
-                }
-                for c in channels
-            ],
-        })
+        # Compute active member counts in Python to avoid SQLite ISO 8601 parsing issues
+        result_list = []
+        for c in channels:
+            members = db.execute(
+                "SELECT last_seen FROM members WHERE channel = ?",
+                (c["code"],),
+            ).fetchall()
+            active_count = sum(1 for m in members if _is_member_active(m["last_seen"]))
+            result_list.append({
+                "channel": c["code"],
+                "status": c["status"],
+                "members": active_count,
+                "messages": c["message_count"],
+                "updated_at": c["updated_at"],
+            })
+
+        return json.dumps({"channels": result_list})
     finally:
         db.close()
 

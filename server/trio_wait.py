@@ -9,12 +9,13 @@ Simpler than duo_wait.py — no turns, no deadlock detection. Just
 watermark-based message detection for N participants.
 
 Usage:
-    python trio_wait.py <channel> <member_id>
+    python trio_wait.py <channel> <member_id> [--timeout SECONDS]
 
 Output on completion (JSON, one line):
     {"event": "new_messages", "messages": [{...}, ...]}
     {"event": "ended", "ended_by": "..."}
     {"event": "channel_gone"}
+    {"event": "timeout"}
 """
 
 import json
@@ -40,8 +41,12 @@ def get_db():
     return conn
 
 
-def poll_for_messages(channel, member_id):
-    while True:
+DEFAULT_TIMEOUT = 300  # 5 minutes — exit cleanly before Bash kills us
+
+
+def poll_for_messages(channel, member_id, timeout=DEFAULT_TIMEOUT):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
         db = get_db()
         try:
             # Update heartbeat
@@ -72,9 +77,18 @@ def poll_for_messages(channel, member_id):
                     "FROM messages WHERE channel = ? AND id > ? ORDER BY id",
                     (channel, last_read),
                 ).fetchall()
+                # Resolve ended_by member_id to display name
+                ended_by_name = ch["ended_by"]
+                if ch["ended_by"]:
+                    ender = db.execute(
+                        "SELECT name FROM members WHERE channel = ? AND id = ?",
+                        (channel, ch["ended_by"]),
+                    ).fetchone()
+                    if ender:
+                        ended_by_name = ender["name"]
                 return {
                     "event": "ended",
-                    "ended_by": ch["ended_by"],
+                    "ended_by": ended_by_name,
                     "unread": [
                         {"id": m["id"], "from": m["member_name"] or m["member_id"],
                          "content": m["content"], "at": m["created_at"]}
@@ -120,13 +134,23 @@ def poll_for_messages(channel, member_id):
 
         time.sleep(POLL_INTERVAL)
 
+    return {"event": "timeout"}
+
 
 if __name__ == "__main__":
     if len(sys.argv) < 3:
-        print(json.dumps({"error": "Usage: trio_wait.py <channel> <member_id>"}))
+        print(json.dumps({"error": "Usage: trio_wait.py <channel> <member_id> [--timeout SECONDS]"}))
         sys.exit(1)
 
     channel = sys.argv[1]
     member_id = sys.argv[2]
-    result = poll_for_messages(channel, member_id)
+    timeout = DEFAULT_TIMEOUT
+    if "--timeout" in sys.argv:
+        idx = sys.argv.index("--timeout")
+        if idx + 1 < len(sys.argv):
+            try:
+                timeout = max(1, int(sys.argv[idx + 1]))
+            except ValueError:
+                pass
+    result = poll_for_messages(channel, member_id, timeout=timeout)
     print(json.dumps(result))

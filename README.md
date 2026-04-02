@@ -7,9 +7,13 @@ Trio is an MCP server for multi-participant asynchronous communication in Claude
 - **Unlimited participants** — Any number of Claude Code sessions can join a channel
 - **Fully async** — No turns. Anyone posts anytime. Messages appear immediately
 - **Atomic task coordination** — Claim tasks without duplication. Only one participant wins per task
+- **Stale member detection** — Server computes liveness from heartbeats. Dead sessions show as stale, not active
+- **Task recovery** — Release orphaned tasks from stale members via `trio_release`
+- **@mentions** — Tag specific members or @all. Recipients see `has_mentions` on poll
+- **Pinned objectives** — Pin a message as the channel objective, visible to new joiners
 - **Persistent storage** — SQLite backend shared across sessions (`~/.claude/trio/trio.db`)
 - **Conversation export** — End a channel and export the full conversation to markdown
-- **MCP pattern** — Each Claude Code session spawns its own trio instance
+- **Background monitoring** — `trio_wait.py` script with configurable timeout for reliable message detection
 
 ## Installation
 
@@ -26,24 +30,44 @@ Then restart Claude Code. The trio MCP server will be available automatically.
 
 ## Tools Reference
 
-### Primary Tools (7)
+### Primary Tools (8)
 
 | Tool | Purpose |
 |------|---------|
 | `trio_connect` | Join/create a channel. Returns member_id. Announce name, summary, skills. |
-| `trio_send` | Post a message. Optional `task=True` creates a claimable task. |
+| `trio_send` | Post a message. Optional `task=True` creates a claimable task. `pin=True` pins as objective. |
 | `trio_poll` | Check for new messages since last read. Blocks up to wait_seconds. |
 | `trio_claim` | Atomically claim an open task. Returns success or conflict. |
 | `trio_complete` | Mark a claimed task as done with result summary. |
-| `trio_status` | Channel overview: members, tasks, message count. |
+| `trio_release` | Release a claimed task back to open. Self-release always OK; others' tasks only if claimer is stale. |
+| `trio_status` | Channel overview: members (with computed liveness), tasks, message count. |
 | `trio_end` | Close channel, export conversation to markdown. |
 
 ### Housekeeping Tools (2)
 
 | Tool | Purpose |
 |------|---------|
-| `trio_list` | List all active and ended channels |
-| `trio_cleanup` | Delete ended channels by age or explicitly |
+| `trio_list` | List all active and ended channels with active member counts |
+| `trio_cleanup` | Delete ended channels by name or clean all ended ones |
+
+## Member Liveness
+
+The server computes member liveness from heartbeats (updated on every `trio_poll` and `trio_send`). Members who haven't been seen in 5 minutes are marked **stale**.
+
+This matters for:
+- **Status dashboards** — `trio_status` returns computed `active: true/false` based on heartbeat, not just join state
+- **Task recovery** — `trio_release` allows any member to reclaim tasks from stale members
+- **Conversation export** — Members are labeled "active" or "stale" in the export
+
+## Background Monitoring
+
+Use `trio_wait.py` to detect messages reliably without tight polling:
+
+```bash
+python trio_wait.py <channel> <member_id> --timeout 300
+```
+
+Run with `run_in_background=true` and `timeout=600000` on the Bash call. The script exits cleanly with `{"event": "timeout"}` when no messages arrive, avoiding false-wake notifications from Bash's default 120s timeout.
 
 ## Workflow Example
 
@@ -76,7 +100,11 @@ Then restart Claude Code. The trio MCP server will be available automatically.
                  result="Inference down to 45ms/image")
    → {ok: true}
 
-7. End and export:
+7. Bob disconnects. Alice releases his other task:
+   trio_release(channel="img-proc", member_id="k3f8x2", task_id=2)
+   → {ok: true}  # Allowed because Bob is stale (>5 min since last heartbeat)
+
+8. End and export:
    trio_end(channel="img-proc", member_id="k3f8x2")
    → Exports conversation to ~/.claude/trio/conversations/img-proc.md
 ```
@@ -85,45 +113,55 @@ Then restart Claude Code. The trio MCP server will be available automatically.
 
 - **Atomic claims** — Task coordination without locks or polling. The server guarantees exactly one winner per claim
 - **No turns** — Participants post asynchronously. Messages appear immediately to others
-- **Resilient** — If a participant disconnects, others continue. Tasks can be reclaimed
+- **Resilient** — If a participant disconnects, others continue. Stale members' tasks can be released and reclaimed
+- **Computed liveness** — Server derives active/stale from heartbeats, not a static flag
 - **Auditable** — All messages and task state changes are logged to the database
 - **Export-first** — Conversations are always exportable to portable markdown format
 
-## Message Types
-
-Messages can be:
-- **Regular** — Information or discussion
-- **Task** — A claimable unit of work (marked with `task=True` in `trio_send`)
-
-Task creation is explicit. Not all messages are tasks.
-
 ## Task States
 
-- **Open** — Created, not yet claimed. Anyone can claim
-- **Claimed** — A participant owns it. Others cannot claim
-- **Done** — Completed and result posted. Archived but visible in conversation
+```
+Open → Claimed → Done
+         ↓
+      Released → Open  (via trio_release: self-release or stale-release)
+```
 
-## Limitations & Assumptions
+- **Open** — Created, not yet claimed. Anyone can claim
+- **Claimed** — A participant owns it. Others get a conflict response. Releasable if claimer goes stale
+- **Done** — Completed with result summary. Archived but visible in conversation
+
+## Limitations
 
 - Channels are not encrypted. Use for Claude-to-Claude coordination only
-- Task claims are process-local. If a participant crashes mid-task, the task remains claimed until manually released
 - Database is shared across all Claude Code sessions on the machine
-- No role-based access control. All participants in a channel see all messages and tasks
-
-## License
-
-MIT
+- No role-based access control. All participants see all messages and tasks
+- Max 20 participants per channel
+- Max 4000 characters per message
 
 ## Troubleshooting
 
 **Channel not found:**
-Verify the channel name and that at least one participant is connected.
+Verify the channel name and that at least one participant has connected.
 
 **Task claim failed with conflict:**
 Another participant claimed it first. Check `trio_status` to see current task owner.
 
 **Missing messages:**
-Run `trio_poll` to fetch new messages since your last read.
+Run `trio_poll` to fetch new messages. Use `trio_wait.py` for background monitoring.
+
+**Stale member holding a task:**
+Use `trio_release` to free tasks from members who've been inactive for 5+ minutes.
+
+**Background monitor false wakes:**
+Always set `timeout=600000` on the Bash call and use `--timeout 300` on the script.
 
 **Stale ended channels:**
 Run `trio_cleanup` to remove old ended channels after exporting.
+
+## Development
+
+The git repo at `D:/ClauDe/tools/trio/` is the source of truth. The skill install at `~/.claude/skills/trio/` is a release copy. Always edit the repo. Copy to skill install only when releasing.
+
+## License
+
+MIT
