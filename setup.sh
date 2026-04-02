@@ -150,7 +150,7 @@ TRIO_TOOLS=(
 "$PYTHON_CMD" -c "
 import json, os
 
-settings_path = '$SETTINGS_JSON'
+settings_path = r'$SETTINGS_JSON'
 tools = $(printf '%s\n' "${TRIO_TOOLS[@]}" | "$PYTHON_CMD" -c "import sys,json; print(json.dumps([l.strip() for l in sys.stdin]))")
 
 if os.path.exists(settings_path):
