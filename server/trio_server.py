@@ -114,10 +114,14 @@ def get_db() -> sqlite3.Connection:
         ON messages (channel, id)
     """)
     # Migration: add pinned_message_id column (v2 feature)
-    try:
-        conn.execute("ALTER TABLE channels ADD COLUMN pinned_message_id INTEGER")
-    except sqlite3.OperationalError:
-        pass  # column already exists
+    for col, table, defn in [
+        ("pinned_message_id", "channels", "INTEGER"),
+        ("mentions", "messages", "TEXT NOT NULL DEFAULT ''"),
+    ]:
+        try:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {defn}")
+        except sqlite3.OperationalError:
+            pass  # column already exists
     conn.commit()
     return conn
 
@@ -452,10 +456,31 @@ def trio_send(channel: str, member_id: str, message: str, task: bool = False, pi
         else:
             content = message
 
+        # Detect @mentions in content
+        mention_ids = []
+        if "@" in content:
+            content_lower = content.lower()
+            if "@all" in content_lower:
+                # Broadcast mention — all active members
+                all_members = db.execute(
+                    "SELECT id FROM members WHERE channel = ? AND active = 1",
+                    (channel,),
+                ).fetchall()
+                mention_ids = [m["id"] for m in all_members]
+            else:
+                active_members = db.execute(
+                    "SELECT id, name FROM members WHERE channel = ? AND active = 1",
+                    (channel,),
+                ).fetchall()
+                for m in active_members:
+                    if f"@{m['name'].lower()}" in content_lower:
+                        mention_ids.append(m["id"])
+        mentions_json = json.dumps(mention_ids) if mention_ids else ""
+
         cur = db.execute(
-            "INSERT INTO messages (channel, member_id, member_name, content, created_at) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (channel, member_id, member["name"], content, now),
+            "INSERT INTO messages (channel, member_id, member_name, content, mentions, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (channel, member_id, member["name"], content, mentions_json, now),
         )
         msg_id = cur.lastrowid
 
@@ -548,7 +573,7 @@ def trio_poll(channel: str, member_id: str, wait_seconds: int = 15) -> str:
 
             # Check for unread messages (from other members)
             unread = db.execute(
-                "SELECT id, member_id, member_name, content, created_at "
+                "SELECT id, member_id, member_name, content, mentions, created_at "
                 "FROM messages WHERE channel = ? AND id > ? AND member_id != ? ORDER BY id",
                 (channel, member["last_read"], member_id),
             ).fetchall()
@@ -565,14 +590,35 @@ def trio_poll(channel: str, member_id: str, wait_seconds: int = 15) -> str:
                 )
                 db.commit()
 
-                return json.dumps({
+                # Enrich with mention flags
+                has_mentions = False
+                msg_list = []
+                for m in unread:
+                    mentions_raw = m["mentions"] if m["mentions"] else ""
+                    try:
+                        mention_list = json.loads(mentions_raw) if mentions_raw else []
+                    except (json.JSONDecodeError, TypeError):
+                        mention_list = []
+                    mentioned = member_id in mention_list
+                    if mentioned:
+                        has_mentions = True
+                    entry = {
+                        "id": m["id"],
+                        "from": m["member_name"] or m["member_id"],
+                        "content": m["content"],
+                        "at": m["created_at"],
+                    }
+                    if mentioned:
+                        entry["mentioned"] = True
+                    msg_list.append(entry)
+
+                resp = {
                     "event": "new_messages",
-                    "messages": [
-                        {"id": m["id"], "from": m["member_name"] or m["member_id"],
-                         "content": m["content"], "at": m["created_at"]}
-                        for m in unread
-                    ],
-                })
+                    "messages": msg_list,
+                }
+                if has_mentions:
+                    resp["has_mentions"] = True
+                return json.dumps(resp)
 
             if time.time() >= deadline:
                 return json.dumps({"event": "no_new"})
