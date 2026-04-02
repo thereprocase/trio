@@ -1031,6 +1031,80 @@ def trio_list() -> str:
 
 
 @mcp.tool()
+def trio_cull(channel: str, member_id: str, target_member_id: str) -> str:
+    """Remove a member from a channel entirely.
+
+    Deletes the target from the members table, releases their claimed
+    tasks back to open, and posts a system message.
+
+    IMPORTANT: Claudes must NEVER call this autonomously. Only on
+    explicit user instruction.
+
+    Args:
+        channel: Channel code
+        member_id: Your member ID (the caller)
+        target_member_id: The member ID to remove
+    """
+    err = validate_channel_code(channel)
+    if err:
+        return json.dumps({"error": err})
+
+    db = get_db()
+    try:
+        caller = _get_member(db, channel, member_id)
+        if not caller:
+            return json.dumps({"error": "You are not a member of this channel."})
+
+        target = _get_member(db, channel, target_member_id)
+        if not target:
+            return json.dumps({"error": f"Member {target_member_id} not found in this channel."})
+
+        if target_member_id == member_id:
+            return json.dumps({"error": "Cannot cull yourself. Use trio_end to leave."})
+
+        target_name = target["name"]
+        now = now_iso()
+
+        # Release any tasks claimed by the culled member
+        released_tasks = db.execute(
+            "SELECT id, description FROM tasks WHERE channel = ? AND claimed_by = ? AND status = 'claimed'",
+            (channel, target_member_id),
+        ).fetchall()
+        if released_tasks:
+            db.execute(
+                "UPDATE tasks SET claimed_by = NULL, status = 'open', updated_at = ? "
+                "WHERE channel = ? AND claimed_by = ? AND status = 'claimed'",
+                (now, channel, target_member_id),
+            )
+
+        db.execute(
+            "DELETE FROM members WHERE id = ? AND channel = ?",
+            (target_member_id, channel),
+        )
+
+        released_ids = [t["id"] for t in released_tasks]
+        cull_msg = f"[culled] {target_name} ({target_member_id}) removed from channel"
+        if released_ids:
+            cull_msg += f" — released tasks: {', '.join(f'#{tid}' for tid in released_ids)}"
+
+        db.execute(
+            "INSERT INTO messages (channel, member_id, member_name, content, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (channel, member_id, caller["name"], cull_msg, now),
+        )
+        db.commit()
+
+        return json.dumps({
+            "ok": True,
+            "culled": target_name,
+            "culled_id": target_member_id,
+            "released_tasks": released_ids,
+        })
+    finally:
+        db.close()
+
+
+@mcp.tool()
 def trio_cleanup(channel: str = "", all_ended: bool = False) -> str:
     """Delete trio channels and their data.
 

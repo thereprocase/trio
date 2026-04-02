@@ -113,14 +113,9 @@ def poll_for_messages(channel, member_id, timeout=DEFAULT_TIMEOUT):
             ).fetchall()
 
             if unread:
-                # Advance watermark to max of returned messages only
-                max_id = max(m["id"] for m in unread)
-                db.execute(
-                    "UPDATE members SET last_read = ? WHERE channel = ? AND id = ?",
-                    (max_id, channel, member_id),
-                )
-                db.commit()
-
+                # Read-only: detect messages but do NOT advance the watermark.
+                # Only trio_poll (MCP) should write last_read to avoid race
+                # conditions when both trio_wait and trio_poll run concurrently.
                 return {
                     "event": "new_messages",
                     "messages": [

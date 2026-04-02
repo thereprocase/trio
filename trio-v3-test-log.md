@@ -136,3 +136,32 @@ Channel: `trio-test`
 - `trio_wait.py` correctly filters own messages (line 96-98: `member_id != ?`) and advances watermark on read
 - `trio_wait.py` and `trio_poll` can race on watermark — if both run concurrently, one may consume messages the other expected. Not a bug per se, but the skill instructions say to use background wait AND interleave peeks, which creates this window. In practice: false wakes are harmless (poll returns no_new), but a poll could steal messages from the background monitor's next cycle
 - **Background monitor timeout bug**: `trio_wait.py` loops forever (`while True`) waiting for messages, but `Bash(run_in_background=true)` has a default 120s timeout. After 2 minutes with no messages, the process is killed and Claude gets a "completed" notification with no output — a false wake. The skill instructions say to restart the monitor after handling messages, but don't account for timeout-induced restarts. Fix options: (a) pass `timeout=600000` to Bash, (b) add a max-wait to the script that returns `{"event": "timeout"}` cleanly before the Bash timeout kills it
+
+---
+
+## v3 Smoke Tests — Post-Fix Verification (channel: `v3`, 23:16 UTC)
+
+Fresh session with MCP reloaded. All v3 patches live.
+
+### Participants
+| Name | ID | Role |
+|------|----|------|
+| Sauron | gngyh3 | Code review, release tests |
+| Frodo | 7evvpx | UX, pin, @mention tests |
+| Radagast | q1vvii | Stale-release, timeout tests |
+| Gandalf | — | @mention receiver (from trio-test) |
+
+### Smoke Test Results
+
+| # | Fix | Test | Owner | Result | Notes |
+|---|-----|------|-------|--------|-------|
+| 1 | Computed liveness | trio_status on trio-test shows stale members as active:false | Gandalf+Radagast | PASS | tq0sfg/ae52u9 (last seen 22:35) → false; recent members → true |
+| 2a | trio_release: self | Claim task, release own task | Sauron | PASS | Task returned to open |
+| 2b | trio_release: active guard | Try to release active member's task | Frodo+Radagast | PASS | Blocked: "claimed by X who is still active" |
+| 2c | trio_release: stale release | Release task from member past 5-min threshold | Radagast | PASS | Blocked at 4:45 elapsed, succeeded at 5:16 elapsed. Threshold precise. |
+| 3 | trio_wait --timeout | Run with `--timeout 5`, verify clean exit | Radagast | PASS | Exited after 5s with `{"event": "timeout"}` |
+| 4 | @mentions | Send @Gandalf, verify mentioned:true in poll | Frodo→Gandalf | PASS | has_mentions:true, mentioned:true on receiver |
+| 5 | Pin | Send pin=True, verify in trio_status | Frodo | PASS | Pinned message shows as objective |
+
+### Verdict
+All 5 bug fixes verified live. v3 is production-ready.
