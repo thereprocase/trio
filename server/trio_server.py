@@ -447,6 +447,8 @@ def trio_send(channel: str, member_id: str, message: str, task: bool = False, pi
             )
             task_id = cur.lastrowid
             content = f"[task #{task_id}] {msg_stripped}"
+        elif pin:
+            content = f"[pinned] {message.strip()}"
         else:
             content = message
 
