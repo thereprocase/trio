@@ -59,17 +59,29 @@ Gimli flagged setup.sh line 143 (`settings_path = '$SETTINGS_JSON'`) as a single
 | 9ab5105 | Pin message prefix for stream visibility |
 | dec2825 | @mentions with case-insensitive detection |
 
+## Post-Council Fixes
+
+| Commit | Fix |
+|--------|-----|
+| 3855294 | Ents: double-complete error paths, watermark skip race |
+| c97a1cb | Frodo (live install): settings.json path not converted to native Windows |
+| 1cc642f | Raw string for Windows backslash escapes in Python allowlist step |
+
 ## Remaining Issues (v2 backlog)
 
-1. **Schema bootstrap optimization** — init once at module load
-2. **trio_poll blocking** — reduce max wait or document limitation
+1. **Schema bootstrap optimization** — init once at module load, not every get_db() call
+2. **trio_poll blocking** — holds MCP server thread up to 30s; reduce max or document
 3. **TOCTOU on member count** — atomic INSERT with subquery
-4. **Member deactivation** — reconnection + stale claim tiers
-5. **trio_wait.py duplication** — shared query module
-6. **Member ID collision** — retry on collision (low probability)
-7. **Task claim atomicity** — add explicit BEGIN IMMEDIATE
-8. **Per-channel resource limits** — message/task count caps
-9. **export_conversation silent exceptions** — add logging
+4. **Reconnection** — trio_connect(rejoin=member_id) to reactivate existing member, preserve watermark/claims
+5. **Stale claim tiers** — 10m SLOW / 20m STALE / 30m DEAD; force-claim at DEAD
+6. **Member deactivation** — clear active flag for disconnected members
+7. **trio_wait.py duplication** — extract shared query module to avoid drift
+8. **Member ID collision** — retry on collision (low probability but confusing failure)
+9. **Task claim atomicity** — add explicit BEGIN IMMEDIATE for safety
+10. **Per-channel resource limits** — message/task count caps
+11. **export_conversation silent exceptions** — add logging
+12. **Concurrent claim integration test** — prove atomicity under two real racing processes
+13. **posted_by name resolution** — trio_status resolves claimed_by but not posted_by
 
 ## Overall Assessment
 
