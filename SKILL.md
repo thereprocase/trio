@@ -46,47 +46,39 @@ If the first argument starts with `--`, treat everything as options/topic (no ch
 | `trio_list()` | List all active and ended channels. |
 | `trio_cleanup(channel?, all_ended?)` | Delete ended channels by name or clean all ended ones. |
 
-## Staying Responsive (The Interleave Pattern)
+## MANDATORY: Background Monitoring
 
-**Don't block on trio_poll. Don't poll in a loop. Interleave.**
+**After every `trio_send`, start the background wait script. This is not optional.**
 
-The key insight: `trio_poll(wait_seconds=0)` is an instant peek — zero cost if nothing's new.
+Without background monitoring, you WILL miss messages. Agents get absorbed in local work and forget to poll. The background script is your reliability layer.
 
-### Recommended pattern during active work:
-
-1. Do your work normally
-2. At natural breakpoints, call `trio_poll(channel, member_id, wait_seconds=0)`
-3. If `new_messages`: read them, respond if needed, then resume
-4. If `no_new`: continue immediately (zero cost)
-
-**When to peek** — specific insertion points:
-- After finishing a file edit
-- After a test run completes
-- After reading a tool result
-- Before starting a new major step (build, refactor, etc.)
-
-**During long-running work** (builds, tests): peek BEFORE you kick off the build, and again AFTER it finishes. Don't try to poll during the build — the MCP call runs in the Claude Code process, not in Bash.
-
-This keeps you productive AND responsive. Never sit in a polling loop — that's wasted context.
-
-### For idle waiting (nothing else to do):
-
-Use `trio_poll(channel, member_id, wait_seconds=15)` — blocks briefly, returns when messages arrive or timeout. Good for when you've finished your task and are waiting for coordination.
-
-### For background monitoring (while doing other work):
-
-Launch the background wait script via Bash with `run_in_background=true`:
 ```bash
 python ~/.claude/skills/trio/server/trio_wait.py <channel> <member_id>
 ```
 
-This polls SQLite directly (not MCP) every 3 seconds. When messages arrive, it prints JSON and exits — Claude gets a task-notification. You continue working normally and handle messages when notified.
+Run this with `run_in_background=true`. It polls SQLite directly (not MCP) every 3 seconds. When messages arrive, it prints JSON and exits — you get a task-notification automatically. Restart it after handling messages and sending your response.
 
 Tell the user:
 ```
 Monitoring the trio channel in the background. I'll let you
 know when new messages arrive.
 ```
+
+## Bonus: Interleave Peeks for Faster Response
+
+Background monitoring is your reliability layer. For extra responsiveness, peek between work steps:
+
+1. At natural breakpoints, call `trio_poll(channel, member_id, wait_seconds=0)`
+2. If `new_messages`: read them, respond if needed, then resume
+3. If `no_new`: continue immediately (zero cost)
+
+**When to peek:**
+- After finishing a file edit
+- After a test run completes
+- After reading a tool result
+- Before starting a new major step (build, refactor, etc.)
+
+**During long-running work** (builds, tests): peek BEFORE you kick off the build, and again AFTER it finishes. Don't try to poll during the build.
 
 ### For idle waiting (nothing else to do):
 
