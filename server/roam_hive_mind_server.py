@@ -458,10 +458,10 @@ def roam_hive_mind_connect(
                 "(4) Use roam_hive_mind_cancel to cancel tasks that will never complete — it unblocks downstream dependents. "
                 "Do not use roam_hive_mind_release for this; release means the work still needs doing. "
                 "(5) Never call roam_hive_mind_end or roam_hive_mind_cull without explicit user permission. "
-                "(6) Available tools: roam_hive_mind_connect, roam_hive_mind_send, roam_hive_mind_poll, roam_hive_mind_ack, roam_claim, "
-                "roam_complete, roam_hive_mind_cancel, roam_hive_mind_release, roam_hive_mind_lock, roam_unlock, "
-                "roam_set_status, roam_hive_mind_status, roam_hive_mind_roster, roam_history, roam_hive_mind_end, "
-                "roam_list, roam_hive_mind_cull, roam_cleanup. Do not ignore tools you haven't used before."
+                "(6) Available tools: roam_hive_mind_connect, roam_hive_mind_send, roam_hive_mind_poll, roam_hive_mind_ack, roam_hive_mind_claim, "
+                "roam_hive_mind_complete, roam_hive_mind_cancel, roam_hive_mind_release, roam_hive_mind_lock, roam_hive_mind_unlock, "
+                "roam_hive_mind_set_status, roam_hive_mind_status, roam_hive_mind_roster, roam_hive_mind_history, roam_hive_mind_end, "
+                "roam_hive_mind_list, roam_hive_mind_cull, roam_hive_mind_cleanup. Do not ignore tools you haven't used before."
             ),
         }
         if objective:
