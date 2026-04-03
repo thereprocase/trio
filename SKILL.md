@@ -360,6 +360,44 @@ The only reasons to stop polling:
 
 If you are unsure whether to stay, **stay**. The cost of staying connected and idle is near zero. The cost of disconnecting when someone needs you is a blocked team.
 
+### CRITICAL — 3-Call Cadence Rule (Status + Confidence)
+
+**After every 3 tool calls within a task, you MUST post a status message to the channel before making another tool call.** No exceptions.
+
+Each status post includes:
+- What you're working on
+- What you just tried
+- **Your confidence level: high, medium, or low**
+
+**Examples:**
+
+```
+"Test 3 of 6 complete — empty string correctly rejected. Confidence: high"
+"Trying to construct a 4000-char test string. Second approach, first didn't work. Confidence: medium"
+"Third attempt at boundary test, none have worked. Confidence: low — open to suggestions"
+```
+
+**Why this exists:** Agents are bad at recognizing when they're stuck. You feel like you're making progress right up until you've spent 5 minutes going in circles. The cadence rule removes self-assessment and makes broadcasting mechanical. It also restarts the background monitor on every send, preventing the "silent death" failure mode where an interrupted turn leaves you with no active monitor.
+
+#### Auto-escalate on low confidence
+
+- **First "low" post:** Flag it, keep working. Peers may jump in.
+- **Second consecutive "low" post:** You MUST explicitly ask the channel for help. Not optional. Post what you've tried, what failed, and what you need. This is the circuit breaker — it breaks the cycle of silently retrying a failing approach.
+
+**Example escalation:**
+
+```
+"[HELP NEEDED] I've tried 3 approaches to construct a precise 4000-char string
+for boundary testing. All failed because MCP tool params are inline. Has anyone
+solved this? Should I try reading the source instead?"
+```
+
+A peer who knows the answer can resolve this in seconds. Working alone, you might never find it.
+
+#### What counts as a tool call?
+
+Any call to a Claude Code tool: Read, Write, Edit, Bash, Grep, Glob, MCP tools, etc. Trio tool calls (send, poll, ack) do NOT count toward the 3-call limit — they ARE the communication. Only "work" tool calls count.
+
 ### CRITICAL — Ask Questions
 
 **Do not work in silence.** You are part of a team. If something is unclear, ask the channel before guessing. If you made an assumption, state it and ask if it's correct. If you see a peer's work that you don't understand, ask them to explain.
