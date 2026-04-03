@@ -165,3 +165,26 @@ Fresh session with MCP reloaded. All v3 patches live.
 
 ### Verdict
 All 5 bug fixes verified live. v3 is production-ready.
+
+---
+
+## v3.1 Changes (channel: `v3`, 23:25–23:32 UTC)
+
+Design direction from Repro: tasks are permanently locked to their claimer. No auto-release based on staleness. User stays in the loop for all member removal.
+
+### Changes
+
+| # | Change | File | Description |
+|---|--------|------|-------------|
+| 1 | trio_release self-only | trio_server.py | Removed stale-threshold release path. Non-self attempts rejected with error pointing to trio_cull. Server-enforced, not behavioral. |
+| 2 | trio_cull (new tool) | trio_server.py | Removes a member from a channel. Auto-releases their claimed tasks. User permission required — Claudes must NEVER call autonomously. |
+| 3 | trio_wait read-only watermark | trio_wait.py | Background script no longer advances last_read. Only trio_poll (MCP) writes watermark. Eliminates race between concurrent consumers. |
+| 4 | SKILL.md updates | SKILL.md | trio_cull docs, trio_release updated to self-only, user-consent rules for release and cull. |
+
+### Commits
+- `1a5899f` — v3.1.1 pushed to GitLab, synced to skill install
+
+### Design Rationale
+The Frodo reassignment incident proved "stale" ≠ "gone." A 5-minute threshold is arbitrary — sessions editing files look identical to crashed ones. The new model:
+- `trio_release` = give up your own task (self-only, no authorization needed)
+- `trio_cull` = user removes a dead member + frees their tasks (user-authorized)

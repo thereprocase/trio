@@ -496,10 +496,13 @@ def trio_send(channel: str, member_id: str, message: str, task: bool = False, pi
         )
         msg_id = cur.lastrowid
 
-        # Update own watermark and heartbeat
+        # Update heartbeat only — do NOT advance watermark here.
+        # Watermarks must only advance in trio_poll (the read path).
+        # Advancing here skips unread messages from other members
+        # that arrived between our last poll and this send.
         db.execute(
-            "UPDATE members SET last_read = ?, last_seen = ? WHERE id = ? AND channel = ?",
-            (msg_id, now, member_id, channel),
+            "UPDATE members SET last_seen = ? WHERE id = ? AND channel = ?",
+            (now, member_id, channel),
         )
         if pin:
             db.execute(
