@@ -113,9 +113,20 @@ def poll_for_messages(channel, member_id, timeout=DEFAULT_TIMEOUT):
             ).fetchall()
 
             if unread:
-                # Read-only: detect messages but do NOT advance the watermark.
-                # Only trio_poll (MCP) should write last_read to avoid race
-                # conditions when both trio_wait and trio_poll run concurrently.
+                # Advance watermark so the next invocation doesn't re-report
+                # these messages.  Previous design left this to trio_poll (MCP)
+                # to avoid races, but in practice the MCP commit doesn't always
+                # persist before the next trio_wait launch, causing the cursor
+                # to stick and the same messages to replay indefinitely.
+                # Since Claude calls trio_wait and trio_poll serially, the race
+                # risk is negligible compared to the stuck-cursor bug.
+                max_id = max(m["id"] for m in unread)
+                db.execute(
+                    "UPDATE members SET last_read = ? WHERE id = ? AND channel = ?",
+                    (max_id, member_id, channel),
+                )
+                db.commit()
+
                 return {
                     "event": "new_messages",
                     "messages": [
