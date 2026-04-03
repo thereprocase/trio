@@ -104,6 +104,7 @@ def get_db() -> sqlite3.Connection:
             status      TEXT NOT NULL DEFAULT 'open',
             description TEXT NOT NULL,
             result      TEXT,
+            blocked_by  TEXT NOT NULL DEFAULT '[]',
             created_at  TEXT NOT NULL,
             updated_at  TEXT NOT NULL,
             FOREIGN KEY (channel) REFERENCES channels(code)
@@ -118,6 +119,7 @@ def get_db() -> sqlite3.Connection:
     for col, table, defn in [
         ("pinned_message_id", "channels", "INTEGER"),
         ("mentions", "messages", "TEXT NOT NULL DEFAULT ''"),
+        ("blocked_by", "tasks", "TEXT NOT NULL DEFAULT '[]'"),
     ]:
         try:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {defn}")
@@ -413,7 +415,7 @@ def trio_connect(
 
 
 @mcp.tool()
-def trio_send(channel: str, member_id: str, message: str, task: bool = False, pin: bool = False) -> str:
+def trio_send(channel: str, member_id: str, message: str, task: bool = False, pin: bool = False, blocked_by: str = "") -> str:
     """Send a message to the trio channel. No turns — send anytime.
 
     All members will see this message on their next poll.
@@ -422,12 +424,18 @@ def trio_send(channel: str, member_id: str, message: str, task: bool = False, pi
     Set pin=True to pin this message as the channel objective (shown in
     trio_status and trio_connect for new joiners). Only one pin per channel.
 
+    Use blocked_by with task=True to declare dependencies. Pass a
+    comma-separated list of task IDs (e.g. "3,5"). The task cannot be
+    claimed until all blockers are done. This enforces critical-path
+    sequencing — agents can only claim work whose prerequisites are complete.
+
     Args:
         channel: Channel code
         member_id: Your member ID (from trio_connect)
         message: Your message (max 4000 chars)
         task: If True, also create a claimable task from this message
         pin: If True, pin this message as the channel objective
+        blocked_by: Comma-separated task IDs this task depends on (requires task=True)
     """
     err = validate_channel_code(channel)
     if err:
@@ -454,15 +462,46 @@ def trio_send(channel: str, member_id: str, message: str, task: bool = False, pi
         task_id = None
 
         if task:
+            # Parse blocked_by into a validated list of task IDs
+            blocker_ids = []
+            if blocked_by and blocked_by.strip():
+                try:
+                    blocker_ids = [int(x.strip()) for x in blocked_by.split(",") if x.strip()]
+                except ValueError:
+                    return json.dumps({"error": "blocked_by must be comma-separated task IDs (e.g. '3,5')."})
+                # Verify all blocker tasks exist in this channel
+                for bid in blocker_ids:
+                    exists = db.execute(
+                        "SELECT id FROM tasks WHERE id = ? AND channel = ?",
+                        (bid, channel),
+                    ).fetchone()
+                    if not exists:
+                        return json.dumps({"error": f"Blocker task #{bid} not found in this channel."})
+            blocked_by_json = json.dumps(blocker_ids) if blocker_ids else "[]"
+
+            # Determine initial status: 'blocked' if has unfinished blockers, else 'open'
+            initial_status = "open"
+            if blocker_ids:
+                done_count = db.execute(
+                    f"SELECT COUNT(*) FROM tasks WHERE id IN ({','.join('?' * len(blocker_ids))}) "
+                    "AND channel = ? AND status = 'done'",
+                    (*blocker_ids, channel),
+                ).fetchone()[0]
+                if done_count < len(blocker_ids):
+                    initial_status = "blocked"
+
             # Insert task row first to get the task_id for the message prefix
             msg_stripped = message.strip()
             cur = db.execute(
-                "INSERT INTO tasks (channel, posted_by, status, description, created_at, updated_at) "
-                "VALUES (?, ?, 'open', ?, ?, ?)",
-                (channel, member_id, msg_stripped, now, now),
+                "INSERT INTO tasks (channel, posted_by, status, description, blocked_by, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (channel, member_id, initial_status, msg_stripped, blocked_by_json, now, now),
             )
             task_id = cur.lastrowid
-            content = f"[task #{task_id}] {msg_stripped}"
+            suffix = ""
+            if blocker_ids:
+                suffix = f" (blocked by #{', #'.join(str(b) for b in blocker_ids)})"
+            content = f"[task #{task_id}] {msg_stripped}{suffix}"
         elif pin:
             content = f"[pinned] {message.strip()}"
         else:
@@ -577,6 +616,7 @@ def trio_poll(channel: str, member_id: str, wait_seconds: int = 15) -> str:
                 return json.dumps({
                     "event": "ended",
                     "ended_by": ended_by_name,
+                    "unread_count": len(unread),
                     "unread": [
                         {"id": m["id"], "from": m["member_name"] or m["member_id"],
                          "content": m["content"], "at": m["created_at"]}
@@ -634,6 +674,7 @@ def trio_poll(channel: str, member_id: str, wait_seconds: int = 15) -> str:
 
                 resp = {
                     "event": "new_messages",
+                    "unread_count": len(msg_list),
                     "messages": msg_list,
                 }
                 if has_mentions:
@@ -641,9 +682,68 @@ def trio_poll(channel: str, member_id: str, wait_seconds: int = 15) -> str:
                 return json.dumps(resp)
 
             if time.time() >= deadline:
-                return json.dumps({"event": "no_new"})
+                return json.dumps({"event": "no_new", "unread_count": 0})
 
             time.sleep(2)
+    finally:
+        db.close()
+
+
+@mcp.tool()
+def trio_history(channel: str, last_n: int = 20, from_id: int | None = None) -> str:
+    """Replay recent messages from a channel. Does NOT require member_id or
+    advance any read watermark — purely read-only.
+
+    Use this to catch up on messages you missed during a long poll, or to
+    review the conversation history.
+
+    Args:
+        channel: Channel code
+        last_n: Number of most recent messages to return (default 20, max 100)
+        from_id: If given, return messages with id >= from_id (overrides last_n)
+    """
+    err = validate_channel_code(channel)
+    if err:
+        return json.dumps({"error": err})
+
+    last_n = min(max(last_n, 1), 100)
+    db = get_db()
+
+    try:
+        ch = _get_channel(db, channel)
+        if not ch:
+            return json.dumps({"error": f"Channel '{channel}' not found."})
+
+        if from_id is not None:
+            rows = db.execute(
+                "SELECT id, member_id, member_name, content, created_at "
+                "FROM messages WHERE channel = ? AND id >= ? ORDER BY id",
+                (channel, from_id),
+            ).fetchall()
+        else:
+            rows = db.execute(
+                "SELECT id, member_id, member_name, content, created_at "
+                "FROM messages WHERE channel = ? ORDER BY id DESC LIMIT ?",
+                (channel, last_n),
+            ).fetchall()
+            rows = list(reversed(rows))
+
+        messages = [
+            {
+                "id": m["id"],
+                "from": m["member_name"] or m["member_id"],
+                "content": m["content"],
+                "at": m["created_at"],
+            }
+            for m in rows
+        ]
+
+        return json.dumps({
+            "ok": True,
+            "channel": channel,
+            "count": len(messages),
+            "messages": messages,
+        })
     finally:
         db.close()
 
@@ -671,6 +771,31 @@ def trio_claim(channel: str, member_id: str, task_id: int) -> str:
             return json.dumps({"error": "You are not a member of this channel."})
 
         now = now_iso()
+
+        # Check if task exists and whether it's blocked
+        task_check = db.execute(
+            "SELECT * FROM tasks WHERE id = ? AND channel = ?",
+            (task_id, channel),
+        ).fetchone()
+        if not task_check:
+            return json.dumps({"error": f"Task #{task_id} not found."})
+
+        if task_check["status"] == "blocked":
+            # Check which blockers are still incomplete
+            blocker_ids = json.loads(task_check["blocked_by"] or "[]")
+            pending = []
+            for bid in blocker_ids:
+                bt = db.execute(
+                    "SELECT id, status, description FROM tasks WHERE id = ? AND channel = ?",
+                    (bid, channel),
+                ).fetchone()
+                if bt and bt["status"] != "done":
+                    pending.append(f"#{bt['id']} ({bt['status']}): {bt['description'][:60]}")
+            return json.dumps({
+                "error": f"Task #{task_id} is blocked. Complete these first:",
+                "blocked_by": pending,
+            })
+
         # Atomic claim: only succeeds if status is still 'open'
         cur = db.execute(
             "UPDATE tasks SET claimed_by = ?, status = 'claimed', updated_at = ? "
@@ -772,10 +897,39 @@ def trio_complete(channel: str, member_id: str, task_id: int, result: str = "") 
         ).fetchone()
         task_desc = task_row["description"] if task_row else ""
 
+        # Unblock downstream tasks whose blockers are now all done
+        unblocked = []
+        blocked_tasks = db.execute(
+            "SELECT id, blocked_by, description FROM tasks WHERE channel = ? AND status = 'blocked'",
+            (channel,),
+        ).fetchall()
+        for bt in blocked_tasks:
+            blocker_ids = json.loads(bt["blocked_by"] or "[]")
+            if task_id not in blocker_ids:
+                continue
+            # Check if ALL blockers for this task are now done
+            all_done = True
+            for bid in blocker_ids:
+                blocker = db.execute(
+                    "SELECT status FROM tasks WHERE id = ? AND channel = ?",
+                    (bid, channel),
+                ).fetchone()
+                if not blocker or blocker["status"] != "done":
+                    all_done = False
+                    break
+            if all_done:
+                db.execute(
+                    "UPDATE tasks SET status = 'open', updated_at = ? WHERE id = ? AND channel = ?",
+                    (now, bt["id"], channel),
+                )
+                unblocked.append(f"#{bt['id']}")
+
         # Post completion message
         msg = f"[done #{task_id}] {task_desc}"
         if result:
             msg += f" — {result.strip()}"
+        if unblocked:
+            msg += f" — unblocked: {', '.join(unblocked)}"
         db.execute(
             "INSERT INTO messages (channel, member_id, member_name, content, created_at) "
             "VALUES (?, ?, ?, ?, ?)",
@@ -783,10 +937,13 @@ def trio_complete(channel: str, member_id: str, task_id: int, result: str = "") 
         )
         db.commit()
 
-        return json.dumps({
+        resp = {
             "ok": True,
             "task_id": task_id,
-        })
+        }
+        if unblocked:
+            resp["unblocked"] = unblocked
+        return json.dumps(resp)
     finally:
         db.close()
 
@@ -909,6 +1066,9 @@ def trio_status(channel: str) -> str:
                 entry["claimed_by"] = claimer["name"] if claimer else t["claimed_by"]
             if t["result"]:
                 entry["result"] = t["result"]
+            blocker_ids = json.loads(t["blocked_by"] or "[]")
+            if blocker_ids:
+                entry["blocked_by"] = blocker_ids
             task_list.append(entry)
 
         # Fetch objective (pinned message) if any
