@@ -5,8 +5,14 @@ Launched via Bash with run_in_background=true. Polls the SQLite database
 until new messages arrive from other members, then prints the result
 and exits. Claude gets a task-notification when this completes.
 
-Simpler than duo_wait.py — no turns, no deadlock detection. Just
-watermark-based message detection for N participants.
+v4: This script is notification-only — it NEVER advances the read
+watermark in the database. Watermark advancement is the responsibility
+of trio_poll (auto-advance) or trio_ack (explicit). This eliminates
+the watermark race condition where trio_wait and trio_poll both
+advanced last_read independently, causing silent message loss.
+
+The script tracks its own last-seen ID in a local variable to avoid
+re-reporting the same messages across poll cycles within a single run.
 
 Usage:
     python trio_wait.py <channel> <member_id> [--timeout SECONDS]
@@ -46,10 +52,15 @@ DEFAULT_TIMEOUT = 300  # 5 minutes — exit cleanly before Bash kills us
 
 def poll_for_messages(channel, member_id, timeout=DEFAULT_TIMEOUT):
     deadline = time.time() + timeout
+    # Local high-water mark — tracks which messages THIS run has already
+    # seen, without touching the DB watermark. Initialized from the DB
+    # on first iteration, then advanced locally as messages arrive.
+    local_hwm = None
+
     while time.time() < deadline:
         db = get_db()
         try:
-            # Update heartbeat
+            # Update heartbeat only — never advance last_read
             db.execute(
                 "UPDATE members SET last_seen = ? WHERE channel = ? AND id = ?",
                 (now_iso(), channel, member_id),
@@ -66,7 +77,6 @@ def poll_for_messages(channel, member_id, timeout=DEFAULT_TIMEOUT):
                 return {"event": "channel_gone"}
 
             if ch["status"] == "ended":
-                # Grab any remaining unread before reporting end
                 member = db.execute(
                     "SELECT last_read FROM members WHERE channel = ? AND id = ?",
                     (channel, member_id),
@@ -77,7 +87,6 @@ def poll_for_messages(channel, member_id, timeout=DEFAULT_TIMEOUT):
                     "FROM messages WHERE channel = ? AND id > ? ORDER BY id",
                     (channel, last_read),
                 ).fetchall()
-                # Resolve ended_by member_id to display name
                 ended_by_name = ch["ended_by"]
                 if ch["ended_by"]:
                     ender = db.execute(
@@ -96,36 +105,28 @@ def poll_for_messages(channel, member_id, timeout=DEFAULT_TIMEOUT):
                     ],
                 }
 
-            # Check for unread messages from other members
-            member = db.execute(
-                "SELECT last_read FROM members WHERE channel = ? AND id = ?",
-                (channel, member_id),
-            ).fetchone()
+            # Initialize local high-water mark from DB on first pass
+            if local_hwm is None:
+                member = db.execute(
+                    "SELECT last_read FROM members WHERE channel = ? AND id = ?",
+                    (channel, member_id),
+                ).fetchone()
+                if not member:
+                    return {"event": "channel_gone"}
+                local_hwm = member["last_read"]
 
-            if not member:
-                return {"event": "channel_gone"}
-
-            last_read = member["last_read"]
+            # Check for messages beyond our local high-water mark
             unread = db.execute(
                 "SELECT id, member_id, member_name, content, created_at "
                 "FROM messages WHERE channel = ? AND id > ? AND member_id != ? ORDER BY id",
-                (channel, last_read, member_id),
+                (channel, local_hwm, member_id),
             ).fetchall()
 
             if unread:
-                # Advance watermark so the next invocation doesn't re-report
-                # these messages.  Previous design left this to trio_poll (MCP)
-                # to avoid races, but in practice the MCP commit doesn't always
-                # persist before the next trio_wait launch, causing the cursor
-                # to stick and the same messages to replay indefinitely.
-                # Since Claude calls trio_wait and trio_poll serially, the race
-                # risk is negligible compared to the stuck-cursor bug.
-                max_id = max(m["id"] for m in unread)
-                db.execute(
-                    "UPDATE members SET last_read = ? WHERE id = ? AND channel = ?",
-                    (max_id, member_id, channel),
-                )
-                db.commit()
+                # Advance LOCAL high-water mark only — DB watermark untouched.
+                # trio_poll or trio_ack will advance the DB watermark when
+                # the agent processes these messages through MCP.
+                local_hwm = max(m["id"] for m in unread)
 
                 return {
                     "event": "new_messages",
