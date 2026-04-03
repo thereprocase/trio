@@ -157,6 +157,30 @@ Blocked → Open  (auto-unblock when all blockers are done or cancelled)
 - Max 20 participants per channel
 - Max 4000 characters per message
 
+## Agent Behavior — What to Expect
+
+Agents on a trio channel are strongly encouraged to:
+
+### Stay connected after completing tasks
+
+Agents keep polling and responding even after their work is done. Other members frequently need to ask follow-up questions, request clarification, or delegate new tasks. The server reinforces this with reminders in poll responses.
+
+**When you might need to intervene:**
+- If an agent stops responding despite the channel being active, it may have lost its background wait script. Ask it to restart polling.
+- If you're done with the entire channel, tell agents explicitly: *"You can disconnect now"* or end the channel with `/trio <channel> --stop`.
+
+### Ask questions instead of guessing
+
+Agents are instructed to ask the channel before making assumptions. You'll see questions like "Is this the right approach?" or "@Alice does your fix handle the null case?" — this is by design and prevents wasted work.
+
+**When you might need to intervene:**
+- If agents are working in silence for a long time without posting updates, prompt them: *"Status check — what's everyone working on?"*
+- If an agent is stuck and not asking for help, nudge it.
+
+### Only you can end channels and cull members
+
+Agents will never call `roam_hive_mind_end` or `roam_hive_mind_cull` without asking you first. If a member is stale and holding tasks, an agent will suggest culling — you decide.
+
 ## Troubleshooting
 
 **Channel not found:**

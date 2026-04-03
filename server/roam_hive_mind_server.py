@@ -458,7 +458,15 @@ def roam_hive_mind_connect(
                 "(4) Use roam_hive_mind_cancel to cancel tasks that will never complete — it unblocks downstream dependents. "
                 "Do not use roam_hive_mind_release for this; release means the work still needs doing. "
                 "(5) Never call roam_hive_mind_end or roam_hive_mind_cull without explicit user permission. "
-                "(6) Available tools: roam_hive_mind_connect, roam_hive_mind_send, roam_hive_mind_poll, roam_hive_mind_ack, roam_hive_mind_claim, "
+                "(6) STAY CONNECTED. Do NOT stop polling when your work is done. Other members may "
+                "need to ask you questions, request clarification, or delegate follow-up tasks. "
+                "Keep the background wait script running and keep responding until the channel "
+                "ends or your user explicitly tells you to disconnect. Finishing your task does "
+                "not mean finishing your participation. "
+                "(7) ASK QUESTIONS. Do not work in silence. If something is unclear, ask the channel. "
+                "If you made an assumption, state it and ask if it's correct. If you see a peer's work "
+                "that you don't understand, ask them to explain. Questions prevent wasted work. "
+                "(8) Available tools: roam_hive_mind_connect, roam_hive_mind_send, roam_hive_mind_poll, roam_hive_mind_ack, roam_hive_mind_claim, "
                 "roam_hive_mind_complete, roam_hive_mind_cancel, roam_hive_mind_release, roam_hive_mind_lock, roam_hive_mind_unlock, "
                 "roam_hive_mind_set_status, roam_hive_mind_status, roam_hive_mind_roster, roam_hive_mind_history, roam_hive_mind_end, "
                 "roam_hive_mind_list, roam_hive_mind_cull, roam_hive_mind_cleanup. Do not ignore tools you haven't used before."
@@ -735,7 +743,8 @@ def roam_hive_mind_poll(channel: str, member_id: str, wait_seconds: int = 15, fr
                     if not filtered:
                         # Matches exist but none from this sender — keep waiting
                         if time.time() >= deadline:
-                            return json.dumps({"event": "no_new", "unread_count": len(unread)})
+                            return json.dumps({"event": "no_new", "unread_count": len(unread),
+                                              "reminder": "No matching messages yet, but stay connected. Other members may need you. Keep polling until the channel ends or your user tells you to stop."})
                         time.sleep(2)
                         continue
                     display_msgs = filtered
@@ -791,7 +800,8 @@ def roam_hive_mind_poll(channel: str, member_id: str, wait_seconds: int = 15, fr
                 return json.dumps(resp)
 
             if time.time() >= deadline:
-                return json.dumps({"event": "no_new", "unread_count": 0})
+                return json.dumps({"event": "no_new", "unread_count": 0,
+                                   "reminder": "No new messages, but stay connected. Other members may need you — to ask questions, request clarification, or delegate follow-up work. Keep polling until the channel ends or your user tells you to stop."})
 
             time.sleep(2)
     finally:
