@@ -1,5 +1,5 @@
 """
-Background polling script for Claude Trio.
+Background polling script for Roam (Claude Trio's MCP server).
 
 Launched via Bash with run_in_background=true. Polls the SQLite database
 until new messages arrive from other members, then prints the result
@@ -7,15 +7,15 @@ and exits. Claude gets a task-notification when this completes.
 
 v4: This script is notification-only — it NEVER advances the read
 watermark in the database. Watermark advancement is the responsibility
-of trio_poll (auto-advance) or trio_ack (explicit). This eliminates
-the watermark race condition where trio_wait and trio_poll both
+of roam_hive_mind_poll (auto-advance) or roam_hive_mind_ack (explicit). This eliminates
+the watermark race condition where roam_hive_mind_wait and roam_hive_mind_poll both
 advanced last_read independently, causing silent message loss.
 
 The script tracks its own last-seen ID in a local variable to avoid
 re-reporting the same messages across poll cycles within a single run.
 
 Usage:
-    python trio_wait.py <channel> <member_id> [--timeout SECONDS]
+    python roam_hive_mind_wait.py <channel> <member_id> [--timeout SECONDS]
 
 Output on completion (JSON, one line):
     {"event": "new_messages", "messages": [{...}, ...]}
@@ -31,7 +31,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-DB_PATH = Path.home() / ".claude" / "trio" / "trio.db"
+DB_PATH = Path.home() / ".claude" / "roam" / "roam.db"
 POLL_INTERVAL = 3  # seconds between checks
 
 
@@ -69,7 +69,7 @@ def poll_for_messages(channel, member_id, timeout=DEFAULT_TIMEOUT):
                 db.commit()
             except sqlite3.OperationalError as e:
                 if "no such table" in str(e):
-                    return {"error": "Database not initialized. Run trio_connect first to create the schema."}
+                    return {"error": "Database not initialized. Run roam_hive_mind_connect first to create the schema."}
                 raise
 
             # Check channel status
@@ -129,7 +129,7 @@ def poll_for_messages(channel, member_id, timeout=DEFAULT_TIMEOUT):
 
             if unread:
                 # Advance LOCAL high-water mark only — DB watermark untouched.
-                # trio_poll or trio_ack will advance the DB watermark when
+                # roam_hive_mind_poll or roam_hive_mind_ack will advance the DB watermark when
                 # the agent processes these messages through MCP.
                 local_hwm = max(m["id"] for m in unread)
 
@@ -151,7 +151,7 @@ def poll_for_messages(channel, member_id, timeout=DEFAULT_TIMEOUT):
 
 if __name__ == "__main__":
     if len(sys.argv) < 3:
-        print(json.dumps({"error": "Usage: trio_wait.py <channel> <member_id> [--timeout SECONDS]"}))
+        print(json.dumps({"error": "Usage: roam_hive_mind_wait.py <channel> <member_id> [--timeout SECONDS]"}))
         sys.exit(1)
 
     channel = sys.argv[1]

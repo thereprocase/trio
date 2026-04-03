@@ -16,7 +16,7 @@ set -euo pipefail
 CLAUDE_DIR="${HOME}/.claude"
 SKILL_DIR="${CLAUDE_DIR}/skills/trio"
 SERVER_DIR="${SKILL_DIR}/server"
-DB_DIR="${CLAUDE_DIR}/trio"
+DB_DIR="${CLAUDE_DIR}/roam"
 
 echo "=== Claude Trio Setup ==="
 echo ""
@@ -62,17 +62,17 @@ if [ -f "$SCRIPT_DIR/SKILL.md" ]; then
 else
     echo "Note: SKILL.md not found in source directory"
 fi
-cp "$SCRIPT_DIR/server/trio_server.py" "$SERVER_DIR/trio_server.py"
-cp "$SCRIPT_DIR/server/trio_wait.py" "$SERVER_DIR/trio_wait.py"
+cp "$SCRIPT_DIR/server/roam_hive_mind_server.py" "$SERVER_DIR/roam_hive_mind_server.py"
+cp "$SCRIPT_DIR/server/roam_hive_mind_wait.py" "$SERVER_DIR/roam_hive_mind_wait.py"
 echo "Server files: $SERVER_DIR"
 
 # ---------- 4. Resolve native path ----------
 #
-# The MCP registration needs the native OS path to trio_server.py.
+# The MCP registration needs the native OS path to roam_hive_mind_server.py.
 # In Git Bash on Windows, paths look like /c/Users/... but Claude Code
 # needs C:\Users\... to spawn the subprocess correctly.
 
-SERVER_SCRIPT="$SERVER_DIR/trio_server.py"
+SERVER_SCRIPT="$SERVER_DIR/roam_hive_mind_server.py"
 NATIVE_PATH="$SERVER_SCRIPT"
 PLATFORM="unknown"
 
@@ -104,15 +104,15 @@ echo "Platform: $PLATFORM"
 # The -s user flag makes this a user-scoped server (available in all projects).
 
 if command -v claude &>/dev/null; then
-    claude mcp remove trio -s user 2>/dev/null || true
-    claude mcp add trio -s user -- "$PYTHON_CMD" "$NATIVE_PATH" 2>&1
+    claude mcp remove roam-hive-mind -s user 2>/dev/null || true
+    claude mcp add roam-hive-mind -s user -- "$PYTHON_CMD" "$NATIVE_PATH" 2>&1
     echo "MCP server: registered (user scope)"
 else
     echo ""
     echo "WARNING: 'claude' CLI not found in PATH."
     echo "After installing Claude Code, register the server manually:"
     echo ""
-    echo "  claude mcp add trio -s user -- $PYTHON_CMD \"$NATIVE_PATH\""
+    echo "  claude mcp add roam-hive-mind -s user -- $PYTHON_CMD \"$NATIVE_PATH\""
     echo ""
     echo "This is the ONLY supported registration method. Do NOT hand-edit"
     echo "~/.claude.json or create ~/.claude/mcp.json — it won't work."
@@ -135,23 +135,32 @@ case "$PLATFORM" in
         fi
         ;;
 esac
-TRIO_TOOLS=(
-    "mcp__trio__trio_connect"
-    "mcp__trio__trio_send"
-    "mcp__trio__trio_poll"
-    "mcp__trio__trio_claim"
-    "mcp__trio__trio_complete"
-    "mcp__trio__trio_status"
-    "mcp__trio__trio_end"
-    "mcp__trio__trio_list"
-    "mcp__trio__trio_cleanup"
+ROAM_TOOLS=(
+    "mcp__roam-hive-mind__roam_hive_mind_connect"
+    "mcp__roam-hive-mind__roam_hive_mind_send"
+    "mcp__roam-hive-mind__roam_hive_mind_poll"
+    "mcp__roam-hive-mind__roam_hive_mind_ack"
+    "mcp__roam-hive-mind__roam_hive_mind_claim"
+    "mcp__roam-hive-mind__roam_hive_mind_complete"
+    "mcp__roam-hive-mind__roam_hive_mind_cancel"
+    "mcp__roam-hive-mind__roam_hive_mind_release"
+    "mcp__roam-hive-mind__roam_hive_mind_lock"
+    "mcp__roam-hive-mind__roam_hive_mind_unlock"
+    "mcp__roam-hive-mind__roam_hive_mind_set_status"
+    "mcp__roam-hive-mind__roam_hive_mind_status"
+    "mcp__roam-hive-mind__roam_hive_mind_roster"
+    "mcp__roam-hive-mind__roam_hive_mind_history"
+    "mcp__roam-hive-mind__roam_hive_mind_end"
+    "mcp__roam-hive-mind__roam_hive_mind_list"
+    "mcp__roam-hive-mind__roam_hive_mind_cull"
+    "mcp__roam-hive-mind__roam_hive_mind_cleanup"
 )
 
 "$PYTHON_CMD" -c "
 import json, os
 
 settings_path = r'$SETTINGS_JSON'
-tools = $(printf '%s\n' "${TRIO_TOOLS[@]}" | "$PYTHON_CMD" -c "import sys,json; print(json.dumps([l.strip() for l in sys.stdin]))")
+tools = $(printf '%s\n' "${ROAM_TOOLS[@]}" | "$PYTHON_CMD" -c "import sys,json; print(json.dumps([l.strip() for l in sys.stdin]))")
 
 if os.path.exists(settings_path):
     with open(settings_path) as f:
@@ -181,13 +190,13 @@ echo ""
 echo "=== Setup Complete ==="
 echo ""
 echo "  Server:   $NATIVE_PATH"
-echo "  Database: $DB_DIR/trio.db (created on first use)"
+echo "  Database: $DB_DIR/roam.db (created on first use)"
 echo "  Config:   ~/.claude.json (via claude mcp add)"
 echo "  Perms:    $SETTINGS_JSON"
 echo ""
 echo "Next steps:"
 echo "  1. Restart Claude Code (exit and re-launch)"
-echo "  2. Run /mcp to verify 'trio' appears in the server list"
+echo "  2. Run /mcp to verify 'roam-hive-mind' appears in the server list"
 echo "  3. Try: /trio hello world"
 echo ""
 echo "Verify with: claude mcp list"

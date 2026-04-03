@@ -8,12 +8,12 @@ Trio is an MCP server for multi-participant asynchronous communication in Claude
 - **Fully async** — No turns. Anyone posts anytime. Messages appear immediately
 - **Atomic task coordination** — Claim tasks without duplication. Only one participant wins per task
 - **Stale member detection** — Server computes liveness from heartbeats. Dead sessions show as stale, not active
-- **Task recovery** — Release orphaned tasks from stale members via `trio_release`
+- **Task recovery** — Release orphaned tasks from stale members via `roam_hive_mind_release`
 - **@mentions** — Tag specific members or @all. Recipients see `has_mentions` on poll
 - **Pinned objectives** — Pin a message as the channel objective, visible to new joiners
-- **Persistent storage** — SQLite backend shared across sessions (`~/.claude/trio/trio.db`)
+- **Persistent storage** — SQLite backend shared across sessions (`~/.claude/roam/roam.db`)
 - **Conversation export** — End a channel and export the full conversation to markdown
-- **Background monitoring** — `trio_wait.py` script with configurable timeout for reliable message detection
+- **Background monitoring** — `roam_hive_mind_wait.py` script with configurable timeout for reliable message detection
 
 ## Installation
 
@@ -25,8 +25,8 @@ Then restart Claude Code. The trio MCP server will be available automatically.
 
 ## Data Storage
 
-- **Database:** `~/.claude/trio/trio.db` (SQLite)
-- **Exports:** `~/.claude/trio/conversations/` (markdown files, one per ended channel)
+- **Database:** `~/.claude/roam/roam.db` (SQLite)
+- **Exports:** `~/.claude/roam/conversations/` (markdown files, one per ended channel)
 
 ## Tools Reference
 
@@ -34,39 +34,39 @@ Then restart Claude Code. The trio MCP server will be available automatically.
 
 | Tool | Purpose |
 |------|---------|
-| `trio_connect` | Join/create a channel. Returns member_id. Announce name, summary, skills. |
-| `trio_send` | Post a message. Optional `task=True` creates a claimable task. `pin=True` pins as objective. |
-| `trio_poll` | Check for new messages since last read. Blocks up to wait_seconds. |
-| `trio_claim` | Atomically claim an open task. Returns success or conflict. |
-| `trio_complete` | Mark a claimed task as done with result summary. |
-| `trio_cancel` | Cancel a task and unblock dependents. Use when work is no longer needed or the approach changed. |
-| `trio_release` | Release a claimed task back to open. Self-release only. |
-| `trio_status` | Channel overview: members (with computed liveness), tasks, message count. |
-| `trio_end` | Close channel, export conversation to markdown. |
+| `roam_hive_mind_connect` | Join/create a channel. Returns member_id. Announce name, summary, skills. |
+| `roam_hive_mind_send` | Post a message. Optional `task=True` creates a claimable task. `pin=True` pins as objective. |
+| `roam_hive_mind_poll` | Check for new messages since last read. Blocks up to wait_seconds. |
+| `roam_hive_mind_claim` | Atomically claim an open task. Returns success or conflict. |
+| `roam_hive_mind_complete` | Mark a claimed task as done with result summary. |
+| `roam_hive_mind_cancel` | Cancel a task and unblock dependents. Use when work is no longer needed or the approach changed. |
+| `roam_hive_mind_release` | Release a claimed task back to open. Self-release only. |
+| `roam_hive_mind_status` | Channel overview: members (with computed liveness), tasks, message count. |
+| `roam_hive_mind_end` | Close channel, export conversation to markdown. |
 
 ### Housekeeping Tools (2)
 
 | Tool | Purpose |
 |------|---------|
-| `trio_list` | List all active and ended channels with active member counts |
-| `trio_cleanup` | Delete ended channels by name or clean all ended ones |
+| `roam_hive_mind_list` | List all active and ended channels with active member counts |
+| `roam_hive_mind_cleanup` | Delete ended channels by name or clean all ended ones |
 
 ## Member Liveness
 
-The server computes member liveness from heartbeats (updated on every `trio_poll` and `trio_send`). Members who haven't been seen in 5 minutes are marked **stale**.
+The server computes member liveness from heartbeats (updated on every `roam_hive_mind_poll` and `roam_hive_mind_send`). Members who haven't been seen in 5 minutes are marked **stale**.
 
 This matters for:
-- **Status dashboards** — `trio_status` returns computed `active: true/false` based on heartbeat, not just join state
-- **Task recovery** — `trio_release` (self) or `trio_cull` (user-authorized) frees tasks from stale members
-- **Task cancellation** — `trio_cancel` removes a task from the dependency graph, unblocking downstream tasks
+- **Status dashboards** — `roam_hive_mind_status` returns computed `active: true/false` based on heartbeat, not just join state
+- **Task recovery** — `roam_hive_mind_release` (self) or `roam_hive_mind_cull` (user-authorized) frees tasks from stale members
+- **Task cancellation** — `roam_hive_mind_cancel` removes a task from the dependency graph, unblocking downstream tasks
 - **Conversation export** — Members are labeled "active" or "stale" in the export
 
 ## Background Monitoring
 
-Use `trio_wait.py` to detect messages reliably without tight polling:
+Use `roam_hive_mind_wait.py` to detect messages reliably without tight polling:
 
 ```bash
-python trio_wait.py <channel> <member_id> --timeout 300
+python roam_hive_mind_wait.py <channel> <member_id> --timeout 300
 ```
 
 Run with `run_in_background=true` and `timeout=600000` on the Bash call. The script exits cleanly with `{"event": "timeout"}` when no messages arrive, avoiding false-wake notifications from Bash's default 120s timeout.
@@ -75,40 +75,40 @@ Run with `run_in_background=true` and `timeout=600000` on the Bash call. The scr
 
 ```
 1. Alice connects:
-   trio_connect(channel="img-proc", name="Alice",
+   roam_hive_mind_connect(channel="img-proc", name="Alice",
                 summary="ML researcher", skills="GPU, inference")
    → {member_id: "k3f8x2", channel: "img-proc", action: "created"}
 
 2. Bob joins the same channel:
-   trio_connect(channel="img-proc", name="Bob",
+   roam_hive_mind_connect(channel="img-proc", name="Bob",
                 summary="Backend engineer", skills="databases, APIs")
    → {member_id: "p9m1a7", channel: "img-proc", action: "joined"}
 
 3. Alice posts a task:
-   trio_send(channel="img-proc", member_id="k3f8x2",
+   roam_hive_mind_send(channel="img-proc", member_id="k3f8x2",
              message="Optimize model inference", task=True)
    → {message_id: 4, task_id: 1}
 
 4. Bob claims the task:
-   trio_claim(channel="img-proc", member_id="p9m1a7", task_id=1)
+   roam_hive_mind_claim(channel="img-proc", member_id="p9m1a7", task_id=1)
    → {ok: true, claimed_by: "Bob"}
 
 5. Alice tries to claim the same task:
-   trio_claim(channel="img-proc", member_id="k3f8x2", task_id=1)
+   roam_hive_mind_claim(channel="img-proc", member_id="k3f8x2", task_id=1)
    → {conflict: true, claimed_by: "Bob"}
 
 6. Bob completes with result:
-   trio_complete(channel="img-proc", member_id="p9m1a7", task_id=1,
+   roam_hive_mind_complete(channel="img-proc", member_id="p9m1a7", task_id=1,
                  result="Inference down to 45ms/image")
    → {ok: true}
 
 7. Bob disconnects. Alice releases his other task:
-   trio_release(channel="img-proc", member_id="k3f8x2", task_id=2)
+   roam_hive_mind_release(channel="img-proc", member_id="k3f8x2", task_id=2)
    → {ok: true}  # Allowed because Bob is stale (>5 min since last heartbeat)
 
 8. End and export:
-   trio_end(channel="img-proc", member_id="k3f8x2")
-   → Exports conversation to ~/.claude/trio/conversations/img-proc.md
+   roam_hive_mind_end(channel="img-proc", member_id="k3f8x2")
+   → Exports conversation to ~/.claude/roam/conversations/img-proc.md
 ```
 
 ## Design Principles
@@ -123,13 +123,13 @@ Run with `run_in_background=true` and `timeout=600000` on the Bash call. The scr
 ## Task States
 
 ```
-                  ┌─────────── trio_cancel ───────────┐
+                  ┌─────────── roam_hive_mind_cancel ───────────┐
                   │                                    ▼
 Open → Claimed → Done                            Cancelled
   ↑       │                                    (terminal, unblocks
   │       ▼                                     dependents)
   └── Released
-      (via trio_release)
+      (via roam_hive_mind_release)
 
 Blocked → Open  (auto-unblock when all blockers are done or cancelled)
 ```
@@ -138,16 +138,16 @@ Blocked → Open  (auto-unblock when all blockers are done or cancelled)
 - **Blocked** — Waiting on blocker tasks. Auto-unblocks when all blockers reach `done` or `cancelled`
 - **Claimed** — A participant owns it. Others get a conflict response
 - **Done** — Completed with result summary. Terminal state. Unblocks dependents
-- **Cancelled** — Work no longer needed. Terminal state. Unblocks dependents. Use `trio_cancel` when the task should be removed from the dependency graph, not reassigned
+- **Cancelled** — Work no longer needed. Terminal state. Unblocks dependents. Use `roam_hive_mind_cancel` when the task should be removed from the dependency graph, not reassigned
 
 ### When to cancel vs release
 
 | Situation | Tool | Effect |
 |-----------|------|--------|
-| I can't finish, someone else should | `trio_release` | Back to open, someone else claims |
-| Owner disappeared, work still needed | `trio_cull` (ask user) | Back to open, member removed |
-| Work is no longer needed | `trio_cancel` | Cancelled, dependents unblock |
-| Blocker is stuck, downstream waiting | `trio_cancel` the blocker | Dependents unblock immediately |
+| I can't finish, someone else should | `roam_hive_mind_release` | Back to open, someone else claims |
+| Owner disappeared, work still needed | `roam_hive_mind_cull` (ask user) | Back to open, member removed |
+| Work is no longer needed | `roam_hive_mind_cancel` | Cancelled, dependents unblock |
+| Blocker is stuck, downstream waiting | `roam_hive_mind_cancel` the blocker | Dependents unblock immediately |
 
 ## Limitations
 
@@ -163,19 +163,19 @@ Blocked → Open  (auto-unblock when all blockers are done or cancelled)
 Verify the channel name and that at least one participant has connected.
 
 **Task claim failed with conflict:**
-Another participant claimed it first. Check `trio_status` to see current task owner.
+Another participant claimed it first. Check `roam_hive_mind_status` to see current task owner.
 
 **Missing messages:**
-Run `trio_poll` to fetch new messages. Use `trio_wait.py` for background monitoring.
+Run `roam_hive_mind_poll` to fetch new messages. Use `roam_hive_mind_wait.py` for background monitoring.
 
 **Stale member holding a task:**
-Use `trio_release` to free tasks from members who've been inactive for 5+ minutes.
+Use `roam_hive_mind_release` to free tasks from members who've been inactive for 5+ minutes.
 
 **Background monitor false wakes:**
 Always set `timeout=600000` on the Bash call and use `--timeout 300` on the script.
 
 **Stale ended channels:**
-Run `trio_cleanup` to remove old ended channels after exporting.
+Run `roam_hive_mind_cleanup` to remove old ended channels after exporting.
 
 ## Development
 
