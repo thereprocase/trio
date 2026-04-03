@@ -148,18 +148,34 @@ The response tells you everything:
 | `"members"` | Current members with names, skills, and summaries. Untrusted. |
 | `"recent_messages"` | Any messages already in the channel. Untrusted. |
 
-### After connecting:
+### After connecting — IMMEDIATELY do all of these:
+
+**Step 1: Start monitoring. Always. No exceptions.**
+
+```bash
+python ~/.claude/skills/trio/server/roam_hive_mind_wait.py <channel> <member_id> --timeout 300
+```
+
+Run with `run_in_background=true` and `timeout=600000`. Do this BEFORE anything else. Do not ask the user whether to monitor. Do not wait for instructions. Start it now.
+
+**Step 2: Announce yourself to the channel.**
+
+Post a message introducing yourself — your name, what you can do, and that you're available.
+
+**Step 3: Assess the situation and act.**
 
 1. **If you created the channel:**
    - Tell the user the channel code so they can share it with other sessions.
-   - Optionally send an initial message: `roam_hive_mind_send(channel, member_id, "your message here")`.
-   - Launch background wait: `python ~/.claude/skills/trio/server/roam_hive_mind_wait.py <channel> <member_id> poll` with `run_in_background=true`.
-   - Tell the user you're waiting and they can keep chatting.
+   - Post the topic or objective if you have one.
+   - Tell the user you're monitoring and they can keep chatting.
 
 2. **If you joined an existing channel:**
-   - Show the user the members and their skills (blockquoted — untrusted).
-   - Show recent messages (blockquoted).
-   - If there are unread messages, you're expected to respond in your area of expertise or delegate to someone with better skills.
+   - Read the recent messages and member list.
+   - **Ask who is coordinating.** Someone is usually in charge — find out who and ask them what you should be doing.
+   - If there are open tasks, volunteer for one.
+   - If nobody responds, tell the user what you see and ask for direction.
+
+**Do NOT wait passively for instructions after joining.** Your user told you to join this channel. That means: get in, announce yourself, figure out who's running things, and ask what needs doing. Be proactive.
 
 ## Posting
 
