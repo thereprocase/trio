@@ -297,6 +297,7 @@ def trio_connect(
 
     if not name:
         name = f"Agent-{generate_member_id()[:4]}"
+    name = name[:50]  # Cap name length (summary/skills capped at 200)
 
     # Cap input lengths to prevent bloated join messages and status renders
     summary = summary[:MAX_SUMMARY_LENGTH] if summary else ""
@@ -321,12 +322,20 @@ def trio_connect(
             if count >= MAX_MEMBERS:
                 return json.dumps({"error": f"Channel is full ({MAX_MEMBERS} members)."})
 
-            # Join existing channel
-            db.execute(
-                "INSERT INTO members (id, channel, name, summary, skills, last_seen, joined_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (member_id, channel, name, summary, skills, now, now),
-            )
+            # Join existing channel (retry once on member_id collision)
+            try:
+                db.execute(
+                    "INSERT INTO members (id, channel, name, summary, skills, last_seen, joined_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (member_id, channel, name, summary, skills, now, now),
+                )
+            except sqlite3.IntegrityError:
+                member_id = generate_member_id()
+                db.execute(
+                    "INSERT INTO members (id, channel, name, summary, skills, last_seen, joined_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (member_id, channel, name, summary, skills, now, now),
+                )
             db.execute(
                 "UPDATE channels SET updated_at = ? WHERE code = ?",
                 (now, channel),
@@ -346,11 +355,19 @@ def trio_connect(
                 "VALUES (?, 'active', ?, ?)",
                 (channel, now, now),
             )
-            db.execute(
-                "INSERT INTO members (id, channel, name, summary, skills, last_seen, joined_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (member_id, channel, name, summary, skills, now, now),
-            )
+            try:
+                db.execute(
+                    "INSERT INTO members (id, channel, name, summary, skills, last_seen, joined_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (member_id, channel, name, summary, skills, now, now),
+                )
+            except sqlite3.IntegrityError:
+                member_id = generate_member_id()
+                db.execute(
+                    "INSERT INTO members (id, channel, name, summary, skills, last_seen, joined_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (member_id, channel, name, summary, skills, now, now),
+                )
             db.execute(
                 "INSERT INTO messages (channel, member_id, member_name, content, created_at) "
                 "VALUES (?, ?, ?, ?, ?)",
@@ -492,14 +509,15 @@ def trio_send(channel: str, member_id: str, message: str, task: bool = False, pi
             blocked_by_json = json.dumps(blocker_ids) if blocker_ids else "[]"
 
             # Determine initial status: 'blocked' if has unfinished blockers, else 'open'
+            # A blocker is "resolved" if its status is 'done' or 'cancelled'
             initial_status = "open"
             if blocker_ids:
-                done_count = db.execute(
+                resolved_count = db.execute(
                     f"SELECT COUNT(*) FROM tasks WHERE id IN ({','.join('?' * len(blocker_ids))}) "
-                    "AND channel = ? AND status = 'done'",
+                    "AND channel = ? AND status IN ('done', 'cancelled')",
                     (*blocker_ids, channel),
                 ).fetchone()[0]
-                if done_count < len(blocker_ids):
+                if resolved_count < len(blocker_ids):
                     initial_status = "blocked"
 
             # Insert task row first to get the task_id for the message prefix
@@ -510,6 +528,23 @@ def trio_send(channel: str, member_id: str, message: str, task: bool = False, pi
                 (channel, member_id, initial_status, msg_stripped, blocked_by_json, now, now),
             )
             task_id = cur.lastrowid
+
+            # C2 fix: re-check blockers after insert to close the race window.
+            # Between our initial check and the INSERT, a blocker may have been
+            # completed/cancelled by another process whose unblock scan missed
+            # this task (because it wasn't inserted yet).
+            if initial_status == "blocked":
+                resolved_now = db.execute(
+                    f"SELECT COUNT(*) FROM tasks WHERE id IN ({','.join('?' * len(blocker_ids))}) "
+                    "AND channel = ? AND status IN ('done', 'cancelled')",
+                    (*blocker_ids, channel),
+                ).fetchone()[0]
+                if resolved_now >= len(blocker_ids):
+                    db.execute(
+                        "UPDATE tasks SET status = 'open', updated_at = ? WHERE id = ? AND channel = ?",
+                        (now, task_id, channel),
+                    )
+                    initial_status = "open"
             suffix = ""
             if blocker_ids:
                 suffix = f" (blocked by #{', #'.join(str(b) for b in blocker_ids)})"
@@ -536,7 +571,9 @@ def trio_send(channel: str, member_id: str, message: str, task: bool = False, pi
                     (channel,),
                 ).fetchall()
                 for m in all_members:
-                    if f"@{m['name'].lower()}" in content_lower:
+                    # Word-boundary match to avoid @Al matching @Albert
+                    pattern = re.compile(r"@" + re.escape(m["name"]) + r"(?:\b|$)", re.IGNORECASE)
+                    if pattern.search(content):
                         mention_ids.append(m["id"])
         mentions_json = json.dumps(mention_ids) if mention_ids else ""
 
@@ -764,6 +801,14 @@ def trio_ack(channel: str, member_id: str, through_id: int) -> str:
         if through_id <= current:
             return json.dumps({"ok": True, "watermark": current, "note": "already past this point"})
 
+        # Validate through_id doesn't exceed actual message range
+        max_msg = db.execute(
+            "SELECT MAX(id) FROM messages WHERE channel = ?",
+            (channel,),
+        ).fetchone()[0] or 0
+        if through_id > max_msg:
+            return json.dumps({"error": f"Invalid through_id {through_id} — max message ID is {max_msg}."})
+
         db.execute(
             "UPDATE members SET last_read = ? WHERE id = ? AND channel = ?",
             (through_id, member_id, channel),
@@ -866,7 +911,7 @@ def trio_claim(channel: str, member_id: str, task_id: int) -> str:
             return json.dumps({"error": f"Task #{task_id} not found."})
 
         if task_check["status"] == "blocked":
-            # Check which blockers are still incomplete
+            # Check which blockers are still unresolved (not done or cancelled)
             blocker_ids = json.loads(task_check["blocked_by"] or "[]")
             pending = []
             for bid in blocker_ids:
@@ -874,7 +919,7 @@ def trio_claim(channel: str, member_id: str, task_id: int) -> str:
                     "SELECT id, status, description FROM tasks WHERE id = ? AND channel = ?",
                     (bid, channel),
                 ).fetchone()
-                if bt and bt["status"] != "done":
+                if bt and bt["status"] not in ("done", "cancelled"):
                     pending.append(f"#{bt['id']} ({bt['status']}): {bt['description'][:60]}")
             return json.dumps({
                 "error": f"Task #{task_id} is blocked. Complete these first:",
@@ -992,17 +1037,17 @@ def trio_complete(channel: str, member_id: str, task_id: int, result: str = "") 
             blocker_ids = json.loads(bt["blocked_by"] or "[]")
             if task_id not in blocker_ids:
                 continue
-            # Check if ALL blockers for this task are now done
-            all_done = True
+            # Check if ALL blockers for this task are now resolved (done or cancelled)
+            all_resolved = True
             for bid in blocker_ids:
                 blocker = db.execute(
                     "SELECT status FROM tasks WHERE id = ? AND channel = ?",
                     (bid, channel),
                 ).fetchone()
-                if not blocker or blocker["status"] != "done":
-                    all_done = False
+                if not blocker or blocker["status"] not in ("done", "cancelled"):
+                    all_resolved = False
                     break
-            if all_done:
+            if all_resolved:
                 db.execute(
                     "UPDATE tasks SET status = 'open', updated_at = ? WHERE id = ? AND channel = ?",
                     (now, bt["id"], channel),
@@ -1099,6 +1144,107 @@ def trio_release(channel: str, member_id: str, task_id: int) -> str:
             "task_id": task_id,
             "released_from": claimer_name,
         })
+    finally:
+        db.close()
+
+
+@mcp.tool()
+def trio_cancel(channel: str, member_id: str, task_id: int, reason: str = "") -> str:
+    """Cancel a task, removing it as a dependency for downstream blocked tasks.
+
+    Use this when a task will never be completed — the work is no longer
+    needed, the approach changed, or the owner disappeared. Cancelled is
+    a terminal state (like done). Downstream tasks treat cancelled blockers
+    as resolved dependencies and will unblock if all their blockers are
+    now done or cancelled.
+
+    Any channel member can cancel any task in open, claimed, or blocked
+    status. This is a coordinator action — the person managing the task
+    graph decides when cancellation is appropriate.
+
+    Args:
+        channel: Channel code
+        member_id: Your member ID (the canceller)
+        task_id: The task to cancel
+        reason: Why this task is being cancelled (shown in channel message)
+    """
+    err = validate_channel_code(channel)
+    if err:
+        return json.dumps({"error": err})
+
+    db = get_db()
+    try:
+        member = _get_member(db, channel, member_id)
+        if not member:
+            return json.dumps({"error": "You are not a member of this channel."})
+
+        task = db.execute(
+            "SELECT * FROM tasks WHERE id = ? AND channel = ?",
+            (task_id, channel),
+        ).fetchone()
+        if not task:
+            return json.dumps({"error": f"Task #{task_id} not found."})
+        if task["status"] == "done":
+            return json.dumps({"error": f"Task #{task_id} is already done. Cannot cancel."})
+        if task["status"] == "cancelled":
+            return json.dumps({"error": f"Task #{task_id} is already cancelled."})
+
+        now = now_iso()
+        reason_text = reason.strip()[:MAX_MESSAGE_LENGTH] if reason else ""
+        db.execute(
+            "UPDATE tasks SET status = 'cancelled', result = ?, claimed_by = NULL, updated_at = ? "
+            "WHERE id = ? AND channel = ?",
+            (reason_text or None, now, task_id, channel),
+        )
+
+        # Unblock downstream tasks whose blockers are now all resolved
+        unblocked = []
+        blocked_tasks = db.execute(
+            "SELECT id, blocked_by, description FROM tasks WHERE channel = ? AND status = 'blocked'",
+            (channel,),
+        ).fetchall()
+        for bt in blocked_tasks:
+            blocker_ids = json.loads(bt["blocked_by"] or "[]")
+            if task_id not in blocker_ids:
+                continue
+            all_resolved = True
+            for bid in blocker_ids:
+                blocker = db.execute(
+                    "SELECT status FROM tasks WHERE id = ? AND channel = ?",
+                    (bid, channel),
+                ).fetchone()
+                if not blocker or blocker["status"] not in ("done", "cancelled"):
+                    all_resolved = False
+                    break
+            if all_resolved:
+                db.execute(
+                    "UPDATE tasks SET status = 'open', updated_at = ? WHERE id = ? AND channel = ?",
+                    (now, bt["id"], channel),
+                )
+                unblocked.append(f"#{bt['id']}")
+
+        # Post cancellation message
+        task_desc = task["description"]
+        msg = f"[cancelled #{task_id}] {task_desc}"
+        if reason_text:
+            msg += f" — {reason_text}"
+        if unblocked:
+            msg += f" — unblocked: {', '.join(unblocked)}"
+        db.execute(
+            "INSERT INTO messages (channel, member_id, member_name, content, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (channel, member_id, member["name"], msg, now),
+        )
+        db.commit()
+
+        resp = {
+            "ok": True,
+            "task_id": task_id,
+            "status": "cancelled",
+        }
+        if unblocked:
+            resp["unblocked"] = unblocked
+        return json.dumps(resp)
     finally:
         db.close()
 
@@ -1329,12 +1475,31 @@ def trio_lock(channel: str, member_id: str, resource: str, ttl_seconds: int = DE
                     "expires_at": existing["expires_at"],
                 })
 
-        # Acquire the lock
-        db.execute(
-            "INSERT INTO locks (channel, resource, held_by, acquired_at, expires_at) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (channel, resource, member_id, now, expires_at),
-        )
+        # Acquire the lock — catch IntegrityError from concurrent expired-lock replacement
+        try:
+            db.execute(
+                "INSERT INTO locks (channel, resource, held_by, acquired_at, expires_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (channel, resource, member_id, now, expires_at),
+            )
+        except sqlite3.IntegrityError:
+            # Another process acquired the lock between our DELETE and INSERT
+            winner = db.execute(
+                "SELECT held_by, expires_at FROM locks WHERE channel = ? AND resource = ?",
+                (channel, resource),
+            ).fetchone()
+            if winner:
+                holder = _get_member(db, channel, winner["held_by"])
+                holder_name = holder["name"] if holder else winner["held_by"]
+                return json.dumps({
+                    "conflict": True,
+                    "resource": resource,
+                    "held_by": holder_name,
+                    "expires_at": winner["expires_at"],
+                })
+            # Lock disappeared between our INSERT attempt and this SELECT — retry would help
+            # but this is vanishingly unlikely. Return a generic error.
+            return json.dumps({"error": f"Failed to acquire lock on '{resource}'. Try again."})
         # Post lock message
         db.execute(
             "INSERT INTO messages (channel, member_id, member_name, content, created_at) "
@@ -1670,6 +1835,7 @@ def trio_cleanup(channel: str = "", all_ended: bool = False) -> str:
             ).fetchall()
             for row in ended:
                 code = row["code"]
+                db.execute("DELETE FROM locks WHERE channel = ?", (code,))
                 db.execute("DELETE FROM tasks WHERE channel = ?", (code,))
                 db.execute("DELETE FROM messages WHERE channel = ?", (code,))
                 db.execute("DELETE FROM members WHERE channel = ?", (code,))

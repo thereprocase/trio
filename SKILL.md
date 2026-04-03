@@ -6,6 +6,14 @@ user-invocable: true
 
 # Claude Trio — Multi-Participant Async Communication
 
+> **READ THE FULL TOOLS TABLE BELOW BEFORE DOING ANYTHING.**
+>
+> You are one participant in a shared workspace. Other Claude sessions depend on you using the tools correctly. Skipping a tool — failing to poll, failing to ack, failing to cancel a stuck task — doesn't just affect you. It breaks coordination for everyone on the channel.
+>
+> Every tool exists because its absence caused a real problem in a real multi-agent session. If you don't understand what a tool does, read its description. If you're unsure whether to use it, use it. The cost of an unnecessary tool call is near zero. The cost of a missed one — lost messages, stuck tasks, silent failures — cascades across the entire team.
+>
+> Do not ignore tools you haven't seen before. Do not assume you know the full API from past sessions. The tool set has evolved. Read the table. Use what's available.
+
 Multiple Claude Code sessions communicate in one channel with fully asynchronous messaging. Unlike duo (two participants, turn-based), trio supports unlimited participants posting freely, coordinated through shared task claims and a persistent message log.
 
 Communication goes through an MCP server backed by SQLite. Every Claude session on the machine has access automatically.
@@ -41,10 +49,11 @@ If the first argument starts with `--`, treat everything as options/topic (no ch
 | `trio_poll(channel, member_id, wait_seconds?)` | Check for new messages since your last read (blocks up to wait_seconds). |
 | `trio_claim(channel, member_id, task_id)` | Atomically claim an open task. Returns success or conflict. |
 | `trio_complete(channel, member_id, task_id, result?)` | Mark a claimed task as done with a result summary. |
+| `trio_cancel(channel, member_id, task_id, reason?)` | **Cancel a task and unblock dependents.** Use when work is no longer needed, the approach changed, or the owner disappeared. Any member can cancel any open/claimed/blocked task. |
+| `trio_release(channel, member_id, task_id)` | Release your own claimed task back to open. Self-release only — use `trio_cull` for dead members. |
 | `trio_status(channel)` | Channel overview: members, tasks, message count. |
 | `trio_end(channel, member_id)` | Close channel, export conversation to markdown. |
 | `trio_list()` | List all active and ended channels. |
-| `trio_release(channel, member_id, task_id)` | Release your own claimed task back to open. Self-release only — use `trio_cull` for dead members. |
 | `trio_cull(channel, member_id, target_member_id)` | Remove a member from a channel. **User permission required — never call autonomously.** |
 | `trio_cleanup(channel?, all_ended?)` | Delete ended channels by name or clean all ended ones. |
 
@@ -205,9 +214,32 @@ The server marks the task as done and posts a completion message:
 [done #3] Optimize the inference loop — Inference optimized to 45ms per image
 ```
 
+### Cancelling a task
+
+**When a task will never be completed** — the work is no longer needed, the approach changed, or the owner disappeared — cancel it:
+
+```python
+trio_cancel(channel, member_id, task_id, reason="Approach changed, splitting into smaller tasks")
+```
+
+The server marks the task as `cancelled` and posts a cancellation message:
+```
+[cancelled #3] Optimize the inference loop — Approach changed, splitting into smaller tasks
+```
+
+**Cancellation unblocks dependents.** If other tasks were blocked by this one, they automatically unblock. The dependency is considered resolved — the coordinator decided this work is no longer required.
+
+**Any member can cancel any task** in `open`, `claimed`, or `blocked` status. This is a coordinator action. Use it when:
+- A task is stuck and nobody will complete it
+- The plan changed and the work is no longer relevant
+- A member was culled and their task should be abandoned, not reassigned
+- You need to restructure the task dependency graph
+
+**Do not cancel tasks that should be reassigned.** If the work still needs doing but the current owner can't finish it, use `trio_release` (self) or `trio_cull` (user-authorized, for stale members) instead. Release puts the task back to `open` for someone else to claim. Cancel means "this work is done being planned."
+
 ### Releasing a task
 
-If you want to give up a task you claimed:
+If you want to give up a task you claimed (so someone else can take it):
 
 ```python
 trio_release(channel, member_id, task_id)
@@ -216,6 +248,16 @@ trio_release(channel, member_id, task_id)
 **Self-release only.** You can only release tasks you claimed yourself. The server rejects all other-member releases.
 
 To free a dead member's tasks, ask the user to authorize a `trio_cull` — culling removes the member and auto-releases all their claimed tasks. If a member appears stale, suggest it: "Repro, Sauron hasn't been seen in 10 minutes — want me to cull them and free their tasks?"
+
+### Release vs Cancel — which to use
+
+| Situation | Use | Why |
+|-----------|-----|-----|
+| I can't finish this, someone else should | `trio_release` | Work still needs doing |
+| Owner disappeared, work still needed | `trio_cull` (ask user) | Frees tasks back to open |
+| This work is no longer needed | `trio_cancel` | Removes dependency, unblocks downstream |
+| Plan changed, restructuring tasks | `trio_cancel` | Clears the old tasks from the graph |
+| Blocker is stuck, downstream is waiting | `trio_cancel` the blocker | Unblocks everything downstream |
 
 ## Polling
 

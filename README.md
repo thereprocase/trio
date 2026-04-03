@@ -30,7 +30,7 @@ Then restart Claude Code. The trio MCP server will be available automatically.
 
 ## Tools Reference
 
-### Primary Tools (8)
+### Primary Tools (9)
 
 | Tool | Purpose |
 |------|---------|
@@ -39,7 +39,8 @@ Then restart Claude Code. The trio MCP server will be available automatically.
 | `trio_poll` | Check for new messages since last read. Blocks up to wait_seconds. |
 | `trio_claim` | Atomically claim an open task. Returns success or conflict. |
 | `trio_complete` | Mark a claimed task as done with result summary. |
-| `trio_release` | Release a claimed task back to open. Self-release always OK; others' tasks only if claimer is stale. |
+| `trio_cancel` | Cancel a task and unblock dependents. Use when work is no longer needed or the approach changed. |
+| `trio_release` | Release a claimed task back to open. Self-release only. |
 | `trio_status` | Channel overview: members (with computed liveness), tasks, message count. |
 | `trio_end` | Close channel, export conversation to markdown. |
 
@@ -56,7 +57,8 @@ The server computes member liveness from heartbeats (updated on every `trio_poll
 
 This matters for:
 - **Status dashboards** — `trio_status` returns computed `active: true/false` based on heartbeat, not just join state
-- **Task recovery** — `trio_release` allows any member to reclaim tasks from stale members
+- **Task recovery** — `trio_release` (self) or `trio_cull` (user-authorized) frees tasks from stale members
+- **Task cancellation** — `trio_cancel` removes a task from the dependency graph, unblocking downstream tasks
 - **Conversation export** — Members are labeled "active" or "stale" in the export
 
 ## Background Monitoring
@@ -121,14 +123,31 @@ Run with `run_in_background=true` and `timeout=600000` on the Bash call. The scr
 ## Task States
 
 ```
-Open → Claimed → Done
-         ↓
-      Released → Open  (via trio_release: self-release or stale-release)
+                  ┌─────────── trio_cancel ───────────┐
+                  │                                    ▼
+Open → Claimed → Done                            Cancelled
+  ↑       │                                    (terminal, unblocks
+  │       ▼                                     dependents)
+  └── Released
+      (via trio_release)
+
+Blocked → Open  (auto-unblock when all blockers are done or cancelled)
 ```
 
 - **Open** — Created, not yet claimed. Anyone can claim
-- **Claimed** — A participant owns it. Others get a conflict response. Releasable if claimer goes stale
-- **Done** — Completed with result summary. Archived but visible in conversation
+- **Blocked** — Waiting on blocker tasks. Auto-unblocks when all blockers reach `done` or `cancelled`
+- **Claimed** — A participant owns it. Others get a conflict response
+- **Done** — Completed with result summary. Terminal state. Unblocks dependents
+- **Cancelled** — Work no longer needed. Terminal state. Unblocks dependents. Use `trio_cancel` when the task should be removed from the dependency graph, not reassigned
+
+### When to cancel vs release
+
+| Situation | Tool | Effect |
+|-----------|------|--------|
+| I can't finish, someone else should | `trio_release` | Back to open, someone else claims |
+| Owner disappeared, work still needed | `trio_cull` (ask user) | Back to open, member removed |
+| Work is no longer needed | `trio_cancel` | Cancelled, dependents unblock |
+| Blocker is stuck, downstream waiting | `trio_cancel` the blocker | Dependents unblock immediately |
 
 ## Limitations
 

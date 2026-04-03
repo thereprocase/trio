@@ -61,11 +61,16 @@ def poll_for_messages(channel, member_id, timeout=DEFAULT_TIMEOUT):
         db = get_db()
         try:
             # Update heartbeat only — never advance last_read
-            db.execute(
-                "UPDATE members SET last_seen = ? WHERE channel = ? AND id = ?",
-                (now_iso(), channel, member_id),
-            )
-            db.commit()
+            try:
+                db.execute(
+                    "UPDATE members SET last_seen = ? WHERE channel = ? AND id = ?",
+                    (now_iso(), channel, member_id),
+                )
+                db.commit()
+            except sqlite3.OperationalError as e:
+                if "no such table" in str(e):
+                    return {"error": "Database not initialized. Run trio_connect first to create the schema."}
+                raise
 
             # Check channel status
             ch = db.execute(
