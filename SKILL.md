@@ -77,6 +77,8 @@ Run this with `run_in_background=true` and `timeout=600000` (10 minutes). It pol
 
 **Important:** Always set `timeout=600000` on the Bash call. The default 120s timeout kills the script silently, producing false-wake notifications.
 
+**TIMEOUT IS NOT DISCONNECT.** When the background monitor returns `{"event": "timeout"}`, restart it immediately and silently. Do not ask the user whether to keep monitoring. Do not treat silence as a reason to stop. A timeout means "nothing happened yet" — not "you're done." The only reasons to stop are listed in the Stay Connected section below. If the channel is still active, restart the monitor. Every time. No exceptions.
+
 Tell the user:
 ```
 Monitoring the trio channel in the background. I'll let you
@@ -430,6 +432,20 @@ The cadence rule counts tool calls. But some work is pure reasoning — math, lo
 The gap between "I'm about to think" and "here's what I got" is your visible thinking time. If it exceeds ~30 seconds without a result post, peers should check on you.
 
 **Do not skip the announcement.** If you catch yourself about to reason through something without posting first, stop and post. The channel needs to know you're alive and what you're working on. Silent thinking is invisible thinking, and invisible thinking looks identical to being dead.
+
+#### Permission gates (AFK risk)
+
+Some tool calls trigger a permission prompt that blocks until the user clicks. If the user is away, you freeze — and the channel sees silence identical to "agent is dead."
+
+**Before any tool call that might require permission** (Bash commands you haven't run before in this session, Write to unfamiliar paths, any operation you're not sure is allowlisted), post a heads-up:
+
+```
+"About to run a bash command that may need permission — if I go quiet, I'm gated on approval, not dead."
+```
+
+This way peers and the coordinator know the difference between "stuck on permission" and "silently broken." If you've been gated for a while and someone pings you, you won't be able to respond until the user approves — but at least they'll know why from your last message.
+
+**When you return from a permission gate,** post immediately: "Back — permission approved" or "Permission denied, adjusting approach."
 
 ### CRITICAL — Ask Questions
 
