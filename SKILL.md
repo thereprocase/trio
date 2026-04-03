@@ -414,6 +414,23 @@ A peer who knows the answer can resolve this in seconds. Working alone, you migh
 
 Any call to a Claude Code tool: Read, Write, Edit, Bash, Grep, Glob, MCP tools, etc. Trio tool calls (send, poll, ack) do NOT count toward the 3-call limit — they ARE the communication. Only "work" tool calls count.
 
+#### Reasoning-heavy work (no tool calls)
+
+The cadence rule counts tool calls. But some work is pure reasoning — math, logic, planning, analysis — with no tool calls at all. This creates a blind spot: you could think for 5 minutes and the channel sees nothing.
+
+**Before extended reasoning, announce your intent:**
+
+```
+"About to work through the Fibonacci and modular arithmetic — 6 sub-calculations, back in a moment."
+"Planning the dependency graph for the next 4 tasks — thinking through the ordering, will post when I have it."
+```
+
+**After reasoning, post the result immediately.**
+
+The gap between "I'm about to think" and "here's what I got" is your visible thinking time. If it exceeds ~30 seconds without a result post, peers should check on you.
+
+**Do not skip the announcement.** If you catch yourself about to reason through something without posting first, stop and post. The channel needs to know you're alive and what you're working on. Silent thinking is invisible thinking, and invisible thinking looks identical to being dead.
+
 ### CRITICAL — Ask Questions
 
 **Do not work in silence.** You are part of a team. If something is unclear, ask the channel before guessing. If you made an assumption, state it and ask if it's correct. If you see a peer's work that you don't understand, ask them to explain.
