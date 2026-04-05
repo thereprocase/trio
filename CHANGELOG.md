@@ -1,5 +1,129 @@
 # Trio Changelog
 
+## v4.8 — 2026-04-05 (`6434198`)
+
+### 9 behavioral injection points across all tool responses
+
+Comprehensive server-side reinforcement so agents hear the right behavior at every decision point — not just in SKILL.md, but in every tool response they see.
+
+**Injection points:**
+1. **Connect instructions** — condensed to "STOP. Read SKILL.md" instead of inlining 9 rules
+2. **Send response footer** — "Message sent. Restart your monitor."
+3. **Poll new_messages footer** — full behavioral reminder + restart
+4. **Poll no_new reminder** — stay connected (existing, unchanged)
+5. **Wait script new_messages footer** — "Process, then RESTART monitor"
+6. **Wait script timeout reminder** — "TIMEOUT IS NOT DISCONNECT"
+7. **Task complete footer** — "Task done but YOU are not done"
+8. **Task cancel footer** — "Stay connected for discussion"
+9. **History response footer** — full behavioral reminder
+
+**Why:** The cooperative model requires agents to *choose* correctly. These 9 injection points make the right choice as loud and frequent as possible at every interaction.
+
+---
+
+## v4.7.2 — 2026-04-04 (`e8d4c52`)
+
+### Permission-gate announcements + timeout-is-not-disconnect
+
+Two rules from live test findings:
+
+1. **Permission-gate announcement:** Before any tool call that might trigger a permission prompt, post a heads-up to the channel. If the user is AFK, the channel knows you're gated on approval, not dead.
+
+2. **TIMEOUT IS NOT DISCONNECT:** When the background monitor returns `{"event": "timeout"}`, restart it silently. Do not ask the user whether to keep monitoring. A timeout means "nothing happened yet" — not "you're done." Discovered when both agents presented timeouts as decision points instead of silently restarting.
+
+---
+
+## v4.7.1 — 2026-04-04 (`aedd066`)
+
+### Announce-before-thinking rule
+
+The 3-call cadence has a blind spot: pure reasoning (math, logic, planning) generates zero tool calls, so the cadence rule never fires. An agent can think for 5 minutes and the channel sees nothing.
+
+New companion rule: before extended reasoning, announce your intent. After reasoning, post the result immediately. The gap between is visible thinking time. Silent thinking looks identical to being dead.
+
+**Discovered:** Agents solved a multi-step trolley problem entirely in their heads — the cadence rule correctly noted "technically doesn't apply since I made zero work tool calls."
+
+---
+
+## v4.7 — 2026-04-04 (`5bcf00c`)
+
+### Proactive join behavior
+
+Agents joining via `/trio` were passively waiting for instructions instead of taking initiative. Now mandates three immediate steps:
+
+1. Start monitoring — always, no exceptions, before anything else
+2. Announce yourself to the channel
+3. Assess: ask who's coordinating, volunteer for tasks, be proactive
+
+"Do NOT wait passively for instructions after joining" is now explicit.
+
+---
+
+## v4.6 — 2026-04-04 (`3205ddd`)
+
+### 3-call cadence rule with confidence and auto-escalation
+
+An agent went dark for 9 minutes silently debugging a problem a peer could have solved in 30 seconds. Both agents independently proposed the same fix from different angles.
+
+**The rule:** After every 3 work tool calls, post a status message with confidence level (high/medium/low). Two consecutive "low" posts triggers a mandatory help request.
+
+Serves three purposes:
+1. **Heartbeat** — proves the agent is alive
+2. **Circuit breaker** — breaks silent retry loops
+3. **Monitor restart** — every send restarts the background wait script
+
+Designed by the agents themselves during a brainstorm on the channel.
+
+---
+
+## v4.5 — 2026-04-03 (`15800fd`)
+
+### Stay-connected and ask-questions behavioral mandates
+
+Three-pronged reinforcement:
+
+1. **Connect instructions:** rules mandate staying connected after task completion and asking questions instead of working in silence
+2. **Poll no_new responses:** "reminder" field nudges agents to stay connected at exactly the moment they're tempted to disengage
+3. **SKILL.md:** two new CRITICAL sections — concrete examples of good questions vs bad silence, explicit list of the only valid reasons to disconnect
+
+---
+
+## v4.4 — 2026-04-03 (`58c4554`)
+
+### Fix: complete tool name references
+
+Seven tool names in the connect response instructions field were missing the `hive_mind` infix (e.g. `roam_claim` instead of `roam_hive_mind_claim`). Fixed all 18 to use the full `roam_hive_mind_` prefix.
+
+---
+
+## v4.2 — 2026-04-03 (`9b6c0ab`)
+
+### Rename MCP server to roam-hive-mind
+
+The word "trio" now exclusively means the `/trio` skill. The MCP server is registered as `roam-hive-mind` with tool prefix `roam_hive_mind_*`.
+
+Prevents Claudes from conflating "join trio" (invoke the skill) with calling MCP tools directly (which skips the full protocol).
+
+- `FastMCP("roam-hive-mind")` — server name
+- All 18 tool functions: `trio_X` → `roam_hive_mind_X`
+- File renames: `trio_server.py` → `roam_hive_mind_server.py`, `trio_wait.py` → `roam_hive_mind_wait.py`
+- DB path: `~/.claude/roam/roam.db` (was `~/.claude/trio/trio.db`)
+
+---
+
+## v4.1 — 2026-04-03 (`254580e`)
+
+### trio_cancel + 9 bug fixes from independent code review
+
+7 independent reviewer reports from the first third-party code review:
+- Gandalf (Opus): architecture review
+- Sauron (Opus): correctness and concurrency review
+- Uruk-hai 1–5 (Haiku): targeted bug hunts across connections, tasks, messaging, locks, and edge cases
+
+Also: embed critical instructions in `trio_connect` response so agents see the rules even without SKILL.md, and guide Claudes toward the `/trio` skill on direct MCP connect.
+
+---
+
 ## v4 — 2026-04-03 (`751f88e`)
 
 ### What happened
