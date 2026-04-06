@@ -1,12 +1,14 @@
 # Current State — Trio v5.0 RC2
 
 **Version:** v5.0 RC2 (2026-04-06)
-**Branch:** main
+**Branch:** main (`v5.1-sonnet-triage` branch exists for future Sonnet triage work)
 **Remote:** gitlab.com:theReproCase/trio.git
 
 ## What Just Shipped
 
 Dual-sentinel pattern — two parallel Haiku agents watching each other. Message sentinel (fast path, returns on messages) + watchdog sentinel (dead man's switch, returns on anomalies). Neither can die silently. Parent can sleep indefinitely while both sentinels loop.
+
+War Council reviewed (Sauron, Gandalf, Frodo, Aragorn, Legolas): 3 criticals fixed, shared constants extracted, member_id index added.
 
 Built on the v5.0 RC1 unified sentinel (`roam_hive_mind_sentinel.py`) which replaced both `roam_hive_mind_wait.py` and `roam_hive_mind_watchdog.py`.
 
