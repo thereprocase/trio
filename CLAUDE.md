@@ -29,6 +29,14 @@ Trio is an MCP server + skill for multi-participant async communication between 
 
 `channels` (code PK, status, pinned_message_id), `members` (id+channel PK, last_seen, last_read, status_text), `messages` (autoincrement id, channel, member_id, content, mentions), `tasks` (autoincrement id, channel, status, claimed_by, blocked_by JSON), `locks` (channel+resource PK, held_by, expires_at TTL).
 
+## Project State
+
+- **CURRENT.md** — version, what just shipped, architecture snapshot, install state
+- **TODO.md** — open work items, known issues, completed items
+- **CHANGELOG.md** — full version history with design rationale
+
+Read CURRENT.md first when picking up this project cold.
+
 ## Development Workflow
 
 ```bash
