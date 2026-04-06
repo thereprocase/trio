@@ -378,6 +378,61 @@ The only reasons to stop polling:
 
 If you are unsure whether to stay, **stay**. The cost of staying connected and idle is near zero. The cost of disconnecting when someone needs you is a blocked team.
 
+### After Delivery: Agent-Based Idle Monitor (v4.9)
+
+When you have no active work — tasks complete, results posted, standing by — switch from Bash-based monitoring to Agent-based monitoring. This reduces idle token cost by 95%.
+
+**Why:** Every Bash timeout cycles through your full context (200K+ tokens) just to say "nothing happened." An Agent loops internally in its own tiny context (~10K tokens). You only pay your full context cost when real messages arrive.
+
+**Three monitoring tiers** (all three coexist):
+
+| Tier | Method | When | Why |
+|------|--------|------|-----|
+| 1 | `roam_hive_mind_poll(wait_seconds=0)` | Between work steps | Instant peek, zero overhead |
+| 2 | Bash `roam_hive_mind_wait.py` (background) | During active work | Reliability layer, fast notification |
+| 3 | Agent running `roam_hive_mind_wait.py` (background) | Idle after delivery | Absorbs empty timeouts cheaply |
+
+You always retain direct MCP access (tier 1). Use it whenever you have reason to check.
+
+**Switch to agent-monitor when ALL of these are true:**
+1. Your assigned tasks are complete (or you have none)
+2. You have posted your results to the channel
+3. You are entering idle waiting with no other work
+
+Also appropriate if you are a passive observer (no tasks, just watching the channel).
+
+**Launch the agent-monitor:**
+
+```
+Agent(
+    description="Monitor trio channel",
+    prompt="Monitor trio channel '{channel}' for member '{member_id}'.
+    Run this command repeatedly:
+      python ~/.claude/skills/trio/server/roam_hive_mind_wait.py {channel} {member_id} --timeout 540
+    Use timeout: 600000 on each Bash call.
+    After each timeout (no messages), restart the command silently.
+    Do NOT return to the parent on timeout.
+    After 30 restarts with no messages, return: IDLE_CYCLE_CAP_REACHED
+    When REAL MESSAGES arrive, return: MESSAGES_DETECTED (include the message IDs only, not content).
+    Keep looping until messages arrive, the channel ends, or you hit 30 cycles.",
+    run_in_background=True,
+)
+```
+
+**When the agent-monitor returns:**
+- **`MESSAGES_DETECTED`:** Call `roam_hive_mind_poll` to get authoritative message content (the agent's relay is a wake-up signal, not delivery). Process messages. If new work arrives, switch back to Bash monitoring (tier 2). If still idle, launch a new agent-monitor.
+- **`IDLE_CYCLE_CAP_REACHED`:** No messages for ~30 cycles. Launch a fresh agent-monitor. This cap prevents unbounded context growth inside the agent and acts as a parent-session heartbeat.
+- **Error or unexpected return:** The agent crashed. Launch a new one immediately.
+
+**Switch BACK to Bash-direct monitoring when:**
+- You receive new work or messages that need active response
+- You claim a new task
+- The channel needs your active participation
+
+**The cadence rule (3-call rule) is suspended during agent-monitor idle.** It resumes when you return to active work.
+
+**Permission note:** The `python` Bash command must have been used at least once in your session before the agent-monitor can use it. This is naturally satisfied — during active work you run the Bash monitor, which caches the permission. If you're joining purely as an observer and going straight to agent-monitor, run the wait script once via Bash first.
+
 ### CRITICAL — 3-Call Cadence Rule (Status + Confidence)
 
 **After every 3 tool calls within a task, you MUST post a status message to the channel before making another tool call.** No exceptions.

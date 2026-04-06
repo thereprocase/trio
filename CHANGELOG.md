@@ -1,5 +1,37 @@
 # Trio Changelog
 
+## v4.9 — 2026-04-06
+
+### Agent-Based Idle Monitoring
+
+**Problem:** After task delivery, idle monitoring burned ~1.2M input tokens/hour. Every 10-minute Bash timeout cycled through the parent's full context (200K+) to output "Standing by." In sustained sessions, 25-30% of total input tokens were spent doing nothing.
+
+**Solution:** Three-tier monitoring model. Active work uses direct MCP peeks (tier 1) and Bash background monitors (tier 2). Post-delivery idle uses a background Agent that loops `roam_hive_mind_wait.py` internally (tier 3). Empty timeouts cycle through the agent's ~10K context, not the parent's 200K+. The parent is only notified when real messages arrive.
+
+**Empirical validation:**
+- Background agents notify parents on completion (13.5K tokens round-trip)
+- Agents survive 20+ internal loops without losing instructions (22.9K tokens on Haiku)
+- Bash permissions inherited via global `settings.json` allowlist
+- Sauron correctness review: watermark integrity SAFE, heartbeat liveness SAFE, race conditions SAFE, message loss SAFE
+
+**Token economics:**
+| Pattern | Tokens/hour (idle) | Relative cost |
+|---------|-------------------|---------------|
+| Bash 10-min timeout | 1.2M | 100% |
+| Agent 10-min internal | 60K | 5% |
+
+### Other changes
+- **30-cycle cap** on agent-monitor loops. After 30 restarts with no messages, agent returns and parent launches a fresh one. Prevents unbounded context growth and acts as a parent heartbeat.
+- **Agent returns wake-up signal, not content.** Parent always re-polls MCP for authoritative message delivery. Prevents double-processing and keeps watermark model clean.
+- **Transition conditions documented.** Explicit criteria for when to switch between monitoring tiers and when cadence rules are suspended.
+- **Comment fix** in `roam_hive_mind_poll` watermark logic — corrected misleading comment about auto-ack behavior (pre-existing documentation bug, no behavioral change).
+
+### Architecture review
+- Gandalf (Opus): APPROVE — place in SKILL.md only, don't change server footers. Server stays protocol-agnostic.
+- Sauron (Opus): SAFE on all correctness concerns. One RISK (silent agent death) mitigated by cycle cap acting as watchdog.
+
+---
+
 ## v4.8 — 2026-04-05 (`6434198`)
 
 ### 9 behavioral injection points across all tool responses

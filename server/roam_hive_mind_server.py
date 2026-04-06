@@ -739,11 +739,9 @@ def roam_hive_mind_poll(channel: str, member_id: str, wait_seconds: int = 15, fr
                 else:
                     display_msgs = unread
 
-                # Auto-ack: advance watermark to where the PREVIOUS poll left off.
-                # This means: if the caller never explicitly acked after the last
-                # poll, we ack those old messages now before returning new ones.
-                # The NEW messages returned here are NOT acked until the next
-                # poll or an explicit roam_hive_mind_ack call.
+                # Advance watermark to the max ID of this batch.
+                # If the caller never explicitly acked after the last poll,
+                # those messages are implicitly acked now (backward-compatible).
                 # When filtering by from_name, never advance watermark — the
                 # caller hasn't seen the unfiltered messages.
                 if not from_name_lower:
