@@ -143,6 +143,7 @@ def get_db() -> sqlite3.Connection:
         ("mentions", "messages", "TEXT NOT NULL DEFAULT ''"),
         ("blocked_by", "tasks", "TEXT NOT NULL DEFAULT '[]'"),
         ("status_text", "members", "TEXT NOT NULL DEFAULT ''"),
+        ("status_changed_at", "members", "TEXT NOT NULL DEFAULT ''"),
     ]:
         try:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {defn}")
@@ -612,10 +613,24 @@ def roam_hive_mind_send(channel: str, member_id: str, message: str, task: bool =
         # Watermarks advance in roam_hive_mind_poll (MCP) and roam_hive_mind_wait.py (background).
         # Advancing in send skips unread messages from other members
         # that arrived between our last poll and this send.
-        db.execute(
-            "UPDATE members SET last_seen = ? WHERE id = ? AND channel = ?",
-            (now, member_id, channel),
-        )
+        #
+        # Auto-clear sleeping status on send (v5). If the member is actively
+        # sending messages, they're not sleeping. Clears the flag so the
+        # watchdog doesn't need to detect the inconsistency — the server
+        # enforces it. Also updates status_changed_at for transition tracking.
+        current_status = member["status_text"] if "status_text" in member.keys() else ""
+        if current_status and any(kw in current_status.lower()
+                                  for kw in ("idle", "standing by", "tier 3", "agent-monitor")):
+            db.execute(
+                "UPDATE members SET last_seen = ?, status_text = '', status_changed_at = ? "
+                "WHERE id = ? AND channel = ?",
+                (now, now, member_id, channel),
+            )
+        else:
+            db.execute(
+                "UPDATE members SET last_seen = ? WHERE id = ? AND channel = ?",
+                (now, member_id, channel),
+            )
         if pin:
             db.execute(
                 "UPDATE channels SET pinned_message_id = ?, updated_at = ? WHERE code = ?",
@@ -1416,10 +1431,19 @@ def roam_hive_mind_set_status(channel: str, member_id: str, status_text: str) ->
 
         status_text = (status_text or "").strip()[:200]
         now = now_iso()
-        db.execute(
-            "UPDATE members SET status_text = ?, last_seen = ? WHERE id = ? AND channel = ?",
-            (status_text, now, member_id, channel),
-        )
+        # Only update status_changed_at when the value actually changes
+        old_status = member["status_text"] if "status_text" in member.keys() else ""
+        if status_text != (old_status or ""):
+            db.execute(
+                "UPDATE members SET status_text = ?, status_changed_at = ?, last_seen = ? "
+                "WHERE id = ? AND channel = ?",
+                (status_text, now, now, member_id, channel),
+            )
+        else:
+            db.execute(
+                "UPDATE members SET last_seen = ? WHERE id = ? AND channel = ?",
+                (now, member_id, channel),
+            )
         db.commit()
         return json.dumps({"ok": True, "status_text": status_text})
     finally:
