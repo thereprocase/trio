@@ -141,6 +141,19 @@ class AAR(FPDF):
         self.set_auto_page_break(False)
         usable = self.w - self.l_margin - self.r_margin
         row_h = 24
+        half_page = (self.h - 86 - 72) / 2  # half usable height
+        total_table_h = row_h * (1 + len(rows)) + 8  # header + rows + bottom rule
+        space_left = self.h - 86 - self.get_y()
+        min_rows_before_break = 3
+
+        # Keep table together if it fits on half a page or less,
+        # OR if fewer than 3 rows would fit on the current page
+        if total_table_h <= half_page:
+            # Small table — keep it all together
+            self.ensure_space(total_table_h)
+        elif space_left < row_h * (1 + min_rows_before_break):
+            # Not enough room for header + 3 rows — push to next page
+            self.ensure_space(total_table_h)
 
         # Header
         self.set_font('Segoe', 'B', 9)
@@ -219,7 +232,7 @@ def build():
     pdf.cell(0, 20, "Trio v5.0 RC2 Development Session", new_x='LMARGIN', new_y='NEXT')
     pdf.ln(32)
     pdf.meta_line("Date", "2026-04-06T17:46Z")
-    pdf.meta_line("Duration", "~5.5 hours")
+    pdf.meta_line("Duration", "~1.25 hours")
     pdf.meta_line("Channel", "v49-test (397 messages, 101 in final segment)")
     pdf.meta_line("Participants", "Coordinator (Opus), Legolas (Opus, live)")
     pdf.meta_line("", "Gandalf, Sauron, Frodo, Aragorn (War Council)")
