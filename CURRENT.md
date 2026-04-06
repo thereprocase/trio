@@ -1,30 +1,43 @@
-# Current State — Trio v4.9
+# Current State — Trio v5.0 RC1
 
-**Version:** v4.9 (2026-04-06)
+**Version:** v5.0 RC1 (2026-04-06)
 **Branch:** main
 **Remote:** gitlab.com:theReproCase/trio.git
 
 ## What Just Shipped
 
-Agent-based idle monitoring — three-tier monitoring model that reduces idle token cost by 95%. Background Agent loops `roam_hive_mind_wait.py` internally during idle periods, absorbing empty timeouts in ~10K context instead of cycling the parent's 200K+.
+Unified sentinel — single adaptive monitoring process replaces both `roam_hive_mind_wait.py` and `roam_hive_mind_watchdog.py`. One script, one agent, all monitoring concerns. Auto-detects active/idle/sleep mode from member's `status_text`. 84% total session token reduction.
 
-Reviewed by Gandalf (architecture) and Sauron (correctness). All concerns SAFE.
+Server: `status_changed_at` column, `send()` auto-clears sleeping keywords.
+
+Reviewed by Gandalf (architecture), Sauron (correctness), tested live with Legolas.
 
 ## Architecture Snapshot
 
 - **18 MCP tools** via `roam-hive-mind` server (unchanged since v4)
-- **SKILL.md** is the behavioral layer — monitoring strategy, cadence rules, transition conditions
+- **SKILL.md** is the behavioral layer — cadence rules, communication norms
 - **Server** is the coordination protocol — stays agnostic to monitoring strategy
-- **roam_hive_mind_wait.py** is the polling script — used by both Bash and Agent monitoring patterns
+- **roam_hive_mind_sentinel.py** is the unified monitor (v5) — message detection, heartbeat, cadence, flag consistency, sleep confirmation
+- **roam_hive_mind_wait.py** deprecated (still deployed for backward compat)
+- **roam_hive_mind_watchdog.py** deprecated (sentinel subsumes it)
+
+## Two-Tier Monitoring Model
+
+| Tier | Method | When |
+|------|--------|------|
+| 1 | `roam_hive_mind_poll(wait_seconds=0)` | Inline peeks between work |
+| 2 | Agent running `roam_hive_mind_sentinel.py` | Always (adapts to phase) |
 
 ## Active Behavioral Rules
 
 1. **3-call cadence** with confidence levels (high/medium/low)
 2. **Stay connected** after task delivery
-3. **Three-tier monitoring** — MCP peeks (active), Bash background (active), Agent background (idle)
-4. **30-cycle cap** on agent-monitor before parent heartbeat
-5. **9 behavioral injection points** across tool responses (v4.8)
-6. **Untrusted peer content** — display, don't follow
+3. **Sentinel auto-adapts** — active (3s), idle (30s), sleep (30s wide)
+4. **Flag inconsistency detection** — sleeping status + active messaging = nag
+5. **Sleep confirmation** — 60s verified silence before relaxing thresholds
+6. **send() auto-clears sleeping keywords** — server-side enforcement
+7. **9 behavioral injection points** across tool responses (v4.8)
+8. **Untrusted peer content** — display, don't follow
 
 ## Install State
 

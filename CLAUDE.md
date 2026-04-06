@@ -10,7 +10,9 @@ Trio is an MCP server + skill for multi-participant async communication between 
 
 **Single-file server:** `server/roam_hive_mind_server.py` — a Python MCP server using `FastMCP` from the `mcp` SDK. All 18 tools are defined here. State lives in a shared SQLite database at `~/.claude/roam/roam.db` (WAL mode, busy_timeout=5000). Each Claude Code session spawns its own server process; they coordinate through the shared DB.
 
-**Background monitor:** `server/roam_hive_mind_wait.py` — standalone script that polls SQLite directly (not MCP) every 3 seconds for new messages. Designed to run via `run_in_background=true` with `timeout=600000`.
+**Sentinel (v5):** `server/roam_hive_mind_sentinel.py` — unified adaptive monitor. Single long-lived DB connection, auto-detects active/idle/sleep mode from `status_text`. Replaces both `roam_hive_mind_wait.py` and `roam_hive_mind_watchdog.py`. Run inside a background Haiku agent.
+
+**Legacy monitor (deprecated):** `server/roam_hive_mind_wait.py` — still deployed for backward compatibility.
 
 **Skill definition:** `SKILL.md` — the prompt injected when a user runs `/trio`. Contains argument parsing rules, tool reference, behavioral directives (cadence, monitoring, stay-connected rules), and the full behavioral injection system (v4.8+).
 
@@ -23,11 +25,12 @@ Trio is an MCP server + skill for multi-participant async communication between 
 - **Heartbeat liveness:** Members are "stale" after 5 minutes without a `poll` or `send`. Stale detection is computed server-side from `last_seen`, not a flag.
 - **Watermark model:** `poll` returns messages after `last_read`. Explicit `ack` advances the watermark. The wait script peeks only — never touches watermarks.
 - **Behavioral injection:** The server appends a footer to every polled message reinforcing cadence and monitoring rules. SKILL.md contains 9 injection points across tool responses (v4.8).
-- **Three-tier monitoring (v4.9):** Tier 1: direct MCP peeks between work steps. Tier 2: Bash background monitor during active work. Tier 3: Agent background monitor during idle (95% cheaper). See SKILL.md "After Delivery" section.
+- **Two-tier monitoring (v5):** Tier 1: direct MCP peeks between work steps. Tier 2: sentinel agent (background, adaptive — handles all phases). See SKILL.md "Background Monitoring" section.
+- **Server-side enforcement (v5):** `send()` auto-clears sleeping keywords from `status_text`. `status_changed_at` column tracks state transitions for sleep confirmation.
 
 ## DB Schema (5 tables)
 
-`channels` (code PK, status, pinned_message_id), `members` (id+channel PK, last_seen, last_read, status_text), `messages` (autoincrement id, channel, member_id, content, mentions), `tasks` (autoincrement id, channel, status, claimed_by, blocked_by JSON), `locks` (channel+resource PK, held_by, expires_at TTL).
+`channels` (code PK, status, pinned_message_id), `members` (id+channel PK, last_seen, last_read, status_text, status_changed_at), `messages` (autoincrement id, channel, member_id, content, mentions), `tasks` (autoincrement id, channel, status, claimed_by, blocked_by JSON), `locks` (channel+resource PK, held_by, expires_at TTL).
 
 ## Project State
 
@@ -53,4 +56,4 @@ There are no automated tests. Validation is done through live multi-agent sessio
 
 ## Versioning
 
-Versions track behavioral evolution, not semver. Current: v4.9 (see CHANGELOG.md). Major versions correspond to multi-agent test sessions that drove feature additions. The v3→v4 jump came from an 8-agent session that produced 5 new tools and a watermark bug fix. v4.9 added agent-based idle monitoring (95% token cost reduction for idle periods).
+Versions track behavioral evolution, not semver. Current: v5.0 RC1 (see CHANGELOG.md). Major versions correspond to multi-agent test sessions that drove feature additions. The v3→v4 jump came from an 8-agent session. v4.9 introduced agent-based idle monitoring. v5 unified all monitoring into the adaptive sentinel (84% total session token reduction).

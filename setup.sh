@@ -64,6 +64,7 @@ else
 fi
 cp "$SCRIPT_DIR/server/roam_hive_mind_server.py" "$SERVER_DIR/roam_hive_mind_server.py"
 cp "$SCRIPT_DIR/server/roam_hive_mind_wait.py" "$SERVER_DIR/roam_hive_mind_wait.py"
+cp "$SCRIPT_DIR/server/roam_hive_mind_sentinel.py" "$SERVER_DIR/roam_hive_mind_sentinel.py"
 echo "Server files: $SERVER_DIR"
 
 # ---------- 4. Resolve native path ----------

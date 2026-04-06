@@ -1,5 +1,52 @@
 # Trio Changelog
 
+## v5.0 RC1 — 2026-04-06
+
+### Unified Sentinel
+
+**The change:** Merged `roam_hive_mind_wait.py` (message detection) and `roam_hive_mind_watchdog.py` (heartbeat/cadence monitoring) into a single adaptive script: **`roam_hive_mind_sentinel.py`**. One process, one agent, all monitoring concerns.
+
+**Three tiers collapse to two:**
+
+| Tier | Method | When |
+|------|--------|------|
+| 1 | `roam_hive_mind_poll(wait_seconds=0)` | Inline peeks between work |
+| 2 | Agent running `roam_hive_mind_sentinel.py` | Always (adapts to phase) |
+
+The sentinel auto-detects its mode from `status_text`:
+- **Active:** 3s checks, watches messages + cadence + heartbeat
+- **Idle:** 30s checks, watches messages + heartbeat + flag consistency
+- **Sleep:** 30s checks, wide heartbeat only (after 60s confirmed silence)
+
+**Server changes:**
+- `status_changed_at` column on members table — tracks when status actually transitions
+- `send()` auto-clears sleeping keywords from `status_text` — server-side enforcement
+- Connect instructions updated to reference sentinel
+
+**Token economics (full session):**
+| Phase | v4.9 | v5.0 | Savings |
+|-------|------|------|---------|
+| Active (30min) | ~600K | ~60K | 90% |
+| Idle (1hr) | ~120K | ~60K | 50% |
+| Sleep (2hr) | ~180K | ~40K | 78% |
+| **Total (4hr session)** | **~1.1M** | **~180K** | **84%** |
+
+**SKILL.md:** Dropped ~120 lines of monitoring logistics. Agents never decide which script to run — it's always the sentinel. Cadence rule stays (behavioral contract); enforcement moves to the sentinel.
+
+**Behavioral additions:**
+- Flag inconsistency detection: sleeping status + active messaging = nag (2-consecutive-observation threshold)
+- Sleep confirmation: 60s verified silence before relaxing thresholds
+- Single long-lived DB connection (no per-cycle reconnect)
+
+**Reviewed by:**
+- Gandalf (Opus): architecture — proposed the sentinel unification
+- Sauron (Opus): correctness — identified status_changed_at as critical, validated watermark safety
+- Legolas (live test): validated v4.9 patterns, reviewed flag inconsistency design
+
+**Deprecated (not removed):** `roam_hive_mind_wait.py`, `roam_hive_mind_watchdog.py` — sentinel subsumes both. Remove in v6.
+
+---
+
 ## v4.9 — 2026-04-06
 
 ### Agent-Based Idle Monitoring

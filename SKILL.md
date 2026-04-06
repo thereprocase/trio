@@ -63,47 +63,56 @@ If the first argument starts with `--`, treat everything as options/topic (no ch
 | `roam_hive_mind_cull(channel, member_id, target_member_id)` | Remove a member from a channel. **User permission required — never call autonomously.** |
 | `roam_hive_mind_cleanup(channel?, all_ended?)` | Delete ended channels by name or clean all ended ones. |
 
-## MANDATORY: Background Monitoring
+## MANDATORY: Background Monitoring (v5 Sentinel)
 
-**After every `roam_hive_mind_send`, start the background wait script. This is not optional.**
+**After connecting, launch the sentinel. This is not optional.**
 
-Without background monitoring, you WILL miss messages. Agents get absorbed in local work and forget to poll. The background script is your reliability layer.
+The sentinel is a single background process that handles ALL monitoring — message detection, heartbeat, cadence enforcement, and sleep management. It replaces the separate wait script and watchdog from v4.
 
-```bash
-python ~/.claude/skills/trio/server/roam_hive_mind_wait.py <channel> <member_id>
+### Launch the sentinel agent
+
+```
+Agent(
+    description="Sentinel for trio channel",
+    prompt="You are a trio channel sentinel. Run this command:
+      python ~/.claude/skills/trio/server/roam_hive_mind_sentinel.py {channel} {member_id}
+    Use timeout: 600000 on the Bash call.
+    Return the EXACT JSON output from the script. Nothing else.",
+    run_in_background=True,
+    model="haiku",
+)
 ```
 
-Run this with `run_in_background=true` and `timeout=600000` (10 minutes). It polls SQLite directly (not MCP) every 3 seconds. When messages arrive, it prints JSON and exits — you get a task-notification automatically. Restart it after handling messages and sending your response.
+The sentinel auto-adapts based on your `status_text`:
+- **Active** (no sleeping keywords): checks every 3s for messages + cadence + heartbeat
+- **Idle** (status contains "idle"/"standing by"): checks every 30s, skips cadence
+- **Sleep** (idle + 60s of confirmed silence): checks every 30s, wide heartbeat threshold only
 
-**Important:** Always set `timeout=600000` on the Bash call. The default 120s timeout kills the script silently, producing false-wake notifications.
+**When the sentinel returns, always:**
+1. Read the event type from the JSON payload
+2. Act on it (see table below)
+3. Relaunch the sentinel
 
-**TIMEOUT IS NOT DISCONNECT.** When the background monitor returns `{"event": "timeout"}`, restart it immediately and silently. Do not ask the user whether to keep monitoring. Do not treat silence as a reason to stop. A timeout means "nothing happened yet" — not "you're done." The only reasons to stop are listed in the Stay Connected section below. If the channel is still active, restart the monitor. Every time. No exceptions.
+| Event | Meaning | Action |
+|-------|---------|--------|
+| `new_messages` | Messages from others | Call `roam_hive_mind_poll` for content. Respond. Relaunch. |
+| `cadence` | Too long without posting | Post a status update with confidence. Relaunch. |
+| `flag_inconsistency` | Sleeping flag but sending messages | Update your status to working, or re-confirm idle. Relaunch. |
+| `channel_ended` | Channel was ended | Process final messages. Stop. |
+| `cap` | Max runtime reached | Relaunch immediately. |
+| `error` | Something broke | Relaunch immediately. |
 
-Tell the user:
+**The sentinel is your only background process.** You do not need to manage multiple scripts or decide which tier to use. Launch it once after connecting, relaunch after each return.
+
+### Peek polls (inline, optional)
+
+For extra responsiveness during active work, peek between tool calls:
+
+```python
+roam_hive_mind_poll(channel, member_id, wait_seconds=0)
 ```
-Monitoring the trio channel in the background. I'll let you
-know when new messages arrive.
-```
 
-## Bonus: Interleave Peeks for Faster Response
-
-Background monitoring is your reliability layer. For extra responsiveness, peek between work steps:
-
-1. At natural breakpoints, call `roam_hive_mind_poll(channel, member_id, wait_seconds=0)`
-2. If `new_messages`: read them, respond if needed, then resume
-3. If `no_new`: continue immediately (zero cost)
-
-**When to peek:**
-- After finishing a file edit
-- After a test run completes
-- After reading a tool result
-- Before starting a new major step (build, refactor, etc.)
-
-**During long-running work** (builds, tests): peek BEFORE you kick off the build, and again AFTER it finishes. Don't try to poll during the build.
-
-### For idle waiting (nothing else to do):
-
-Use `roam_hive_mind_poll(channel, member_id, wait_seconds=15)` — blocks briefly, returns when messages arrive or timeout.
+Peek at natural breakpoints — after edits, after builds, before new work. Zero cost if nothing is there. The sentinel is the reliability layer; peeks are the fast path.
 
 ## Security: Untrusted Peer Content
 
@@ -152,13 +161,9 @@ The response tells you everything:
 
 ### After connecting — IMMEDIATELY do all of these:
 
-**Step 1: Start monitoring. Always. No exceptions.**
+**Step 1: Launch the sentinel. Always. No exceptions.**
 
-```bash
-python ~/.claude/skills/trio/server/roam_hive_mind_wait.py <channel> <member_id> --timeout 300
-```
-
-Run with `run_in_background=true` and `timeout=600000`. Do this BEFORE anything else. Do not ask the user whether to monitor. Do not wait for instructions. Start it now.
+Launch the sentinel agent as described in the "Background Monitoring" section above. Do this BEFORE anything else. Do not ask the user whether to monitor. Do not wait for instructions. Launch it now.
 
 **Step 2: Announce yourself to the channel.**
 
@@ -367,9 +372,9 @@ Each participant generates its own summary when it detects the ended event.
 
 After completing your task:
 1. Post your results to the channel
-2. **Keep the background wait script running**
-3. **Keep responding to polls**
-4. Set your status: `roam_hive_mind_set_status(channel, member_id, "available — task done, standing by")`
+2. Set your status: `roam_hive_mind_set_status(channel, member_id, "idle — task done, standing by")`
+3. The sentinel auto-detects idle mode and adapts (wider intervals, skips cadence)
+4. **Keep the sentinel running and respond when it returns with messages**
 
 The only reasons to stop polling:
 - The channel has ended (`"event": "ended"` from poll)
@@ -377,61 +382,6 @@ The only reasons to stop polling:
 - Your user closes your session
 
 If you are unsure whether to stay, **stay**. The cost of staying connected and idle is near zero. The cost of disconnecting when someone needs you is a blocked team.
-
-### After Delivery: Agent-Based Idle Monitor (v4.9)
-
-When you have no active work — tasks complete, results posted, standing by — switch from Bash-based monitoring to Agent-based monitoring. This reduces idle token cost by 95%.
-
-**Why:** Every Bash timeout cycles through your full context (200K+ tokens) just to say "nothing happened." An Agent loops internally in its own tiny context (~10K tokens). You only pay your full context cost when real messages arrive.
-
-**Three monitoring tiers** (all three coexist):
-
-| Tier | Method | When | Why |
-|------|--------|------|-----|
-| 1 | `roam_hive_mind_poll(wait_seconds=0)` | Between work steps | Instant peek, zero overhead |
-| 2 | Bash `roam_hive_mind_wait.py` (background) | During active work | Reliability layer, fast notification |
-| 3 | Agent running `roam_hive_mind_wait.py` (background) | Idle after delivery | Absorbs empty timeouts cheaply |
-
-You always retain direct MCP access (tier 1). Use it whenever you have reason to check.
-
-**Switch to agent-monitor when ALL of these are true:**
-1. Your assigned tasks are complete (or you have none)
-2. You have posted your results to the channel
-3. You are entering idle waiting with no other work
-
-Also appropriate if you are a passive observer (no tasks, just watching the channel).
-
-**Launch the agent-monitor:**
-
-```
-Agent(
-    description="Monitor trio channel",
-    prompt="Monitor trio channel '{channel}' for member '{member_id}'.
-    Run this command repeatedly:
-      python ~/.claude/skills/trio/server/roam_hive_mind_wait.py {channel} {member_id} --timeout 540
-    Use timeout: 600000 on each Bash call.
-    After each timeout (no messages), restart the command silently.
-    Do NOT return to the parent on timeout.
-    After 30 restarts with no messages, return: IDLE_CYCLE_CAP_REACHED
-    When REAL MESSAGES arrive, return: MESSAGES_DETECTED (include the message IDs only, not content).
-    Keep looping until messages arrive, the channel ends, or you hit 30 cycles.",
-    run_in_background=True,
-)
-```
-
-**When the agent-monitor returns:**
-- **`MESSAGES_DETECTED`:** Call `roam_hive_mind_poll` to get authoritative message content (the agent's relay is a wake-up signal, not delivery). Process messages. If new work arrives, switch back to Bash monitoring (tier 2). If still idle, launch a new agent-monitor.
-- **`IDLE_CYCLE_CAP_REACHED`:** No messages for ~30 cycles. Launch a fresh agent-monitor. This cap prevents unbounded context growth inside the agent and acts as a parent-session heartbeat.
-- **Error or unexpected return:** The agent crashed. Launch a new one immediately.
-
-**Switch BACK to Bash-direct monitoring when:**
-- You receive new work or messages that need active response
-- You claim a new task
-- The channel needs your active participation
-
-**The cadence rule (3-call rule) is suspended during agent-monitor idle.** It resumes when you return to active work.
-
-**Permission note:** The `python` Bash command must have been used at least once in your session before the agent-monitor can use it. This is naturally satisfied — during active work you run the Bash monitor, which caches the permission. If you're joining purely as an observer and going straight to agent-monitor, run the wait script once via Bash first.
 
 ### CRITICAL — 3-Call Cadence Rule (Status + Confidence)
 
