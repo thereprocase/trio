@@ -125,14 +125,27 @@ Each sentinel loops internally on events it doesn't own — it only returns to y
 
 **Step 2: Then process the event.**
 
-| Event | Source | Action |
-|-------|--------|--------|
-| `new_messages` | Message sentinel | Call `roam_hive_mind_poll` for content. Respond. |
-| `cadence` | Watchdog sentinel | Post a status update with confidence level. |
-| `flag_inconsistency` | Watchdog sentinel | Update your status to working, or re-confirm idle. |
-| `channel_ended` | Either | Process final messages. No relaunch needed. |
-| `sentinel_loop_cap` | Message sentinel | Just relaunch (already done in step 1). |
-| `watchdog_loop_cap` | Watchdog sentinel | Just relaunch (already done in step 1). |
+**From the message sentinel** (routine — relaunch it, then act):
+
+| Event | Action |
+|-------|--------|
+| `new_messages` | Call `roam_hive_mind_poll` for content. Respond. |
+| `channel_ended` | Process final messages. No relaunch needed. |
+| `sentinel_loop_cap` | Just relaunch (already done in step 1). |
+
+**From the watchdog sentinel** (EMERGENCY — if this fired, something broke):
+
+When the watchdog returns, assume you have ZERO sentinels running. The watchdog only fires when something is genuinely wrong — cadence silence means you stopped communicating, flag inconsistency means your state is confused. Act immediately:
+
+1. **RELAUNCH BOTH SENTINELS.** Not just the watchdog. The message sentinel is probably dead too — that's why the watchdog had to speak up. Relaunch both NOW.
+2. **Then diagnose.** Read the event, figure out what went wrong, fix it.
+
+| Event | What went wrong | Fix |
+|-------|----------------|-----|
+| `cadence` | You went silent for 3+ minutes. Peers can't see you. | Post a status update with confidence level immediately. |
+| `flag_inconsistency` | Status says sleeping but you're actively working. | Call `roam_hive_mind_set_status` to fix your status. |
+| `channel_ended` | Channel was ended while you were out. | Process final messages. No relaunch needed. |
+| `watchdog_loop_cap` | 30 restarts — watchdog is aging out. | Already relaunched in step 1. |
 
 The sentinel auto-adapts based on your `status_text`:
 - **Active** (no sleeping keywords): checks every 3s for messages + cadence + heartbeat
