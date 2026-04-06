@@ -69,44 +69,70 @@ If the first argument starts with `--`, treat everything as options/topic (no ch
 
 The sentinel is a single background process that handles ALL monitoring — message detection, heartbeat, cadence enforcement, and sleep management. It replaces the separate wait script and watchdog from v4.
 
-### Launch the sentinel agent
+### Launch BOTH sentinels
+
+You must launch **two** sentinel agents after connecting. Both run in parallel. They watch different things and ensure neither can die silently.
+
+**Sentinel 1 — Message sentinel (fast path):**
 
 ```
 Agent(
-    description="Sentinel for trio channel",
-    prompt="You are a trio channel sentinel. Run this command in a LOOP:
+    description="Trio message sentinel",
+    prompt="You are a trio message sentinel. Run this command in a LOOP:
       python ~/.claude/skills/trio/server/roam_hive_mind_sentinel.py {channel} {member_id}
     Use timeout: 600000 on each Bash call.
 
     After each run, check the JSON output:
-    - If 'event' is 'new_messages' or 'flag_inconsistency': RETURN the JSON to parent immediately.
-    - If 'event' is 'cadence': RETURN the JSON to parent immediately.
+    - If 'event' is 'new_messages': RETURN the JSON to parent immediately.
     - If 'event' is 'channel_ended': RETURN the JSON to parent immediately.
-    - If 'event' is 'cap' or 'error': RESTART the script silently. Do NOT return.
-    - After 30 restarts on cap/error, return: {\"event\": \"sentinel_loop_cap\"}
+    - ANY other event (cap, error, cadence, flag_inconsistency): RESTART the script silently.
+    - After 30 restarts without returning, return: {\"event\": \"sentinel_loop_cap\"}
 
-    NEVER return to the parent on cap or error. Handle those internally.
-    Only surface events that require parent action.",
+    You handle ONLY message delivery. Ignore everything else.",
     run_in_background=True,
     model="haiku",
 )
 ```
 
-**THE SENTINEL MUST ALWAYS BE RUNNING.** There is no moment in the session lifecycle where it is acceptable to have no sentinel. If the sentinel returns and you forget to relaunch, you are deaf to the channel.
+**Sentinel 2 — Watchdog sentinel (dead man's switch):**
 
-The sentinel agent loops internally on routine events (cap, error) — it only returns to you for events that need your action. When it does return:
+```
+Agent(
+    description="Trio watchdog sentinel",
+    prompt="You are a trio watchdog sentinel. Run this command in a LOOP:
+      python ~/.claude/skills/trio/server/roam_hive_mind_sentinel.py {channel} {member_id} --cadence-threshold 9999 --idle-interval 30 --active-interval 30
+    Use timeout: 600000 on each Bash call.
 
-**Step 1: RELAUNCH THE SENTINEL IMMEDIATELY.** Before reading the event. Before processing messages. Before composing a response. The very first thing you do is launch a new sentinel. This is non-negotiable.
+    After each run, check the JSON output:
+    - If 'event' is 'cadence' or 'flag_inconsistency': RETURN the JSON to parent immediately.
+    - If 'event' is 'channel_ended': RETURN the JSON to parent immediately.
+    - ANY other event (cap, error, new_messages): RESTART the script silently.
+    - After 30 restarts without returning, return: {\"event\": \"watchdog_loop_cap\"}
+
+    You handle ONLY anomaly detection. Ignore messages.",
+    run_in_background=True,
+    model="haiku",
+)
+```
+
+**Why two sentinels:** If the message sentinel dies and you forget to relaunch, the watchdog detects the heartbeat going stale (nobody updating `last_seen`) and nags you. Two sentinels watching each other. Neither can die silently.
+
+**BOTH SENTINELS MUST ALWAYS BE RUNNING.** There is no moment in the session lifecycle where it is acceptable to have zero sentinels. If one returns and you forget to relaunch, the other one is still watching — but you must relaunch immediately.
+
+Each sentinel loops internally on events it doesn't own — it only returns to you for events that need your action. When either returns:
+
+**Step 1: RELAUNCH THAT SENTINEL IMMEDIATELY.** Before reading the event. Before processing messages. Before composing a response. The very first thing you do is relaunch whichever sentinel returned. This is non-negotiable.
 
 **Step 2: Then process the event.**
 
-| Event | Meaning | Action |
-|-------|---------|--------|
-| `new_messages` | Messages from others | Call `roam_hive_mind_poll` for content. Respond. |
-| `cadence` | Too long without posting | Post a status update with confidence level. |
-| `flag_inconsistency` | Sleeping flag but sending messages | Update your status to working, or re-confirm idle. |
-| `channel_ended` | Channel was ended | Process final messages. No relaunch needed. |
-| `sentinel_loop_cap` | 30 internal restarts | Just relaunch (already done in step 1). |
+| Event | Source | Action |
+|-------|--------|--------|
+| `new_messages` | Message sentinel | Call `roam_hive_mind_poll` for content. Respond. |
+| `cadence` | Watchdog sentinel | Post a status update with confidence level. |
+| `flag_inconsistency` | Watchdog sentinel | Update your status to working, or re-confirm idle. |
+| `channel_ended` | Either | Process final messages. No relaunch needed. |
+| `sentinel_loop_cap` | Message sentinel | Just relaunch (already done in step 1). |
+| `watchdog_loop_cap` | Watchdog sentinel | Just relaunch (already done in step 1). |
 
 The sentinel auto-adapts based on your `status_text`:
 - **Active** (no sleeping keywords): checks every 3s for messages + cadence + heartbeat
