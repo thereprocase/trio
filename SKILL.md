@@ -100,7 +100,7 @@ Agent(
 Agent(
     description="Trio watchdog sentinel",
     prompt="You are a trio watchdog sentinel. Run this command in a LOOP:
-      python ~/.claude/skills/trio/server/roam_hive_mind_sentinel.py {channel} {member_id} --cadence-threshold 9999 --idle-interval 30 --active-interval 30
+      python ~/.claude/skills/trio/server/roam_hive_mind_sentinel.py {channel} {member_id} --cadence-threshold 600 --idle-interval 30 --active-interval 30
     Use timeout: 600000 on each Bash call.
 
     After each run, check the JSON output:

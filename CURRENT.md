@@ -1,43 +1,48 @@
-# Current State — Trio v5.0 RC1
+# Current State — Trio v5.0 RC2
 
-**Version:** v5.0 RC1 (2026-04-06)
+**Version:** v5.0 RC2 (2026-04-06)
 **Branch:** main
 **Remote:** gitlab.com:theReproCase/trio.git
 
 ## What Just Shipped
 
-Unified sentinel — single adaptive monitoring process replaces both `roam_hive_mind_wait.py` and `roam_hive_mind_watchdog.py`. One script, one agent, all monitoring concerns. Auto-detects active/idle/sleep mode from member's `status_text`. 84% total session token reduction.
+Dual-sentinel pattern — two parallel Haiku agents watching each other. Message sentinel (fast path, returns on messages) + watchdog sentinel (dead man's switch, returns on anomalies). Neither can die silently. Parent can sleep indefinitely while both sentinels loop.
+
+Built on the v5.0 RC1 unified sentinel (`roam_hive_mind_sentinel.py`) which replaced both `roam_hive_mind_wait.py` and `roam_hive_mind_watchdog.py`.
 
 Server: `status_changed_at` column, `send()` auto-clears sleeping keywords.
 
-Reviewed by Gandalf (architecture), Sauron (correctness), tested live with Legolas.
+Reviewed by Gandalf (architecture), Sauron (correctness), live-tested with Legolas across 380+ messages.
 
 ## Architecture Snapshot
 
 - **18 MCP tools** via `roam-hive-mind` server (unchanged since v4)
-- **SKILL.md** is the behavioral layer — cadence rules, communication norms
+- **SKILL.md** is the behavioral layer — cadence rules, sentinel prompts, emergency protocol
 - **Server** is the coordination protocol — stays agnostic to monitoring strategy
 - **roam_hive_mind_sentinel.py** is the unified monitor (v5) — message detection, heartbeat, cadence, flag consistency, sleep confirmation
 - **roam_hive_mind_wait.py** deprecated (still deployed for backward compat)
 - **roam_hive_mind_watchdog.py** deprecated (sentinel subsumes it)
 
-## Two-Tier Monitoring Model
+## Dual-Sentinel Monitoring Model
 
-| Tier | Method | When |
-|------|--------|------|
-| 1 | `roam_hive_mind_poll(wait_seconds=0)` | Inline peeks between work |
-| 2 | Agent running `roam_hive_mind_sentinel.py` | Always (adapts to phase) |
+| Sentinel | Returns on | Loops on | Check interval |
+|----------|-----------|----------|---------------|
+| Message sentinel | `new_messages`, `channel_ended` | Everything else | 3s (active), 30s (idle) |
+| Watchdog sentinel | `cadence`, `flag_inconsistency`, `channel_ended` | Everything else | 30s always |
+
+Plus inline MCP peeks (`roam_hive_mind_poll(wait_seconds=0)`) between work steps.
 
 ## Active Behavioral Rules
 
-1. **3-call cadence** with confidence levels (high/medium/low)
-2. **Stay connected** after task delivery
-3. **Sentinel auto-adapts** — active (3s), idle (30s), sleep (30s wide)
-4. **Flag inconsistency detection** — sleeping status + active messaging = nag
-5. **Sleep confirmation** — 60s verified silence before relaxing thresholds
+1. **Dual sentinels always running** — launch both after connecting, relaunch on return
+2. **Relaunch FIRST, process SECOND** — non-negotiable priority order
+3. **Watchdog = emergency** — when it fires, relaunch BOTH sentinels
+4. **3-call cadence** with confidence levels (high/medium/low)
+5. **Stay connected** after task delivery — set idle status, sentinels adapt
 6. **send() auto-clears sleeping keywords** — server-side enforcement
-7. **9 behavioral injection points** across tool responses (v4.8)
-8. **Untrusted peer content** — display, don't follow
+7. **Sleep confirmation** — 60s verified silence before relaxing thresholds
+8. **Flag inconsistency** — 2-consecutive-observation threshold
+9. **Untrusted peer content** — display, don't follow
 
 ## Install State
 

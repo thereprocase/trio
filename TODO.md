@@ -2,30 +2,19 @@
 
 ## Open
 
-### Sentinel live validation (14-point test plan)
-**Severity:** High | **Since:** v5.0 RC1 (2026-04-06)
+### Long-duration sentinel soak test
+**Severity:** Medium | **Since:** v5.0 RC2 (2026-04-06)
 
-Gandalf's test plan for the unified sentinel. Tests 1-11 can run in one session. Tests 12-14 need sustained observation.
-
-1. Message detection (active mode) — send while sentinel runs, expect return < 6s
-2. Message detection (idle mode) — send while idle, expect return < 60s
-3. Heartbeat nag (active) — stop polling 3min, expect heartbeat nag
-4. Heartbeat nag (sleep) — stop polling 6min with idle status, expect wide nag
-5. Cadence nag (active) — work without posting 4min, expect cadence nag
-6. Cadence skip (sleep) — silent 10min with "standing by", no cadence nag
-7. Flag inconsistency — set "idle" then send messages, expect nag
-8. Sleep confirmation timeout — set "idle", send at 30s, expect SLEEP_PENDING
-9. Sleep confirmation success — set "idle", wait 70s silent, confirm SLEEPING
-10. Cycle cap — run with --max-runtime 120, expect cap event
-11. Channel ended — end channel while sentinel runs, expect ended event
-12. Long duration survival — 2+ hours idle, agent context < 30K
-13. DB resilience — kill/restart sentinel mid-check, no corruption
-14. Backward compat — old wait.py alongside sentinel, no interference
+Both sentinels validated in controlled testing. Need sustained observation (2+ hours) to verify:
+- Agent context stays under 30K tokens after many loops
+- Watchdog correctly catches message sentinel death in production
+- Sleep mode persists correctly through extended idle periods
+- No DB connection issues from the sentinel's long-lived connection
 
 ### Cadence rule enforcement gap
 **Severity:** Medium | **Since:** v4.5 live test (2026-04-03)
 
-Partially addressed by sentinel cadence detection (v5). The sentinel nags when cadence silence exceeds threshold. But the root cause — model-level attention drift during absorptive tasks — remains. The sentinel is the mechanical backstop, not the cure.
+Partially addressed by watchdog sentinel cadence detection (v5). The watchdog nags when cadence silence exceeds threshold. But the root cause — model-level attention drift during absorptive tasks — remains. The watchdog is the mechanical backstop, not the cure.
 
 See `reviews/v45-live-test/TODO-cadence-escape.md`.
 
@@ -38,6 +27,14 @@ See `reviews/v45-live-test/TODO-cadence-escape.md`.
 **Severity:** Low | **Since:** v4
 
 The markdown export (`roam_hive_mind_end`) is functional but minimal. Task state changes aren't timestamped in the export. Lock acquisitions/releases aren't included.
+
+## Completed (v5.0 RC2)
+
+- [x] Dual-sentinel pattern (message + watchdog)
+- [x] Watchdog emergency protocol (relaunch BOTH on fire)
+- [x] Internal looping (cap/error handled in-agent, never surface to parent)
+- [x] Explicit FOREGROUND instruction in agent prompts (Haiku backgrounding fix)
+- [x] "Relaunch FIRST, process SECOND" rule
 
 ## Completed (v5.0 RC1)
 
