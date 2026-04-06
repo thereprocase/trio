@@ -23,18 +23,26 @@ class AAR(FPDF):
         self.add_font('Segoe', 'B', f'{FONT_DIR}/segoeuib.ttf')
         self.add_font('Segoe', 'I', f'{FONT_DIR}/segoeuii.ttf')
         self.add_font('Cascadia', '', f'{FONT_DIR}/CascadiaCode.ttf')
+        self._table_num = 0
 
     def footer(self):
-        self.set_y(-54)
-        rule_w = 24
-        x_start = self.w - self.r_margin - rule_w
-        self.set_draw_color(*ACCENT)
-        self.set_line_width(0.75)
-        self.line(x_start, self.get_y(), x_start + rule_w, self.get_y())
-        self.set_y(-44)
         self.set_font('Segoe', 'B', 9)
         self.set_text_color(*ACCENT)
-        self.cell(0, 10, f'{self.page_no()} of {{nb}}', align='R')
+        # Measure with resolved page count, not {nb} placeholder.
+        # {nb} is 4 chars but resolves to 1-2 digits — width mismatch.
+        resolved_text = f'{self.page_no()} of {self.pages_count}'
+        page_w = self.get_string_width(resolved_text)
+        x_right = self.w - self.r_margin
+        # Accent rule — wider than text, right edge flush to margin
+        rule_w = page_w + self.c_margin + 24
+        self.set_y(-46)
+        self.set_draw_color(*ACCENT)
+        self.set_line_width(0.75)
+        self.line(x_right - rule_w, self.get_y(), x_right, self.get_y())
+        # Page number — explicit positioning to bypass fpdf2 c_margin inset
+        self.set_y(self.get_y() + 2)
+        self.set_x(x_right - page_w - self.c_margin)
+        self.cell(page_w + self.c_margin, 12, resolved_text)
 
     def ensure_space(self, needed):
         if self.get_y() + needed > self.h - 86:
@@ -137,36 +145,52 @@ class AAR(FPDF):
         self.cell(0, 14, value, new_x='LMARGIN', new_y='NEXT')
         self.set_text_color(*BODY_COLOR)
 
-    def render_table(self, headers, rows, col_widths, col_aligns=None):
+    def render_table(self, headers, rows, col_widths, col_aligns=None, caption=""):
+        self.ln(12)  # padding above table
         self.set_auto_page_break(False)
-        usable = self.w - self.l_margin - self.r_margin
+        table_w = sum(col_widths)
         row_h = 24
-        half_page = (self.h - 86 - 72) / 2  # half usable height
-        total_table_h = row_h * (1 + len(rows)) + 8  # header + rows + bottom rule
+        caption_h = 30 if caption else 0
+        half_page = (self.h - 86 - 72) / 2
+        total_table_h = caption_h + row_h * (1 + len(rows)) + 8
         space_left = self.h - 86 - self.get_y()
         min_rows_before_break = 3
 
         # Keep table together if it fits on half a page or less,
         # OR if fewer than 3 rows would fit on the current page
         if total_table_h <= half_page:
-            # Small table — keep it all together
             self.ensure_space(total_table_h)
-        elif space_left < row_h * (1 + min_rows_before_break):
-            # Not enough room for header + 3 rows — push to next page
+        elif space_left < row_h * (1 + min_rows_before_break) + caption_h:
             self.ensure_space(total_table_h)
 
-        # Header
-        self.set_font('Segoe', 'B', 9)
-        self.set_fill_color(*BODY_COLOR)
-        self.set_text_color(255, 255, 255)
-        x0 = self.l_margin
-        for i, h in enumerate(headers):
-            w = col_widths[i]
-            align = (col_aligns[i] if col_aligns else 'L')
-            self.set_xy(x0, self.get_y())
-            self.cell(w, row_h, f"  {h}", fill=True, align=align)
-            x0 += w
-        self.ln(row_h)
+        # Increment table number now (used in caption after table)
+        if caption:
+            self._table_num += 1
+
+        # Center the table horizontally
+        usable = self.w - self.l_margin - self.r_margin
+        table_x = self.l_margin + (usable - table_w) / 2
+
+        pad = 8  # left padding for L-aligned cells
+
+        def _render_header():
+            self.set_font('Segoe', 'B', 9)
+            self.set_fill_color(*BODY_COLOR)
+            self.set_text_color(255, 255, 255)
+            x0 = table_x
+            for i, h in enumerate(headers):
+                w = col_widths[i]
+                align = (col_aligns[i] if col_aligns else 'L')
+                self.set_xy(x0 + (pad if align == 'L' else 0), self.get_y())
+                cw = w - (pad if align == 'L' else 0)
+                self.cell(cw, row_h, h, fill=True, align=align)
+                if align == 'L':
+                    self.set_xy(x0, self.get_y())
+                    self.cell(pad, row_h, '', fill=True)
+                x0 += w
+            self.ln(row_h)
+
+        _render_header()
 
         # Rows
         self.set_font('Segoe', '', 9.5)
@@ -174,47 +198,47 @@ class AAR(FPDF):
             if self.get_y() + row_h > self.h - 86:
                 self.add_page()
                 self.ln(8)
-                # Re-render header
-                self.set_font('Segoe', 'B', 9)
-                self.set_fill_color(*BODY_COLOR)
-                self.set_text_color(255, 255, 255)
-                x0 = self.l_margin
-                for i, h in enumerate(headers):
-                    w = col_widths[i]
-                    align = (col_aligns[i] if col_aligns else 'L')
-                    self.set_xy(x0, self.get_y())
-                    self.cell(w, row_h, f"  {h}", fill=True, align=align)
-                    x0 += w
-                self.ln(row_h)
+                _render_header()
                 self.set_font('Segoe', '', 9.5)
 
             # Zebra
             if ri % 2 == 1:
                 self.set_fill_color(*ZEBRA)
-                self.rect(self.l_margin, self.get_y(), usable, row_h, style='F')
+                self.rect(table_x, self.get_y(), table_w, row_h, style='F')
 
             self.set_text_color(*BODY_COLOR)
-            x0 = self.l_margin
+            x0 = table_x
             for i, cell_text in enumerate(row):
                 w = col_widths[i]
                 align = (col_aligns[i] if col_aligns else 'L')
-                self.set_xy(x0, self.get_y())
-                # Bold first column for summary rows
-                if cell_text.startswith('**') and cell_text.endswith('**'):
+                is_bold = cell_text.startswith('**') and cell_text.endswith('**')
+                if is_bold:
                     self.set_font('Segoe', 'B', 9.5)
                     cell_text = cell_text.strip('*')
-                    self.cell(w, row_h, f"  {cell_text}", align=align)
+                self.set_xy(x0 + (pad if align == 'L' else 0), self.get_y())
+                cw = w - (pad if align == 'L' else 0)
+                self.cell(cw, row_h, cell_text, align=align)
+                if is_bold:
                     self.set_font('Segoe', '', 9.5)
-                else:
-                    self.cell(w, row_h, f"  {cell_text}", align=align)
                 x0 += w
             self.ln(row_h)
 
         # Bottom rule
         self.set_draw_color(*STRUCTURAL)
         self.set_line_width(0.5)
-        self.line(self.l_margin, self.get_y(), self.l_margin + usable, self.get_y())
-        self.ln(8)
+        self.line(table_x, self.get_y(), table_x + table_w, self.get_y())
+        self.ln(4)
+
+        # Caption below table
+        if caption:
+            self.ln(2)
+            usable_w = self.w - self.l_margin - self.r_margin
+            self.set_font('Segoe', 'I', 9)
+            self.set_text_color(*MUTED)
+            caption_text = f"Table {self._table_num}. {caption}"
+            self.cell(usable_w, 14, caption_text, align='C', new_x='LMARGIN', new_y='NEXT')
+
+        self.ln(16)  # padding below table
         self.set_auto_page_break(True, 86)
 
 
@@ -286,7 +310,8 @@ def build():
     pdf.h3("send() Auto-Clear: Invisible Mode Transition")
     pdf.body("When an idle agent responds to a message, send() silently clears their sleeping status. The agent is now in active mode (3s sentinel checks, cadence enforcement) without being told. This interaction was undocumented until Frodo flagged it in the War Council.")
 
-    # War Council Review
+    # War Council Review — keep heading + intro + table together
+    pdf.ensure_space(360)  # h2 + paragraph + 7-row table
     pdf.h2("War Council Review")
     pdf.body("Full council deployed against RC2: Sauron (correctness), Gandalf (architecture), Frodo (UX), Aragorn (security), Legolas (performance, live on channel).")
     pdf.ln(4)
@@ -303,14 +328,17 @@ def build():
         ],
         col_widths=[140, 80, 80, 80],
         col_aligns=['L', 'C', 'C', 'C'],
+        caption="War Council findings by reviewer",
     )
 
     pdf.body("All 3 criticals resolved (SKILL.md contradictions from stale RC1 text). Top warnings addressed: shared keyword constant, emergency protocol accuracy, cadence threshold documentation, prompt clarity for Haiku agents.")
 
-    # Token Economics
+    # Token Economics — keep heading + prose + table + follow-up paragraph together
+    pdf.ensure_space(380)  # h2 + h3 + intro + 4-row table + caption + follow-up
     pdf.h2("Token Economics")
 
     pdf.h3("8-Hour Session: 1 Worker + 2 Idle Helpers")
+    pdf.body("A realistic development session with one active Opus worker and two idle Opus helpers on standby for questions. The worker does real dev work (reads, edits, builds); the helpers sleep between occasional wake-ups.")
     pdf.render_table(
         headers=["", "Opus Tokens", "Haiku Tokens", "Total"],
         rows=[
@@ -320,10 +348,12 @@ def build():
         ],
         col_widths=[100, 100, 100, 80],
         col_aligns=['L', 'R', 'R', 'R'],
+        caption="8-hour session token comparison (1 worker + 2 idle helpers)",
     )
     pdf.body("Monitoring overhead went from 63% of total session cost to 5%. The worker's actual dev work is now the dominant cost.")
 
     pdf.h3("5-Hour Idle Monitoring Only")
+    pdf.body("Isolating just the monitoring overhead \u2014 no active work, all three agents idle. This is the scenario where the sentinel architecture has the most dramatic impact.")
     pdf.render_table(
         headers=["", "Tokens", "Dollar Cost"],
         rows=[
@@ -333,6 +363,7 @@ def build():
         ],
         col_widths=[180, 100, 100],
         col_aligns=['L', 'R', 'R'],
+        caption="5-hour idle monitoring cost comparison",
     )
 
     # What We Didn't Get To
