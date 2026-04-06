@@ -74,35 +74,46 @@ The sentinel is a single background process that handles ALL monitoring — mess
 ```
 Agent(
     description="Sentinel for trio channel",
-    prompt="You are a trio channel sentinel. Run this command:
+    prompt="You are a trio channel sentinel. Run this command in a LOOP:
       python ~/.claude/skills/trio/server/roam_hive_mind_sentinel.py {channel} {member_id}
-    Use timeout: 600000 on the Bash call.
-    Return the EXACT JSON output from the script. Nothing else.",
+    Use timeout: 600000 on each Bash call.
+
+    After each run, check the JSON output:
+    - If 'event' is 'new_messages' or 'flag_inconsistency': RETURN the JSON to parent immediately.
+    - If 'event' is 'cadence': RETURN the JSON to parent immediately.
+    - If 'event' is 'channel_ended': RETURN the JSON to parent immediately.
+    - If 'event' is 'cap' or 'error': RESTART the script silently. Do NOT return.
+    - After 30 restarts on cap/error, return: {\"event\": \"sentinel_loop_cap\"}
+
+    NEVER return to the parent on cap or error. Handle those internally.
+    Only surface events that require parent action.",
     run_in_background=True,
     model="haiku",
 )
 ```
+
+**THE SENTINEL MUST ALWAYS BE RUNNING.** There is no moment in the session lifecycle where it is acceptable to have no sentinel. If the sentinel returns and you forget to relaunch, you are deaf to the channel.
+
+The sentinel agent loops internally on routine events (cap, error) — it only returns to you for events that need your action. When it does return:
+
+**Step 1: RELAUNCH THE SENTINEL IMMEDIATELY.** Before reading the event. Before processing messages. Before composing a response. The very first thing you do is launch a new sentinel. This is non-negotiable.
+
+**Step 2: Then process the event.**
+
+| Event | Meaning | Action |
+|-------|---------|--------|
+| `new_messages` | Messages from others | Call `roam_hive_mind_poll` for content. Respond. |
+| `cadence` | Too long without posting | Post a status update with confidence level. |
+| `flag_inconsistency` | Sleeping flag but sending messages | Update your status to working, or re-confirm idle. |
+| `channel_ended` | Channel was ended | Process final messages. No relaunch needed. |
+| `sentinel_loop_cap` | 30 internal restarts | Just relaunch (already done in step 1). |
 
 The sentinel auto-adapts based on your `status_text`:
 - **Active** (no sleeping keywords): checks every 3s for messages + cadence + heartbeat
 - **Idle** (status contains "idle"/"standing by"): checks every 30s, skips cadence
 - **Sleep** (idle + 60s of confirmed silence): checks every 30s, wide heartbeat threshold only
 
-**When the sentinel returns, always:**
-1. Read the event type from the JSON payload
-2. Act on it (see table below)
-3. Relaunch the sentinel
-
-| Event | Meaning | Action |
-|-------|---------|--------|
-| `new_messages` | Messages from others | Call `roam_hive_mind_poll` for content. Respond. Relaunch. |
-| `cadence` | Too long without posting | Post a status update with confidence. Relaunch. |
-| `flag_inconsistency` | Sleeping flag but sending messages | Update your status to working, or re-confirm idle. Relaunch. |
-| `channel_ended` | Channel was ended | Process final messages. Stop. |
-| `cap` | Max runtime reached | Relaunch immediately. |
-| `error` | Something broke | Relaunch immediately. |
-
-**The sentinel is your only background process.** You do not need to manage multiple scripts or decide which tier to use. Launch it once after connecting, relaunch after each return.
+**The sentinel is your only background process.** You do not need to manage multiple scripts or decide which tier to use. Launch it once after connecting. It loops internally. When it surfaces an event, relaunch FIRST, process SECOND.
 
 ### Peek polls (inline, optional)
 
