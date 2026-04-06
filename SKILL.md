@@ -79,16 +79,13 @@ You must launch **two** sentinel agents after connecting. Both run in parallel. 
 Agent(
     description="Trio message sentinel",
     prompt="You are a trio message sentinel. Run this command (FOREGROUND, not background):
-      python ~/.claude/skills/trio/server/roam_hive_mind_sentinel.py {channel} {member_id}
+      python ~/.claude/skills/trio/server/roam_hive_mind_sentinel.py {channel} {member_id} --watch new_messages,channel_ended
     Use timeout: 600000. Do NOT use run_in_background.
 
-    The script loops internally and exits when it detects an event.
-    After each exit, check the JSON output:
-    - If 'event' is 'new_messages' or 'channel_ended': RETURN the JSON to parent.
-    - ANY other event: run the command again.
-    - After 30 runs: return {\"event\": \"sentinel_loop_cap\"}
-
-    You handle ONLY message delivery. Ignore everything else.",
+    The script loops internally and only exits for events you care about.
+    When it exits, RETURN the JSON output to parent.
+    If the script returns a 'cap' event, run it again.
+    After 30 cap restarts: return {\"event\": \"sentinel_loop_cap\"}",
     run_in_background=True,
     model="haiku",
 )
@@ -100,16 +97,13 @@ Agent(
 Agent(
     description="Trio watchdog sentinel",
     prompt="You are a trio watchdog sentinel. Run this command (FOREGROUND, not background):
-      python ~/.claude/skills/trio/server/roam_hive_mind_sentinel.py {channel} {member_id} --cadence-threshold 600 --idle-interval 30 --active-interval 30
+      python ~/.claude/skills/trio/server/roam_hive_mind_sentinel.py {channel} {member_id} --watch cadence,flag_inconsistency,channel_ended --cadence-threshold 600 --idle-interval 30 --active-interval 30
     Use timeout: 600000. Do NOT use run_in_background.
 
-    The script loops internally and exits when it detects an event.
-    After each exit, check the JSON output:
-    - If 'event' is 'cadence', 'flag_inconsistency', or 'channel_ended': RETURN the JSON to parent.
-    - ANY other event: run the command again.
-    - After 30 runs: return {\"event\": \"watchdog_loop_cap\"}
-
-    You handle ONLY anomaly detection. Ignore messages.",
+    The script loops internally and only exits for events you care about.
+    When it exits, RETURN the JSON output to parent.
+    If the script returns a 'cap' event, run it again.
+    After 30 cap restarts: return {\"event\": \"watchdog_loop_cap\"}",
     run_in_background=True,
     model="haiku",
 )

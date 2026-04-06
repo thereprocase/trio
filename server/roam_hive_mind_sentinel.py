@@ -32,6 +32,9 @@ Options:
     --sleep-confirm SECONDS     (default: 60 — silence before sleep)
     --active-interval SECONDS   (default: 3)
     --idle-interval SECONDS     (default: 30)
+    --watch EVENTS              (default: all — comma-separated list of events
+                                 to return on. Others loop internally.
+                                 e.g. --watch new_messages,channel_ended)
 """
 
 import json
@@ -80,10 +83,22 @@ def is_sleeping_flag(status_text):
 
 def sentinel(channel, member_id, max_runtime, heartbeat_threshold,
              idle_heartbeat_threshold, cadence_threshold, sleep_confirm,
-             active_interval, idle_interval):
-    """Main sentinel loop. Returns a JSON-serializable dict on exit."""
+             active_interval, idle_interval, watch_events=None):
+    """Main sentinel loop. Returns a JSON-serializable dict on exit.
+
+    If watch_events is set (e.g. ["new_messages", "channel_ended"]),
+    the sentinel only returns for those event types and loops internally
+    on all others. This prevents the Haiku agent from burning its run
+    cap on events it doesn't care about.
+    """
 
     deadline = time.time() + max_runtime
+
+    def should_return(event_type):
+        """Check if this event type is in the watch list (if set)."""
+        if watch_events is None:
+            return True  # no filter — return on everything
+        return event_type in watch_events
 
     # Persistent state across check cycles
     prev_msg_count = None
@@ -187,14 +202,16 @@ def sentinel(channel, member_id, max_runtime, heartbeat_threshold,
 
                 if unread:
                     local_hwm = max(m["id"] for m in unread)
-                    msg_ids = [m["id"] for m in unread]
-                    return {
-                        "event": "new_messages",
-                        "mode": mode,
-                        "message_ids": msg_ids,
-                        "count": len(msg_ids),
-                        "msg": f"{len(msg_ids)} new message(s) detected. Poll MCP for content.",
-                    }
+                    if should_return("new_messages"):
+                        msg_ids = [m["id"] for m in unread]
+                        return {
+                            "event": "new_messages",
+                            "mode": mode,
+                            "message_ids": msg_ids,
+                            "count": len(msg_ids),
+                            "msg": f"{len(msg_ids)} new message(s) detected. Poll MCP for content.",
+                        }
+                    # Not watching new_messages — continue loop
 
                 # ── Check 2: Heartbeat staleness ──
                 heartbeat_gap = seconds_since(member["last_seen"])
@@ -219,7 +236,7 @@ def sentinel(channel, member_id, max_runtime, heartbeat_threshold,
                         msgs_sent = own_msg_count - prev_msg_count
                         if msgs_sent > 1:
                             inconsistency_streak += 1
-                            if inconsistency_streak >= 2:
+                            if inconsistency_streak >= 2 and should_return("flag_inconsistency"):
                                 prev_msg_count = own_msg_count
                                 return {
                                     "event": "flag_inconsistency",
@@ -247,7 +264,7 @@ def sentinel(channel, member_id, max_runtime, heartbeat_threshold,
                     cadence_gap = seconds_since(
                         latest_own["created_at"] if latest_own else None
                     )
-                    if cadence_gap > cadence_threshold:
+                    if cadence_gap > cadence_threshold and should_return("cadence"):
                         return {
                             "event": "cadence",
                             "mode": mode,
@@ -307,14 +324,18 @@ if __name__ == "__main__":
         "--idle-interval": ("idle_interval", 5),
     }
 
+    watch_events = None  # default: return on all events
+
     args = sys.argv[3:]
     for i, arg in enumerate(args):
-        if arg in flag_map and i + 1 < len(args):
+        if arg == "--watch" and i + 1 < len(args):
+            watch_events = [e.strip() for e in args[i + 1].split(",") if e.strip()]
+        elif arg in flag_map and i + 1 < len(args):
             key, minimum = flag_map[arg]
             try:
                 opts[key] = max(minimum, int(args[i + 1]))
             except ValueError:
                 pass
 
-    result = sentinel(channel, member_id, **opts)
+    result = sentinel(channel, member_id, watch_events=watch_events, **opts)
     print(json.dumps(result))
