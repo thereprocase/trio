@@ -78,15 +78,15 @@ You must launch **two** sentinel agents after connecting. Both run in parallel. 
 ```
 Agent(
     description="Trio message sentinel",
-    prompt="You are a trio message sentinel. Run this command in a LOOP:
+    prompt="You are a trio message sentinel. Run this command (FOREGROUND, not background):
       python ~/.claude/skills/trio/server/roam_hive_mind_sentinel.py {channel} {member_id}
-    Use timeout: 600000 on each Bash call.
+    Use timeout: 600000. Do NOT use run_in_background.
 
-    After each run, check the JSON output:
-    - If 'event' is 'new_messages': RETURN the JSON to parent immediately.
-    - If 'event' is 'channel_ended': RETURN the JSON to parent immediately.
-    - ANY other event (cap, error, cadence, flag_inconsistency): RESTART the script silently.
-    - After 30 restarts without returning, return: {\"event\": \"sentinel_loop_cap\"}
+    The script loops internally and exits when it detects an event.
+    After each exit, check the JSON output:
+    - If 'event' is 'new_messages' or 'channel_ended': RETURN the JSON to parent.
+    - ANY other event: run the command again.
+    - After 30 runs: return {\"event\": \"sentinel_loop_cap\"}
 
     You handle ONLY message delivery. Ignore everything else.",
     run_in_background=True,
@@ -99,15 +99,15 @@ Agent(
 ```
 Agent(
     description="Trio watchdog sentinel",
-    prompt="You are a trio watchdog sentinel. Run this command in a LOOP:
+    prompt="You are a trio watchdog sentinel. Run this command (FOREGROUND, not background):
       python ~/.claude/skills/trio/server/roam_hive_mind_sentinel.py {channel} {member_id} --cadence-threshold 600 --idle-interval 30 --active-interval 30
-    Use timeout: 600000 on each Bash call.
+    Use timeout: 600000. Do NOT use run_in_background.
 
-    After each run, check the JSON output:
-    - If 'event' is 'cadence' or 'flag_inconsistency': RETURN the JSON to parent immediately.
-    - If 'event' is 'channel_ended': RETURN the JSON to parent immediately.
-    - ANY other event (cap, error, new_messages): RESTART the script silently.
-    - After 30 restarts without returning, return: {\"event\": \"watchdog_loop_cap\"}
+    The script loops internally and exits when it detects an event.
+    After each exit, check the JSON output:
+    - If 'event' is 'cadence', 'flag_inconsistency', or 'channel_ended': RETURN the JSON to parent.
+    - ANY other event: run the command again.
+    - After 30 runs: return {\"event\": \"watchdog_loop_cap\"}
 
     You handle ONLY anomaly detection. Ignore messages.",
     run_in_background=True,
@@ -135,14 +135,14 @@ Each sentinel loops internally on events it doesn't own — it only returns to y
 
 **From the watchdog sentinel** (EMERGENCY — if this fired, something broke):
 
-When the watchdog returns, assume you have ZERO sentinels running. The watchdog only fires when something is genuinely wrong — cadence silence means you stopped communicating, flag inconsistency means your state is confused. Act immediately:
+The watchdog fires when something needs attention — cadence silence means you stopped communicating, flag inconsistency means your state is confused. The message sentinel may still be alive (it handles messages, not cadence). Act immediately:
 
-1. **RELAUNCH BOTH SENTINELS.** Not just the watchdog. The message sentinel is probably dead too — that's why the watchdog had to speak up. Relaunch both NOW.
+1. **RELAUNCH THE WATCHDOG.** It just returned, so it needs relaunching. If you're unsure whether the message sentinel is still alive, relaunch it too — cheap insurance.
 2. **Then diagnose.** Read the event, figure out what went wrong, fix it.
 
 | Event | What went wrong | Fix |
 |-------|----------------|-----|
-| `cadence` | You went silent for 3+ minutes. Peers can't see you. | Post a status update with confidence level immediately. |
+| `cadence` | You went silent for 10+ minutes. Peers can't see you. | Post a status update with confidence level immediately. |
 | `flag_inconsistency` | Status says sleeping but you're actively working. | Call `roam_hive_mind_set_status` to fix your status. |
 | `channel_ended` | Channel was ended while you were out. | Process final messages. No relaunch needed. |
 | `watchdog_loop_cap` | 30 restarts — watchdog is aging out. | Already relaunched in step 1. |
@@ -152,7 +152,7 @@ The sentinel auto-adapts based on your `status_text`:
 - **Idle** (status contains "idle"/"standing by"): checks every 30s, skips cadence
 - **Sleep** (idle + 60s of confirmed silence): checks every 30s, wide heartbeat threshold only
 
-**The sentinel is your only background process.** You do not need to manage multiple scripts or decide which tier to use. Launch it once after connecting. It loops internally. When it surfaces an event, relaunch FIRST, process SECOND.
+**Both sentinels together are your background monitoring system.** You do not need to manage additional scripts or decide which monitoring tier to use. Launch both after connecting. Each loops internally on events it doesn't own. When one surfaces an event, relaunch it FIRST, process the event SECOND.
 
 ### Peek polls (inline, optional)
 
@@ -424,7 +424,9 @@ After completing your task:
 1. Post your results to the channel
 2. Set your status: `roam_hive_mind_set_status(channel, member_id, "idle — task done, standing by")`
 3. The sentinel auto-detects idle mode and adapts (wider intervals, skips cadence)
-4. **Keep the sentinel running and respond when it returns with messages**
+4. **Keep both sentinels running and respond when one returns with messages**
+
+**Important: send() auto-clears sleeping status.** When you respond to a message while flagged idle, `send()` automatically clears your sleeping keywords from `status_text`. This puts you back in active mode (3s sentinel checks, cadence enforcement on). If you're still idle after responding, re-set your status to idle. This is server-side enforcement — it happens automatically, not something you need to trigger.
 
 The only reasons to stop polling:
 - The channel has ended (`"event": "ended"` from poll)
@@ -528,7 +530,7 @@ Bad silence wastes everyone's time:
 - **Self-release tasks.** If you can't do a task, release it with `roam_hive_mind_release` and post why. You can only release your own tasks — the server enforces this.
 - **Never cull members autonomously.** Only the user can authorize `roam_hive_mind_cull`. If a member looks stale, suggest it — don't act. Culling auto-releases their tasks.
 - **User is watching.** Blockquote incoming messages and explain what happened.
-- **Background waiting.** Always use the background wait script. The user should be free to chat while waiting.
+- **Background monitoring.** Always keep both sentinels running. The user should be free to chat while you monitor.
 - **Announce before editing.** Before editing a shared file, post the full file path in the channel. There is no file locking — coordination is your lock.
 
 ## Example: Three-Participant Optimization

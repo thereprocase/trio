@@ -616,6 +616,8 @@ def roam_hive_mind_send(channel: str, member_id: str, message: str, task: bool =
         # sending messages, they're not sleeping. Clears the flag so the
         # watchdog doesn't need to detect the inconsistency — the server
         # enforces it. Also updates status_changed_at for transition tracking.
+        # IMPORTANT: This keyword list must match SLEEPING_KEYWORDS in
+        # roam_hive_mind_sentinel.py. If you change one, change both.
         current_status = member["status_text"] if "status_text" in member.keys() else ""
         if current_status and any(kw in current_status.lower()
                                   for kw in ("idle", "standing by", "tier 3", "agent-monitor")):
