@@ -23,6 +23,11 @@ import string
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+# Add server/ to sys.path so roam_constants can be imported when MCP spawns this
+import sys
+sys.path.insert(0, str(Path(__file__).parent))
+from roam_constants import SLEEPING_KEYWORDS
+
 from mcp.server.fastmcp import FastMCP
 
 DB_DIR = Path.home() / ".claude" / "roam"
@@ -136,6 +141,11 @@ def get_db() -> sqlite3.Connection:
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_messages_channel_id
         ON messages (channel, id)
+    """)
+    # Index for sentinel COUNT(*) and cadence queries by member
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_messages_channel_member
+        ON messages (channel, member_id)
     """)
     # Migration: add pinned_message_id column (v2 feature)
     for col, table, defn in [
@@ -616,11 +626,8 @@ def roam_hive_mind_send(channel: str, member_id: str, message: str, task: bool =
         # sending messages, they're not sleeping. Clears the flag so the
         # watchdog doesn't need to detect the inconsistency — the server
         # enforces it. Also updates status_changed_at for transition tracking.
-        # IMPORTANT: This keyword list must match SLEEPING_KEYWORDS in
-        # roam_hive_mind_sentinel.py. If you change one, change both.
         current_status = member["status_text"] if "status_text" in member.keys() else ""
-        if current_status and any(kw in current_status.lower()
-                                  for kw in ("idle", "standing by", "tier 3", "agent-monitor")):
+        if current_status and any(kw in current_status.lower() for kw in SLEEPING_KEYWORDS):
             db.execute(
                 "UPDATE members SET last_seen = ?, status_text = '', status_changed_at = ? "
                 "WHERE id = ? AND channel = ?",

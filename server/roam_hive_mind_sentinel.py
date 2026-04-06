@@ -52,10 +52,7 @@ DEFAULT_SLEEP_CONFIRM = 60          # 60s silence to confirm sleep
 DEFAULT_ACTIVE_INTERVAL = 3         # seconds between checks (active)
 DEFAULT_IDLE_INTERVAL = 30          # seconds between checks (idle/sleep)
 
-# IMPORTANT: This list must match the server's auto-clear keywords in
-# roam_hive_mind_server.py (send() function). If you add a keyword here,
-# add it there too — otherwise mode detection and auto-clear will disagree.
-SLEEPING_KEYWORDS = ("idle", "standing by", "tier 3", "agent-monitor")
+from roam_constants import SLEEPING_KEYWORDS
 
 
 def now_iso():
