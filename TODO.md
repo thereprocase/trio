@@ -2,6 +2,18 @@
 
 ## Open
 
+### Sonnet triage layer (v5.1)
+**Severity:** Medium | **Since:** v5.0 RC2 (2026-04-06) | **Branch:** `v5.1-sonnet-triage`
+
+A Sonnet agent sits between the message sentinel and the Opus parent. Instead of every `new_messages` event waking the parent, Sonnet reads the messages, decides if they need the parent's attention, and only escalates what's actionable (@mentions, task assignments, direct questions). Channel chatter between other members gets absorbed.
+
+Three possible approaches:
+1. **Triage agent** — Sonnet reads messages, filters noise, only wakes Opus parent for actionable items. Biggest token savings (~70% fewer Opus wake-ups).
+2. **Sonnet as idle helper** — Switch idle helper sessions from Opus to Sonnet entirely. Follow-up questions ("which file was that?") don't need Opus reasoning.
+3. **Context-aware watchdog** — Sonnet reads last few messages before firing cadence nag. If worker said "starting a 20-min build," suppress the nag.
+
+**Estimated impact:** Triage approach could reduce Opus wake-ups from ~80/session to ~24, saving ~400K Opus tokens replaced by ~200K Sonnet.
+
 ### Long-duration sentinel soak test
 **Severity:** Medium | **Since:** v5.0 RC2 (2026-04-06)
 
@@ -28,8 +40,11 @@ See `reviews/v45-live-test/TODO-cadence-escape.md`.
 
 The markdown export (`roam_hive_mind_end`) is functional but minimal. Task state changes aren't timestamped in the export. Lock acquisitions/releases aren't included.
 
-## Completed (v5.0 RC2)
+## Completed (v5.0 RC2 — War Council)
 
+- [x] Shared SLEEPING_KEYWORDS constant (roam_constants.py)
+- [x] idx_messages_channel_member index for sentinel queries
+- [x] War Council: 3 criticals fixed, SKILL.md contradictions resolved
 - [x] Dual-sentinel pattern (message + watchdog)
 - [x] Watchdog emergency protocol (relaunch BOTH on fire)
 - [x] Internal looping (cap/error handled in-agent, never surface to parent)
