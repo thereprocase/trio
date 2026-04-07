@@ -49,6 +49,17 @@ See `reviews/v45-live-test/TODO-cadence-escape.md`.
 
 `roam_hive_mind_wait.py` and `roam_hive_mind_watchdog.py` are deprecated. Sentinel subsumes both. Remove after confirming no sessions reference them directly.
 
+### UserPromptSubmit hook as sentinel complement (~v10)
+**Severity:** Low / Idea | **Since:** v5.1 (2026-04-07)
+
+Inspired by Gas Town's `UserPromptSubmit` hook pattern (Yegge). A Claude Code hook on `UserPromptSubmit` could check the trio DB for unread messages at every turn boundary. If messages are pending, the hook returns `{"decision": "block", "reason": "You have N unread trio messages..."}` and Claude Code re-injects that as system context. Zero background agents needed for message detection at turn boundaries.
+
+**NOT a replacement for sentinels.** The hook only fires between turns — if Opus is mid-tool-call for 30 seconds, messages queue. The sentinel detects messages within 3 seconds during active work. The hook would be a **complement**: sentinel for fast sub-turn detection, hook for guaranteed turn-boundary detection. Belt and suspenders.
+
+**Why low priority:** The sentinel architecture (v5.1) already works for 4+ hours unattended. The hook adds a second detection layer but doesn't solve a problem we currently have. Worth revisiting when the sentinel pattern is battle-tested in production and we have a clear picture of what failure modes remain.
+
+**Reference:** Steve Yegge's Gas Town (`github.com/steveyegge/gastown`) uses this pattern as its primary message injection mechanism. See `D:/ClauDe/tools/yegge/gastown/` and `D:/ClauDe/tools/trio/test-log.md` § "Gas Town" for analysis.
+
 ### Conversation export quality
 **Severity:** Low | **Since:** v4
 

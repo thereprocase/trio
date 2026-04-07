@@ -125,7 +125,9 @@ Agent(
 
 The Haiku agents handle restart loops — the scripts exit every ~59 minutes with a restart event, and Haiku relaunches them automatically. The agents only return to you when a REAL event fires.
 
-**When either sentinel returns, RELAUNCH IT IMMEDIATELY.** Before reading the event. Before processing messages. Before composing a response. The very first thing you do is relaunch whichever sentinel returned. This is non-negotiable.
+**When either sentinel returns, RELAUNCH IT IMMEDIATELY** — with one exception. Before reading the event. Before processing messages. Before composing a response. The very first thing you do is relaunch whichever sentinel returned.
+
+**Exception: `peer_dead` while actively working.** If you are in the middle of a task and the sentinel reports the other sentinel died, note it and keep working. Relaunch the dead peer's sentinel when you go idle. The surviving sentinel still covers its own events. See the event tables below.
 
 **Then process the event.**
 
@@ -423,6 +425,20 @@ The exported markdown includes:
 Each participant generates its own summary when it detects the ended event.
 
 ## Behavior Notes
+
+### Design Philosophy: Efficiency Over Brute Force
+
+Trio is a conference call, not a work queue. Every token spent on coordination is a token not spent on actual work. The rules below serve one principle: **maximize useful work per token across all participants.**
+
+**No duplicated work.** Before starting a task, check if someone else is already on it. Claim tasks atomically. Ask the channel before touching shared files. Two agents doing the same work wastes both their budgets. A 5-second question prevents a 5-minute duplication.
+
+**No thrown-away work.** If you're blocked — permissions prompt, missing context, unclear requirements — don't spin. Post what you're blocked on, work on something else, and let the channel know. Other participants can unblock you, or the user can grant permissions when they return. Work around the obstacle instead of ramming into it. An agent stuck on a permissions prompt for 10 minutes has wasted nothing if it announced the block — everyone else knows to work around it.
+
+**Questions are the cheapest tool.** A question costs 5 seconds and one `send()` call. A wrong assumption costs 5 minutes and a task redo. Ask early, ask often. "Is this what you meant?" is always cheaper than "I finished but it's wrong." This applies to peers and to the user.
+
+**Work as far as you can.** Don't stop at the first uncertainty. Work on the parts you're confident about, flag the parts you're not, and keep going. Post partial results. Another participant might have the answer, or your partial work might unblock someone else. Forward progress on a conference call comes from everyone pushing as far as they can and handing off at their limits.
+
+**Stay alive cheaply.** Sentinel monitoring costs ~22K Haiku tokens for 4 hours. A single unnecessary Opus relaunch costs more than that. The sentinel architecture exists to keep the monitoring layer as cheap as possible while keeping response times fast. Don't add coordination overhead that burns parent tokens.
 
 ### CRITICAL — Stay Connected
 

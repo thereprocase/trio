@@ -37,19 +37,23 @@ if __name__ == "__main__":
         }))
         sys.exit(1)
 
-    result = sentinel(
-        channel=sys.argv[1],
-        member_id=sys.argv[2],
-        max_runtime=MAX_RUNTIME_S,
-        heartbeat_threshold=DEFAULT_HEARTBEAT_THRESHOLD,
-        idle_heartbeat_threshold=DEFAULT_IDLE_HEARTBEAT_THRESHOLD,
-        cadence_threshold=DEFAULT_CADENCE_THRESHOLD,
-        sleep_confirm=DEFAULT_SLEEP_CONFIRM,
-        active_interval=DEFAULT_ACTIVE_INTERVAL,
-        idle_interval=DEFAULT_IDLE_INTERVAL,
-        watch_events=["new_messages", "channel_ended", "peer_dead"],
-        role="messenger",
-    )
+    try:
+        result = sentinel(
+            channel=sys.argv[1],
+            member_id=sys.argv[2],
+            max_runtime=MAX_RUNTIME_S,
+            heartbeat_threshold=DEFAULT_HEARTBEAT_THRESHOLD,
+            idle_heartbeat_threshold=DEFAULT_IDLE_HEARTBEAT_THRESHOLD,
+            cadence_threshold=DEFAULT_CADENCE_THRESHOLD,
+            sleep_confirm=DEFAULT_SLEEP_CONFIRM,
+            active_interval=DEFAULT_ACTIVE_INTERVAL,
+            idle_interval=DEFAULT_IDLE_INTERVAL,
+            watch_events=["new_messages", "channel_ended", "peer_dead"],
+            role="messenger",
+        )
+    except Exception as e:
+        print(json.dumps({"event": "error", "msg": f"messenger crashed: {e}"}))
+        sys.exit(1)
 
     if result.get("event") == "cap":
         print(json.dumps({

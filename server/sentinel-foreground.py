@@ -25,6 +25,8 @@ from roam_hive_mind_sentinel import (
     DEFAULT_IDLE_HEARTBEAT_THRESHOLD,
     DEFAULT_SLEEP_CONFIRM,
 )
+# cadence_threshold, active_interval, idle_interval hardcoded below —
+# watchdog intentionally uses different values than messenger defaults
 from roam_constants import MAX_RUNTIME_S
 
 if __name__ == "__main__":
@@ -34,19 +36,23 @@ if __name__ == "__main__":
         }))
         sys.exit(1)
 
-    result = sentinel(
-        channel=sys.argv[1],
-        member_id=sys.argv[2],
-        max_runtime=MAX_RUNTIME_S,
-        heartbeat_threshold=DEFAULT_HEARTBEAT_THRESHOLD,
-        idle_heartbeat_threshold=DEFAULT_IDLE_HEARTBEAT_THRESHOLD,
-        cadence_threshold=600,
-        sleep_confirm=DEFAULT_SLEEP_CONFIRM,
-        active_interval=30,
-        idle_interval=30,
-        watch_events=["cadence", "flag_inconsistency", "channel_ended", "peer_dead"],
-        role="watchdog",
-    )
+    try:
+        result = sentinel(
+            channel=sys.argv[1],
+            member_id=sys.argv[2],
+            max_runtime=MAX_RUNTIME_S,
+            heartbeat_threshold=DEFAULT_HEARTBEAT_THRESHOLD,
+            idle_heartbeat_threshold=DEFAULT_IDLE_HEARTBEAT_THRESHOLD,
+            cadence_threshold=600,
+            sleep_confirm=DEFAULT_SLEEP_CONFIRM,
+            active_interval=30,
+            idle_interval=30,
+            watch_events=["cadence", "flag_inconsistency", "channel_ended", "peer_dead"],
+            role="watchdog",
+        )
+    except Exception as e:
+        print(json.dumps({"event": "error", "msg": f"watchdog crashed: {e}"}))
+        sys.exit(1)
 
     if result.get("event") == "cap":
         print(json.dumps({

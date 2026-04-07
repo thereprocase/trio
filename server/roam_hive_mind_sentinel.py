@@ -6,20 +6,22 @@ roam_hive_mind_watchdog.py (heartbeat/cadence monitoring) with a single
 adaptive process. One script, one agent, all monitoring concerns.
 
 MODES (auto-detected from member's status_text in SQLite):
-  - ACTIVE: 3s check interval. Watches messages, cadence, heartbeat.
-  - IDLE: 30s interval. Watches messages, heartbeat, flag consistency.
-  - SLEEP: 30s interval. Wide heartbeat only (after 60s confirmation).
+  - ACTIVE: 3s check interval. Watches messages, cadence, peer heartbeat.
+  - IDLE: 30s interval. Watches messages, flag consistency, peer heartbeat.
+  - SLEEP: 30s interval. Peer heartbeat only (after 60s confirmation).
 
-The sentinel never writes to the database (except heartbeat updates).
-It only reads state and reports events to the parent agent.
+The sentinel writes heartbeat updates (last_seen + role-specific column)
+and reads state to report events to the parent agent.
 
 RETURNS to parent only when something needs attention:
   - new_messages: real messages from other members
-  - heartbeat: polling has stopped
   - cadence: too long without a status post (active mode only)
   - flag_inconsistency: sleeping flag but actively sending messages
+  - peer_dead: the other sentinel's heartbeat is stale (5 min, 2 checks)
   - channel_ended: channel was ended by another member
-  - cap: max runtime exceeded — parent should relaunch
+  - channel_gone: channel row deleted from DB
+  - error: persistent DB failure or invalid state
+  - cap: max runtime exceeded — wrapper converts to restart event
 
 Usage:
     python roam_hive_mind_sentinel.py <channel> <member_id> [options]
@@ -82,7 +84,8 @@ def is_sleeping_flag(status_text):
 
 def sentinel(channel, member_id, max_runtime, heartbeat_threshold,
              idle_heartbeat_threshold, cadence_threshold, sleep_confirm,
-             active_interval, idle_interval, watch_events=None, role=None):
+             active_interval, idle_interval, watch_events=None, role=None,
+             _db_path=None):
     """Main sentinel loop. Returns a JSON-serializable dict on exit.
 
     If watch_events is set (e.g. ["new_messages", "channel_ended"]),
@@ -93,10 +96,18 @@ def sentinel(channel, member_id, max_runtime, heartbeat_threshold,
     If role is set ("messenger" or "watchdog"), the sentinel writes its
     own heartbeat column and monitors the peer's. Returns peer_dead if
     the peer heartbeat goes stale (5 min, 2 consecutive observations).
+
+    _db_path: override DB path for testing. Production uses DB_PATH.
     """
 
     PEER_DEAD_THRESHOLD = 300   # 5 minutes
+    PEER_DEAD_STARTUP_GRACE = 60  # ignore peer heartbeat for first 60s
     PEER_ROLES = {"messenger": "watchdog", "watchdog": "messenger"}
+    VALID_ROLES = {"messenger", "watchdog"}
+
+    if role and role not in VALID_ROLES:
+        return {"event": "error", "msg": f"Invalid role: {role}"}
+
     own_col = f"{role}_heartbeat" if role else None
     peer_col = f"{PEER_ROLES[role]}_heartbeat" if role and role in PEER_ROLES else None
 
@@ -115,14 +126,17 @@ def sentinel(channel, member_id, max_runtime, heartbeat_threshold,
     inconsistency_streak = 0    # consecutive checks with flag inconsistency
     peer_dead_streak = 0        # consecutive checks with stale peer heartbeat
     db_error_streak = 0         # consecutive DB errors (surfaces persistent failures)
+    start_time = time.time()    # for startup grace period on peer detection
 
-    # Single long-lived DB connection (WAL mode, reused)
-    db = sqlite3.connect(str(DB_PATH), timeout=10)
-    db.row_factory = sqlite3.Row
-    db.execute("PRAGMA journal_mode=WAL")
-    db.execute("PRAGMA busy_timeout=5000")
-
+    db = None
     try:
+        # Single long-lived DB connection (WAL mode, reused)
+        db_path = _db_path or DB_PATH
+        db = sqlite3.connect(str(db_path), timeout=10)
+        db.row_factory = sqlite3.Row
+        db.execute("PRAGMA journal_mode=WAL")
+        db.execute("PRAGMA busy_timeout=5000")
+
         while time.time() < deadline:
             # Default check interval (may be overridden based on mode below)
             check_interval = active_interval
@@ -162,11 +176,9 @@ def sentinel(channel, member_id, max_runtime, heartbeat_threshold,
                 # ── Update heartbeat ──
                 now_ts = now_iso()
                 if own_col:
-                    db.execute(
-                        f"UPDATE members SET last_seen = ?, {own_col} = ? "
-                        "WHERE channel = ? AND id = ?",
-                        (now_ts, now_ts, channel, member_id),
-                    )
+                    # own_col is validated against VALID_ROLES at function entry
+                    sql = f"UPDATE members SET last_seen = ?, {own_col} = ? WHERE channel = ? AND id = ?"
+                    db.execute(sql, (now_ts, now_ts, channel, member_id))
                 else:
                     db.execute(
                         "UPDATE members SET last_seen = ? WHERE channel = ? AND id = ?",
@@ -233,17 +245,7 @@ def sentinel(channel, member_id, max_runtime, heartbeat_threshold,
                         }
                     # Not watching new_messages — continue loop
 
-                # ── Check 2: Heartbeat staleness ──
-                heartbeat_gap = seconds_since(member["last_seen"])
-                effective_hb = idle_heartbeat_threshold if mode == "sleep" else heartbeat_threshold
-
-                # Note: heartbeat_gap should be near-zero because we just
-                # updated last_seen above. This check catches the case where
-                # the UPDATE failed silently or the member was removed.
-                # In practice, heartbeat nags fire when the sentinel itself
-                # has been restarted and the gap accumulated between restarts.
-
-                # ── Check 3: Flag inconsistency (idle/sleep modes) ──
+                # ── Check 2: Flag inconsistency (idle/sleep modes) ──
                 if sleeping_flag:
                     own_msg_count_row = db.execute(
                         "SELECT COUNT(*) as cnt FROM messages "
@@ -295,8 +297,8 @@ def sentinel(channel, member_id, max_runtime, heartbeat_threshold,
                             ),
                         }
 
-                # ── Check 5: Peer sentinel heartbeat (if role set) ──
-                if peer_col:
+                # ── Check 4: Peer sentinel heartbeat (if role set) ──
+                if peer_col and (time.time() - start_time) > PEER_DEAD_STARTUP_GRACE:
                     peer_hb = member[peer_col] if peer_col in member.keys() else None
                     peer_gap = seconds_since(peer_hb)
                     if peer_gap > PEER_DEAD_THRESHOLD:
@@ -332,7 +334,8 @@ def sentinel(channel, member_id, max_runtime, heartbeat_threshold,
             time.sleep(check_interval)
 
     finally:
-        db.close()
+        if db:
+            db.close()
 
     return {
         "event": "cap",
