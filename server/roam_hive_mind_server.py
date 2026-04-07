@@ -286,6 +286,23 @@ def _seconds_since(iso_timestamp: str) -> float:
         return float("inf")
 
 
+def _sentinel_nag(member) -> str:
+    """Check caller's own sentinel heartbeats. Returns a nag string or empty."""
+    try:
+        mhb = member["messenger_heartbeat"] if "messenger_heartbeat" in member.keys() else ""
+        whb = member["watchdog_heartbeat"] if "watchdog_heartbeat" in member.keys() else ""
+    except (KeyError, TypeError):
+        return ""
+    has_msg = bool(mhb) and _seconds_since(mhb) < 300
+    has_wtd = bool(whb) and _seconds_since(whb) < 300
+    if has_msg and has_wtd:
+        return ""  # both alive, no nag
+    if not has_msg and not has_wtd:
+        return "[server] SENTINELS DOWN. You are DEAF. Launch both NOW."
+    missing = "messenger" if not has_msg else "watchdog"
+    return f"[server] {missing} sentinel DOWN. Relaunch it."
+
+
 # ── MCP Tools ────────────────────────────────────────────────────────────────
 
 
@@ -665,7 +682,7 @@ def roam_hive_mind_send(channel: str, member_id: str, message: str, task: bool =
             "ok": True,
             "channel": channel,
             "message_id": msg_id,
-            "footer": "[server] Message sent. Restart your background monitor now if not running.",
+            "footer": _sentinel_nag(member) or "",
         }
         if task_id is not None:
             result["task_id"] = task_id
@@ -807,11 +824,13 @@ def roam_hive_mind_poll(channel: str, member_id: str, wait_seconds: int = 15, fr
                         entry["mentioned"] = True
                     msg_list.append(entry)
 
+                nag = _sentinel_nag(member)
+                footer = MESSAGE_FOOTER + (" " + nag if nag else "")
                 resp = {
                     "event": "new_messages",
                     "unread_count": len(msg_list),
                     "messages": msg_list,
-                    "footer": MESSAGE_FOOTER,
+                    "footer": footer,
                 }
                 if has_mentions:
                     resp["has_mentions"] = True
@@ -820,8 +839,11 @@ def roam_hive_mind_poll(channel: str, member_id: str, wait_seconds: int = 15, fr
                 return json.dumps(resp)
 
             if time.time() >= deadline:
-                return json.dumps({"event": "no_new", "unread_count": 0,
-                                   "reminder": "No new messages, but stay connected. Other members may need you — to ask questions, request clarification, or delegate follow-up work. Keep polling until the channel ends or your user tells you to stop."})
+                nag = _sentinel_nag(member)
+                reminder = "No new messages, but stay connected."
+                if nag:
+                    reminder += " " + nag
+                return json.dumps({"event": "no_new", "unread_count": 0, "reminder": reminder})
 
             time.sleep(2)
     finally:
