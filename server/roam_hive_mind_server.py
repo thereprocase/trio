@@ -277,6 +277,15 @@ def _is_member_active(last_seen: str | None) -> bool:
         return False
 
 
+def _seconds_since(iso_timestamp: str) -> float:
+    """Seconds elapsed since an ISO 8601 timestamp."""
+    try:
+        ts = datetime.fromisoformat(iso_timestamp)
+        return (datetime.now(timezone.utc) - ts).total_seconds()
+    except (ValueError, TypeError):
+        return float("inf")
+
+
 # ── MCP Tools ────────────────────────────────────────────────────────────────
 
 
@@ -1320,7 +1329,8 @@ def roam_hive_mind_status(channel: str) -> str:
             return json.dumps({"error": f'Channel "{channel}" not found.'})
 
         members = db.execute(
-            "SELECT id, name, summary, skills, active, last_seen "
+            "SELECT id, name, summary, skills, active, last_seen, "
+            "messenger_heartbeat, watchdog_heartbeat "
             "FROM members WHERE channel = ? ORDER BY joined_at",
             (channel,),
         ).fetchall()
@@ -1397,6 +1407,17 @@ def roam_hive_mind_status(channel: str) -> str:
             held = member_locks.get(m["id"], [])
             if held:
                 entry["locks"] = held
+            # Sentinel liveness: check heartbeat column freshness (5 min threshold)
+            mhb = m["messenger_heartbeat"] if "messenger_heartbeat" in m.keys() else ""
+            whb = m["watchdog_heartbeat"] if "watchdog_heartbeat" in m.keys() else ""
+            has_msg = bool(mhb) and _seconds_since(mhb) < 300
+            has_wtd = bool(whb) and _seconds_since(whb) < 300
+            if has_msg and has_wtd:
+                entry["sentinels"] = "both"
+            elif has_msg or has_wtd:
+                entry["sentinels"] = "messenger" if has_msg else "watchdog"
+            else:
+                entry["sentinels"] = "none"
             member_list.append(entry)
 
         resp = {
@@ -1646,7 +1667,7 @@ def roam_hive_mind_roster(channel: str) -> str:
             return json.dumps({"error": f'Channel "{channel}" not found.'})
 
         members = db.execute(
-            "SELECT id, name, summary, skills, status_text, last_seen FROM members WHERE channel = ? ORDER BY joined_at",
+            "SELECT id, name, summary, skills, status_text, last_seen, messenger_heartbeat, watchdog_heartbeat FROM members WHERE channel = ? ORDER BY joined_at",
             (channel,),
         ).fetchall()
 
@@ -1682,6 +1703,16 @@ def roam_hive_mind_roster(channel: str) -> str:
             held = member_locks.get(m["id"], [])
             if held:
                 entry["locks"] = held
+            mhb = m["messenger_heartbeat"] if m["messenger_heartbeat"] else ""
+            whb = m["watchdog_heartbeat"] if m["watchdog_heartbeat"] else ""
+            has_msg = bool(mhb) and _seconds_since(mhb) < 300
+            has_wtd = bool(whb) and _seconds_since(whb) < 300
+            if has_msg and has_wtd:
+                entry["sentinels"] = "both"
+            elif has_msg or has_wtd:
+                entry["sentinels"] = "messenger" if has_msg else "watchdog"
+            else:
+                entry["sentinels"] = "none"
             roster.append(entry)
 
         return json.dumps({
