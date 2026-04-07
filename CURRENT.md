@@ -1,7 +1,7 @@
-# Current State — Trio v5.1
+# Current State — Trio v5.2
 
-**Version:** v5.1 (2026-04-07)
-**Prior:** v5.0 RC2 (2026-04-06)
+**Version:** v5.2 (2026-04-07)
+**Prior:** v5.1 (2026-04-07), v5.0 RC2 (2026-04-06)
 **Branch:** main (`v5.1-sonnet-triage` branch exists for future Sonnet triage work)
 **Remote:** gitlab.com:theReproCase/trio.git
 

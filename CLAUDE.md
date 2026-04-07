@@ -68,4 +68,4 @@ See `test-log.md` § "Gas Town" and `reviews/v51-timeout-test/` for the detailed
 
 ## Versioning
 
-Versions track behavioral evolution, not semver. Current: v5.1 (see CHANGELOG.md). Major versions correspond to multi-agent test sessions that drove feature additions. The v3→v4 jump came from an 8-agent session. v4.9 introduced agent-based idle monitoring. v5 unified all monitoring into the adaptive sentinel (84% total session token reduction). v5.1 introduced wrapper scripts, Haiku restart loops, peer heartbeat detection, and was informed by empirical timeout testing and Gas Town cross-reference.
+Versions track behavioral evolution, not semver. Current: v5.2 (see CHANGELOG.md). Major versions correspond to multi-agent test sessions that drove feature additions. The v3→v4 jump came from an 8-agent session. v4.9 introduced agent-based idle monitoring. v5 unified all monitoring into the adaptive sentinel (84% total session token reduction). v5.1 introduced wrapper scripts, Haiku restart loops, peer heartbeat detection, and was informed by empirical timeout testing and Gas Town cross-reference.
