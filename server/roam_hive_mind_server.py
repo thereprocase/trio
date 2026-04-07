@@ -32,18 +32,6 @@ from mcp.server.fastmcp import FastMCP
 
 DB_DIR = Path.home() / ".claude" / "roam"
 DB_PATH = DB_DIR / "roam.db"
-HWM_DIR = DB_DIR / "hwm"
-
-
-def _cleanup_hwm_files(channel):
-    """Remove HWM files for a channel (garbage collection)."""
-    if not HWM_DIR.exists():
-        return
-    for f in HWM_DIR.glob(f"{channel}_*.hwm"):
-        try:
-            f.unlink()
-        except OSError:
-            pass
 
 CHANNEL_CODE_PATTERN = re.compile(r"^[a-z0-9][a-z0-9\-]{0,31}$")
 MAX_MESSAGE_LENGTH = 4000
@@ -1955,7 +1943,6 @@ def roam_hive_mind_cleanup(channel: str = "", all_ended: bool = False) -> str:
             db.execute("DELETE FROM messages WHERE channel = ?", (channel,))
             db.execute("DELETE FROM members WHERE channel = ?", (channel,))
             db.execute("DELETE FROM channels WHERE code = ?", (channel,))
-            _cleanup_hwm_files(channel)
             deleted.append(channel)
         elif all_ended:
             ended = db.execute(
@@ -1968,7 +1955,6 @@ def roam_hive_mind_cleanup(channel: str = "", all_ended: bool = False) -> str:
                 db.execute("DELETE FROM messages WHERE channel = ?", (code,))
                 db.execute("DELETE FROM members WHERE channel = ?", (code,))
                 db.execute("DELETE FROM channels WHERE code = ?", (code,))
-                _cleanup_hwm_files(code)
                 deleted.append(code)
         else:
             return json.dumps({"error": "Specify a channel or set all_ended=True."})

@@ -78,17 +78,16 @@ You must launch **two** sentinel agents after connecting. Both run in parallel. 
 ```
 Agent(
     description="Trio message sentinel",
-    prompt="You are a message sentinel. Your ONLY job is to run a script and restart it.
+    prompt="Run this command in FOREGROUND with timeout: 3600000. Do NOT use run_in_background.
 
-    RULES:
-    1. Run this command in FOREGROUND with timeout: 3600000.
-       Do NOT use run_in_background: true.
-       python ~/.claude/skills/trio/server/messenger-foreground.py {channel} {member_id}
-    2. When the command finishes, read the last JSON line it printed.
-    3. If the JSON contains event=restart → run the SAME command again (step 1).
-    4. If the JSON contains ANY OTHER event → return ALL output to me and stop.
-    5. If the command fails with an error or produces no JSON output, return the full error to me immediately.
-    6. Do NOT return early. Do NOT summarize. Do NOT add commentary.",
+    python ~/.claude/skills/trio/server/messenger-foreground.py {channel} {member_id}
+
+    When it finishes, look at the JSON output. There is ONE field that matters: event.
+
+    The word restart means try again — run the SAME command again.
+    Any other word means STOP. Return ALL output to me. Do NOT run the command again.
+
+    If the command fails or produces no output, return the error immediately.",
     run_in_background=True,
     model="haiku",
 )
@@ -99,17 +98,16 @@ Agent(
 ```
 Agent(
     description="Trio watchdog sentinel",
-    prompt="You are a watchdog sentinel. Your ONLY job is to run a script and restart it.
+    prompt="Run this command in FOREGROUND with timeout: 3600000. Do NOT use run_in_background.
 
-    RULES:
-    1. Run this command in FOREGROUND with timeout: 3600000.
-       Do NOT use run_in_background: true.
-       python ~/.claude/skills/trio/server/sentinel-foreground.py {channel} {member_id}
-    2. When the command finishes, read the last JSON line it printed.
-    3. If the JSON contains event=restart → run the SAME command again (step 1).
-    4. If the JSON contains ANY OTHER event → return ALL output to me and stop.
-    5. If the command fails with an error or produces no JSON output, return the full error to me immediately.
-    6. Do NOT return early. Do NOT summarize. Do NOT add commentary.",
+    python ~/.claude/skills/trio/server/sentinel-foreground.py {channel} {member_id}
+
+    When it finishes, look at the JSON output. There is ONE field that matters: event.
+
+    The word restart means try again — run the SAME command again.
+    Any other word means STOP. Return ALL output to me. Do NOT run the command again.
+
+    If the command fails or produces no output, return the error immediately.",
     run_in_background=True,
     model="haiku",
 )
@@ -461,7 +459,13 @@ If you are unsure whether to stay, **stay**. The cost of staying connected and i
 
 ### CRITICAL — 3-Call Cadence Rule (Status + Confidence)
 
-**After every 3 tool calls within a task, you MUST post a status message to the channel before making another tool call.** No exceptions.
+**After every 3 tool calls within a task, you MUST post a status message to the channel AND do a peek poll before making another tool call.** No exceptions.
+
+The cadence check is two calls, always in this order:
+1. `roam_hive_mind_send(channel, member_id, "<status update>")` — your status with confidence level
+2. `roam_hive_mind_poll(channel, member_id, wait_seconds=0)` — peek for incoming messages
+
+This peek poll is your belt-and-suspenders backup. The sentinel is the reliability layer, but peek polls catch anything it misses. Zero cost if nothing is there.
 
 Each status post includes:
 - What you're working on

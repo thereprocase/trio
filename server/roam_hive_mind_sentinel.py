@@ -47,7 +47,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 DB_PATH = Path.home() / ".claude" / "roam" / "roam.db"
-HWM_DIR = Path.home() / ".claude" / "roam" / "hwm"
 
 # Defaults
 DEFAULT_HEARTBEAT_THRESHOLD = 120   # 2 min (active)
@@ -58,27 +57,6 @@ DEFAULT_ACTIVE_INTERVAL = 3         # seconds between checks (active)
 DEFAULT_IDLE_INTERVAL = 30          # seconds between checks (idle/sleep)
 
 from roam_constants import SLEEPING_KEYWORDS, MAX_RUNTIME_S
-
-
-def hwm_path(channel, role):
-    """Per-channel, per-role high-water mark file."""
-    return HWM_DIR / f"{channel}_{role}.hwm"
-
-
-def read_hwm(channel, role):
-    """Read the persisted HWM. Returns int or None."""
-    p = hwm_path(channel, role)
-    try:
-        val = p.read_text().strip()
-        return int(val) if val else None
-    except (FileNotFoundError, ValueError):
-        return None
-
-
-def write_hwm(channel, role, value):
-    """Persist the HWM atomically."""
-    HWM_DIR.mkdir(parents=True, exist_ok=True)
-    hwm_path(channel, role).write_text(str(value))
 
 
 def now_iso():
@@ -245,17 +223,7 @@ def sentinel(channel, member_id, max_runtime, heartbeat_threshold,
 
                 # ── Check 1: New messages from others ──
                 if local_hwm is None:
-                    # Race condition fix: poll() can advance last_read between
-                    # sentinel restarts, hiding messages in the gap. Use the
-                    # min of (persisted HWM from previous run, DB last_read)
-                    # so we never skip forward past undetected messages.
-                    # Duplicates are fine — missing messages is not.
-                    persisted = read_hwm(channel, role) if role else None
-                    db_hwm = member["last_read"] or 0
-                    if persisted is not None:
-                        local_hwm = min(persisted, db_hwm)
-                    else:
-                        local_hwm = db_hwm
+                    local_hwm = member["last_read"] or 0
 
                 unread = db.execute(
                     "SELECT id, member_id, member_name, content, created_at "
@@ -266,8 +234,6 @@ def sentinel(channel, member_id, max_runtime, heartbeat_threshold,
 
                 if unread:
                     local_hwm = max(m["id"] for m in unread)
-                    if role:
-                        write_hwm(channel, role, local_hwm)
                     if should_return("new_messages"):
                         msg_ids = [m["id"] for m in unread]
                         return {
