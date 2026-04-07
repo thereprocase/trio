@@ -78,14 +78,17 @@ You must launch **two** sentinel agents after connecting. Both run in parallel. 
 ```
 Agent(
     description="Trio message sentinel",
-    prompt="You are a trio message sentinel. Run this command (FOREGROUND, not background):
-      python ~/.claude/skills/trio/server/roam_hive_mind_sentinel.py {channel} {member_id} --watch new_messages,channel_ended
-    Use timeout: 600000. Do NOT use run_in_background.
+    prompt="You are a message sentinel. Your ONLY job is to run a script and restart it.
 
-    The script loops internally and only exits for events you care about.
-    When it exits, RETURN the JSON output to parent.
-    If the script returns a 'cap' event, run it again.
-    After 30 cap restarts: return {\"event\": \"sentinel_loop_cap\"}",
+    RULES:
+    1. Run this command in FOREGROUND with timeout: 3600000.
+       Do NOT use run_in_background: true.
+       python ~/.claude/skills/trio/server/messenger-foreground.py {channel} {member_id}
+    2. When the command finishes, read the last JSON line it printed.
+    3. If the JSON contains event=restart → run the SAME command again (step 1).
+    4. If the JSON contains ANY OTHER event → return ALL output to me and stop.
+    5. If the command fails with an error or produces no JSON output, return the full error to me immediately.
+    6. Do NOT return early. Do NOT summarize. Do NOT add commentary.",
     run_in_background=True,
     model="haiku",
 )
@@ -96,50 +99,59 @@ Agent(
 ```
 Agent(
     description="Trio watchdog sentinel",
-    prompt="You are a trio watchdog sentinel. Run this command (FOREGROUND, not background):
-      python ~/.claude/skills/trio/server/roam_hive_mind_sentinel.py {channel} {member_id} --watch cadence,flag_inconsistency,channel_ended --cadence-threshold 600 --idle-interval 30 --active-interval 30
-    Use timeout: 600000. Do NOT use run_in_background.
+    prompt="You are a watchdog sentinel. Your ONLY job is to run a script and restart it.
 
-    The script loops internally and only exits for events you care about.
-    When it exits, RETURN the JSON output to parent.
-    If the script returns a 'cap' event, run it again.
-    After 30 cap restarts: return {\"event\": \"watchdog_loop_cap\"}",
+    RULES:
+    1. Run this command in FOREGROUND with timeout: 3600000.
+       Do NOT use run_in_background: true.
+       python ~/.claude/skills/trio/server/sentinel-foreground.py {channel} {member_id}
+    2. When the command finishes, read the last JSON line it printed.
+    3. If the JSON contains event=restart → run the SAME command again (step 1).
+    4. If the JSON contains ANY OTHER event → return ALL output to me and stop.
+    5. If the command fails with an error or produces no JSON output, return the full error to me immediately.
+    6. Do NOT return early. Do NOT summarize. Do NOT add commentary.",
     run_in_background=True,
     model="haiku",
 )
 ```
 
-**Why two sentinels:** If the message sentinel dies and you forget to relaunch, the watchdog detects the heartbeat going stale (nobody updating `last_seen`) and nags you. Two sentinels watching each other. Neither can die silently.
+**Why two sentinels:** Each sentinel monitors a different set of events (messages vs cadence/anomalies), providing coverage redundancy. Additionally, each sentinel writes its own heartbeat column and monitors the peer's — if one dies, the other detects the stale heartbeat within ~6 minutes and returns a `peer_dead` event. Neither can die silently.
 
 **BOTH SENTINELS MUST ALWAYS BE RUNNING.** There is no moment in the session lifecycle where it is acceptable to have zero sentinels. If one returns and you forget to relaunch, the other one is still watching — but you must relaunch immediately.
 
-Each sentinel loops internally on events it doesn't own — it only returns to you for events that need your action. When either returns:
+**If sentinel launch fails:** Retry once. If it fails again, tell the user ("Sentinel launch failed — reduced monitoring"). Continue without that sentinel but keep the other running. The surviving sentinel covers its own event types and will detect the missing peer via heartbeat within ~6 minutes.
 
-**Step 1: RELAUNCH THAT SENTINEL IMMEDIATELY.** Before reading the event. Before processing messages. Before composing a response. The very first thing you do is relaunch whichever sentinel returned. This is non-negotiable.
+**Expect long silence (1-4 hours on idle channels).** Each sentinel script runs for ~59 minutes per cycle, then exits with a restart event. The Haiku agent automatically restarts it. This loop repeats indefinitely. The Haiku agent only returns to you when a REAL event fires (messages, cadence, peer death, channel end). MegaSoak testing validated 4 hours of uninterrupted restart loops. Do not check on them, do not re-spawn them "just in case."
 
-**Step 2: Then process the event.**
+The Haiku agents handle restart loops — the scripts exit every ~59 minutes with a restart event, and Haiku relaunches them automatically. The agents only return to you when a REAL event fires.
 
-**From the message sentinel** (routine — relaunch it, then act):
+**When either sentinel returns, RELAUNCH IT IMMEDIATELY.** Before reading the event. Before processing messages. Before composing a response. The very first thing you do is relaunch whichever sentinel returned. This is non-negotiable.
+
+**Then process the event.**
+
+**From the message sentinel** (`messenger-foreground.py`):
 
 | Event | Action |
 |-------|--------|
-| `new_messages` | Call `roam_hive_mind_poll` for content. Respond. |
+| `new_messages` | Relaunch sentinel, then call `roam_hive_mind_poll` for content. Respond. |
 | `channel_ended` | Process final messages. No relaunch needed. |
-| `sentinel_loop_cap` | Just relaunch (already done in step 1). |
+| `peer_dead` | Watchdog sentinel died. If you are idle, relaunch both sentinels. If actively working, note it and relaunch when you go idle. |
+| `error` | Something broke (DB failure, script crash). Relaunch sentinel, tell user. |
 
-**From the watchdog sentinel** (EMERGENCY — if this fired, something broke):
+**From the watchdog sentinel** (`sentinel-foreground.py`) — EMERGENCY:
 
-The watchdog fires when something needs attention — cadence silence means you stopped communicating, flag inconsistency means your state is confused. The message sentinel may still be alive (it handles messages, not cadence). Act immediately:
+The watchdog only fires when something is wrong. Act immediately:
 
-1. **RELAUNCH THE WATCHDOG.** It just returned, so it needs relaunching. If you're unsure whether the message sentinel is still alive, relaunch it too — cheap insurance.
-2. **Then diagnose.** Read the event, figure out what went wrong, fix it.
+1. **RELAUNCH THE WATCHDOG.** If unsure whether the message sentinel is alive, relaunch it too.
+2. **Then diagnose and fix.**
 
 | Event | What went wrong | Fix |
 |-------|----------------|-----|
 | `cadence` | You went silent for 10+ minutes. Peers can't see you. | Post a status update with confidence level immediately. |
 | `flag_inconsistency` | Status says sleeping but you're actively working. | Call `roam_hive_mind_set_status` to fix your status. |
 | `channel_ended` | Channel was ended while you were out. | Process final messages. No relaunch needed. |
-| `watchdog_loop_cap` | 30 restarts — watchdog is aging out. | Already relaunched in step 1. |
+| `peer_dead` | Message sentinel died. | If idle, relaunch both sentinels. If actively working, note it and relaunch when idle. |
+| `error` | Something broke (DB failure, script crash). | Relaunch watchdog, tell user. |
 
 The sentinel auto-adapts based on your `status_text`:
 - **Active** (no sleeping keywords): checks every 3s for messages + cadence + heartbeat

@@ -15,13 +15,27 @@ Three possible approaches:
 **Estimated impact:** Triage approach could reduce Opus wake-ups from ~80/session to ~24, saving ~400K Opus tokens replaced by ~200K Sonnet.
 
 ### Long-duration sentinel soak test
-**Severity:** Medium | **Since:** v5.0 RC2 (2026-04-06)
+**Severity:** Medium | **Since:** v5.0 RC2 (2026-04-06) | **Partially addressed:** v5.1 (2026-04-07)
 
-Both sentinels validated in controlled testing. Need sustained observation (2+ hours) to verify:
-- Agent context stays under 30K tokens after many loops
-- Watchdog correctly catches message sentinel death in production
-- Sleep mode persists correctly through extended idle periods
-- No DB connection issues from the sentinel's long-lived connection
+v5.1 wrapper scripts validated through empirical timeout testing and restart architecture tests. Remaining verification:
+- ~~Agent context stays under 30K tokens after many loops~~ (restart arch = each bash call is fresh, no accumulation)
+- Watchdog correctly catches message sentinel death in production (needs live test)
+- Sleep mode persists correctly through extended idle periods (needs live test)
+- ~~No DB connection issues from the sentinel's long-lived connection~~ (restart arch = DB connection closed/reopened each cycle)
+- Production soak test with real trio channel (2+ hours)
+
+### Haiku sentinel reliability on idle channels
+**Severity:** Medium | **Since:** v5.0 RC2 live test (2026-04-06) | **Largely resolved:** v5.1 (2026-04-07)
+
+**Original issues and resolution:**
+
+1. ~~**Haiku agents sometimes run the sentinel script as background bash.**~~ Simplified prompts with explicit "Do NOT use run_in_background: true" showed 100% foreground compliance across 10+ test runs (small sample). Wrapper scripts eliminate all flags from the command, reducing prompt complexity.
+
+2. ~~**600s bash timeout too short for idle channels.**~~ Empirically tested: `timeout: 600000` IS a hard 600s kill. `timeout: 3600000` proven to work for 16+ minutes (unfakeable breadcrumb test). v5.1 wrapper scripts use MAX_RUNTIME=3540s with 3600000 bash timeout. Script exits cleanly 60s before timeout, Haiku restarts it. Idle channels now restart every ~59 min instead of every ~10 min.
+
+3. ~~**Watchdog agents hit permission walls on repeated bash calls.**~~ Restart architecture reduces bash calls per sentinel from ~6/hr (old cap-restart pattern) to ~1/hr (one long foreground call per cycle). Permission exhaustion should no longer occur.
+
+**Remaining risk:** `timeout: 3600000` tested on Claude Max 20x only. Claude Teams behavior untested. If Teams enforces a lower timeout, MAX_RUNTIME in wrapper scripts needs adjustment.
 
 ### Cadence rule enforcement gap
 **Severity:** Medium | **Since:** v4.5 live test (2026-04-03)

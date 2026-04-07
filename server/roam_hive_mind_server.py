@@ -154,6 +154,8 @@ def get_db() -> sqlite3.Connection:
         ("blocked_by", "tasks", "TEXT NOT NULL DEFAULT '[]'"),
         ("status_text", "members", "TEXT NOT NULL DEFAULT ''"),
         ("status_changed_at", "members", "TEXT NOT NULL DEFAULT ''"),
+        ("messenger_heartbeat", "members", "TEXT NOT NULL DEFAULT ''"),
+        ("watchdog_heartbeat", "members", "TEXT NOT NULL DEFAULT ''"),
     ]:
         try:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {defn}")

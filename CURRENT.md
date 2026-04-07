@@ -1,6 +1,7 @@
-# Current State — Trio v5.0 RC2
+# Current State — Trio v5.1
 
-**Version:** v5.0 RC2 (2026-04-06)
+**Version:** v5.1 (2026-04-07)
+**Prior:** v5.0 RC2 (2026-04-06)
 **Branch:** main (`v5.1-sonnet-triage` branch exists for future Sonnet triage work)
 **Remote:** gitlab.com:theReproCase/trio.git
 
@@ -22,15 +23,25 @@ Reviewed by Gandalf (architecture), Sauron (correctness), live-tested with Legol
 - **SKILL.md** is the behavioral layer — cadence rules, sentinel prompts, emergency protocol
 - **Server** is the coordination protocol — stays agnostic to monitoring strategy
 - **roam_hive_mind_sentinel.py** is the unified monitor (v5) — message detection, heartbeat, cadence, flag consistency, sleep confirmation
+- **messenger-foreground.py** (v5.1) — wrapper for message sentinel role, bakes in watch_events and MAX_RUNTIME
+- **sentinel-foreground.py** (v5.1) — wrapper for watchdog sentinel role, bakes in watch_events and thresholds
 - **roam_hive_mind_wait.py** deprecated (still deployed for backward compat)
 - **roam_hive_mind_watchdog.py** deprecated (sentinel subsumes it)
 
-## Dual-Sentinel Monitoring Model
+## Dual-Sentinel Monitoring Model (v5.1)
 
-| Sentinel | Returns on | Loops on | Check interval |
-|----------|-----------|----------|---------------|
-| Message sentinel | `new_messages`, `channel_ended` | Everything else | 3s (active), 30s (idle) |
-| Watchdog sentinel | `cadence`, `flag_inconsistency`, `channel_ended` | Everything else | 30s always |
+Each sentinel is a Haiku agent running a wrapper script in a restart loop:
+
+1. Haiku runs `messenger-foreground.py` / `sentinel-foreground.py` (foreground, timeout: 3600000)
+2. Script runs for up to 3540s (~59 min), monitoring the DB
+3. If a watched event fires → script prints event JSON, exits → Haiku returns to Opus parent
+4. If runtime limit reached → script prints `{"event": "restart"}`, exits → Haiku relaunches the script
+5. Haiku loops on restart events indefinitely. Opus parent sees nothing for hours. This is normal.
+
+| Sentinel | Script | Returns on | Loops on | Check interval |
+|----------|--------|-----------|----------|---------------|
+| Message | `messenger-foreground.py` | `new_messages`, `channel_ended` | Everything else + cap restarts | 3s (active), 30s (idle) |
+| Watchdog | `sentinel-foreground.py` | `cadence`, `flag_inconsistency`, `channel_ended` | Everything else + cap restarts | 30s always |
 
 Plus inline MCP peeks (`roam_hive_mind_poll(wait_seconds=0)`) between work steps.
 

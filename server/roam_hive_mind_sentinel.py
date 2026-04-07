@@ -83,14 +83,23 @@ def is_sleeping_flag(status_text):
 
 def sentinel(channel, member_id, max_runtime, heartbeat_threshold,
              idle_heartbeat_threshold, cadence_threshold, sleep_confirm,
-             active_interval, idle_interval, watch_events=None):
+             active_interval, idle_interval, watch_events=None, role=None):
     """Main sentinel loop. Returns a JSON-serializable dict on exit.
 
     If watch_events is set (e.g. ["new_messages", "channel_ended"]),
     the sentinel only returns for those event types and loops internally
     on all others. This prevents the Haiku agent from burning its run
     cap on events it doesn't care about.
+
+    If role is set ("messenger" or "watchdog"), the sentinel writes its
+    own heartbeat column and monitors the peer's. Returns peer_dead if
+    the peer heartbeat goes stale (5 min, 2 consecutive observations).
     """
+
+    PEER_DEAD_THRESHOLD = 300   # 5 minutes
+    PEER_ROLES = {"messenger": "watchdog", "watchdog": "messenger"}
+    own_col = f"{role}_heartbeat" if role else None
+    peer_col = f"{PEER_ROLES[role]}_heartbeat" if role and role in PEER_ROLES else None
 
     deadline = time.time() + max_runtime
 
@@ -105,6 +114,8 @@ def sentinel(channel, member_id, max_runtime, heartbeat_threshold,
     local_hwm = None            # local high-water mark for message detection
     sleep_confirmed = False
     inconsistency_streak = 0    # consecutive checks with flag inconsistency
+    peer_dead_streak = 0        # consecutive checks with stale peer heartbeat
+    db_error_streak = 0         # consecutive DB errors (surfaces persistent failures)
 
     # Single long-lived DB connection (WAL mode, reused)
     db = sqlite3.connect(str(DB_PATH), timeout=10)
@@ -149,10 +160,18 @@ def sentinel(channel, member_id, max_runtime, heartbeat_threshold,
                     return {"event": "channel_ended", "ended_by": ended_by_name}
 
                 # ── Update heartbeat ──
-                db.execute(
-                    "UPDATE members SET last_seen = ? WHERE channel = ? AND id = ?",
-                    (now_iso(), channel, member_id),
-                )
+                now_ts = now_iso()
+                if own_col:
+                    db.execute(
+                        f"UPDATE members SET last_seen = ?, {own_col} = ? "
+                        "WHERE channel = ? AND id = ?",
+                        (now_ts, now_ts, channel, member_id),
+                    )
+                else:
+                    db.execute(
+                        "UPDATE members SET last_seen = ? WHERE channel = ? AND id = ?",
+                        (now_ts, channel, member_id),
+                    )
                 db.commit()
 
                 # ── Determine mode ──
@@ -183,6 +202,7 @@ def sentinel(channel, member_id, max_runtime, heartbeat_threshold,
                 else:
                     sleep_confirmed = False
                     inconsistency_streak = 0
+                    prev_msg_count = None  # reset to prevent stale deltas on re-sleep
 
                 mode = "sleep" if (sleeping_flag and sleep_confirmed) else (
                     "idle" if sleeping_flag else "active"
@@ -275,11 +295,42 @@ def sentinel(channel, member_id, max_runtime, heartbeat_threshold,
                             ),
                         }
 
+                # ── Check 5: Peer sentinel heartbeat (if role set) ──
+                if peer_col:
+                    try:
+                        peer_hb = member[peer_col] if peer_col in member.keys() else None
+                    except (IndexError, KeyError):
+                        peer_hb = None
+                    peer_gap = seconds_since(peer_hb)
+                    if peer_gap > PEER_DEAD_THRESHOLD:
+                        peer_dead_streak += 1
+                        if peer_dead_streak >= 2 and should_return("peer_dead"):
+                            peer_name = PEER_ROLES.get(role, "unknown")
+                            return {
+                                "event": "peer_dead",
+                                "peer": peer_name,
+                                "gap_seconds": round(peer_gap),
+                                "mode": mode,
+                                "msg": (
+                                    f"{peer_name} sentinel heartbeat stale "
+                                    f"({round(peer_gap)}s). Peer may be dead."
+                                ),
+                            }
+                    else:
+                        peer_dead_streak = 0
+
             except sqlite3.OperationalError as e:
                 if "no such table" in str(e):
                     return {"event": "error", "msg": "Database not initialized."}
+                db_error_streak += 1
+                if db_error_streak >= 10:
+                    return {
+                        "event": "error",
+                        "msg": f"Persistent DB failure after {db_error_streak} consecutive errors: {e}",
+                    }
                 # Transient DB error — retry on next cycle
-                pass
+            else:
+                db_error_streak = 0
 
             time.sleep(check_interval)
 

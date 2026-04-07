@@ -65,6 +65,8 @@ fi
 cp "$SCRIPT_DIR/server/roam_hive_mind_server.py" "$SERVER_DIR/roam_hive_mind_server.py"
 cp "$SCRIPT_DIR/server/roam_hive_mind_wait.py" "$SERVER_DIR/roam_hive_mind_wait.py"
 cp "$SCRIPT_DIR/server/roam_hive_mind_sentinel.py" "$SERVER_DIR/roam_hive_mind_sentinel.py"
+cp "$SCRIPT_DIR/server/messenger-foreground.py" "$SERVER_DIR/messenger-foreground.py"
+cp "$SCRIPT_DIR/server/sentinel-foreground.py" "$SERVER_DIR/sentinel-foreground.py"
 cp "$SCRIPT_DIR/server/roam_constants.py" "$SERVER_DIR/roam_constants.py"
 echo "Server files: $SERVER_DIR"
 
