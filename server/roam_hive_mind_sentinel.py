@@ -246,6 +246,7 @@ def sentinel(channel, member_id, max_runtime, heartbeat_threshold,
                     # Not watching new_messages — continue loop
 
                 # ── Check 2: Flag inconsistency (idle/sleep modes) ──
+                # (Check numbering: 1=messages, 2=flag, 3=cadence, 4=peer heartbeat)
                 if sleeping_flag:
                     own_msg_count_row = db.execute(
                         "SELECT COUNT(*) as cnt FROM messages "
@@ -256,7 +257,7 @@ def sentinel(channel, member_id, max_runtime, heartbeat_threshold,
 
                     if prev_msg_count is not None and own_msg_count > prev_msg_count:
                         msgs_sent = own_msg_count - prev_msg_count
-                        if msgs_sent > 1:
+                        if msgs_sent > 1:  # >1 not >=1: send() auto-clears sleeping flag, so 1 msg is expected
                             inconsistency_streak += 1
                             if inconsistency_streak >= 2 and should_return("flag_inconsistency"):
                                 prev_msg_count = own_msg_count
@@ -276,7 +277,7 @@ def sentinel(channel, member_id, max_runtime, heartbeat_threshold,
 
                     prev_msg_count = own_msg_count
 
-                # ── Check 4: Cadence silence (active mode only) ──
+                # ── Check 3: Cadence silence (active mode only) ──
                 if mode == "active":
                     latest_own = db.execute(
                         "SELECT created_at FROM messages "

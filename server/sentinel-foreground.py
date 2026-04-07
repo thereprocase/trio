@@ -1,6 +1,6 @@
 """Watchdog sentinel — run in FOREGROUND only.
 
-Watches for cadence silence, flag inconsistency, and channel-ended events.
+Watches for cadence silence, flag inconsistency, channel-ended, and peer-dead events.
 Loops internally on all other events. Exits cleanly 30s before
 its runtime limit so the calling agent can restart it.
 
@@ -51,7 +51,7 @@ if __name__ == "__main__":
             role="watchdog",
         )
     except Exception as e:
-        print(json.dumps({"event": "error", "msg": f"watchdog crashed: {e}"}))
+        print(json.dumps({"event": "error", "msg": f"watchdog crashed: {type(e).__name__}: {e}"}))
         sys.exit(1)
 
     if result.get("event") == "cap":

@@ -1,6 +1,6 @@
 """Message sentinel — run in FOREGROUND only.
 
-Watches for new messages and channel-ended events.
+Watches for new messages, channel-ended, and peer-dead events.
 Loops internally on all other events. Exits cleanly 30s before
 its runtime limit so the calling agent can restart it.
 
@@ -52,7 +52,7 @@ if __name__ == "__main__":
             role="messenger",
         )
     except Exception as e:
-        print(json.dumps({"event": "error", "msg": f"messenger crashed: {e}"}))
+        print(json.dumps({"event": "error", "msg": f"messenger crashed: {type(e).__name__}: {e}"}))
         sys.exit(1)
 
     if result.get("event") == "cap":
