@@ -1,5 +1,30 @@
 # Trio Changelog
 
+## v5.3 — 2026-04-07
+
+### Sentinel Prompt Fix & Cadence Peek Polls
+
+**The problem:** Haiku sentinel agents treated ALL events as restart events, looping indefinitely instead of returning real events (new_messages, cadence, peer_dead) to the Opus parent. Root cause: the original 6-rule numbered prompt buried the stop condition inside a list, causing Haiku to fuzzy-match and restart on everything.
+
+**A/B tested 4 prompt variants** during a live soak test with PDF-Crafter:
+
+| Variant | Approach | Result | Tool calls | Tokens |
+|---------|----------|--------|------------|--------|
+| 1 (baseline) | 6-rule numbered list | LOOP — 112 iterations | 112 | 52K |
+| 2 (binary) | "restart = try again, any other word = STOP" | PASS | 1 | 22K |
+| 3 (negative) | "ONLY restart if literally 'restart'" | PASS | 1 | 30K |
+| 4 (enumeration) | List every event with "→ return and stop" | PASS (noisy) | 4 | 31K |
+
+**Shipped variant 2** (cheapest at 22K, binary decision). Both sentinel prompts in SKILL.md updated.
+
+**Cadence peek polls (belt and suspenders).** The 3-call cadence rule now requires a `poll(wait_seconds=0)` after each status post. Sentinel is the reliability layer; peek polls catch anything it misses. Zero cost if nothing is there.
+
+**Reverted HWM persistence** (shipped and reverted same day). File-based high-water marks caused infinite re-detection loops — `min(persisted, last_read)` fell back to the lower watermark every restart, re-detecting the same messages. The "gap" between sentinel restarts wasn't real: `poll()` already catches all messages. The sentinel alerts; `poll()` reads.
+
+**Future direction (v6):** Exit codes (`sys.exit(0)` = restart, non-zero = real event) + scaling check intervals (3s→120s based on channel silence) + 3.5h max runtime. Eliminates JSON parsing entirely — Haiku's decision becomes "is the number 0?"
+
+---
+
 ## v5.2 — 2026-04-07
 
 ### Sentinel Enforcement & Liveness
