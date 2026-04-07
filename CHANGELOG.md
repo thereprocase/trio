@@ -1,5 +1,13 @@
 # Trio Changelog
 
+## v5.3.1 — 2026-04-07
+
+### Drain Before Launch
+
+**Poll before sentinels.** Connect sequence now requires `poll(wait_seconds=0)` before launching sentinels. Advances `last_read` past messages already in the channel, preventing the sentinel from firing immediately on stale messages and wasting a relaunch cycle. Found during v5.3 soak test — sentinel kept returning within seconds of launch for pre-existing messages.
+
+---
+
 ## v5.3 — 2026-04-07
 
 ### Sentinel Prompt Fix & Cadence Peek Polls

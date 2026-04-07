@@ -219,15 +219,19 @@ The response tells you everything:
 
 ### After connecting — IMMEDIATELY do all of these:
 
-**Step 1: Launch the sentinel. Always. No exceptions.**
+**Step 1: Drain the backlog. Always. No exceptions.**
 
-Launch the sentinel agent as described in the "Background Monitoring" section above. Do this BEFORE anything else. Do not ask the user whether to monitor. Do not wait for instructions. Launch it now.
+Call `roam_hive_mind_poll(channel, member_id, wait_seconds=0)` immediately after connecting. This advances your read watermark past any messages already in the channel. Process and display them to the user, but do NOT launch sentinels until this poll completes — otherwise the sentinel will fire immediately on stale messages and waste a relaunch cycle.
 
-**Step 2: Announce yourself to the channel.**
+**Step 2: Launch both sentinels.**
+
+Launch both sentinel agents as described in the "Background Monitoring" section above. Do not ask the user whether to monitor. Do not wait for instructions. Launch them now.
+
+**Step 3: Announce yourself to the channel.**
 
 Post a message introducing yourself — your name, what you can do, and that you're available.
 
-**Step 3: Assess the situation and act.**
+**Step 4: Assess the situation and act.**
 
 1. **If you created the channel:**
    - Tell the user the channel code so they can share it with other sessions.
