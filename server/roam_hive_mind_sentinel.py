@@ -25,7 +25,7 @@ Usage:
     python roam_hive_mind_sentinel.py <channel> <member_id> [options]
 
 Options:
-    --max-runtime SECONDS       (default: 18000 — 5 hours)
+    --max-runtime SECONDS       (default: 3540 — 59 min, from roam_constants.py)
     --heartbeat-threshold SECONDS   (default: 120 — active mode)
     --idle-heartbeat-threshold SECONDS  (default: 300 — sleep mode)
     --cadence-threshold SECONDS (default: 180 — active mode only)
@@ -47,7 +47,6 @@ from pathlib import Path
 DB_PATH = Path.home() / ".claude" / "roam" / "roam.db"
 
 # Defaults
-DEFAULT_MAX_RUNTIME = 18000         # 5 hours
 DEFAULT_HEARTBEAT_THRESHOLD = 120   # 2 min (active)
 DEFAULT_IDLE_HEARTBEAT_THRESHOLD = 300  # 5 min (sleep)
 DEFAULT_CADENCE_THRESHOLD = 180     # 3 min (active only)
@@ -55,7 +54,7 @@ DEFAULT_SLEEP_CONFIRM = 60          # 60s silence to confirm sleep
 DEFAULT_ACTIVE_INTERVAL = 3         # seconds between checks (active)
 DEFAULT_IDLE_INTERVAL = 30          # seconds between checks (idle/sleep)
 
-from roam_constants import SLEEPING_KEYWORDS
+from roam_constants import SLEEPING_KEYWORDS, MAX_RUNTIME_S
 
 
 def now_iso():
@@ -131,7 +130,8 @@ def sentinel(channel, member_id, max_runtime, heartbeat_threshold,
             try:
                 # ── Read all state in one pass ──
                 member = db.execute(
-                    "SELECT last_seen, last_read, status_text, status_changed_at "
+                    "SELECT last_seen, last_read, status_text, status_changed_at, "
+                    "messenger_heartbeat, watchdog_heartbeat "
                     "FROM members WHERE channel = ? AND id = ?",
                     (channel, member_id),
                 ).fetchone()
@@ -297,10 +297,7 @@ def sentinel(channel, member_id, max_runtime, heartbeat_threshold,
 
                 # ── Check 5: Peer sentinel heartbeat (if role set) ──
                 if peer_col:
-                    try:
-                        peer_hb = member[peer_col] if peer_col in member.keys() else None
-                    except (IndexError, KeyError):
-                        peer_hb = None
+                    peer_hb = member[peer_col] if peer_col in member.keys() else None
                     peer_gap = seconds_since(peer_hb)
                     if peer_gap > PEER_DEAD_THRESHOLD:
                         peer_dead_streak += 1
@@ -356,7 +353,7 @@ if __name__ == "__main__":
 
     # Parse optional flags
     opts = {
-        "max_runtime": DEFAULT_MAX_RUNTIME,
+        "max_runtime": MAX_RUNTIME_S,
         "heartbeat_threshold": DEFAULT_HEARTBEAT_THRESHOLD,
         "idle_heartbeat_threshold": DEFAULT_IDLE_HEARTBEAT_THRESHOLD,
         "cadence_threshold": DEFAULT_CADENCE_THRESHOLD,

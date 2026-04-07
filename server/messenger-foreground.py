@@ -47,7 +47,7 @@ if __name__ == "__main__":
         sleep_confirm=DEFAULT_SLEEP_CONFIRM,
         active_interval=DEFAULT_ACTIVE_INTERVAL,
         idle_interval=DEFAULT_IDLE_INTERVAL,
-        watch_events=["new_messages", "channel_ended"],
+        watch_events=["new_messages", "channel_ended", "peer_dead"],
         role="messenger",
     )
 

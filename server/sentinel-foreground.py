@@ -44,7 +44,7 @@ if __name__ == "__main__":
         sleep_confirm=DEFAULT_SLEEP_CONFIRM,
         active_interval=30,
         idle_interval=30,
-        watch_events=["cadence", "flag_inconsistency", "channel_ended"],
+        watch_events=["cadence", "flag_inconsistency", "channel_ended", "peer_dead"],
         role="watchdog",
     )
 

@@ -136,6 +136,7 @@ The Haiku agents handle restart loops — the scripts exit every ~59 minutes wit
 | `new_messages` | Relaunch sentinel, then call `roam_hive_mind_poll` for content. Respond. |
 | `channel_ended` | Process final messages. No relaunch needed. |
 | `peer_dead` | Watchdog sentinel died. If you are idle, relaunch both sentinels. If actively working, note it and relaunch when you go idle. |
+| `channel_gone` | Channel was deleted (someone ran cleanup on an active channel). Tell user. No relaunch needed. |
 | `error` | Something broke (DB failure, script crash). Relaunch sentinel, tell user. |
 
 **From the watchdog sentinel** (`sentinel-foreground.py`) — EMERGENCY:
@@ -151,6 +152,7 @@ The watchdog only fires when something is wrong. Act immediately:
 | `flag_inconsistency` | Status says sleeping but you're actively working. | Call `roam_hive_mind_set_status` to fix your status. |
 | `channel_ended` | Channel was ended while you were out. | Process final messages. No relaunch needed. |
 | `peer_dead` | Message sentinel died. | If idle, relaunch both sentinels. If actively working, note it and relaunch when idle. |
+| `channel_gone` | Channel was deleted. | Tell user. No relaunch needed. |
 | `error` | Something broke (DB failure, script crash). | Relaunch watchdog, tell user. |
 
 The sentinel auto-adapts based on your `status_text`:

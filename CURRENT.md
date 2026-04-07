@@ -38,10 +38,10 @@ Each sentinel is a Haiku agent running a wrapper script in a restart loop:
 4. If runtime limit reached → script prints `{"event": "restart"}`, exits → Haiku relaunches the script
 5. Haiku loops on restart events indefinitely. Opus parent sees nothing for hours. This is normal.
 
-| Sentinel | Script | Returns on | Loops on | Check interval |
-|----------|--------|-----------|----------|---------------|
-| Message | `messenger-foreground.py` | `new_messages`, `channel_ended` | Everything else + cap restarts | 3s (active), 30s (idle) |
-| Watchdog | `sentinel-foreground.py` | `cadence`, `flag_inconsistency`, `channel_ended` | Everything else + cap restarts | 30s always |
+| Sentinel | Script | Returns on (watch filter) | Also returns (bypass filter) | Loops on | Check interval |
+|----------|--------|--------------------------|----------------------------|----------|---------------|
+| Message | `messenger-foreground.py` | `new_messages`, `peer_dead` | `channel_ended`, `channel_gone`, `error` | Everything else + cap restarts | 3s (active), 30s (idle) |
+| Watchdog | `sentinel-foreground.py` | `cadence`, `flag_inconsistency`, `peer_dead` | `channel_ended`, `channel_gone`, `error` | Everything else + cap restarts | 30s always |
 
 Plus inline MCP peeks (`roam_hive_mind_poll(wait_seconds=0)`) between work steps.
 
