@@ -2,8 +2,10 @@
 
 ## Open
 
-### Sonnet triage layer (v5.1)
+### Sonnet triage layer (~v6+)
 **Severity:** Medium | **Since:** v5.0 RC2 (2026-04-06) | **Branch:** `v5.1-sonnet-triage`
+
+Parallels Gas Town's Boot agent (ephemeral, one triage decision per daemon tick). See `D:/ClauDe/tools/yegge/gastown/` for their three-tier approach: Daemon (Go, free) → Boot (ephemeral AI, one decision) → Deacon (persistent oversight).
 
 A Sonnet agent sits between the message sentinel and the Opus parent. Instead of every `new_messages` event waking the parent, Sonnet reads the messages, decides if they need the parent's attention, and only escalates what's actionable (@mentions, task assignments, direct questions). Channel chatter between other members gets absorbed.
 

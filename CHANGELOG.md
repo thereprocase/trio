@@ -1,5 +1,77 @@
 # Trio Changelog
 
+## v5.2 — 2026-04-07
+
+### Sentinel Enforcement & Liveness
+
+**Sentinel nags in server responses.** `poll()` and `send()` responses now include a sentinel liveness check on the calling member. Both alive = silent. One down = `[server] messenger sentinel DOWN. Relaunch it.` Both down = `[server] SENTINELS DOWN. You are DEAF. Launch both NOW.` Zero extra messages or tool calls — the nag rides existing server responses.
+
+**Sentinel liveness in status/roster.** `roam_hive_mind_status` and `roam_hive_mind_roster` responses include `"sentinels": "both" | "messenger" | "watchdog" | "none"` per member. Any agent checking the dashboard sees who's monitoring and who isn't.
+
+**Design philosophy section** added to SKILL.md: efficiency over brute force, no duplicated work, no thrown-away work, questions are cheap, work around permission blocks, stay alive cheaply.
+
+**Gas Town cross-reference** in CLAUDE.md. Yegge's multi-agent orchestration system (`D:/ClauDe/tools/yegge/gastown/`) is available for pattern mining. Different purpose (work queue vs conference call), narrow overlap (heartbeats, restart patterns, prompt engineering). `UserPromptSubmit` hook idea filed as future complement to sentinels (~v10).
+
+---
+
+## v5.1 — 2026-04-07
+
+### Wrapper Scripts, Restart Architecture, Peer Heartbeat
+
+**The problem:** Sentinels died every ~10 minutes on idle channels. The bash timeout killed the Python process, Haiku returned a useless status report (or fabricated completion output), and Opus relaunched — burning tokens. 18+ relaunch cycles over a 3-hour session.
+
+**Empirical timeout testing (overnight, ~20 tests):**
+- `timeout: 600000` = hard kill at 600s of silence (unfakeable breadcrumbs prove it)
+- `timeout: 3600000` = works for 58 min (single bash call, A1 test)
+- `timeout: 7200000` = works for 118 min (B2 test)
+- Bash timeout is an idle-output timer, not wall-clock — stdout resets it (heartbeat theory confirmed)
+- Haiku fabricates completion output when processes are killed — always use unfakeable markers
+- No tool call limit found up to 51 calls
+- MegaSoak: 4-hour Haiku restart loop, 23K tokens, zero drift
+- `BASH_MAX_TIMEOUT_MS` env var is the real ceiling (not the documented 600k)
+
+**Wrapper scripts:** `messenger-foreground.py` and `sentinel-foreground.py` — thin wrappers that bake in watch_events, thresholds, and MAX_RUNTIME. Convert sentinel `cap` events to `restart` events for the Haiku restart loop. Dead simple command for the Haiku agent prompt — no flags, no architecture knowledge needed.
+
+**Restart architecture:** Haiku agent runs the wrapper script, loops on `event=restart`, returns to Opus only on real events. Opus fires two background agents after connecting and forgets about them for hours. Validated at 15s, 300s, and 3540s cycle durations, plus 4-hour MegaSoak.
+
+**Peer heartbeat:** `messenger_heartbeat` and `watchdog_heartbeat` columns in members table. Each sentinel writes its own, reads the other's. 5-minute threshold, 2-observation confirmation, 60-second startup grace period. Returns `peer_dead` event — informational, not always emergency (defer if actively working).
+
+**Bug fixes from War Council + formation review (3 Seers + 3 Uruk-hai + Gollum + Ent):**
+- Startup race: empty heartbeat columns → false positive peer_dead (60s grace period)
+- Exception handling: wrappers catch sentinel crashes, always output JSON
+- DB connect moved inside try-finally (NameError on connection failure)
+- Consecutive DB error counter: 10 errors → error event (silent swallowing fix)
+- `prev_msg_count` reset on mode transition (false positive inconsistency fix)
+- Dead heartbeat check (Check 2) removed — was a no-op
+- Ghost events removed from SKILL.md, `channel_gone` documented
+- `DEFAULT_MAX_RUNTIME` vestigial 5hr default replaced with shared constant
+- Role whitelist validation before f-string SQL column name
+- `_db_path` parameter added to sentinel() for unit test injection
+- SKILL.md: simplified Haiku prompts (numbered rules, crash handling rule)
+- SKILL.md: "non-negotiable relaunch" carve-out for peer_dead during active work
+
+**Constants extracted to `roam_constants.py`:** `MAX_RUNTIME_S=3540`, `BASH_TIMEOUT_MS=3600000`, single source of truth.
+
+**`BASH_MAX_TIMEOUT_MS=3600000`** added to `~/.claude/settings.json` env — converts undocumented timeout behavior into configured behavior.
+
+**Test infrastructure:** 7 test scripts in `tests/` covering timeout ceiling, unfakeable breadcrumbs, heartbeat theory, restart architecture, agent restart loops.
+
+**Reviewed by:** Sauron, Gandalf, Frodo (Opus × 2 rounds each), 3 Uruk-hai waves (Haiku), Gollum (Haiku), Ent/Treebeard (Sonnet). 12 reviews total in `reviews/v51-timeout-test/`.
+
+---
+
+## v5.0 RC2 — 2026-04-06
+
+### Dual-Sentinel Pattern
+
+**The change:** Two parallel Haiku agents watching each other. Message sentinel (fast path, returns on messages) + watchdog sentinel (dead man's switch, returns on anomalies). Neither can die silently. Parent can sleep indefinitely while both sentinels loop.
+
+**War Council reviewed:** Sauron, Gandalf, Frodo, Aragorn, Legolas. 3 criticals fixed, shared constants extracted (`roam_constants.py`), member_id index added.
+
+**SKILL.md:** Sentinel prompts, emergency protocol, "relaunch FIRST, process SECOND" rule.
+
+---
+
 ## v5.0 RC1 — 2026-04-06
 
 ### Unified Sentinel
