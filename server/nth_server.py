@@ -46,9 +46,10 @@ MESSAGE_FOOTER = (
     "RESTART YOUR BACKGROUND MONITOR NOW if it is not running."
 )
 
-SERVER_NAME = os.environ.get("NTH_SERVER_NAME", "nth-cluster")
+SERVER_NAME = os.environ.get("NTH_SERVER_NAME", "nth-trio")
 SERVER_HOST = os.environ.get("NTH_HOST", "127.0.0.1")
 SERVER_PORT = int(os.environ.get("NTH_PORT", "8000"))
+TOOL_PREFIX = os.environ.get("NTH_TOOL_PREFIX", "trio")
 mcp = FastMCP(SERVER_NAME, host=SERVER_HOST, port=SERVER_PORT)
 
 
@@ -309,7 +310,7 @@ def _sentinel_nag(member) -> str:
 # ── MCP Tools ────────────────────────────────────────────────────────────────
 
 
-@mcp.tool()
+@mcp.tool(name=f"{TOOL_PREFIX}_connect")
 def nth_connect(
     summary: str,
     name: str = "",
@@ -507,7 +508,7 @@ def nth_connect(
         db.close()
 
 
-@mcp.tool()
+@mcp.tool(name=f"{TOOL_PREFIX}_send")
 def nth_send(channel: str, member_id: str, message: str, task: bool = False, pin: bool = False, blocked_by: str = "") -> str:
     """Send a message to the channel. No turns — send anytime.
 
@@ -696,7 +697,7 @@ def nth_send(channel: str, member_id: str, message: str, task: bool = False, pin
         db.close()
 
 
-@mcp.tool()
+@mcp.tool(name=f"{TOOL_PREFIX}_poll")
 def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: str = "") -> str:
     """Check for new messages since your last read. Blocks up to wait_seconds.
 
@@ -853,7 +854,7 @@ def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: st
         db.close()
 
 
-@mcp.tool()
+@mcp.tool(name=f"{TOOL_PREFIX}_ack")
 def nth_ack(channel: str, member_id: str, through_id: int) -> str:
     """Acknowledge messages up to a given ID, advancing your read watermark.
 
@@ -903,7 +904,7 @@ def nth_ack(channel: str, member_id: str, through_id: int) -> str:
         db.close()
 
 
-@mcp.tool()
+@mcp.tool(name=f"{TOOL_PREFIX}_history")
 def nth_history(channel: str, last_n: int = 20, from_id: int | None = None) -> str:
     """Replay recent messages from a channel. Does NOT require member_id or
     advance any read watermark — purely read-only.
@@ -963,7 +964,7 @@ def nth_history(channel: str, last_n: int = 20, from_id: int | None = None) -> s
         db.close()
 
 
-@mcp.tool()
+@mcp.tool(name=f"{TOOL_PREFIX}_claim")
 def nth_claim(channel: str, member_id: str, task_id: int) -> str:
     """Atomically claim an open task. Returns success or conflict.
 
@@ -1061,7 +1062,7 @@ def nth_claim(channel: str, member_id: str, task_id: int) -> str:
         db.close()
 
 
-@mcp.tool()
+@mcp.tool(name=f"{TOOL_PREFIX}_complete")
 def nth_complete(channel: str, member_id: str, task_id: int, result: str = "") -> str:
     """Mark a claimed task as done.
 
@@ -1164,7 +1165,7 @@ def nth_complete(channel: str, member_id: str, task_id: int, result: str = "") -
         db.close()
 
 
-@mcp.tool()
+@mcp.tool(name=f"{TOOL_PREFIX}_release")
 def nth_release(channel: str, member_id: str, task_id: int) -> str:
     """Release a claimed task back to open. Self-release only.
 
@@ -1234,7 +1235,7 @@ def nth_release(channel: str, member_id: str, task_id: int) -> str:
         db.close()
 
 
-@mcp.tool()
+@mcp.tool(name=f"{TOOL_PREFIX}_cancel")
 def nth_cancel(channel: str, member_id: str, task_id: int, reason: str = "") -> str:
     """Cancel a task, removing it as a dependency for downstream blocked tasks.
 
@@ -1336,7 +1337,7 @@ def nth_cancel(channel: str, member_id: str, task_id: int, reason: str = "") -> 
         db.close()
 
 
-@mcp.tool()
+@mcp.tool(name=f"{TOOL_PREFIX}_status")
 def nth_status(channel: str) -> str:
     """Get full details for a channel: members, all tasks, message count.
 
@@ -1460,7 +1461,7 @@ def nth_status(channel: str) -> str:
         db.close()
 
 
-@mcp.tool()
+@mcp.tool(name=f"{TOOL_PREFIX}_set_status")
 def nth_set_status(channel: str, member_id: str, status_text: str) -> str:
     """Set your status text, visible to all members in nth_status and nth_roster.
 
@@ -1508,7 +1509,7 @@ def nth_set_status(channel: str, member_id: str, status_text: str) -> str:
 DEFAULT_LOCK_TTL = 600  # 10 minutes
 
 
-@mcp.tool()
+@mcp.tool(name=f"{TOOL_PREFIX}_lock")
 def nth_lock(channel: str, member_id: str, resource: str, ttl_seconds: int = DEFAULT_LOCK_TTL) -> str:
     """Acquire an exclusive lock on a named resource.
 
@@ -1620,7 +1621,7 @@ def nth_lock(channel: str, member_id: str, resource: str, ttl_seconds: int = DEF
         db.close()
 
 
-@mcp.tool()
+@mcp.tool(name=f"{TOOL_PREFIX}_unlock")
 def nth_unlock(channel: str, member_id: str, resource: str) -> str:
     """Release a lock you hold on a resource.
 
@@ -1670,7 +1671,7 @@ def nth_unlock(channel: str, member_id: str, resource: str) -> str:
         db.close()
 
 
-@mcp.tool()
+@mcp.tool(name=f"{TOOL_PREFIX}_roster")
 def nth_roster(channel: str) -> str:
     """View a channel's member list without joining. Read-only, no member_id required.
 
@@ -1750,7 +1751,7 @@ def nth_roster(channel: str) -> str:
         db.close()
 
 
-@mcp.tool()
+@mcp.tool(name=f"{TOOL_PREFIX}_end")
 def nth_end(channel: str, member_id: str) -> str:
     """End a channel. Exports the conversation to a markdown file.
 
@@ -1803,7 +1804,7 @@ def nth_end(channel: str, member_id: str) -> str:
         db.close()
 
 
-@mcp.tool()
+@mcp.tool(name=f"{TOOL_PREFIX}_list")
 def nth_list() -> str:
     """List all channels on this machine."""
     db = get_db()
@@ -1835,7 +1836,7 @@ def nth_list() -> str:
         db.close()
 
 
-@mcp.tool()
+@mcp.tool(name=f"{TOOL_PREFIX}_cull")
 def nth_cull(channel: str, member_id: str, target_member_id: str) -> str:
     """Remove a member from a channel entirely.
 
@@ -1922,7 +1923,7 @@ def nth_cull(channel: str, member_id: str, target_member_id: str) -> str:
         db.close()
 
 
-@mcp.tool()
+@mcp.tool(name=f"{TOOL_PREFIX}_cleanup")
 def nth_cleanup(channel: str = "", all_ended: bool = False) -> str:
     """Delete channels and their data.
 

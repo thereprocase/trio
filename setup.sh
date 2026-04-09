@@ -1,26 +1,24 @@
 #!/usr/bin/env bash
 # Claude nth — cross-platform setup
-# Installs the MCP server and skill for all Claude Code sessions on this machine.
+# Installs the MCP server and skills for all Claude Code sessions on this machine.
 # Works on Linux, macOS, and Windows (Git Bash / MSYS2 / WSL).
 #
 # Modes:
-#   hub    — Full install. Local stdio (nth-cluster) + SSE server for remotes.
-#   remote — Skill-only install. Connects to a hub via SSE (nth-hive).
+#   hub    — Full install. /trio (local stdio) + /quartet (SSE for remotes).
+#            Registers nth-trio (stdio) + nth-qweb (SSE). Runs quartet_server.py.
+#   remote — Remote install. /trio (local stdio) + /quartet (SSE to hub).
+#            Registers nth-trio (stdio) + nth-qweb (SSE pointing at hub).
 #
-# What this does:
-#   1. Checks for Python 3.10+ and installs the MCP SDK if needed
-#   2. Copies skill + server to ~/.claude/skills/nth/
-#   3. Registers the MCP server via `claude mcp add` (writes to ~/.claude.json)
-#   4. Allowlists nth tools in ~/.claude/settings.json (zero permission prompts)
-#   5. Migrates old roam.db if present
+# Both modes get /trio for local use. Hub also serves /quartet for remotes.
 #
-# After setup: restart Claude Code, then /nth works in every session.
+# After setup: restart Claude Code, then /trio and /quartet work.
 
 set -euo pipefail
 
 CLAUDE_DIR="${HOME}/.claude"
-SKILL_DIR="${CLAUDE_DIR}/skills/nth"
-SERVER_DIR="${SKILL_DIR}/server"
+TRIO_SKILL_DIR="${CLAUDE_DIR}/skills/trio"
+QUARTET_SKILL_DIR="${CLAUDE_DIR}/skills/quartet"
+SERVER_DIR="${CLAUDE_DIR}/skills/nth/server"
 DB_DIR="${CLAUDE_DIR}/nth"
 OLD_DB_DIR="${CLAUDE_DIR}/roam"
 
@@ -37,7 +35,7 @@ if [ "${1:-}" = "hub" ] || [ "${1:-}" = "remote" ]; then
     shift
 else
     echo "Select setup mode:"
-    echo "  1) hub    — This machine hosts the database. Local + remote access."
+    echo "  1) hub    — This machine hosts the DB + serves remotes via Tailscale."
     echo "  2) remote — This machine connects to a hub via Tailscale."
     echo ""
     read -rp "Mode [1/2]: " mode_choice
@@ -109,31 +107,32 @@ fi
 
 # ---------- 3. Copy files ----------
 
-mkdir -p "$SERVER_DIR" "$DB_DIR"
+mkdir -p "$TRIO_SKILL_DIR" "$QUARTET_SKILL_DIR" "$SERVER_DIR" "$DB_DIR"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Always copy the skill file
-if [ -f "$SCRIPT_DIR/SKILL.md" ]; then
-    cp "$SCRIPT_DIR/SKILL.md" "$SKILL_DIR/SKILL.md"
-    echo "Skill file: $SKILL_DIR/SKILL.md"
-else
-    echo "Note: SKILL.md not found in source directory"
+# Each skill gets its own directory with a SKILL.md
+if [ -f "$SCRIPT_DIR/SKILL-trio.md" ]; then
+    cp "$SCRIPT_DIR/SKILL-trio.md" "$TRIO_SKILL_DIR/SKILL.md"
 fi
+if [ -f "$SCRIPT_DIR/SKILL-quartet.md" ]; then
+    cp "$SCRIPT_DIR/SKILL-quartet.md" "$QUARTET_SKILL_DIR/SKILL.md"
+fi
+# Remove old single-skill install
+rm -f "${CLAUDE_DIR}/skills/nth/SKILL.md" 2>/dev/null || true
+rm -f "${CLAUDE_DIR}/skills/nth/SKILL-trio.md" 2>/dev/null || true
+rm -f "${CLAUDE_DIR}/skills/nth/SKILL-quartet.md" 2>/dev/null || true
+echo "Skills: /trio -> $TRIO_SKILL_DIR, /quartet -> $QUARTET_SKILL_DIR"
 
-if [ "$MODE" = "hub" ]; then
-    # Hub: copy all server files
-    cp "$SCRIPT_DIR/server/nth_server.py" "$SERVER_DIR/nth_server.py"
-    cp "$SCRIPT_DIR/server/nth_sentinel.py" "$SERVER_DIR/nth_sentinel.py"
-    cp "$SCRIPT_DIR/server/nth_wait.py" "$SERVER_DIR/nth_wait.py" 2>/dev/null || true
-    cp "$SCRIPT_DIR/server/nth_sse.py" "$SERVER_DIR/nth_sse.py"
-    cp "$SCRIPT_DIR/server/messenger-foreground.py" "$SERVER_DIR/messenger-foreground.py"
-    cp "$SCRIPT_DIR/server/sentinel-foreground.py" "$SERVER_DIR/sentinel-foreground.py"
-    cp "$SCRIPT_DIR/server/nth_constants.py" "$SERVER_DIR/nth_constants.py"
-    echo "Server files: $SERVER_DIR"
-else
-    echo "Remote mode: server files not needed (SSE to hub)"
-fi
+# Copy server files (both modes need them for local /trio)
+cp "$SCRIPT_DIR/server/nth_server.py" "$SERVER_DIR/nth_server.py"
+cp "$SCRIPT_DIR/server/nth_sentinel.py" "$SERVER_DIR/nth_sentinel.py"
+cp "$SCRIPT_DIR/server/nth_wait.py" "$SERVER_DIR/nth_wait.py" 2>/dev/null || true
+cp "$SCRIPT_DIR/server/quartet_server.py" "$SERVER_DIR/quartet_server.py"
+cp "$SCRIPT_DIR/server/messenger-foreground.py" "$SERVER_DIR/messenger-foreground.py"
+cp "$SCRIPT_DIR/server/sentinel-foreground.py" "$SERVER_DIR/sentinel-foreground.py"
+cp "$SCRIPT_DIR/server/nth_constants.py" "$SERVER_DIR/nth_constants.py"
+echo "Server files: $SERVER_DIR"
 
 # ---------- 4. Data migration ----------
 
@@ -144,21 +143,17 @@ fi
 
 # ---------- 5. Resolve native path ----------
 
-if [ "$MODE" = "hub" ]; then
-    SERVER_SCRIPT="$SERVER_DIR/nth_server.py"
-    NATIVE_PATH="$SERVER_SCRIPT"
-fi
+SERVER_SCRIPT="$SERVER_DIR/nth_server.py"
+NATIVE_PATH="$SERVER_SCRIPT"
 
 PLATFORM="unknown"
 case "$(uname -s)" in
     MINGW*|MSYS*|CYGWIN*)
         PLATFORM="windows"
-        if [ "$MODE" = "hub" ]; then
-            if command -v cygpath &>/dev/null; then
-                NATIVE_PATH=$(cygpath -w "$SERVER_SCRIPT")
-            else
-                NATIVE_PATH=$(echo "$SERVER_SCRIPT" | sed 's|^/\([a-zA-Z]\)/|\1:\\|' | sed 's|/|\\|g')
-            fi
+        if command -v cygpath &>/dev/null; then
+            NATIVE_PATH=$(cygpath -w "$SERVER_SCRIPT")
+        else
+            NATIVE_PATH=$(echo "$SERVER_SCRIPT" | sed 's|^/\([a-zA-Z]\)/|\1:\\|' | sed 's|/|\\|g')
         fi
         ;;
     Darwin*)
@@ -170,30 +165,32 @@ case "$(uname -s)" in
 esac
 echo "Platform: $PLATFORM"
 
-# ---------- 6. Register MCP server ----------
+# ---------- 6. Register MCP servers ----------
 
 if command -v claude &>/dev/null; then
     # Clean up old registrations
     claude mcp remove roam-hive-mind -s user 2>/dev/null || true
     claude mcp remove nth-cluster -s user 2>/dev/null || true
     claude mcp remove nth-hive -s user 2>/dev/null || true
+    claude mcp remove nth-trio -s user 2>/dev/null || true
+    claude mcp remove nth-qweb -s user 2>/dev/null || true
 
-    if [ "$MODE" = "hub" ]; then
-        claude mcp add nth-cluster -s user -- "$PYTHON_CMD" "$NATIVE_PATH" 2>&1
-        echo "MCP server: nth-cluster registered (stdio, user scope)"
-    else
-        claude mcp add --transport sse -s user nth-hive "$HUB_URL" 2>&1
-        echo "MCP server: nth-hive registered (SSE -> $HUB_URL)"
+    # Both modes: register nth-trio (local stdio) — /trio always works
+    claude mcp add nth-trio -s user -- "$PYTHON_CMD" "$NATIVE_PATH" 2>&1
+    echo "MCP server: nth-trio registered (stdio, /trio)"
+
+    # Remote mode: also register nth-qweb (SSE to hub) — /quartet connects to hub
+    if [ "$MODE" = "remote" ]; then
+        claude mcp add --transport sse -s user nth-qweb "$HUB_URL" 2>&1
+        echo "MCP server: nth-qweb registered (SSE -> $HUB_URL, /quartet)"
     fi
 else
     echo ""
     echo "WARNING: 'claude' CLI not found in PATH."
-    if [ "$MODE" = "hub" ]; then
-        echo "Register the server manually:"
-        echo "  claude mcp add nth-cluster -s user -- $PYTHON_CMD \"$NATIVE_PATH\""
-    else
-        echo "Register the server manually:"
-        echo "  claude mcp add --transport sse -s user nth-hive \"$HUB_URL\""
+    echo "Register manually:"
+    echo "  claude mcp add nth-trio -s user -- $PYTHON_CMD \"$NATIVE_PATH\""
+    if [ "$MODE" = "remote" ]; then
+        echo "  claude mcp add --transport sse -s user nth-qweb \"$HUB_URL\""
     fi
 fi
 
@@ -210,43 +207,35 @@ case "$PLATFORM" in
         ;;
 esac
 
-# MCP prefix depends on mode
+# Tool base names (18 tools)
+TOOL_BASES=(connect send poll ack claim complete cancel release lock unlock set_status status roster history end list cull cleanup)
+
+# Build allowlist arrays
+TRIO_TOOLS=()
+QUARTET_TOOLS=()
+for base in "${TOOL_BASES[@]}"; do
+    TRIO_TOOLS+=("mcp__nth-trio__trio_${base}")
+    QUARTET_TOOLS+=("mcp__nth-qweb__quartet_${base}")
+done
+
+# Combine based on mode
 if [ "$MODE" = "hub" ]; then
-    MCP_PREFIX="nth-cluster"
+    # Hub: allowlist trio tools only (quartet served, not consumed locally)
+    ALL_TOOLS=("${TRIO_TOOLS[@]}")
 else
-    MCP_PREFIX="nth-hive"
+    # Remote: allowlist both trio (local) and quartet (to hub)
+    ALL_TOOLS=("${TRIO_TOOLS[@]}" "${QUARTET_TOOLS[@]}")
 fi
 
-NTH_TOOLS=(
-    "mcp__${MCP_PREFIX}__nth_connect"
-    "mcp__${MCP_PREFIX}__nth_send"
-    "mcp__${MCP_PREFIX}__nth_poll"
-    "mcp__${MCP_PREFIX}__nth_ack"
-    "mcp__${MCP_PREFIX}__nth_claim"
-    "mcp__${MCP_PREFIX}__nth_complete"
-    "mcp__${MCP_PREFIX}__nth_cancel"
-    "mcp__${MCP_PREFIX}__nth_release"
-    "mcp__${MCP_PREFIX}__nth_lock"
-    "mcp__${MCP_PREFIX}__nth_unlock"
-    "mcp__${MCP_PREFIX}__nth_set_status"
-    "mcp__${MCP_PREFIX}__nth_status"
-    "mcp__${MCP_PREFIX}__nth_roster"
-    "mcp__${MCP_PREFIX}__nth_history"
-    "mcp__${MCP_PREFIX}__nth_end"
-    "mcp__${MCP_PREFIX}__nth_list"
-    "mcp__${MCP_PREFIX}__nth_cull"
-    "mcp__${MCP_PREFIX}__nth_cleanup"
-)
-
-# Also remove old roam-hive-mind tool permissions
-OLD_TOOLS_PATTERN="roam-hive-mind"
+# Patterns to clean up
+OLD_PATTERNS="roam-hive-mind nth-cluster nth-hive"
 
 "$PYTHON_CMD" -c "
 import json, os
 
 settings_path = r'$SETTINGS_JSON'
-tools = $(printf '%s\n' "${NTH_TOOLS[@]}" | "$PYTHON_CMD" -c "import sys,json; print(json.dumps([l.strip() for l in sys.stdin]))")
-old_pattern = '$OLD_TOOLS_PATTERN'
+tools = $(printf '%s\n' "${ALL_TOOLS[@]}" | "$PYTHON_CMD" -c "import sys,json; print(json.dumps([l.strip() for l in sys.stdin]))")
+old_patterns = '$OLD_PATTERNS'.split()
 
 if os.path.exists(settings_path):
     with open(settings_path) as f:
@@ -257,9 +246,9 @@ else:
 perms = settings.setdefault('permissions', {})
 allow = perms.setdefault('allow', [])
 
-# Remove old roam-hive-mind entries
-removed = [t for t in allow if old_pattern in t]
-allow[:] = [t for t in allow if old_pattern not in t]
+# Remove old entries
+removed = [t for t in allow if any(p in t for p in old_patterns)]
+allow[:] = [t for t in allow if not any(p in t for p in old_patterns)]
 
 added = 0
 for tool in tools:
@@ -279,25 +268,26 @@ print(f'Permissions: {added} tool(s) allowlisted, {len(removed)} old entries rem
 echo ""
 echo "=== Setup Complete ($MODE mode) ==="
 echo ""
+echo "  /trio:    nth-trio (local stdio, always works)"
 if [ "$MODE" = "hub" ]; then
-    echo "  MCP:      nth-cluster (stdio, local)"
+    echo "  /quartet: Start quartet_server.py to serve remotes"
+    echo ""
     echo "  Server:   $NATIVE_PATH"
     echo "  Database: $DB_DIR/nth.db (created on first use)"
-    echo "  Config:   ~/.claude.json (via claude mcp add)"
-    echo "  Perms:    $SETTINGS_JSON"
     echo ""
-    echo "  To serve remote sessions:"
-    echo "    python $SERVER_DIR/nth_sse.py"
-    echo "  (Starts SSE server on 0.0.0.0:8000 — accessible via Tailscale)"
+    echo "  To serve remote /quartet sessions:"
+    echo "    python $SERVER_DIR/quartet_server.py"
+    echo "  (SSE on 0.0.0.0:8000 — accessible via Tailscale)"
 else
-    echo "  MCP:      nth-hive (SSE -> $HUB_URL)"
-    echo "  Config:   ~/.claude.json (via claude mcp add)"
-    echo "  Perms:    $SETTINGS_JSON"
+    echo "  /quartet: nth-qweb (SSE -> $HUB_URL)"
 fi
+echo ""
+echo "  Config: ~/.claude.json (via claude mcp add)"
+echo "  Perms:  $SETTINGS_JSON"
 echo ""
 echo "Next steps:"
 echo "  1. Restart Claude Code (exit and re-launch)"
-echo "  2. Run /mcp to verify nth tools appear"
-echo "  3. Try: /nth hello world"
+echo "  2. Run /mcp to verify trio + quartet tools appear"
+echo "  3. Try: /trio hello world"
 echo ""
 echo "Verify with: claude mcp list"

@@ -64,7 +64,7 @@ Plus inline MCP peeks (`nth_poll(wait_seconds=0)`) between work steps.
 ## Install State
 
 - Repo: `D:/ClauDe/tools/trio/`
-- Skill install: `~/.claude/skills/trio/`
+- Skill install: `~/.claude/skills/nth/`
 - MCP registrations: `~/.claude.json` (via `claude mcp add`) — `nth-cluster` (stdio) and/or `nth-hive` (SSE)
 - Permissions: `~/.claude/settings.json` (18 tools allowlisted as `nth_*`)
 - Database: `~/.claude/nth/nth.db`
