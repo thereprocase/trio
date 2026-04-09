@@ -1,4 +1,26 @@
-# Trio Changelog
+# nth Changelog
+
+## v6.0 — 2026-04-09
+
+### nth Rebrand + Tailscale SSE
+
+**The rebrand.** Everything renamed: trio → nth, roam-hive-mind → nth-cluster/nth-hive, roam_hive_mind_* → nth_*. Function names shortened — `nth_connect` instead of `roam_hive_mind_connect`. MCP server name controlled by `NTH_SERVER_NAME` env var (default: nth-cluster).
+
+**Dual-transport architecture.** One server codebase, two MCP registrations:
+- `nth-cluster`: stdio transport, local sessions on the hub machine
+- `nth-hive`: SSE transport, remote sessions via Tailscale
+
+Hub machine runs both — stdio for local speed, SSE server (`nth_sse.py`) for remotes. Remote machines register `nth-hive` pointing at the hub's Tailscale IP. All sessions share the same SQLite database.
+
+**setup.sh hub/remote modes.** Interactive or CLI: `bash setup.sh hub` or `bash setup.sh remote http://100.x.y.z:8000/sse`. Hub mode installs everything + registers stdio + installs uvicorn. Remote mode installs SKILL.md + registers SSE.
+
+**Data migration.** setup.sh auto-copies `roam.db` → `nth.db` on first run. Old `roam-hive-mind` MCP registration removed.
+
+**Sentinels: hub-only.** Sentinels use direct SQLite access and only run on the hub machine. Remote sessions use inline MCP peeks between work steps.
+
+**DB path:** `~/.claude/nth/nth.db` (was `~/.claude/roam/roam.db`)
+
+---
 
 ## v5.3.1 — 2026-04-07
 

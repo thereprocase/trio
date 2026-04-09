@@ -1,4 +1,4 @@
-# TODO — Trio
+# TODO — nth
 
 ## Open
 
@@ -46,10 +46,20 @@ Partially addressed by watchdog sentinel cadence detection (v5). The watchdog na
 
 See `reviews/v45-live-test/TODO-cadence-escape.md`.
 
-### Remove deprecated scripts
-**Severity:** Low | **Target:** v6
+### Remote sentinel support
+**Severity:** Medium | **Since:** v6.0 (2026-04-09)
 
-`roam_hive_mind_wait.py` and `roam_hive_mind_watchdog.py` are deprecated. Sentinel subsumes both. Remove after confirming no sessions reference them directly.
+Make sentinel work over MCP tools so it can run on remote machines. Currently hub-only because sentinels use direct SQLite access. Remote sessions fall back to inline MCP peeks between work steps.
+
+### SSE server watchdog
+**Severity:** Medium | **Since:** v6.0 (2026-04-09)
+
+Auto-restart `nth_sse.py` if it crashes. Currently manual restart. Could be a systemd unit, a wrapper script with restart loop, or a process supervisor.
+
+### ~~Remove deprecated scripts~~
+**Severity:** Low | **Target:** v6 | **Completed:** v6.0 (2026-04-09)
+
+~~`roam_hive_mind_wait.py` and `roam_hive_mind_watchdog.py` are deprecated.~~ Renamed to `nth_wait.py` etc. as part of v6.0 rebrand. Sentinel still subsumes both.
 
 ### UserPromptSubmit hook as sentinel complement (~v10)
 **Severity:** Low / Idea | **Since:** v5.1 (2026-04-07)
@@ -65,7 +75,7 @@ Inspired by Gas Town's `UserPromptSubmit` hook pattern (Yegge). A Claude Code ho
 ### Conversation export quality
 **Severity:** Low | **Since:** v4
 
-The markdown export (`roam_hive_mind_end`) is functional but minimal. Task state changes aren't timestamped in the export. Lock acquisitions/releases aren't included.
+The markdown export (`nth_end`) is functional but minimal. Task state changes aren't timestamped in the export. Lock acquisitions/releases aren't included.
 
 ## Completed (v5.0 RC2 — War Council)
 

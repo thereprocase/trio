@@ -19,7 +19,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from roam_hive_mind_sentinel import (
+from nth_sentinel import (
     sentinel,
     DEFAULT_HEARTBEAT_THRESHOLD,
     DEFAULT_IDLE_HEARTBEAT_THRESHOLD,
@@ -27,7 +27,7 @@ from roam_hive_mind_sentinel import (
 )
 # cadence_threshold, active_interval, idle_interval hardcoded below —
 # watchdog intentionally uses different values than messenger defaults
-from roam_constants import MAX_RUNTIME_S
+from nth_constants import MAX_RUNTIME_S
 
 if __name__ == "__main__":
     if len(sys.argv) < 3:
