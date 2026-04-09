@@ -91,16 +91,42 @@ def _console(icon: str, channel: str, text: str, color: int = 0):
     else:
         _safe_print(f"{prefix} {text}", flush=True)
 
+def _tailscale_dns():
+    """Try to discover this machine's Tailscale MagicDNS hostname."""
+    import subprocess
+    for ts_path in ["tailscale", r"C:\Program Files\Tailscale\tailscale.exe"]:
+        try:
+            out = subprocess.check_output(
+                [ts_path, "status", "--json"],
+                stderr=subprocess.DEVNULL, timeout=5,
+            )
+            import json as _json
+            data = _json.loads(out)
+            dns = data.get("Self", {}).get("DNSName", "")
+            if dns.endswith("."):
+                dns = dns[:-1]
+            return dns
+        except Exception:
+            continue
+    return ""
+
 def _startup_banner():
     """Print startup banner when the server begins."""
     if not _CONSOLE_ENABLED:
         return
+    ts_dns = _tailscale_dns()
+    connect_url = f"http://{ts_dns}:{SERVER_PORT}/sse" if ts_dns else ""
     _safe_print("\033[1m", end="")
     _safe_print("  +-------------------------------------------+")
     _safe_print(f"  |  nth server - {SERVER_NAME:<27s}|")
     _safe_print(f"  |  {f'{SERVER_HOST}:{SERVER_PORT}':<31s}|")
     _safe_print(f"  |  tools: {TOOL_PREFIX}_* (18)                    |")
     _safe_print(f"  |  db: ~/.claude/nth/nth.db                 |")
+    if connect_url:
+        _safe_print("  |                                           |")
+        _safe_print(f"  |  Remote setup:                            |")
+        _safe_print(f"  |  bash setup.sh remote                    |")
+        _safe_print(f"  |    {connect_url[:39]:<39s}|")
     _safe_print("  +-------------------------------------------+")
     _safe_print("\033[0m", flush=True)
 
