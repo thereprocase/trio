@@ -48,14 +48,36 @@ MESSAGE_FOOTER = (
 
 SERVER_NAME = os.environ.get("NTH_SERVER_NAME", "nth-trio")
 SERVER_HOST = os.environ.get("NTH_HOST", "127.0.0.1")
-SERVER_PORT = int(os.environ.get("NTH_PORT", "8000"))
 TOOL_PREFIX = os.environ.get("NTH_TOOL_PREFIX", "trio")
+
+def _find_free_port(preferred: int = 8000) -> int:
+    """Try preferred port, then scan for a free one."""
+    import socket
+    for port in [preferred] + list(range(18000, 18020)):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            try:
+                s.bind((SERVER_HOST, port))
+                return port
+            except OSError:
+                continue
+    # Fall through: let uvicorn fail with a clear error
+    return preferred
+
+SERVER_PORT = int(os.environ.get("NTH_PORT", "0")) or _find_free_port()
 mcp = FastMCP(SERVER_NAME, host=SERVER_HOST, port=SERVER_PORT)
 
 # ── Console feed ──────────────────────────────────────────────────────
 # Human-readable live feed for the server terminal window.
 # ANSI colors: 90=gray, 32=green, 33=yellow, 35=magenta, 36=cyan, 31=red, 1=bold
 _CONSOLE_ENABLED = os.environ.get("NTH_QUIET", "") == ""
+
+def _safe_print(*args, **kwargs):
+    """Print with fallback for Windows consoles that choke on Unicode."""
+    try:
+        print(*args, **kwargs)
+    except UnicodeEncodeError:
+        text = " ".join(str(a) for a in args)
+        print(text.encode("ascii", errors="replace").decode(), **kwargs)
 
 def _console(icon: str, channel: str, text: str, color: int = 0):
     """Print a timestamped event to the server console."""
@@ -65,22 +87,22 @@ def _console(icon: str, channel: str, text: str, color: int = 0):
     chan = f"\033[36m{channel}\033[0m" if channel else ""
     prefix = f"\033[90m{ts}\033[0m {icon} {chan}" if chan else f"\033[90m{ts}\033[0m {icon}"
     if color:
-        print(f"{prefix} \033[{color}m{text}\033[0m", flush=True)
+        _safe_print(f"{prefix} \033[{color}m{text}\033[0m", flush=True)
     else:
-        print(f"{prefix} {text}", flush=True)
+        _safe_print(f"{prefix} {text}", flush=True)
 
 def _startup_banner():
     """Print startup banner when the server begins."""
     if not _CONSOLE_ENABLED:
         return
-    print("\033[1m", end="")
-    print("  ┌─────────────────────────────────────────┐")
-    print(f"  │  nth server · {SERVER_NAME:<26s}│")
-    print(f"  │  {SERVER_HOST}:{SERVER_PORT:<30s}│")
-    print(f"  │  tools: {TOOL_PREFIX}_* (18)                   │")
-    print(f"  │  db: ~/.claude/nth/nth.db                │")
-    print("  └─────────────────────────────────────────┘")
-    print("\033[0m", flush=True)
+    _safe_print("\033[1m", end="")
+    _safe_print("  +-------------------------------------------+")
+    _safe_print(f"  |  nth server - {SERVER_NAME:<27s}|")
+    _safe_print(f"  |  {f'{SERVER_HOST}:{SERVER_PORT}':<31s}|")
+    _safe_print(f"  |  tools: {TOOL_PREFIX}_* (18)                    |")
+    _safe_print(f"  |  db: ~/.claude/nth/nth.db                 |")
+    _safe_print("  +-------------------------------------------+")
+    _safe_print("\033[0m", flush=True)
 
 _startup_banner()
 
