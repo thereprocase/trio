@@ -92,7 +92,20 @@ def _console(icon: str, channel: str, text: str, color: int = 0):
         _safe_print(f"{prefix} {text}", flush=True)
 
 def _tailscale_dns():
-    """Try to discover this machine's Tailscale MagicDNS hostname."""
+    """Get the hub hostname for remote connections.
+
+    Priority: ~/.claude/nth/hub-alias file > Tailscale MagicDNS > empty.
+    The hub-alias file lets you set a stable name (e.g. a Tailscale DNS
+    alias) so remotes don't break when you switch machines.
+    """
+    # Check for a manually set alias first
+    alias_file = DB_DIR / "hub-alias"
+    if alias_file.exists():
+        alias = alias_file.read_text().strip()
+        if alias:
+            return alias
+
+    # Fall back to Tailscale auto-discovery
     import subprocess
     for ts_path in ["tailscale", r"C:\Program Files\Tailscale\tailscale.exe"]:
         try:
