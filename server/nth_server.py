@@ -52,6 +52,38 @@ SERVER_PORT = int(os.environ.get("NTH_PORT", "8000"))
 TOOL_PREFIX = os.environ.get("NTH_TOOL_PREFIX", "trio")
 mcp = FastMCP(SERVER_NAME, host=SERVER_HOST, port=SERVER_PORT)
 
+# ── Console feed ──────────────────────────────────────────────────────
+# Human-readable live feed for the server terminal window.
+# ANSI colors: 90=gray, 32=green, 33=yellow, 35=magenta, 36=cyan, 31=red, 1=bold
+_CONSOLE_ENABLED = os.environ.get("NTH_QUIET", "") == ""
+
+def _console(icon: str, channel: str, text: str, color: int = 0):
+    """Print a timestamped event to the server console."""
+    if not _CONSOLE_ENABLED:
+        return
+    ts = datetime.now().strftime("%H:%M:%S")
+    chan = f"\033[36m{channel}\033[0m" if channel else ""
+    prefix = f"\033[90m{ts}\033[0m {icon} {chan}" if chan else f"\033[90m{ts}\033[0m {icon}"
+    if color:
+        print(f"{prefix} \033[{color}m{text}\033[0m", flush=True)
+    else:
+        print(f"{prefix} {text}", flush=True)
+
+def _startup_banner():
+    """Print startup banner when the server begins."""
+    if not _CONSOLE_ENABLED:
+        return
+    print("\033[1m", end="")
+    print("  ┌─────────────────────────────────────────┐")
+    print(f"  │  nth server · {SERVER_NAME:<26s}│")
+    print(f"  │  {SERVER_HOST}:{SERVER_PORT:<30s}│")
+    print(f"  │  tools: {TOOL_PREFIX}_* (18)                   │")
+    print(f"  │  db: ~/.claude/nth/nth.db                │")
+    print("  └─────────────────────────────────────────┘")
+    print("\033[0m", flush=True)
+
+_startup_banner()
+
 
 def generate_channel_code(topic: str = "") -> str:
     """Generate a short channel code, optionally from a topic string."""
@@ -502,6 +534,10 @@ def nth_connect(
         }
         if objective:
             resp["objective"] = objective
+        if action == "created":
+            _console("🌟", channel, f"{name} created channel", 32)
+        else:
+            _console("👋", channel, f"{name} joined ({len(members)} members)", 32)
         return json.dumps(resp)
 
     finally:
@@ -681,6 +717,11 @@ def nth_send(channel: str, member_id: str, message: str, task: bool = False, pin
                 (now, channel),
             )
         db.commit()
+
+        if task_id is not None:
+            _console("📋", channel, f"{member['name']} posted task #{task_id}: {content}", 33)
+        else:
+            _console("💬", channel, f"{member['name']}: {content}")
 
         result = {
             "ok": True,
@@ -1053,6 +1094,7 @@ def nth_claim(channel: str, member_id: str, task_id: int) -> str:
         )
         db.commit()
 
+        _console("🎯", channel, f"{member['name']} claimed task #{task_id}", 35)
         return json.dumps({
             "ok": True,
             "task_id": task_id,
@@ -1153,6 +1195,8 @@ def nth_complete(channel: str, member_id: str, task_id: int, result: str = "") -
         )
         db.commit()
 
+        result_text = result.strip() if result else "done"
+        _console("✅", channel, f"{member['name']} completed task #{task_id}: {result_text[:80]}", 32)
         resp = {
             "ok": True,
             "task_id": task_id,
@@ -1226,6 +1270,7 @@ def nth_release(channel: str, member_id: str, task_id: int) -> str:
         )
         db.commit()
 
+        _console("🔄", channel, f"{member['name']} released task #{task_id}", 33)
         return json.dumps({
             "ok": True,
             "task_id": task_id,
@@ -1324,6 +1369,7 @@ def nth_cancel(channel: str, member_id: str, task_id: int, reason: str = "") -> 
         )
         db.commit()
 
+        _console("❌", channel, f"{member['name']} cancelled task #{task_id}", 31)
         resp = {
             "ok": True,
             "task_id": task_id,
@@ -1616,6 +1662,7 @@ def nth_lock(channel: str, member_id: str, resource: str, ttl_seconds: int = DEF
             (channel, member_id, member["name"], f"[locked] {resource} (TTL {ttl_seconds}s)", now),
         )
         db.commit()
+        _console("🔒", channel, f"{member['name']} locked '{resource}'", 90)
         return json.dumps({"ok": True, "resource": resource, "action": "acquired", "expires_at": expires_at})
     finally:
         db.close()
@@ -1666,6 +1713,7 @@ def nth_unlock(channel: str, member_id: str, resource: str) -> str:
             (channel, member_id, member["name"], f"[unlocked] {resource}", now),
         )
         db.commit()
+        _console("🔓", channel, f"{member['name']} unlocked '{resource}'", 90)
         return json.dumps({"ok": True, "resource": resource, "action": "released"})
     finally:
         db.close()
@@ -1793,6 +1841,7 @@ def nth_end(channel: str, member_id: str) -> str:
             (channel,),
         ).fetchone()[0]
 
+        _console("🏁", channel, f"{member['name']} ended channel ({msg_count} messages)", 31)
         return json.dumps({
             "ok": True,
             "channel": channel,
@@ -1913,6 +1962,7 @@ def nth_cull(channel: str, member_id: str, target_member_id: str) -> str:
         )
         db.commit()
 
+        _console("💀", channel, f"{caller['name']} culled {target_name}", 31)
         return json.dumps({
             "ok": True,
             "culled": target_name,
