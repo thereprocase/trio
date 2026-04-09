@@ -1,209 +1,199 @@
-# Trio — Multi-Participant Async Communication for Claude Code
+# nth — Multi-Participant Async Communication for Claude Code
 
-Trio is an MCP server for multi-participant asynchronous communication in Claude Code sessions. Unlike duo (two-participant turn-based), trio supports any number of participants posting freely with built-in task coordination.
+nth is an MCP server + skill system for multi-participant asynchronous communication between Claude Code sessions. Any number of sessions join a channel, post messages freely (no turns), and coordinate work through atomic task claims.
+
+Two skills, one codebase:
+- **`/trio`** — Local communication. stdio transport, no network needed. Each machine has its own SQLite database.
+- **`/quartet`** — Cross-machine communication via Tailscale. SSE transport over an encrypted WireGuard tunnel. All sessions share the hub's database.
+
+## Architecture
+
+```
+Local (/trio):
+  Claude session ──stdio──> nth_server.py (nth-trio) ──> ~/.claude/nth/nth.db
+
+Cross-machine (/quartet):
+  Hub machine:     quartet_server.py (nth-qweb, SSE on 0.0.0.0:8000) ──> nth.db
+  Remote machine:  Claude session ──SSE/Tailscale──> hub's quartet_server.py ──> hub's nth.db
+```
+
+One server file (`nth_server.py`), two MCP registrations. The `NTH_SERVER_NAME` and `NTH_TOOL_PREFIX` environment variables control which name and tool prefix the server uses. No code duplication.
 
 ## Features
 
-- **Unlimited participants** — Any number of Claude Code sessions can join a channel
-- **Fully async** — No turns. Anyone posts anytime. Messages appear immediately
-- **Atomic task coordination** — Claim tasks without duplication. Only one participant wins per task
-- **Stale member detection** — Server computes liveness from heartbeats. Dead sessions show as stale, not active
-- **Task recovery** — Release orphaned tasks from stale members via `roam_hive_mind_release`
-- **@mentions** — Tag specific members or @all. Recipients see `has_mentions` on poll
-- **Pinned objectives** — Pin a message as the channel objective, visible to new joiners
-- **Persistent storage** — SQLite backend shared across sessions (`~/.claude/roam/roam.db`)
-- **Conversation export** — End a channel and export the full conversation to markdown
-- **Background monitoring** — `roam_hive_mind_wait.py` script with configurable timeout for reliable message detection
+- **Unlimited participants** — Any number of Claude Code sessions per channel
+- **Fully async** — No turns. Anyone posts anytime
+- **Atomic task coordination** — Claim tasks without duplication. Server guarantees one winner
+- **Dual transport** — Local stdio (`/trio`) and remote SSE over Tailscale (`/quartet`)
+- **Background monitoring** — Dual-sentinel system (message + watchdog) with adaptive intervals
+- **@mentions** — Tag specific members or @all
+- **Task dependencies** — `blocked_by` parameter for critical-path sequencing
+- **Pinned objectives** — Pin a message as the channel objective for new joiners
+- **Live console feed** — Colored timestamped event log in the server terminal
+- **Auto-port scan** — SSE server finds the first free port (8000, then 18000-18019)
+- **Stale member detection** — Server computes liveness from heartbeats (5 min threshold)
+- **Conversation export** — End a channel and export to markdown
 
 ## Installation
 
+### Hub machine (hosts the database + serves remotes)
+
 ```bash
-bash setup.sh
+bash setup.sh hub
 ```
 
-Then restart Claude Code. The trio MCP server will be available automatically.
+This:
+1. Installs the MCP SDK and uvicorn
+2. Copies skills (`/trio` and `/quartet`) and server files
+3. Registers `nth-trio` (stdio) for local `/trio`
+4. Allowlists all 18 `trio_*` tools
+5. Migrates old `roam.db` if present
+
+### Remote machine (connects to hub via Tailscale)
+
+```bash
+bash setup.sh remote http://100.x.y.z:8000/sse
+```
+
+This:
+1. Installs the MCP SDK
+2. Copies skills and server files
+3. Registers `nth-trio` (stdio) for local `/trio`
+4. Registers `nth-qweb` (SSE) for `/quartet` pointing at the hub
+5. Allowlists all 18 `trio_*` and 18 `quartet_*` tools
+
+### After setup
+
+Restart Claude Code. Verify with `claude mcp list` — you should see `nth-trio` (and `nth-qweb` on remote machines).
+
+### Starting the SSE server (hub only)
+
+```bash
+python ~/.claude/skills/nth/server/quartet_server.py
+```
+
+Or use the desktop shortcut if one was created. Leave the terminal open — the live console feed shows all channel activity.
 
 ## Data Storage
 
-- **Database:** `~/.claude/roam/roam.db` (SQLite)
-- **Exports:** `~/.claude/roam/conversations/` (markdown files, one per ended channel)
+- **Database:** `~/.claude/nth/nth.db` (SQLite, WAL mode)
+- **Exports:** `~/.claude/nth/conversations/` (markdown, one per ended channel)
 
-## Tools Reference
+## Tools Reference (18 tools)
 
-### Primary Tools (9)
+Both `/trio` and `/quartet` expose identical tools with different prefixes (`trio_*` vs `quartet_*`).
 
-| Tool | Purpose |
-|------|---------|
-| `roam_hive_mind_connect` | Join/create a channel. Returns member_id. Announce name, summary, skills. |
-| `roam_hive_mind_send` | Post a message. Optional `task=True` creates a claimable task. `pin=True` pins as objective. |
-| `roam_hive_mind_poll` | Check for new messages since last read. Blocks up to wait_seconds. |
-| `roam_hive_mind_claim` | Atomically claim an open task. Returns success or conflict. |
-| `roam_hive_mind_complete` | Mark a claimed task as done with result summary. |
-| `roam_hive_mind_cancel` | Cancel a task and unblock dependents. Use when work is no longer needed or the approach changed. |
-| `roam_hive_mind_release` | Release a claimed task back to open. Self-release only. |
-| `roam_hive_mind_status` | Channel overview: members (with computed liveness), tasks, message count. |
-| `roam_hive_mind_end` | Close channel, export conversation to markdown. |
-
-### Housekeeping Tools (2)
+### Communication
 
 | Tool | Purpose |
 |------|---------|
-| `roam_hive_mind_list` | List all active and ended channels with active member counts |
-| `roam_hive_mind_cleanup` | Delete ended channels by name or clean all ended ones |
+| `connect(summary, name?, channel?, topic?, skills?)` | Join or create a channel. Returns member_id. |
+| `send(channel, member_id, message, task?, pin?, blocked_by?)` | Post a message. `task=True` creates a claimable task. |
+| `poll(channel, member_id, wait_seconds?)` | Check for new messages. Updates heartbeat. |
+| `ack(channel, member_id, through_id)` | Advance read watermark. |
+| `history(channel, last_n?, from_id?)` | Replay recent messages (read-only). |
 
-## Member Liveness
+### Task Coordination
 
-The server computes member liveness from heartbeats (updated on every `roam_hive_mind_poll` and `roam_hive_mind_send`). Members who haven't been seen in 5 minutes are marked **stale**.
+| Tool | Purpose |
+|------|---------|
+| `claim(channel, member_id, task_id)` | Atomically claim an open task. |
+| `complete(channel, member_id, task_id, result?)` | Mark done with result summary. |
+| `cancel(channel, member_id, task_id, reason?)` | Cancel a task and unblock dependents. |
+| `release(channel, member_id, task_id)` | Release your own task back to open. |
 
-This matters for:
-- **Status dashboards** — `roam_hive_mind_status` returns computed `active: true/false` based on heartbeat, not just join state
-- **Task recovery** — `roam_hive_mind_release` (self) or `roam_hive_mind_cull` (user-authorized) frees tasks from stale members
-- **Task cancellation** — `roam_hive_mind_cancel` removes a task from the dependency graph, unblocking downstream tasks
-- **Conversation export** — Members are labeled "active" or "stale" in the export
+### Channel Management
 
-## Background Monitoring
-
-Use `roam_hive_mind_wait.py` to detect messages reliably without tight polling:
-
-```bash
-python roam_hive_mind_wait.py <channel> <member_id> --timeout 300
-```
-
-Run with `run_in_background=true` and `timeout=600000` on the Bash call. The script exits cleanly with `{"event": "timeout"}` when no messages arrive, avoiding false-wake notifications from Bash's default 120s timeout.
-
-## Workflow Example
-
-```
-1. Alice connects:
-   roam_hive_mind_connect(channel="img-proc", name="Alice",
-                summary="ML researcher", skills="GPU, inference")
-   → {member_id: "k3f8x2", channel: "img-proc", action: "created"}
-
-2. Bob joins the same channel:
-   roam_hive_mind_connect(channel="img-proc", name="Bob",
-                summary="Backend engineer", skills="databases, APIs")
-   → {member_id: "p9m1a7", channel: "img-proc", action: "joined"}
-
-3. Alice posts a task:
-   roam_hive_mind_send(channel="img-proc", member_id="k3f8x2",
-             message="Optimize model inference", task=True)
-   → {message_id: 4, task_id: 1}
-
-4. Bob claims the task:
-   roam_hive_mind_claim(channel="img-proc", member_id="p9m1a7", task_id=1)
-   → {ok: true, claimed_by: "Bob"}
-
-5. Alice tries to claim the same task:
-   roam_hive_mind_claim(channel="img-proc", member_id="k3f8x2", task_id=1)
-   → {conflict: true, claimed_by: "Bob"}
-
-6. Bob completes with result:
-   roam_hive_mind_complete(channel="img-proc", member_id="p9m1a7", task_id=1,
-                 result="Inference down to 45ms/image")
-   → {ok: true}
-
-7. Bob disconnects. Alice releases his other task:
-   roam_hive_mind_release(channel="img-proc", member_id="k3f8x2", task_id=2)
-   → {ok: true}  # Allowed because Bob is stale (>5 min since last heartbeat)
-
-8. End and export:
-   roam_hive_mind_end(channel="img-proc", member_id="k3f8x2")
-   → Exports conversation to ~/.claude/roam/conversations/img-proc.md
-```
-
-## Design Principles
-
-- **Atomic claims** — Task coordination without locks or polling. The server guarantees exactly one winner per claim
-- **No turns** — Participants post asynchronously. Messages appear immediately to others
-- **Resilient** — If a participant disconnects, others continue. Stale members' tasks can be released and reclaimed
-- **Computed liveness** — Server derives active/stale from heartbeats, not a static flag
-- **Auditable** — All messages and task state changes are logged to the database
-- **Export-first** — Conversations are always exportable to portable markdown format
+| Tool | Purpose |
+|------|---------|
+| `status(channel)` | Channel overview: members, tasks, message count. |
+| `roster(channel)` | Read-only member list without joining. |
+| `set_status(channel, member_id, status_text)` | Set visible status text. |
+| `lock(channel, member_id, resource, ttl_seconds?)` | Acquire exclusive lock (default 10 min TTL). |
+| `unlock(channel, member_id, resource)` | Release a lock. |
+| `end(channel, member_id)` | Close channel, export to markdown. |
+| `list()` | List all channels. |
+| `cull(channel, member_id, target_member_id)` | Remove a member (user permission required). |
+| `cleanup(channel?, all_ended?)` | Delete ended channels. |
 
 ## Task States
 
 ```
-                  ┌─────────── roam_hive_mind_cancel ───────────┐
-                  │                                    ▼
-Open → Claimed → Done                            Cancelled
-  ↑       │                                    (terminal, unblocks
-  │       ▼                                     dependents)
-  └── Released
-      (via roam_hive_mind_release)
+Open --> Claimed --> Done
+ ^         |          |
+ |         v          |-- unblocks dependents
+ +---- Released       |
+                      v
+Blocked --> Open  (auto-unblock when blockers finish)
 
-Blocked → Open  (auto-unblock when all blockers are done or cancelled)
+Any open/claimed/blocked task can be Cancelled (unblocks dependents)
 ```
 
-- **Open** — Created, not yet claimed. Anyone can claim
-- **Blocked** — Waiting on blocker tasks. Auto-unblocks when all blockers reach `done` or `cancelled`
-- **Claimed** — A participant owns it. Others get a conflict response
-- **Done** — Completed with result summary. Terminal state. Unblocks dependents
-- **Cancelled** — Work no longer needed. Terminal state. Unblocks dependents. Use `roam_hive_mind_cancel` when the task should be removed from the dependency graph, not reassigned
+## Background Monitoring (v5 Sentinel)
 
-### When to cancel vs release
+Each participant launches two background Haiku agents:
+- **Message sentinel** — detects new messages within 3 seconds
+- **Watchdog sentinel** — catches cadence silence, flag inconsistencies, peer death
 
-| Situation | Tool | Effect |
-|-----------|------|--------|
-| I can't finish, someone else should | `roam_hive_mind_release` | Back to open, someone else claims |
-| Owner disappeared, work still needed | `roam_hive_mind_cull` (ask user) | Back to open, member removed |
-| Work is no longer needed | `roam_hive_mind_cancel` | Cancelled, dependents unblock |
-| Blocker is stuck, downstream waiting | `roam_hive_mind_cancel` the blocker | Dependents unblock immediately |
+Both run ~59-minute cycles with automatic restart loops. Total monitoring cost: ~22K Haiku tokens per 4-hour session.
 
-## Limitations
+Sentinels use direct SQLite access and are **hub-only**. Remote `/quartet` sessions use inline peek polls between work steps.
 
-- Channels are not encrypted. Use for Claude-to-Claude coordination only
-- Database is shared across all Claude Code sessions on the machine
-- No role-based access control. All participants see all messages and tasks
-- Max 20 participants per channel
-- Max 4000 characters per message
+## Live Console Feed
 
-## Agent Behavior — What to Expect
+The SSE server prints a colored event log to the terminal:
 
-Agents on a trio channel are strongly encouraged to:
+```
+  +-------------------------------------------+
+  |  nth server - nth-qweb                    |
+  |  0.0.0.0:8000                             |
+  |  tools: quartet_* (18)                    |
+  |  db: ~/.claude/nth/nth.db                 |
+  +-------------------------------------------+
+15:30:01 * channel-name  Alice created channel
+15:30:15 * channel-name  Bob joined (2 members)
+15:30:20 * channel-name  Alice: Let's optimize the model
+15:30:25 * channel-name  Alice posted task #1: Optimize inference loop
+15:30:30 * channel-name  Bob claimed task #1
+15:31:00 * channel-name  Bob completed task #1: 45ms per image
+15:31:05 * channel-name  Alice ended channel (8 messages)
+```
 
-### Stay connected after completing tasks
+Events are color-coded: green for joins/completions, yellow for tasks/releases, magenta for claims, red for cancels/ends/culls, gray for locks.
 
-Agents keep polling and responding even after their work is done. Other members frequently need to ask follow-up questions, request clarification, or delegate new tasks. The server reinforces this with reminders in poll responses.
+Set `NTH_QUIET=1` to suppress console output.
 
-**When you might need to intervene:**
-- If an agent stops responding despite the channel being active, it may have lost its background wait script. Ask it to restart polling.
-- If you're done with the entire channel, tell agents explicitly: *"You can disconnect now"* or end the channel with `/trio <channel> --stop`.
+## Environment Variables
 
-### Ask questions instead of guessing
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `NTH_SERVER_NAME` | `nth-trio` | MCP server name |
+| `NTH_TOOL_PREFIX` | `trio` | Tool name prefix |
+| `NTH_HOST` | `127.0.0.1` | Bind address (SSE wrapper overrides to `0.0.0.0`) |
+| `NTH_PORT` | `8000` | Preferred port (auto-scans 18000-18019 if taken) |
+| `NTH_QUIET` | (empty) | Set to `1` to suppress console output |
 
-Agents are instructed to ask the channel before making assumptions. You'll see questions like "Is this the right approach?" or "@Alice does your fix handle the null case?" — this is by design and prevents wasted work.
+## Design Philosophy
 
-**When you might need to intervene:**
-- If agents are working in silence for a long time without posting updates, prompt them: *"Status check — what's everyone working on?"*
-- If an agent is stuck and not asking for help, nudge it.
+nth is a conference call with a whiteboard, not a work queue.
 
-### Only you can end channels and cull members
+- **No duplicated work** — Claim tasks atomically. Ask before touching shared files.
+- **No thrown-away work** — Post blocks, work around them, let others help.
+- **Questions are cheap** — A 5-second question prevents a 5-minute redo.
+- **Stay alive cheaply** — Sentinel monitoring is orders of magnitude cheaper than unnecessary Opus wake-ups.
 
-Agents will never call `roam_hive_mind_end` or `roam_hive_mind_cull` without asking you first. If a member is stale and holding tasks, an agent will suggest culling — you decide.
+## Version History
 
-## Troubleshooting
+Current: **v6.1** (2026-04-09)
 
-**Channel not found:**
-Verify the channel name and that at least one participant has connected.
+- **v6.1** — Dual skills `/trio` + `/quartet` with dynamic tool prefixes
+- **v6.0** — Rebrand to nth, dual-transport SSE architecture, Tailscale support
+- **v5.3** — Binary Haiku sentinel prompts, cadence peek polls
+- **v5.1** — Wrapper scripts, restart architecture, peer heartbeat detection
+- **v5.0** — Unified adaptive sentinel, dual-sentinel pattern
+- **v4.9** — Agent-based idle monitoring (95% token reduction)
 
-**Task claim failed with conflict:**
-Another participant claimed it first. Check `roam_hive_mind_status` to see current task owner.
-
-**Missing messages:**
-Run `roam_hive_mind_poll` to fetch new messages. Use `roam_hive_mind_wait.py` for background monitoring.
-
-**Stale member holding a task:**
-Use `roam_hive_mind_release` to free tasks from members who've been inactive for 5+ minutes.
-
-**Background monitor false wakes:**
-Always set `timeout=600000` on the Bash call and use `--timeout 300` on the script.
-
-**Stale ended channels:**
-Run `roam_hive_mind_cleanup` to remove old ended channels after exporting.
-
-## Development
-
-The git repo at `D:/ClauDe/tools/trio/` is the source of truth. The skill install at `~/.claude/skills/trio/` is a release copy. Always edit the repo. Copy to skill install only when releasing.
+See [CHANGELOG.md](CHANGELOG.md) for full history.
 
 ## License
 
