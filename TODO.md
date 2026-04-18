@@ -2,6 +2,11 @@
 
 ## Open
 
+### Per-process server capability — use it to simplify everything (~v7)
+**Severity:** High (architectural, biggest win) | **Since:** 2026-04-18 retrospective
+
+Generalization of the session-token + sentinel simplification threads. Each MCP stdio server process is, by construction, owned by exactly one Claude Code session — so session identity can live in server-side module globals, not be passed by the client on every call. This lever, fully exploited, cuts ~58% of the skill + server codebase. Tier 1 (certain wins from process isolation): server-secret session_id, implicit member_id, drop heartbeat, drop lease sweeper, drop revocation machinery. Tier 2 (depends on MCP tool-call duration ceiling — needs experiment): replace both sentinels with a single long-blocking `nth_wait` RPC. Delete `nth_sentinel.py`, `messenger-foreground.py`, `sentinel-foreground.py`, `agents/trio-sentinel.md`. Cuts SKILL.md to ~80 lines. Full analysis: `reports/2026-04-18-per-process-server-simplification.md`. Bundle with the sentinel + session-token simplifications below — they're all aspects of the same insight.
+
 ### Session token bearer semantics — drop them (~v7)
 **Severity:** Medium (cleanup) | **Since:** v6.2 retrospective (2026-04-18)
 
