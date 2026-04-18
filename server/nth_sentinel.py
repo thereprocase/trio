@@ -222,8 +222,24 @@ def sentinel(channel, member_id, max_runtime, heartbeat_threshold,
                 check_interval = idle_interval if mode in ("idle", "sleep") else active_interval
 
                 # ── Check 1: New messages from others ──
+                # v6: session-token clients advance sessions.last_read, not
+                # members.last_read, so seed from the highest watermark we
+                # know about. Otherwise the sentinel fires spurious
+                # new_messages on every restart.
                 if local_hwm is None:
-                    local_hwm = member["last_read"] or 0
+                    legacy_hwm = member["last_read"] or 0
+                    try:
+                        sess_hwm_row = db.execute(
+                            "SELECT MAX(last_read) AS hwm FROM sessions "
+                            "WHERE channel = ? AND member_id = ? "
+                            "AND revoked_at IS NULL AND role = 'primary'",
+                            (channel, member_id),
+                        ).fetchone()
+                        sess_hwm = (sess_hwm_row["hwm"] or 0) if sess_hwm_row else 0
+                    except sqlite3.OperationalError:
+                        # sessions table missing (pre-v6 DB) — fall through
+                        sess_hwm = 0
+                    local_hwm = max(legacy_hwm, sess_hwm)
 
                 unread = db.execute(
                     "SELECT id, member_id, member_name, content, created_at "

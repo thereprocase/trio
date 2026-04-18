@@ -1,15 +1,21 @@
-# Current State — nth v6.0
+# Current State — nth v6.2
 
-**Version:** v6.0 (2026-04-09)
-**Prior:** v5.3.1 (2026-04-07), v5.3 (2026-04-07), v5.2 (2026-04-07), v5.1 (2026-04-07), v5.0 RC2 (2026-04-06)
+**Version:** v6.2 (2026-04-17)
+**Prior:** v6.0 (2026-04-09), v5.3.1 (2026-04-07), v5.3 (2026-04-07), v5.2 (2026-04-07), v5.1 (2026-04-07), v5.0 RC2 (2026-04-06)
 **Branch:** main
 **Remote:** gitlab.com:theReproCase/trio.git
 
 ## What Just Shipped
 
-Rebrand from trio/roam to nth. Dual-transport architecture: `nth-cluster` (stdio, local) and `nth-hive` (SSE, remote via Tailscale). Same server code, env-var-controlled MCP name (`NTH_SERVER_NAME`). setup.sh hub/remote modes. Data migration from `roam.db` to `nth.db`.
+v6.2 — sentinel capability scoping + session tokens. Fixes a live bug where Haiku sentinel sub-agents could post to shared channels under the parent's `member_id` (`bugs/2026-04-17-sentinel-agent-tool-scope.md`).
 
-All file renames: `roam_hive_mind_server.py` → `nth_server.py`, `roam_hive_mind_sentinel.py` → `nth_sentinel.py`, `roam_constants.py` → `nth_constants.py`, `roam_hive_mind_wait.py` → `nth_wait.py`. Tool prefix: `roam_hive_mind_*` → `nth_*`. Function names shortened — `nth_connect` instead of `roam_hive_mind_connect`.
+- **New subagent template** `agents/trio-sentinel.md` — `tools: Bash` only. Sentinels launched with `subagent_type="trio-sentinel"` structurally cannot call any MCP tool.
+- **`sessions` table + `session_token`** — bearer capability minted on `nth_connect`. All mutating RPCs accept `session_token` and enforce per-session watermarks + authorship provenance + task leases.
+- **`nth_retract` RPC** — author-only retraction renders `[RETRACTED: reason] {original}` inline in history.
+- **`nth_sentinel.py`** seeds watermark from `max(members.last_read, primary session.last_read)` so session-token clients don't cause sentinel misfires.
+- **SKILL.md** (all three: canonical, trio, quartet) updated with session_token threading pattern, new retract section, and capability-scoped sentinel launch blocks.
+
+Entire migration is additive and backward-compatible. Security review: 0 critical / 4 warning / 5 note (3 fixed in patch, 2 deferred as pre-existing-class to v6.3).
 
 ## Architecture Snapshot
 

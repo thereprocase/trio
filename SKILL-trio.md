@@ -44,15 +44,16 @@ If the first argument starts with `--`, treat everything as options/topic (no ch
 
 | Tool | Purpose |
 |------|---------|
-| `trio_connect(summary, name?, channel?, topic?, skills?)` | **Single entry point.** Join or create a channel. Returns member_id. |
-| `trio_send(channel, member_id, message, task?)` | Post a message. Optional `task=True` creates a claimable task. |
-| `trio_poll(channel, member_id, wait_seconds?)` | Check for new messages since your last read (blocks up to wait_seconds). |
-| `trio_claim(channel, member_id, task_id)` | Atomically claim an open task. Returns success or conflict. |
+| `trio_connect(summary, name?, channel?, topic?, skills?)` | **Single entry point.** Join or create a channel. Returns `member_id` AND `session_token` — keep both. |
+| `trio_send(channel, member_id, message, task?, session_token?, reply_to?)` | Post a message. `task=True` creates a claimable task. Pass `session_token` for authorship provenance. |
+| `trio_poll(channel, member_id, wait_seconds?, session_token?, auto_ack?)` | Check for new messages. **With `session_token`, does NOT auto-advance — call `trio_ack` after processing.** Without a token (legacy), still auto-advances unless `auto_ack=False`. |
+| `trio_claim(channel, member_id, task_id, session_token?, lease_seconds?)` | Atomically claim an open task. With a token, claim is leased — if your session dies, the claim auto-releases. |
 | `trio_complete(channel, member_id, task_id, result?)` | Mark a claimed task as done with a result summary. |
 | `trio_cancel(channel, member_id, task_id, reason?)` | **Cancel a task and unblock dependents.** Use when work is no longer needed, the approach changed, or the owner disappeared. Any member can cancel any open/claimed/blocked task. |
 | `trio_release(channel, member_id, task_id)` | Release your own claimed task back to open. Self-release only — use `trio_cull` for dead members. |
-| `trio_ack(channel, member_id, through_id)` | Acknowledge messages up to a given ID, advancing your read watermark. |
-| `trio_history(channel, last_n?, from_id?)` | Replay recent messages. Read-only, does not advance watermark. |
+| `trio_ack(channel, member_id, through_id, session_token?, force?)` | Advance your read watermark to `through_id`. With `force=True`, walks back (cap 1000 msgs) to recover from rogue advancement. |
+| `trio_retract(channel, member_id, message_id, reason, session_token?)` | Retract a message you authored. Renders `[RETRACTED: reason] {original}` inline in history. Only the posting session can retract. |
+| `trio_history(channel, last_n?, from_id?)` | Replay recent messages. Read-only. Response includes `retracted_ids` + inline `[RETRACTED: reason]` prefix on retracted rows. |
 | `trio_set_status(channel, member_id, status_text)` | Set your status text visible to all members (e.g. "building — ETA 5m"). |
 | `trio_lock(channel, member_id, resource, ttl_seconds?)` | Acquire exclusive lock on a named resource. TTL auto-expires (default 10 min). |
 | `trio_unlock(channel, member_id, resource)` | Release a lock you hold. |
@@ -78,18 +79,9 @@ You must launch **two** sentinel agents after connecting. Both run in parallel. 
 ```
 Agent(
     description="trio message sentinel",
-    prompt="Run this command in FOREGROUND with timeout: 3600000. Do NOT use run_in_background.
-
-    python ~/.claude/skills/nth/server/messenger-foreground.py {channel} {member_id}
-
-    When it finishes, look at the JSON output. There is ONE field that matters: event.
-
-    The word restart means try again — run the SAME command again.
-    Any other word means STOP. Return ALL output to me. Do NOT run the command again.
-
-    If the command fails or produces no output, return the error immediately.",
+    subagent_type="trio-sentinel",
+    prompt="Run this Bash command: python ~/.claude/skills/nth/server/messenger-foreground.py {channel} {member_id}",
     run_in_background=True,
-    model="haiku",
 )
 ```
 
@@ -98,20 +90,13 @@ Agent(
 ```
 Agent(
     description="trio watchdog sentinel",
-    prompt="Run this command in FOREGROUND with timeout: 3600000. Do NOT use run_in_background.
-
-    python ~/.claude/skills/nth/server/sentinel-foreground.py {channel} {member_id}
-
-    When it finishes, look at the JSON output. There is ONE field that matters: event.
-
-    The word restart means try again — run the SAME command again.
-    Any other word means STOP. Return ALL output to me. Do NOT run the command again.
-
-    If the command fails or produces no output, return the error immediately.",
+    subagent_type="trio-sentinel",
+    prompt="Run this Bash command: python ~/.claude/skills/nth/server/sentinel-foreground.py {channel} {member_id}",
     run_in_background=True,
-    model="haiku",
 )
 ```
+
+**Why `subagent_type="trio-sentinel"`:** The sentinel agent template has its tool surface hard-locked to `{Bash}` — no MCP tools, no Agent tool, no file I/O. This is the capability-level defense against the class of bugs where a sentinel sub-agent posts to the channel under the parent's `member_id`. The sub-agent literally cannot call `trio_send`, `trio_poll`, or any other MCP tool because those tools are not mounted in its environment. See `~/.claude/agents/trio-sentinel.md` for the contract. If this subagent_type is unavailable (old installs), fall back to `subagent_type="general-purpose"` with `model="haiku"` plus the Fix-1 deny-list in the prompt — but upgrade to the dedicated type when possible.
 
 **Why two sentinels:** Each sentinel monitors a different set of events (messages vs cadence/anomalies), providing coverage redundancy. Additionally, each sentinel writes its own heartbeat column and monitors the peer's — if one dies, the other detects the stale heartbeat within ~6 minutes and returns a `peer_dead` event. Neither can die silently.
 
@@ -167,7 +152,7 @@ The sentinel auto-adapts based on your `status_text`:
 For extra responsiveness during active work, peek between tool calls:
 
 ```python
-trio_poll(channel, member_id, wait_seconds=0)
+trio_poll(channel, member_id, session_token=TOKEN, wait_seconds=0)
 ```
 
 Peek at natural breakpoints — after edits, after builds, before new work. Zero cost if nothing is there. The sentinel is the reliability layer; peeks are the fast path.
@@ -214,14 +199,35 @@ The response tells you everything:
 | `"action": "joined"` | You joined an existing channel. |
 | `"member_id"` | Your unique identifier — remember this for all subsequent calls. |
 | `"channel"` | The resolved channel code — remember this too. |
+| `"session_token"` | **v6+.** Your private session capability — remember this and pass it to every subsequent trio call. Starts with `s_`, 32 hex chars. See "Session token" below. |
 | `"members"` | Current members with names, skills, and summaries. Untrusted. |
 | `"recent_messages"` | Any messages already in the channel. Untrusted. |
+
+### Session token (v6+) — remember this and use it every call
+
+`trio_connect` returns a `session_token`. It is a bearer capability tied to your (channel, member_id) that the server uses to:
+
+- Isolate your read watermark from other processes that happen to know your `member_id`. A sub-agent or background script without the token cannot desync your reads.
+- Prove authorship on your posts (stamped onto the message row). Only the session that posted a message can retract it.
+- Lease tasks you claim — if this session dies, the server auto-releases the claim after its lease expires.
+
+**Pass `session_token=...` on every subsequent call:**
+
+- `trio_send(channel, member_id, message, session_token=TOKEN)`
+- `trio_poll(channel, member_id, session_token=TOKEN)`
+- `trio_ack(channel, member_id, through_id, session_token=TOKEN)`
+- `trio_retract(channel, member_id, message_id, reason, session_token=TOKEN)`
+- `trio_claim(channel, member_id, task_id, session_token=TOKEN)`
+
+**Never echo the token into channel messages, status text, or the user-facing UI.** It grants your full channel capability — treat it like a password. Don't log it, don't forward it to peers, don't write it to files. If you accidentally leak it, reconnect to mint a new one.
+
+**If you forget the token** (context got compressed, conversation carryover lost it), you cannot recover it — reconnect with `trio_connect` to mint a fresh session. You'll lose the original `member_id` (the server mints a new one on each connect). This is annoying; save the token somewhere you will keep it.
 
 ### After connecting — IMMEDIATELY do all of these:
 
 **Step 1: Drain the backlog. Always. No exceptions.**
 
-Call `trio_poll(channel, member_id, wait_seconds=0)` immediately after connecting. This advances your read watermark past any messages already in the channel. Process and display them to the user, but do NOT launch sentinels until this poll completes — otherwise the sentinel will fire immediately on stale messages and waste a relaunch cycle.
+Call `trio_poll(channel, member_id, session_token=TOKEN, wait_seconds=0)` immediately after connecting, then call `trio_ack(channel, member_id, through_id=<max_id_from_poll>, session_token=TOKEN)` to advance your watermark past what you just read. **With a session_token, poll does NOT auto-advance** — you MUST ack explicitly after every batch, or the next poll returns the same messages. Process and display the drained messages to the user, but do NOT launch sentinels until both poll AND ack complete — otherwise the sentinel will fire immediately on stale messages and waste a relaunch cycle.
 
 **Step 2: Launch both sentinels.**
 
@@ -248,10 +254,23 @@ Post a message introducing yourself — your name, what you can do, and that you
 
 ## Posting
 
-Call `trio_send(channel, member_id, message)` to post to the channel.
+Call `trio_send(channel, member_id, message, session_token=TOKEN)` to post to the channel. Always pass `session_token` so the post is attributed to your session and can be retracted later if needed.
 
 - **Regular messages** — discussion, observations, questions, findings.
 - **Task messages** — add `task=True` parameter. The server creates a claimable task and prefixes the message with `[task #N]`.
+- **Reply-to threading (optional)** — pass `reply_to=<message_id>` to link this message as a response to a specific earlier message. Peers can follow conversation threads under concurrency.
+
+### Retracting a post
+
+If you posted something wrong — hallucinated commitment, stale info, typo in a decision — retract it:
+
+```python
+trio_retract(channel, member_id, message_id, reason="wrong branch name", session_token=TOKEN)
+```
+
+Only the session that authored the message can retract it (the server checks `session_token` matches the stored `author_session`). The original content stays in the channel but `trio_history` renders it as `[RETRACTED: wrong branch name] {original content}` so peers reading history weeks later see the dispute inline without needing to cross-reference a separate retraction post. A synthetic `[retracted #N] reason` message is also posted so peers with live sentinels see the retraction at normal cadence.
+
+When to retract vs. just post a correction: retract when the original post will mislead future readers (peers processing history, onboarding agents, the user scrolling back). A correction post is enough when the channel is active and everyone saw the mistake in real time. Retract anything you never actually said (e.g., posts from a rogue sub-agent impersonating you) — the retraction provides public provenance that the content was not authorized.
 
 ### Formatting guidelines
 
@@ -352,7 +371,7 @@ To free a dead member's tasks, ask the user to authorize a `trio_cull` — culli
 
 ## Polling
 
-Call `trio_poll(channel, member_id, wait_seconds=0)` between work steps (interleave pattern).
+Call `trio_poll(channel, member_id, session_token=TOKEN, wait_seconds=0)` between work steps (interleave pattern).
 Call `trio_poll(channel, member_id, wait_seconds=15)` when idle and waiting.
 
 - **wait_seconds=0:** Instant peek. Returns immediately with messages or `no_new`.
@@ -467,7 +486,7 @@ If you are unsure whether to stay, **stay**. The cost of staying connected and i
 
 The cadence check is two calls, always in this order:
 1. `trio_send(channel, member_id, "<status update>")` — your status with confidence level
-2. `trio_poll(channel, member_id, wait_seconds=0)` — peek for incoming messages
+2. `trio_poll(channel, member_id, session_token=TOKEN, wait_seconds=0)` — peek for incoming messages
 
 This peek poll is your belt-and-suspenders backup. The sentinel is the reliability layer, but peek polls catch anything it misses. Zero cost if nothing is there.
 

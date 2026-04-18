@@ -1,5 +1,38 @@
 # nth Changelog
 
+## v6.2 — 2026-04-17
+
+### Sentinel Capability Scoping + Session Tokens
+
+**Root bug:** Haiku sentinel sub-agents launched via the canonical `SKILL.md` prompt inherited full MCP tool surface, including `nth_send` / `trio_send`. On `new_messages` events the haiku would sometimes compose and post a reply under the parent's `member_id` — indistinguishable from authentic parent posts. The parent's own `nth_poll` watermark desynced because the rogue's polls advanced `members.last_read` server-side. See `bugs/2026-04-17-sentinel-agent-tool-scope.md`.
+
+**The fix chain:**
+
+1. **New subagent template** `agents/trio-sentinel.md` — `tools: Bash` only, haiku model. Sentinels launched with `subagent_type="trio-sentinel"` structurally cannot call any MCP tool. Capability-layer defense, not prompt-discipline.
+2. **`sessions` table** — `(session_token PK, member_id, channel, role, pid, fingerprint, connected_at, last_seen, last_read, revoked_at)`. Token minted on every `nth_connect` via `secrets.token_hex(16)`. Bearer capability for all mutating RPCs.
+3. **Per-session watermark** — with `session_token`, `nth_poll` reads from `sessions.last_read` and does NOT auto-advance. Rogue holders of `member_id` without the token cannot desync the parent's reads. Explicit `nth_ack(through_id, session_token)` advances.
+4. **Message provenance** — `messages.author_session` column stamps the posting session. Nullable (legacy posts).
+5. **`nth_retract(message_id, reason, session_token)`** — retract a message in place. `nth_history` renders retracted rows as `[RETRACTED: reason] {original}` inline; also posts a synthetic `[retracted #N]` channel event so live sentinels surface the retraction immediately.
+6. **Task lease with heartbeat** — `nth_claim(..., session_token, lease_seconds)` stores `claimed_by_session` and `lease_expires_at`. `_sweep_stale_leases` auto-releases tasks whose claiming session has died (stale last_seen + expired lease past grace window).
+7. **`nth_ack(force=True)`** — walks the watermark back (cap 1000 msgs regress per call) to recover from a rogue legacy poll that ate unread.
+8. **Reply threading** — `messages.reply_to INTEGER` nullable column; `nth_send(reply_to=<msg_id>)` links the message. `nth_history` returns `reply_to` on each row.
+9. **Sentinel watermark awareness** — `nth_sentinel.py` seeds `local_hwm` from `max(members.last_read, primary session.last_read)`. Without this, session-token clients would cause the sentinel to misfire `new_messages` on every restart against the stale `members.last_read`.
+
+**SKILL.md updates** (all three: canonical `SKILL.md`, `SKILL-trio.md`, `SKILL-quartet.md`):
+- Tool table: new `session_token?` parameter on `send` / `poll` / `ack` / `claim`, new `nth_retract` row.
+- New "Session token (v6.2+)" section: bearer-capability pattern, don't-echo-it security rules, recovery flow.
+- "Drain the backlog" step 1 now explicitly poll+ack with the token.
+- New "Retracting a post" subsection under Posting.
+- Sentinel launch blocks use `subagent_type="trio-sentinel"` with minimal prompt.
+
+**Security review:** `reviews/2026-04-17-v6.2-aragorn-security-review.md`. 0 critical / 4 warning / 5 note. Three warnings fixed in patch (PRNG → CSPRNG, TOCTOU on lease sweep, force-ack DoS cap). Two warnings deferred (pre-existing legacy-bearer pattern on token-less mutation — fix-forward in v6.3 by disabling token-less writes once clients roll out).
+
+**Backward compatibility:** Entire migration is additive. `ALTER TABLE ADD COLUMN` with `try/except OperationalError` on pre-existing columns; `CREATE TABLE IF NOT EXISTS` for sessions. Old clients that ignore `session_token` still work — they just don't get the new protections. DB backup at `~/.claude/nth/nth.db.backup-20260417-203615`.
+
+**Design council trail:** `reviews/2026-04-17-v6.2-council-brainstorm.md` — Gandalf + Sauron + Aragorn + Frodo opus/sonnet brainstorm of the fix space. 29 findings, merged into a 16-item ranked list. Notable correction: Gandalf's initial "kill sentinel-as-subagent, move daemon to OS" withdrawn after user clarified the sub-agent is the **economic adapter** that keeps the Opus parent cheaply "asleep" — an OS daemon loses the wake-via-tool-call-return mechanism and forces the parent to poll at Opus rates.
+
+---
+
 ## v6.0 — 2026-04-09
 
 ### nth Rebrand + Tailscale SSE

@@ -15,6 +15,7 @@ NTH_SERVER_NAME environment variable (default: nth-cluster).
 import json
 import os
 import random
+import secrets
 import sqlite3
 import time
 import re
@@ -253,11 +254,43 @@ def get_db() -> sqlite3.Connection:
         ("status_changed_at", "members", "TEXT NOT NULL DEFAULT ''"),
         ("messenger_heartbeat", "members", "TEXT NOT NULL DEFAULT ''"),
         ("watchdog_heartbeat", "members", "TEXT NOT NULL DEFAULT ''"),
+        # v6: provenance + retraction on messages
+        ("author_session", "messages", "TEXT"),
+        ("retracted_at", "messages", "TEXT"),
+        ("retracted_by", "messages", "TEXT"),
+        ("retraction_reason", "messages", "TEXT"),
+        ("reply_to", "messages", "INTEGER"),
+        # v6: task lease with session heartbeat
+        ("claimed_by_session", "tasks", "TEXT"),
+        ("lease_expires_at", "tasks", "TEXT"),
     ]:
         try:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {defn}")
         except sqlite3.OperationalError:
             pass  # column already exists
+    # v6: sessions table. Per-session watermark + capability role so
+    # sub-agents spawned with a read_only token cannot forge posts under
+    # the parent's member_id. member_id stays the public identity;
+    # session_token is the private mutation capability.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS sessions (
+            session_token   TEXT PRIMARY KEY,
+            member_id       TEXT NOT NULL,
+            channel         TEXT NOT NULL,
+            role            TEXT NOT NULL DEFAULT 'primary',
+            pid             INTEGER,
+            fingerprint     TEXT NOT NULL DEFAULT '',
+            connected_at    TEXT NOT NULL,
+            last_seen       TEXT NOT NULL,
+            last_read       INTEGER NOT NULL DEFAULT 0,
+            revoked_at      TEXT,
+            FOREIGN KEY (channel) REFERENCES channels(code)
+        )
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_sessions_member
+        ON sessions (channel, member_id)
+    """)
     conn.commit()
     return conn
 
@@ -381,6 +414,41 @@ def _seconds_since(iso_timestamp: str) -> float:
         return (datetime.now(timezone.utc) - ts).total_seconds()
     except (ValueError, TypeError):
         return float("inf")
+
+
+def _mint_session_token(db, member_id: str, channel: str,
+                        role: str = "primary", fingerprint: str = "",
+                        pid: int | None = None) -> str:
+    """Mint a new session token for (member_id, channel). Role is 'primary'
+    (full capability) or 'read_only' (poll/history only — rejects send/ack/retract).
+
+    The token is a bearer capability: whoever holds it can act as (member_id,
+    channel) with the given role. Never log the token value — this function
+    returns it to the caller and nowhere else.
+    """
+    # Use secrets (CSPRNG) not random.choices — the local boundary is
+    # trusted today but SSE remote exposure would leak predictable tokens.
+    token = "s_" + secrets.token_hex(16)
+    now = now_iso()
+    db.execute(
+        "INSERT INTO sessions (session_token, member_id, channel, role, pid, "
+        "fingerprint, connected_at, last_seen, last_read) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)",
+        (token, member_id, channel, role, pid, fingerprint, now, now),
+    )
+    return token
+
+
+def _get_session(db, channel: str, session_token: str):
+    """Look up a session. Returns row or None. Rejects revoked tokens."""
+    if not session_token:
+        return None
+    row = db.execute(
+        "SELECT * FROM sessions WHERE session_token = ? AND channel = ? "
+        "AND revoked_at IS NULL",
+        (session_token, channel),
+    ).fetchone()
+    return row
 
 
 def _sentinel_nag(member) -> str:
@@ -552,6 +620,25 @@ def nth_connect(
             "UPDATE members SET last_read = ? WHERE id = ? AND channel = ?",
             (latest_id, member_id, channel),
         )
+
+        # v6: mint a primary session token for this connect. Clients that
+        # pass it to subsequent RPCs get per-session watermarks and author
+        # provenance. Clients that ignore it see legacy (member_id-only)
+        # behavior — backward-compatible.
+        session_pid = None
+        try:
+            session_pid = int(os.environ.get("CLAUDE_PID") or os.getpid())
+        except (TypeError, ValueError):
+            session_pid = None
+        session_fingerprint = os.environ.get("CLAUDE_SESSION_ID", "")[:64]
+        session_token = _mint_session_token(
+            db, member_id, channel,
+            role="primary", fingerprint=session_fingerprint, pid=session_pid,
+        )
+        db.execute(
+            "UPDATE sessions SET last_read = ? WHERE session_token = ?",
+            (latest_id, session_token),
+        )
         db.commit()
 
         # Fetch objective (pinned message) if any
@@ -569,6 +656,7 @@ def nth_connect(
             "ok": True,
             "channel": channel,
             "member_id": member_id,
+            "session_token": session_token,
             "name": name,
             "action": action,
             "members": [
@@ -606,7 +694,7 @@ def nth_connect(
 
 
 @mcp.tool(name=f"{TOOL_PREFIX}_send")
-def nth_send(channel: str, member_id: str, message: str, task: bool = False, pin: bool = False, blocked_by: str = "") -> str:
+def nth_send(channel: str, member_id: str, message: str, task: bool = False, pin: bool = False, blocked_by: str = "", session_token: str = "", reply_to: int | None = None) -> str:
     """Send a message to the channel. No turns — send anytime.
 
     All members will see this message on their next poll.
@@ -648,6 +736,30 @@ def nth_send(channel: str, member_id: str, message: str, task: bool = False, pin
         member = _get_member(db, channel, member_id)
         if not member:
             return json.dumps({"error": "You are not a member of this channel."})
+
+        # v6: session token capability check. If a token is provided, it MUST
+        # be valid, match the member_id, and have 'primary' role. Tokens with
+        # role='read_only' (minted for sentinel sub-agents) are rejected here.
+        # No token = legacy mode (no provenance, no role check).
+        author_session = None
+        if session_token:
+            sess = _get_session(db, channel, session_token)
+            if not sess:
+                return json.dumps({"error": "Invalid or revoked session_token."})
+            if sess["member_id"] != member_id:
+                return json.dumps({"error": "session_token does not match member_id."})
+            if sess["role"] != "primary":
+                return json.dumps({"error": f"session_token role '{sess['role']}' cannot send. Use a primary token."})
+            author_session = session_token
+
+        # Validate reply_to if given — must reference an existing message in this channel
+        if reply_to is not None:
+            target = db.execute(
+                "SELECT id FROM messages WHERE id = ? AND channel = ?",
+                (reply_to, channel),
+            ).fetchone()
+            if not target:
+                return json.dumps({"error": f"reply_to target #{reply_to} not found in this channel."})
 
         now = now_iso()
         task_id = None
@@ -740,11 +852,20 @@ def nth_send(channel: str, member_id: str, message: str, task: bool = False, pin
         mentions_json = json.dumps(mention_ids) if mention_ids else ""
 
         cur = db.execute(
-            "INSERT INTO messages (channel, member_id, member_name, content, mentions, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (channel, member_id, member["name"], content, mentions_json, now),
+            "INSERT INTO messages (channel, member_id, member_name, content, mentions, "
+            "author_session, reply_to, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (channel, member_id, member["name"], content, mentions_json,
+             author_session, reply_to, now),
         )
         msg_id = cur.lastrowid
+
+        # v6: extend session heartbeat on successful send
+        if author_session:
+            db.execute(
+                "UPDATE sessions SET last_seen = ? WHERE session_token = ?",
+                (now, author_session),
+            )
 
         # Update heartbeat only — do NOT advance watermark here.
         # Watermarks advance in nth_poll (MCP) and nth_wait.py (background).
@@ -800,7 +921,7 @@ def nth_send(channel: str, member_id: str, message: str, task: bool = False, pin
 
 
 @mcp.tool(name=f"{TOOL_PREFIX}_poll")
-def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: str = "") -> str:
+def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: str = "", session_token: str = "", auto_ack: bool = True) -> str:
     """Check for new messages since your last read. Blocks up to wait_seconds.
 
     Returns all unread messages, or "no_new" if nothing arrived.
@@ -831,12 +952,37 @@ def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: st
     from_name_lower = from_name.strip().lower() if from_name else ""
     db = get_db()
 
+    # v6: resolve session_token up front. If provided, watermark lives in
+    # sessions.last_read (per-session) and auto_ack defaults to False.
+    # If not provided, watermark lives in members.last_read (legacy).
+    sess_row = None
+    if session_token:
+        sess_row = _get_session(db, channel, session_token)
+        if not sess_row:
+            db.close()
+            return json.dumps({"error": "Invalid or revoked session_token."})
+        if sess_row["member_id"] != member_id:
+            db.close()
+            return json.dumps({"error": "session_token does not match member_id."})
+        # Session-scoped poll — caller is expected to call nth_ack explicitly
+        # unless they override auto_ack. This is the split that prevents
+        # watermark desync: rogue holders of member_id without the token
+        # cannot advance this session's cursor.
+
     try:
         deadline = time.time() + wait_seconds
         while True:
             member = _get_member(db, channel, member_id)
             if not member:
                 return json.dumps({"error": "You are not a member of this channel."})
+
+            # Current watermark depends on whether the caller uses a session token
+            if sess_row is not None:
+                # Re-read sessions row in case an ack bumped it between iterations
+                fresh = _get_session(db, channel, session_token)
+                current_watermark = fresh["last_read"] if fresh else sess_row["last_read"]
+            else:
+                current_watermark = member["last_read"]
 
             ch = _get_channel(db, channel)
             if not ch:
@@ -846,7 +992,7 @@ def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: st
                 unread = db.execute(
                     "SELECT id, member_id, member_name, content, created_at "
                     "FROM messages WHERE channel = ? AND id > ? ORDER BY id",
-                    (channel, member["last_read"]),
+                    (channel, current_watermark),
                 ).fetchall()
                 # Resolve ended_by member_id to display name
                 ended_by_name = ch["ended_by"]
@@ -877,7 +1023,7 @@ def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: st
             unread = db.execute(
                 "SELECT id, member_id, member_name, content, mentions, created_at "
                 "FROM messages WHERE channel = ? AND id > ? AND member_id != ? ORDER BY id",
-                (channel, member["last_read"], member_id),
+                (channel, current_watermark, member_id),
             ).fetchall()
 
             if unread:
@@ -895,16 +1041,27 @@ def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: st
                 else:
                     display_msgs = unread
 
-                # Advance watermark to the max ID of this batch.
-                # If the caller never explicitly acked after the last poll,
-                # those messages are implicitly acked now (backward-compatible).
-                # When filtering by from_name, never advance watermark — the
-                # caller hasn't seen the unfiltered messages.
-                if not from_name_lower:
+                # Advance watermark behavior depends on session mode:
+                #   - session_token present: NEVER auto-advance. Caller must
+                #     call nth_ack explicitly. This is the split-ack path
+                #     that prevents rogue-holder watermark desync.
+                #   - no session_token, auto_ack=True: legacy behavior —
+                #     advance members.last_read to the batch max.
+                #   - no session_token, auto_ack=False: don't advance.
+                # When filtering by from_name, never advance — caller hasn't
+                # seen the unfiltered messages.
+                if not from_name_lower and sess_row is None and auto_ack:
                     max_id = max(m["id"] for m in unread)
                     db.execute(
                         "UPDATE members SET last_read = ? WHERE id = ? AND channel = ?",
                         (max_id, member_id, channel),
+                    )
+                    db.commit()
+                elif sess_row is not None:
+                    # Extend session heartbeat on every successful read
+                    db.execute(
+                        "UPDATE sessions SET last_seen = ? WHERE session_token = ?",
+                        (now, session_token),
                     )
                     db.commit()
 
@@ -957,7 +1114,7 @@ def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: st
 
 
 @mcp.tool(name=f"{TOOL_PREFIX}_ack")
-def nth_ack(channel: str, member_id: str, through_id: int) -> str:
+def nth_ack(channel: str, member_id: str, through_id: int, session_token: str = "", force: bool = False) -> str:
     """Acknowledge messages up to a given ID, advancing your read watermark.
 
     Call this after processing messages from nth_poll to confirm receipt.
@@ -984,8 +1141,28 @@ def nth_ack(channel: str, member_id: str, through_id: int) -> str:
         if not member:
             return json.dumps({"error": "You are not a member of this channel."})
 
-        current = member["last_read"]
-        if through_id <= current:
+        # v6: session_token resolves which watermark to advance
+        sess = None
+        if session_token:
+            sess = _get_session(db, channel, session_token)
+            if not sess:
+                return json.dumps({"error": "Invalid or revoked session_token."})
+            if sess["member_id"] != member_id:
+                return json.dumps({"error": "session_token does not match member_id."})
+            current = sess["last_read"]
+        else:
+            current = member["last_read"]
+
+        # force=True allows walking back the watermark (e.g., to recover from
+        # a rogue sub-agent that advanced past unread messages). Without force,
+        # ack is monotonic. Cap regression at 1000 messages to prevent an
+        # accidental force=True in a loop from re-reading an entire large
+        # channel on every cycle (self-DoS on context window).
+        MAX_REGRESS = 1000
+        if force and through_id < current - MAX_REGRESS:
+            return json.dumps({"error": f"force regress too large ({current - through_id} > {MAX_REGRESS}). "
+                                        "Issue multiple smaller force-acks to walk back further."})
+        if through_id <= current and not force:
             return json.dumps({"ok": True, "watermark": current, "note": "already past this point"})
 
         # Validate through_id doesn't exceed actual message range
@@ -995,13 +1172,104 @@ def nth_ack(channel: str, member_id: str, through_id: int) -> str:
         ).fetchone()[0] or 0
         if through_id > max_msg:
             return json.dumps({"error": f"Invalid through_id {through_id} — max message ID is {max_msg}."})
+        if through_id < 0:
+            return json.dumps({"error": f"through_id cannot be negative."})
 
+        if sess is not None:
+            db.execute(
+                "UPDATE sessions SET last_read = ?, last_seen = ? WHERE session_token = ?",
+                (through_id, now_iso(), session_token),
+            )
+        else:
+            db.execute(
+                "UPDATE members SET last_read = ? WHERE id = ? AND channel = ?",
+                (through_id, member_id, channel),
+            )
+        db.commit()
+        return json.dumps({"ok": True, "watermark": through_id, "force": force if force else None})
+    finally:
+        db.close()
+
+
+@mcp.tool(name=f"{TOOL_PREFIX}_retract")
+def nth_retract(channel: str, member_id: str, message_id: int, reason: str = "", session_token: str = "") -> str:
+    """Retract a message you previously posted. Marks it retracted in place —
+    does NOT delete. trio_history renders retracted messages with an inline
+    [RETRACTED: reason] marker so peers reading history weeks later see the
+    dispute without having to cross-reference a separate retraction post.
+
+    Only the author can retract their own message. With session_token, the
+    token's author_session must match (provable provenance). Without a
+    session_token (legacy), member_id authorship is checked.
+
+    Args:
+        channel: Channel code
+        member_id: Your member ID
+        message_id: The message to retract
+        reason: Short public reason (shown inline in history). Max 200 chars.
+        session_token: Your session token from nth_connect (required if the
+                       message was posted with a session_token).
+    """
+    err = validate_channel_code(channel)
+    if err:
+        return json.dumps({"error": err})
+
+    reason = (reason or "").strip()[:200]
+
+    db = get_db()
+    try:
+        member = _get_member(db, channel, member_id)
+        if not member:
+            return json.dumps({"error": "You are not a member of this channel."})
+
+        msg = db.execute(
+            "SELECT id, member_id, author_session, retracted_at, content "
+            "FROM messages WHERE id = ? AND channel = ?",
+            (message_id, channel),
+        ).fetchone()
+        if not msg:
+            return json.dumps({"error": f"Message #{message_id} not found in this channel."})
+        if msg["retracted_at"]:
+            return json.dumps({"error": f"Message #{message_id} is already retracted.",
+                              "retracted_at": msg["retracted_at"]})
+
+        # Authorization: the message's author_session must match the caller's
+        # session_token (strong), OR the message has no author_session and
+        # the caller's member_id matches (legacy).
+        if msg["author_session"]:
+            if not session_token:
+                return json.dumps({"error": "This message has a session-bound authorship. "
+                                  "Provide the session_token that originally posted it to retract."})
+            if session_token != msg["author_session"]:
+                sess = _get_session(db, channel, session_token)
+                if not sess or sess["member_id"] != member_id:
+                    return json.dumps({"error": "Invalid or mismatched session_token."})
+                return json.dumps({"error": "session_token did not author this message. "
+                                  "Only the authoring session can retract."})
+        else:
+            if msg["member_id"] != member_id:
+                return json.dumps({"error": "Only the author can retract this message."})
+
+        now = now_iso()
+        retractor = session_token if session_token else member_id
         db.execute(
-            "UPDATE members SET last_read = ? WHERE id = ? AND channel = ?",
-            (through_id, member_id, channel),
+            "UPDATE messages SET retracted_at = ?, retracted_by = ?, retraction_reason = ? "
+            "WHERE id = ? AND channel = ?",
+            (now, retractor, reason, message_id, channel),
+        )
+        # Post a synthetic channel event so peers with a sentinel see the
+        # retraction at the same cadence as a normal message. Keeps the
+        # retraction visible without relying on peers re-reading history.
+        synthetic = f"[retracted #{message_id}] {reason}" if reason else f"[retracted #{message_id}]"
+        db.execute(
+            "INSERT INTO messages (channel, member_id, member_name, content, "
+            "author_session, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (channel, member_id, member["name"], synthetic,
+             session_token if session_token else None, now),
         )
         db.commit()
-        return json.dumps({"ok": True, "watermark": through_id})
+        _console("🚫", channel, f"{member['name']} retracted #{message_id}: {reason[:60]}", 31)
+        return json.dumps({"ok": True, "message_id": message_id, "retracted_at": now})
     finally:
         db.close()
 
@@ -1033,41 +1301,113 @@ def nth_history(channel: str, last_n: int = 20, from_id: int | None = None) -> s
 
         if from_id is not None:
             rows = db.execute(
-                "SELECT id, member_id, member_name, content, created_at "
+                "SELECT id, member_id, member_name, content, created_at, "
+                "retracted_at, retracted_by, retraction_reason, reply_to "
                 "FROM messages WHERE channel = ? AND id >= ? ORDER BY id",
                 (channel, from_id),
             ).fetchall()
         else:
             rows = db.execute(
-                "SELECT id, member_id, member_name, content, created_at "
+                "SELECT id, member_id, member_name, content, created_at, "
+                "retracted_at, retracted_by, retraction_reason, reply_to "
                 "FROM messages WHERE channel = ? ORDER BY id DESC LIMIT ?",
                 (channel, last_n),
             ).fetchall()
             rows = list(reversed(rows))
 
-        messages = [
-            {
+        messages = []
+        retracted_ids = []
+        for m in rows:
+            is_retracted = bool(m["retracted_at"])
+            display_content = m["content"]
+            if is_retracted:
+                reason = m["retraction_reason"] or "retracted by author"
+                display_content = f"[RETRACTED: {reason}] {m['content']}"
+                retracted_ids.append(m["id"])
+            entry = {
                 "id": m["id"],
                 "from": m["member_name"] or m["member_id"],
-                "content": m["content"],
+                "content": display_content,
                 "at": m["created_at"],
             }
-            for m in rows
-        ]
+            if is_retracted:
+                entry["retracted"] = True
+                entry["retracted_at"] = m["retracted_at"]
+                if m["retraction_reason"]:
+                    entry["retraction_reason"] = m["retraction_reason"]
+            if m["reply_to"]:
+                entry["reply_to"] = m["reply_to"]
+            messages.append(entry)
 
-        return json.dumps({
+        resp = {
             "ok": True,
             "channel": channel,
             "count": len(messages),
             "messages": messages,
             "footer": MESSAGE_FOOTER,
-        })
+        }
+        if retracted_ids:
+            resp["retracted_count"] = len(retracted_ids)
+            resp["retracted_ids"] = retracted_ids
+        return json.dumps(resp)
     finally:
         db.close()
 
 
+LEASE_STALE_GRACE_SECONDS = 600  # 10 minutes past lease expiry before auto-release
+
+def _sweep_stale_leases(db, channel: str) -> list[int]:
+    """Release claims whose claiming session is stale AND lease has expired.
+
+    A lease is considered stale when:
+      1. lease_expires_at < now - LEASE_STALE_GRACE_SECONDS, AND
+      2. the claiming session's last_seen is older than STALE_THRESHOLD_SECONDS.
+
+    Returns the list of task IDs that were auto-released.
+    """
+    released = []
+    now_dt = datetime.now(timezone.utc)
+    claimed = db.execute(
+        "SELECT id, claimed_by, claimed_by_session, lease_expires_at "
+        "FROM tasks WHERE channel = ? AND status = 'claimed' "
+        "AND lease_expires_at IS NOT NULL",
+        (channel,),
+    ).fetchall()
+    for t in claimed:
+        try:
+            exp = datetime.fromisoformat(t["lease_expires_at"])
+        except (ValueError, TypeError):
+            continue
+        if (now_dt - exp).total_seconds() < LEASE_STALE_GRACE_SECONDS:
+            continue
+        # Lease expired past grace. Check session liveness if we know it.
+        if t["claimed_by_session"]:
+            sess = db.execute(
+                "SELECT last_seen FROM sessions WHERE session_token = ?",
+                (t["claimed_by_session"],),
+            ).fetchone()
+            if sess and _is_member_active(sess["last_seen"]):
+                continue  # session still alive, respect the claim
+        # Reclaim — guard on status + original session to avoid racing a
+        # legitimate renewal that happened between the liveness check and
+        # this UPDATE. Only release if the row is still claimed by the same
+        # (now-stale) session we read above.
+        cur = db.execute(
+            "UPDATE tasks SET status = 'open', claimed_by = NULL, "
+            "claimed_by_session = NULL, lease_expires_at = NULL, updated_at = ? "
+            "WHERE id = ? AND channel = ? AND status = 'claimed' "
+            "AND (claimed_by_session IS ? OR claimed_by_session = ?)",
+            (now_iso(), t["id"], channel, t["claimed_by_session"], t["claimed_by_session"] or ""),
+        )
+        if cur.rowcount:
+            released.append(t["id"])
+    if released:
+        db.commit()
+    return released
+
+
 @mcp.tool(name=f"{TOOL_PREFIX}_claim")
-def nth_claim(channel: str, member_id: str, task_id: int) -> str:
+def nth_claim(channel: str, member_id: str, task_id: int, session_token: str = "", lease_seconds: int = 3600) -> str:
     """Atomically claim an open task. Returns success or conflict.
 
     Only one member can claim a task. If someone else already claimed it,
@@ -1088,7 +1428,26 @@ def nth_claim(channel: str, member_id: str, task_id: int) -> str:
         if not member:
             return json.dumps({"error": "You are not a member of this channel."})
 
+        # v6: sweep stale-leased tasks first so a dead claimer doesn't
+        # permanently block this claim attempt.
+        auto_released = _sweep_stale_leases(db, channel)
+
+        # Validate session_token if provided — only primary role can claim.
+        claim_session = None
+        if session_token:
+            sess = _get_session(db, channel, session_token)
+            if not sess:
+                return json.dumps({"error": "Invalid or revoked session_token."})
+            if sess["member_id"] != member_id:
+                return json.dumps({"error": "session_token does not match member_id."})
+            if sess["role"] != "primary":
+                return json.dumps({"error": f"session_token role '{sess['role']}' cannot claim tasks."})
+            claim_session = session_token
+
         now = now_iso()
+        lease_seconds = max(60, min(lease_seconds, 86400))  # 1 min .. 24 h
+        lease_expires = (datetime.now(timezone.utc)
+                         + timedelta(seconds=lease_seconds)).isoformat() if claim_session else None
 
         # Check if task exists and whether it's blocked
         task_check = db.execute(
@@ -1116,9 +1475,10 @@ def nth_claim(channel: str, member_id: str, task_id: int) -> str:
 
         # Atomic claim: only succeeds if status is still 'open'
         cur = db.execute(
-            "UPDATE tasks SET claimed_by = ?, status = 'claimed', updated_at = ? "
+            "UPDATE tasks SET claimed_by = ?, claimed_by_session = ?, "
+            "lease_expires_at = ?, status = 'claimed', updated_at = ? "
             "WHERE id = ? AND channel = ? AND status = 'open'",
-            (member_id, now, task_id, channel),
+            (member_id, claim_session, lease_expires, now, task_id, channel),
         )
 
         if cur.rowcount == 0:
