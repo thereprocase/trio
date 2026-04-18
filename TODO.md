@@ -2,6 +2,17 @@
 
 ## Open
 
+### Sentinel simplification experiment (~v7)
+**Severity:** High (architectural) | **Since:** v6.2 (2026-04-17)
+
+Both sentinels and the `trio-sentinel` subagent apparatus exist to work around Haiku drift on the 1h foreground Bash contract. A harness-provided blocking-subprocess primitive would eliminate the need entirely. Until Anthropic ships that, three paths forward are captured in `reports/2026-04-18-sentinel-simplification-paths.md`:
+
+1. Shrink `MAX_RUNTIME_S` from 59 → 10 min. Trivial, reversible.
+2. OS daemon + peek-only. Loses idle-push semantics.
+3. **File-flag pipe via Bash** (recommended experiment) — OS daemon writes events to a named pipe; parent's `Bash(timeout=600000)` blocks on `read -t 590 line < /tmp/nth-events.pipe`. No sub-agent, no Haiku, capability bug class eliminated structurally. Collapses both sentinels into one Bash call pattern.
+
+Also file an RFC with Anthropic for the underlying primitive. Don't block on it.
+
 ### Sonnet triage layer (~v6+)
 **Severity:** Medium | **Since:** v5.0 RC2 (2026-04-06) | **Branch:** `v5.1-sonnet-triage`
 
