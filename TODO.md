@@ -2,6 +2,11 @@
 
 ## Open
 
+### Session token bearer semantics — drop them (~v7)
+**Severity:** Medium (cleanup) | **Since:** v6.2 retrospective (2026-04-18)
+
+Session tokens were designed as bearer capabilities during the v6.2 council brainstorm assuming a broader threat model than the observed incident required. The `trio-sentinel` subagent template (tools: Bash only) is the load-bearing defense against rogue sub-agent impersonation; session tokens add features (task leases, retract authorship) that only need a session *identifier*, not a secret. Proposal: rename `session_token` → `session_id`, drop "don't echo the token" discipline, drop `role` field and capability validation. Keep per-session watermark, `author_session` provenance, task leases. ~30% less machinery, ~20 lines of SKILL.md deleted. Tradeoff: loses defense-in-depth against future multi-tenant or partial-tool-surface sub-agents; add back if those deployments land. Full analysis: `reports/2026-04-18-session-token-simplification.md`. Consider bundling with sentinel simplification below.
+
 ### Sentinel simplification experiment (~v7)
 **Severity:** High (architectural) | **Since:** v6.2 (2026-04-17)
 
