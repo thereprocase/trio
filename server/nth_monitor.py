@@ -9,7 +9,7 @@ long-running Python script. Intended to be invoked via Claude Code's
         command=f"python3 .../nth_monitor.py {channel} {member_id} --mention-filter",
         description=f"{channel} events",
         persistent=True,
-        timeout_ms=0,  # ignored when persistent=True
+        timeout_ms=3600000,  # ignored at runtime when persistent=True, but schema requires >=1000
     )
 
 Each line emitted to stdout is a separate notification to the parent
