@@ -152,8 +152,12 @@ def fetch(db, channel, after_id, since_ts):
 def main():
     ap = argparse.ArgumentParser(description="Live console view of nth traffic.")
     ap.add_argument("-c", "--channel", help="Filter to one channel code.")
-    ap.add_argument("-s", "--since", type=int, default=0,
-                    help="Seconds of backlog to print before tailing (default 0).")
+    ap.add_argument("-s", "--since", type=int, default=None,
+                    help="Seconds of backlog to print before tailing. "
+                         "Default is everything — the full channel history "
+                         "is dumped into the terminal on startup so your "
+                         "native scrollback works like a chat app. Pass a "
+                         "number to limit (e.g. -s 3600 for the last hour).")
     ap.add_argument("--snapshot", action="store_true",
                     help="Print current log and exit (no tail).")
     ap.add_argument("--no-color", action="store_true",
@@ -179,12 +183,15 @@ def main():
     db = open_db(db_path)
     show_channel = args.channel is None
 
-    # Starting watermark: if --since, pull history from that far back.
+    # Starting point for the history dump.
+    # - Default (--since not passed): everything. Scrollback in the user's
+    #   terminal emulator is the "scrollable chat history"; dumping the full
+    #   log up front makes that natural.
+    # - --since N: only the last N seconds.
+    # - --snapshot: everything, and exit after printing.
     since_ts = None
-    if args.since > 0:
+    if args.since is not None and args.since > 0:
         since_ts = datetime.fromtimestamp(time.time() - args.since).astimezone().isoformat()
-    elif args.snapshot:
-        since_ts = "1970-01-01T00:00:00+00:00"
 
     rows = fetch(db, args.channel, 0, since_ts)
     for r in rows:

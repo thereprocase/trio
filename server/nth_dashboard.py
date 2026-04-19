@@ -60,8 +60,10 @@ POLL_INTERVAL        = 0.5       # seconds between DB polls
 REFRESH_HZ           = 4         # Live refresh rate
 SPARKLINE_MINS       = 5         # minutes of global msg-rate to show
 SPARKLINE_BIN_SEC    = 10        # one bar = 10s
-TAIL_LINES           = 7         # fixed-height footer
-SNIPPET_CHARS        = 60
+TAIL_MIN_LINES       = 8         # min display rows reserved for chat tail
+TAIL_FETCH           = 60        # how many messages to pull for the tail
+SNIPPET_CHARS        = 60        # table row "Last snippet" truncation
+TABLE_OVERHEAD_LINES = 4         # header + separator + padding for the table
 SLEEPING_KEYWORDS    = ("idle", "standing by", "tier 3", "agent-monitor")
 
 AGENT_PALETTE = [
@@ -201,9 +203,10 @@ class AgentState:
 
 # ───────── Dashboard core ─────────
 class Dashboard:
-    def __init__(self, channel: str, db_path: Path):
+    def __init__(self, channel: str, db_path: Path, console: Optional[Console] = None):
         self.channel = channel
         self.db_path = db_path
+        self.console = console or Console()
         self.db: Optional[sqlite3.Connection] = None
         self.agents: Dict[str, AgentState] = {}
         self.last_msg_id = 0
@@ -461,37 +464,61 @@ class Dashboard:
         sections.append(tail_rows)
         return Group(*sections)
 
+    def _tail_viewport_lines(self) -> int:
+        """How many terminal rows the tail may use. Header, table, and
+        blank separators eat from the top; everything else is ours."""
+        total = self.console.size.height
+        used_above = 2                                      # header + blank
+        used_above += TABLE_OVERHEAD_LINES + max(1, len(self.agents))
+        if self.error:
+            used_above += 1
+        used_above += 1                                     # blank between table and tail
+        return max(TAIL_MIN_LINES, total - used_above - 1)
+
     def _render_tail(self) -> Group:
         assert self.db is not None
         rows = self.db.execute(
             "SELECT id, member_id, member_name, content, mentions, created_at "
             "FROM messages WHERE channel = ? ORDER BY id DESC LIMIT ?",
-            (self.channel, TAIL_LINES),
+            (self.channel, TAIL_FETCH),
         ).fetchall()
-        rows = list(reversed(rows))
+        rows = list(reversed(rows))                         # oldest first
 
-        lines: List[Text] = []
-        for r in rows:
+        # Build a chronological stream of wrapped display lines.
+        wrap_width = max(20, self.console.size.width - 2)
+        all_lines: List[Text] = []
+        for i, r in enumerate(rows):
             t = parse_ts(r["created_at"])
             hhmmss = datetime.fromtimestamp(t).strftime("%H:%M:%S") if t else "--:--:--"
             sender = self._ensure_agent(r["member_id"], r["member_name"])
             mentions = parse_mentions(r["mentions"])
-            recipients = ",".join(mentions) if mentions else "all"
-            content = (r["content"] or "")[:100]
+            content = r["content"] or ""
 
-            line = Text()
-            line.append(f"  {hhmmss}  ", style="bright_black")
-            line.append(f"[{sender.name:>8}", style=sender.color)
-            line.append(" → ", style="bright_black")
-            line.append(f"{recipients:<8}] ", style="yellow" if mentions else "bright_black")
-            line.append(content)
-            lines.append(line)
+            header = Text()
+            header.append(f"{hhmmss}  ", style="bright_black")
+            header.append(sender.name, style=f"{sender.color} bold")
+            if mentions:
+                header.append(" → @" + ",@".join(mentions), style="yellow")
+            all_lines.append(header)
 
-        # Pad to fixed height so layout doesn't jump.
-        while len(lines) < TAIL_LINES:
-            lines.append(Text(""))
+            body = Text("  " + content)
+            for wrapped in body.wrap(self.console, wrap_width):
+                all_lines.append(wrapped)
 
-        return Group(*lines)
+            if i != len(rows) - 1:                          # blank separator between messages
+                all_lines.append(Text(""))
+
+        # Bottom-align into the viewport: keep only the most recent lines
+        # that fit; pad the top with blanks when we have less content than
+        # screen real-estate (e.g. a fresh channel).
+        height = self._tail_viewport_lines()
+        if len(all_lines) > height:
+            all_lines = all_lines[-height:]
+        else:
+            pad = height - len(all_lines)
+            all_lines = [Text("")] * pad + all_lines
+
+        return Group(*all_lines)
 
     # ── Keybinds ──
     def cycle_sort(self) -> None:
@@ -572,7 +599,8 @@ def main() -> int:
         sys.stderr.write(f"nth.db not found at {db_path}\n")
         return 1
 
-    dash = Dashboard(args.channel, db_path)
+    console = Console()
+    dash = Dashboard(args.channel, db_path, console=console)
     dash.open()
 
     stop_flag = {"flag": False}
@@ -584,8 +612,6 @@ def main() -> int:
 
     keys = KeyReader(dash, stop_flag)
     keys.start()
-
-    console = Console()
 
     try:
         with Live(dash.render(), console=console, refresh_per_second=args.refresh_hz,
