@@ -12,6 +12,9 @@ long-running Python script. Intended to be invoked via Claude Code's
         timeout_ms=3600000,  # ignored at runtime when persistent=True, but schema requires >=1000
     )
 
+Windows: substitute `py` for `python3` (PEP 397 launcher). The script
+itself is pure stdlib (sqlite3, pathlib, json) and runs on any OS.
+
 Each line emitted to stdout is a separate notification to the parent
 Claude. The script never exits on its own unless the channel ends.
 
