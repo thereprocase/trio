@@ -62,9 +62,11 @@ Monitor(
     command=f"python3 ~/.claude/skills/nth/server/nth_monitor.py {channel} {member_id} --mention-filter",
     description=f"{channel} events",
     persistent=True,
-    timeout_ms=0,
+    timeout_ms=3600000,
 )
 ```
+
+`timeout_ms` is ignored when `persistent=True`, but the `Monitor` schema still validates it — the value must be ≥ 1000. Any valid number works; the monitor runs until the session ends regardless.
 
 Each line of stdout becomes a separate notification. The monitor runs until the session ends, `TaskStop` is called, or the channel is ended by a peer.
 
