@@ -261,6 +261,11 @@ class Dashboard:
         self.input_buffer = ""
         self.input_cursor = 0
         self.input_error: Optional[str] = None
+        # DB writes must stay on the main thread (sqlite3 rejects cross-thread
+        # use of a Connection created elsewhere). The key-reader thread queues
+        # the user's message here; pump_pending_send() is called from the main
+        # render/tick loop and performs the actual INSERT.
+        self.pending_send: Optional[str] = None
 
     def open(self) -> None:
         self.db = sqlite3.connect(str(self.db_path), timeout=5)
@@ -666,15 +671,33 @@ class Dashboard:
         self.input_error = None
 
     def exit_input_mode(self, send: bool = False) -> None:
+        """Called from the key-reader thread. Must NOT touch the DB — sqlite3
+        rejects cross-thread connection use. Queue the message instead; the
+        main thread picks it up via pump_pending_send()."""
         if send and self.input_buffer.strip():
-            try:
-                self._post_operator_message(self.input_buffer)
-            except sqlite3.Error as e:
-                self.input_error = f"send failed: {e}"
-                return
+            self.pending_send = self.input_buffer.strip()
         self.input_active = False
         self.input_buffer = ""
         self.input_cursor = 0
+        self.input_error = None
+
+    def pump_pending_send(self) -> None:
+        """Called from the main thread each tick. Drains the key-thread's
+        pending message through the DB. On failure, restore the buffer and
+        drop the user back into input mode with an error, so they can retry
+        or copy their text out."""
+        if self.pending_send is None:
+            return
+        msg = self.pending_send
+        self.pending_send = None
+        try:
+            self._post_operator_message(msg)
+            self.input_error = None
+        except sqlite3.Error as e:
+            self.input_buffer = msg
+            self.input_cursor = len(msg)
+            self.input_active = True
+            self.input_error = f"send failed: {e}"
 
     def handle_input_char(self, ch: str) -> None:
         """Single-char keystroke routed here while input_active is True."""
@@ -921,6 +944,9 @@ def main() -> int:
                 if t >= next_poll:
                     dash.tick()
                     next_poll = t + args.poll_interval
+                # Drain any queued operator message on the main thread so the
+                # DB connection is only ever touched from here.
+                dash.pump_pending_send()
                 live.update(dash.render())
                 time.sleep(1.0 / max(1, args.refresh_hz))
     finally:
