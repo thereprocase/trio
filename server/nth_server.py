@@ -452,7 +452,14 @@ def _get_session(db, channel: str, session_token: str):
 
 
 def _sentinel_nag(member) -> str:
-    """Check caller's own sentinel heartbeats. Returns a nag string or empty."""
+    """Check caller's heartbeat freshness. Returns a nag string or empty.
+
+    Both the legacy Haiku-subagent design and the Monitor-based design
+    (`nth_monitor.py`, v7+) write to `messenger_heartbeat` +
+    `watchdog_heartbeat`. If either heartbeat is stale, the caller's event
+    sentinel is likely down and deserves the nag. When a Monitor-based
+    sentinel is running, both columns are updated every tick and this
+    returns empty (no false-positive nag)."""
     try:
         mhb = member["messenger_heartbeat"] if "messenger_heartbeat" in member.keys() else ""
         whb = member["watchdog_heartbeat"] if "watchdog_heartbeat" in member.keys() else ""
@@ -461,11 +468,11 @@ def _sentinel_nag(member) -> str:
     has_msg = bool(mhb) and _seconds_since(mhb) < 300
     has_wtd = bool(whb) and _seconds_since(whb) < 300
     if has_msg and has_wtd:
-        return ""  # both alive, no nag
+        return ""  # fresh heartbeats, no nag
     if not has_msg and not has_wtd:
-        return "[server] SENTINELS DOWN. You are DEAF. Launch both NOW."
+        return "[server] Sentinel heartbeat stale. Relaunch your Monitor."
     missing = "messenger" if not has_msg else "watchdog"
-    return f"[server] {missing} sentinel DOWN. Relaunch it."
+    return f"[server] {missing} heartbeat stale. Relaunch your Monitor."
 
 
 # ── MCP Tools ────────────────────────────────────────────────────────────────
@@ -909,8 +916,13 @@ def nth_send(channel: str, member_id: str, message: str, task: bool = False, pin
             "ok": True,
             "channel": channel,
             "message_id": msg_id,
-            "footer": _sentinel_nag(member) or "",
         }
+        # Footer is only emitted on nth_poll — the active-read call. nth_send,
+        # nth_ack, and nth_history responses are already dense enough; the
+        # MESSAGE_FOOTER + sentinel nag repetition there was pure noise.
+        nag = _sentinel_nag(member)
+        if nag:
+            result["footer"] = nag
         if task_id is not None:
             result["task_id"] = task_id
         if pin:
@@ -921,7 +933,7 @@ def nth_send(channel: str, member_id: str, message: str, task: bool = False, pin
 
 
 @mcp.tool(name=f"{TOOL_PREFIX}_poll")
-def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: str = "", session_token: str = "", auto_ack: bool = True) -> str:
+def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: str = "", session_token: str = "", auto_ack: bool = True, mentions_only: bool = False) -> str:
     """Check for new messages since your last read. Blocks up to wait_seconds.
 
     Returns all unread messages, or "no_new" if nothing arrived.
@@ -933,6 +945,10 @@ def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: st
     messages (backward-compatible default).
 
     Use from_name to filter messages by sender (case-insensitive substring).
+    Use mentions_only=True to return only broadcasts (empty mentions array)
+    and messages that mention this member_id — non-matching messages are
+    hidden but still advance the watermark on auto-ack. Lets callers opt
+    out of cross-talk bodies.
     When filtering, only matching messages are returned but the watermark
     is NOT advanced — unfiltered messages remain unread for your next poll.
 
@@ -1040,6 +1056,26 @@ def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: st
                     display_msgs = filtered
                 else:
                     display_msgs = unread
+
+                # Apply mentions_only filter: keep broadcasts (empty mentions)
+                # and messages that mention this member. Hidden messages still
+                # exist and will advance the watermark via auto-ack below — the
+                # caller has opted out of seeing their bodies, not out of
+                # acknowledging them.
+                if mentions_only:
+                    mo_filtered = []
+                    for m in display_msgs:
+                        raw = m["mentions"] if m["mentions"] else ""
+                        if not raw:
+                            mo_filtered.append(m)
+                            continue
+                        try:
+                            ids = json.loads(raw)
+                        except (json.JSONDecodeError, TypeError):
+                            ids = []
+                        if member_id in ids:
+                            mo_filtered.append(m)
+                    display_msgs = mo_filtered
 
                 # Advance watermark behavior depends on session mode:
                 #   - session_token present: NEVER auto-advance. Caller must
@@ -1344,8 +1380,8 @@ def nth_history(channel: str, last_n: int = 20, from_id: int | None = None) -> s
             "channel": channel,
             "count": len(messages),
             "messages": messages,
-            "footer": MESSAGE_FOOTER,
         }
+        # history is read-only replay; no footer (see _sentinel_nag note in nth_send).
         if retracted_ids:
             resp["retracted_count"] = len(retracted_ids)
             resp["retracted_ids"] = retracted_ids
@@ -1499,19 +1535,14 @@ def nth_claim(channel: str, member_id: str, task_id: int, session_token: str = "
                 "status": task["status"],
             })
 
-        # Read back the task description to include in the claim message
-        task_row = db.execute(
-            "SELECT description FROM tasks WHERE id = ? AND channel = ?",
-            (task_id, channel),
-        ).fetchone()
-        task_desc = task_row["description"] if task_row else ""
-
-        # Post claim message
+        # Post claim message — task_id alone is enough to find the original
+        # task post; echoing task_desc here would triple-print it across
+        # post/claim/complete (context-window churn, no added information).
         db.execute(
             "INSERT INTO messages (channel, member_id, member_name, content, created_at) "
             "VALUES (?, ?, ?, ?, ?)",
             (channel, member_id, member["name"],
-             f"[claimed #{task_id}] {task_desc}", now),
+             f"[claimed #{task_id}] by {member['name']}", now),
         )
         db.commit()
 
@@ -1569,13 +1600,6 @@ def nth_complete(channel: str, member_id: str, task_id: int, result: str = "") -
                 return json.dumps({"error": f"Task #{task_id} is claimed by someone else."})
             return json.dumps({"error": f"Task #{task_id} cannot be completed (status: {task['status']})."})
 
-        # Read back the task description for the done message
-        task_row = db.execute(
-            "SELECT description FROM tasks WHERE id = ? AND channel = ?",
-            (task_id, channel),
-        ).fetchone()
-        task_desc = task_row["description"] if task_row else ""
-
         # Unblock downstream tasks whose blockers are now all done
         unblocked = []
         blocked_tasks = db.execute(
@@ -1603,8 +1627,9 @@ def nth_complete(channel: str, member_id: str, task_id: int, result: str = "") -
                 )
                 unblocked.append(f"#{bt['id']}")
 
-        # Post completion message
-        msg = f"[done #{task_id}] {task_desc}"
+        # Post completion message — task_id is enough to find the original;
+        # omit task_desc to avoid re-echoing it for a third time.
+        msg = f"[done #{task_id}] by {member['name']}"
         if result:
             msg += f" — {result.strip()}"
         if unblocked:

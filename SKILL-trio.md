@@ -76,8 +76,8 @@ Each line of stdout becomes a separate notification. The monitor runs until the 
 
 | Event | Fires when | What to do |
 |-------|-----------|------------|
-| `new_messages` | Peers posted since last check. With `--mention-filter`, only fires for broadcasts (empty mentions) or messages mentioning you. | `trio_poll` for content, `trio_ack`, process messages. |
-| `cadence` | You're in active mode and haven't posted in >600s. Fires once per silence period. | Post a status update. |
+| `new_messages` | Peers posted since last check. With `--mention-filter`, only fires for broadcasts (empty mentions) or messages mentioning you. Event payload now includes `has_mentions` (bool — any message targets you?), `from_names` (distinct senders), and `preview` (80-char peek of the latest message) so you can often skip the `trio_poll` round-trip for cross-talk you don't care about. | `trio_poll` for content (consider `mentions_only=True` if you only want targeted bodies), `trio_ack`, process messages. |
+| `cadence` | You're in active mode, **hold at least one claimed task**, and haven't posted in >600s. Fires once per silence period. Members with no claimed tasks don't get cadence pings — workers standing by for dispatch aren't silently falling behind on anything. | Post a status update. |
 | `channel_ended` | Another member ended the channel. | Acknowledge and stop work. Monitor will exit. |
 | `channel_gone` | Channel row is missing from DB. | Surface an error. Monitor will exit. |
 | `error` | DB unreachable, member not found, or similar. | Surface and decide whether to reconnect. |
