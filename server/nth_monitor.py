@@ -46,8 +46,9 @@ from nth_constants import SLEEPING_KEYWORDS
 
 DB_PATH = Path.home() / ".claude" / "nth" / "nth.db"
 
-ACTIVE_INTERVAL = 3
-IDLE_INTERVAL = 30
+ACTIVE_INTERVAL = 0.5
+IDLE_INTERVAL = 3.0
+HEARTBEAT_INTERVAL = 10.0
 CADENCE_THRESHOLD = 600
 
 
@@ -79,12 +80,18 @@ def is_sleeping(status_text):
 def monitor(channel, member_id, mention_filter=False, _db_path=None):
     local_hwm = None
     cadence_fired = False
+    last_heartbeat_mono = 0.0
     db_error_streak = 0
 
     db_path = _db_path or DB_PATH
     db = sqlite3.connect(str(db_path), timeout=10)
     db.row_factory = sqlite3.Row
     db.execute("PRAGMA journal_mode=WAL")
+    # synchronous=NORMAL is safe under WAL: we lose at most the most recent
+    # commit on a hard crash, and the only thing we commit here is a heartbeat
+    # timestamp — recomputed on the next tick. Dropping per-commit fsync is
+    # what makes sub-second polling cheap on laptop SSDs.
+    db.execute("PRAGMA synchronous=NORMAL")
     db.execute("PRAGMA busy_timeout=5000")
 
     try:
@@ -122,19 +129,21 @@ def monitor(channel, member_id, mention_filter=False, _db_path=None):
                     emit({"event": "channel_ended", "ended_by": ender_name})
                     return
 
-                now_ts = now_iso()
-                # Write last_seen plus both legacy sentinel heartbeat columns.
-                # The server's _sentinel_nag() suppresses the "SENTINELS DOWN" footer
-                # when messenger+watchdog heartbeats look fresh. The Monitor-based
-                # design replaces both subagents with this single process, so we
-                # satisfy the legacy check by updating both columns every tick.
-                db.execute(
-                    "UPDATE members SET last_seen = ?, "
-                    "messenger_heartbeat = ?, watchdog_heartbeat = ? "
-                    "WHERE channel = ? AND id = ?",
-                    (now_ts, now_ts, now_ts, channel, member_id),
-                )
-                db.commit()
+                # Decouple heartbeat writes from poll rate. At 0.5s active polling
+                # we'd otherwise do ~172k fsync-bearing commits/day just to bump a
+                # timestamp. The server's _sentinel_nag() threshold is 300s, so
+                # writing once every HEARTBEAT_INTERVAL (~10s) is 30× margin.
+                mono = time.monotonic()
+                if mono - last_heartbeat_mono >= HEARTBEAT_INTERVAL:
+                    now_ts = now_iso()
+                    db.execute(
+                        "UPDATE members SET last_seen = ?, "
+                        "messenger_heartbeat = ?, watchdog_heartbeat = ? "
+                        "WHERE channel = ? AND id = ?",
+                        (now_ts, now_ts, now_ts, channel, member_id),
+                    )
+                    db.commit()
+                    last_heartbeat_mono = mono
 
                 sleeping = is_sleeping(member["status_text"])
                 check_interval = IDLE_INTERVAL if sleeping else ACTIVE_INTERVAL
