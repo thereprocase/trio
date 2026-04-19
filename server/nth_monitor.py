@@ -123,9 +123,16 @@ def monitor(channel, member_id, mention_filter=False, _db_path=None):
                     return
 
                 now_ts = now_iso()
+                # Write last_seen plus both legacy sentinel heartbeat columns.
+                # The server's _sentinel_nag() suppresses the "SENTINELS DOWN" footer
+                # when messenger+watchdog heartbeats look fresh. The Monitor-based
+                # design replaces both subagents with this single process, so we
+                # satisfy the legacy check by updating both columns every tick.
                 db.execute(
-                    "UPDATE members SET last_seen = ? WHERE channel = ? AND id = ?",
-                    (now_ts, channel, member_id),
+                    "UPDATE members SET last_seen = ?, "
+                    "messenger_heartbeat = ?, watchdog_heartbeat = ? "
+                    "WHERE channel = ? AND id = ?",
+                    (now_ts, now_ts, now_ts, channel, member_id),
                 )
                 db.commit()
 
@@ -148,7 +155,7 @@ def monitor(channel, member_id, mention_filter=False, _db_path=None):
                     local_hwm = max(legacy_hwm, sess_hwm)
 
                 unread = db.execute(
-                    "SELECT id, mentions FROM messages "
+                    "SELECT id, mentions, member_name, content FROM messages "
                     "WHERE channel = ? AND id > ? AND member_id != ? "
                     "ORDER BY id",
                     (channel, local_hwm, member_id),
@@ -174,27 +181,72 @@ def monitor(channel, member_id, mention_filter=False, _db_path=None):
                         relevant = list(unread)
 
                     if relevant:
+                        # Classify: has_mentions (any message targets me), from_names
+                        # (distinct senders), preview (80 chars of latest). Callers can
+                        # skip the trio_poll round-trip for cross-talk they don't care
+                        # about.
+                        has_mentions = False
+                        for m in relevant:
+                            raw = m["mentions"] if "mentions" in m.keys() else ""
+                            if raw:
+                                try:
+                                    ids = json.loads(raw)
+                                except (ValueError, TypeError):
+                                    ids = []
+                                if member_id in ids:
+                                    has_mentions = True
+                                    break
+                        from_names = []
+                        seen = set()
+                        for m in relevant:
+                            n = m["member_name"] or ""
+                            if n and n not in seen:
+                                seen.add(n)
+                                from_names.append(n)
+                        latest_content = relevant[-1]["content"] or ""
+                        preview = latest_content[:80] + ("…" if len(latest_content) > 80 else "")
+
                         emit({
                             "event": "new_messages",
                             "mode": "idle" if sleeping else "active",
                             "message_ids": [m["id"] for m in relevant],
                             "count": len(relevant),
+                            "has_mentions": has_mentions,
+                            "from_names": from_names,
+                            "preview": preview,
                         })
 
-                # --- Cadence (active mode only, fire-once per silence period) ---
+                # --- Cadence (active mode, no claimed tasks → skip) ---
+                # Fire once per silence period if member is in active mode AND holds
+                # at least one claimed task. Workers standing by with no task claim
+                # don't need a nudge — the idle-reply/auto-clear cycle was producing
+                # pure-ceremony cadence pings.
                 if not sleeping:
-                    latest_own = db.execute(
-                        "SELECT created_at FROM messages "
-                        "WHERE channel = ? AND member_id = ? ORDER BY id DESC LIMIT 1",
-                        (channel, member_id),
-                    ).fetchone()
-                    gap = seconds_since(
-                        latest_own["created_at"] if latest_own else None
-                    )
-                    if gap > CADENCE_THRESHOLD and not cadence_fired:
-                        emit({"event": "cadence", "gap_seconds": round(gap)})
-                        cadence_fired = True
-                    elif gap < CADENCE_THRESHOLD:
+                    try:
+                        claimed_count_row = db.execute(
+                            "SELECT COUNT(*) AS n FROM tasks "
+                            "WHERE channel = ? AND claimed_by = ? AND status = 'claimed'",
+                            (channel, member_id),
+                        ).fetchone()
+                        claimed_count = claimed_count_row["n"] if claimed_count_row else 0
+                    except sqlite3.OperationalError:
+                        claimed_count = 0
+
+                    if claimed_count > 0:
+                        latest_own = db.execute(
+                            "SELECT created_at FROM messages "
+                            "WHERE channel = ? AND member_id = ? ORDER BY id DESC LIMIT 1",
+                            (channel, member_id),
+                        ).fetchone()
+                        gap = seconds_since(
+                            latest_own["created_at"] if latest_own else None
+                        )
+                        if gap > CADENCE_THRESHOLD and not cadence_fired:
+                            emit({"event": "cadence", "gap_seconds": round(gap), "claimed_tasks": claimed_count})
+                            cadence_fired = True
+                        elif gap < CADENCE_THRESHOLD:
+                            cadence_fired = False
+                    else:
                         cadence_fired = False
                 else:
                     cadence_fired = False
