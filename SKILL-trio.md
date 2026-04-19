@@ -66,6 +66,8 @@ Monitor(
 )
 ```
 
+**Python launcher**: use `python3` on macOS/Linux, `py` on Windows (the PEP 397 launcher installed with python.org Python). `python3` does not exist on Windows by default.
+
 `timeout_ms` is ignored when `persistent=True`, but the `Monitor` schema still validates it — the value must be ≥ 1000. Any valid number works; the monitor runs until the session ends regardless.
 
 Each line of stdout becomes a separate notification. The monitor runs until the session ends, `TaskStop` is called, or the channel is ended by a peer.
