@@ -439,7 +439,7 @@ INDEX_HTML = r"""<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>nth_web — trio dashboard</title>
+<title>nth_web</title>
 <style>
   :root {
     --bg: #0b0f14; --bg2: #121821; --panel: #161d27; --border: #273040;
@@ -453,49 +453,131 @@ INDEX_HTML = r"""<!doctype html>
     font-family: "JetBrains Mono", "Fira Code", "Cascadia Code", ui-monospace, Menlo, monospace;
     font-size: 13px; line-height: 1.45;
   }
-  #app { display: grid; grid-template-columns: 1fr 280px; grid-template-rows: 42px 1fr auto;
+  button { font-family: inherit; }
+
+  #app { display: grid; grid-template-columns: 1fr 300px; grid-template-rows: 42px 1fr auto;
          height: 100vh; }
+
+  /* ── Header ── */
   header { grid-column: 1 / 3; background: var(--bg2); border-bottom: 1px solid var(--border);
-           display: flex; align-items: center; padding: 0 14px; gap: 16px;
+           display: flex; align-items: center; padding: 0 14px; gap: 12px;
            font-weight: 600; }
   header .title { color: var(--accent); }
-  header .meta { color: var(--dim); font-weight: 400; }
-  header .conn {
-    margin-left: auto; font-size: 11px; padding: 3px 8px; border-radius: 3px;
-    background: var(--panel); border: 1px solid var(--border);
+  header .meta { color: var(--dim); font-weight: 400; font-size: 11px; }
+  header .spacer { flex: 1; }
+  header .pill {
+    font-size: 11px; padding: 3px 8px; border-radius: 3px; cursor: pointer;
+    background: var(--panel); border: 1px solid var(--border); user-select: none;
+    color: var(--dim); font-weight: 500;
   }
-  header .conn.ok { color: var(--accent2); }
-  header .conn.bad { color: var(--err); }
+  header .pill:hover { border-color: var(--accent); color: var(--fg); }
+  header .pill.on { background: var(--accent); color: var(--bg); border-color: var(--accent); }
+  header .pill.conn.ok { color: var(--accent2); }
+  header .pill.conn.bad { color: var(--err); }
+  header #filter { background: var(--panel); color: var(--fg); border: 1px solid var(--border);
+                   padding: 3px 8px; border-radius: 3px; font-family: inherit; font-size: 11px;
+                   width: 160px; }
+  header #filter:focus { outline: none; border-color: var(--accent); }
 
-  #chat { grid-row: 2 / 3; grid-column: 1 / 2; overflow-y: auto;
-          padding: 12px 16px; scroll-behavior: smooth; }
-  .msg { margin-bottom: 10px; word-wrap: break-word; }
-  .msg .head { font-size: 11px; color: var(--dim); margin-bottom: 2px; }
+  /* ── Chat ── */
+  #chat-wrap { grid-row: 2 / 3; grid-column: 1 / 2; position: relative; overflow: hidden; }
+  #chat { height: 100%; overflow-y: auto; padding: 12px 16px; scroll-behavior: smooth; }
+  .msg { margin-bottom: 10px; word-wrap: break-word; cursor: pointer; padding: 4px 8px 6px;
+         border-radius: 3px; border-left: 3px solid transparent; margin-left: -8px; }
+  .msg:hover { background: #0f1420; }
+  .msg .head { font-size: 11px; color: var(--dim); margin-bottom: 2px;
+               display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  .msg .head .time { cursor: help; }
   .msg .author { font-weight: 600; }
-  .msg .mentions { color: var(--mention); margin-left: 6px; }
+  .msg .mentions-tag { color: var(--mention); }
   .msg .body { white-space: pre-wrap; }
+  .msg.compact .body {
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .msg.compact .body::after { content: ""; }
   .msg.system .body { color: var(--dim); font-style: italic; }
   .msg.mine .author { color: var(--accent2); }
-  .msg.targeted { background: #1a2030; padding: 6px 10px; border-left: 3px solid var(--mention);
-                  margin-left: -10px; border-radius: 0 3px 3px 0; }
+  .msg.targeted { background: #1a2030; border-left-color: var(--mention); }
+  .msg.filtered-out { display: none; }
 
-  #roster { grid-row: 2 / 3; grid-column: 2 / 3;
-            background: var(--panel); border-left: 1px solid var(--border);
-            overflow-y: auto; padding: 10px 12px; }
-  #roster h2 { font-size: 11px; text-transform: uppercase; color: var(--dim);
-               letter-spacing: 0.08em; margin: 4px 0 8px; }
-  .member { display: flex; align-items: center; gap: 8px; padding: 4px 0; cursor: pointer; }
-  .member:hover { background: var(--bg2); }
+  /* Ack badges — one per member, full color = read past this msg, dim = pending */
+  .acks { display: inline-flex; gap: 2px; margin-left: auto; align-items: center; }
+  .ack-badge { display: inline-flex; align-items: center; justify-content: center;
+               width: 16px; height: 16px; border-radius: 50%;
+               font-size: 9px; font-weight: 700;
+               border: 1px solid transparent;
+               cursor: pointer; }
+  .ack-badge.read { opacity: 1; }
+  .ack-badge.pending { opacity: 0.25; filter: saturate(0.3); }
+  .ack-badge.self { display: none; }
+
+  /* Jump-to-latest */
+  #jump-btn { position: absolute; right: 18px; bottom: 14px;
+              background: var(--accent); color: var(--bg); border: none; padding: 6px 12px;
+              border-radius: 18px; cursor: pointer; font-weight: 600; font-size: 11px;
+              box-shadow: 0 4px 14px rgba(0,0,0,0.5); display: none; z-index: 5; }
+  #jump-btn.show { display: block; }
+  #jump-btn:hover { background: #50b0f0; }
+  #jump-btn .count { background: var(--err); color: white;
+                     border-radius: 10px; padding: 1px 6px; margin-left: 4px; font-size: 10px; }
+
+  /* ── Roster sidebar ── */
+  #side { grid-row: 2 / 3; grid-column: 2 / 3;
+          background: var(--panel); border-left: 1px solid var(--border);
+          overflow-y: auto; display: flex; flex-direction: column; }
+  #side section { padding: 10px 12px; border-bottom: 1px solid var(--border); }
+  #side section:last-child { border-bottom: none; }
+  #side h2 { font-size: 10px; text-transform: uppercase; color: var(--dim);
+             letter-spacing: 0.08em; margin: 0 0 8px; font-weight: 600; }
+
+  .member { padding: 5px 0; cursor: pointer; }
+  .member + .member { border-top: 1px solid #1d2533; }
+  .member .row { display: flex; align-items: center; gap: 8px; }
   .member .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
-  .member .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .member .id { color: var(--dimmer); font-size: 10px; }
+  .member .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+                  font-weight: 500; }
+  .member .caret { color: var(--dimmer); font-size: 9px; transition: transform 0.1s; }
+  .member.expanded .caret { transform: rotate(90deg); }
+  .member .id { color: var(--dimmer); font-size: 10px; margin-left: 2px; }
   .dot.active { background: var(--accent2); }
   .dot.idle { background: var(--dimmer); }
   .dot.stale { background: var(--warn); }
   .dot.dead { background: var(--err); }
-  .member .stext { font-size: 10px; color: var(--dim); margin-top: 1px;
-                   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .member .stext { font-size: 10px; color: var(--dim); margin-top: 2px;
+                   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+                   padding-left: 16px; }
 
+  .member .stats { display: none; padding: 8px 0 2px 16px;
+                   font-size: 10px; color: var(--dim); }
+  .member.expanded .stats { display: block; }
+  .stats .stat-row { display: flex; justify-content: space-between; padding: 2px 0; gap: 10px; }
+  .stats .stat-label { color: var(--dim); }
+  .stats .stat-val { color: var(--fg); font-weight: 600; text-align: right;
+                     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+                     max-width: 180px; }
+  .stats .stat-val.good { color: var(--accent2); }
+  .stats .stat-val.warn { color: var(--warn); }
+  .stats .stat-val.bad { color: var(--err); }
+  .stats .snippet { color: var(--fg); font-style: italic;
+                    white-space: normal; padding-top: 4px; line-height: 1.3;
+                    max-height: 54px; overflow: hidden; }
+
+  /* Channel stats block */
+  #chanstats .stat-row { display: flex; justify-content: space-between; padding: 3px 0;
+                         font-size: 11px; }
+  #chanstats .stat-label { color: var(--dim); }
+  #chanstats .stat-val { color: var(--fg); font-weight: 600; }
+  #sparkline { font-family: inherit; font-size: 14px; color: var(--accent);
+               letter-spacing: -1px; padding-top: 4px; }
+  #filter-banner { padding: 4px 8px; background: #1a2030; color: var(--mention);
+                   font-size: 10px; border-radius: 3px; margin-bottom: 6px;
+                   display: none; cursor: pointer; }
+  #filter-banner.active { display: block; }
+
+  /* ── Composer (unchanged from v1) ── */
   #composer { grid-row: 3 / 4; grid-column: 1 / 3;
               background: var(--bg2); border-top: 1px solid var(--border);
               padding: 8px 14px; display: flex; flex-direction: column; gap: 4px; }
@@ -532,14 +614,29 @@ INDEX_HTML = r"""<!doctype html>
   <header>
     <span class="title" id="h-channel">trio#…</span>
     <span class="meta" id="h-meta">connecting…</span>
-    <span class="conn bad" id="h-conn">● disconnected</span>
+    <span class="spacer"></span>
+    <input id="filter" type="text" placeholder="filter messages…" spellcheck="false">
+    <span class="pill" id="btn-compact" title="clamp every message body to 3 lines">compact</span>
+    <span class="pill" id="btn-notify" title="desktop notifications on @you">🔔 off</span>
+    <span class="pill conn bad" id="h-conn">● disconnected</span>
   </header>
 
-  <div id="chat"></div>
+  <div id="chat-wrap">
+    <div id="chat"></div>
+    <button id="jump-btn">↓ latest<span class="count" id="jump-count" style="display:none">0</span></button>
+  </div>
 
-  <aside id="roster">
-    <h2 id="r-heading">Members</h2>
-    <div id="r-list"></div>
+  <aside id="side">
+    <section>
+      <div id="filter-banner">filter active — showing matching messages only. click to clear.</div>
+      <h2 id="r-heading">Members</h2>
+      <div id="r-list"></div>
+    </section>
+    <section id="chanstats-wrap">
+      <h2>Channel stats</h2>
+      <div id="chanstats"></div>
+      <div id="sparkline"></div>
+    </section>
   </aside>
 
   <div id="composer">
@@ -555,16 +652,21 @@ INDEX_HTML = r"""<!doctype html>
       <kbd>@</kbd> mention
       <kbd>Tab</kbd> accept completion
       <kbd>Esc</kbd> dismiss
-      <kbd>↑/↓</kbd> navigate completions
+      <kbd>↑/↓</kbd> navigate
+      <span style="margin-left:14px;color:var(--dim)">click a message to expand/collapse in compact mode</span>
     </div>
   </div>
 </div>
 
 <script>
 (() => {
+  // ── DOM handles ──
+  const chatWrap = document.getElementById('chat-wrap');
   const chat = document.getElementById('chat');
   const rosterEl = document.getElementById('r-list');
   const rosterHeading = document.getElementById('r-heading');
+  const chanStatsEl = document.getElementById('chanstats');
+  const sparkEl = document.getElementById('sparkline');
   const hChannel = document.getElementById('h-channel');
   const hMeta = document.getElementById('h-meta');
   const hConn = document.getElementById('h-conn');
@@ -572,27 +674,52 @@ INDEX_HTML = r"""<!doctype html>
   const sendBtn = document.getElementById('send-btn');
   const preview = document.getElementById('preview');
   const compEl = document.getElementById('completions');
+  const filterEl = document.getElementById('filter');
+  const filterBanner = document.getElementById('filter-banner');
+  const btnCompact = document.getElementById('btn-compact');
+  const btnNotify = document.getElementById('btn-notify');
+  const jumpBtn = document.getElementById('jump-btn');
+  const jumpCount = document.getElementById('jump-count');
 
+  // ── State ──
   const state = {
     channel: '',
     operator: { id: '', name: '' },
     server_host: '',
-    members: new Map(),            // id → member
+    members: new Map(),            // id → member (roster row)
+    messages: new Map(),            // id → message
+    messageDomById: new Map(),      // id → DOM node (for ack badge updates)
     seenMsgIds: new Set(),
     completion: { visible: false, index: 0, items: [], atPos: -1 },
+    agentStats: new Map(),          // id → {sent, sent_times[], lengths[], lastSnippet,
+                                    //        read_latencies[], queue_depth,
+                                    //        directed_received, directed_replied, pending_directed[]}
+    filter: '',
+    compact: false,                 // global compact mode
+    expandedMsgs: new Set(),        // ids with per-msg override (toggle-specific)
+    expandedMembers: new Set(),     // member ids with expanded stats
+    notifyEnabled: false,
+    unreadCount: 0,                 // for tab title while hidden
+    jumpUnread: 0,                  // messages arrived while user was scrolled up
+    rateBins: new Map(),            // bin_epoch_10s → count
+    startedAt: Date.now(),
+    originalTitle: 'nth_web',
   };
-
-  // ── Palette (mirrors the terminal dashboard) ──
   const PALETTE = ['#62d7ef','#d070d7','#7ede7e','#e5d35e',
                    '#8eb9ff','#ff8470','#9ef0f0','#f79fea'];
   function colorFor(id) {
-    // Deterministic assignment via hash.
     let h = 0;
     for (const c of id) h = (h * 31 + c.charCodeAt(0)) | 0;
     return PALETTE[Math.abs(h) % PALETTE.length];
   }
+  function initialOf(member) {
+    const n = member.name || member.id || '?';
+    return n.trim().charAt(0).toUpperCase() || '?';
+  }
+  function escapeHtml(s) { return s.replace(/[&<>"']/g, c =>
+    ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]); }
 
-  // ── Rendering ──
+  // ── Time ──
   function formatTime(iso) {
     if (!iso) return '--:--';
     try {
@@ -600,28 +727,181 @@ INDEX_HTML = r"""<!doctype html>
       return d.toTimeString().slice(0, 8);
     } catch (e) { return '--:--'; }
   }
+  function fmtRel(seconds) {
+    if (seconds == null || !isFinite(seconds)) return '—';
+    const s = Math.max(0, Math.floor(seconds));
+    if (s < 60) return s + 's';
+    if (s < 3600) return Math.floor(s / 60) + 'm';
+    if (s < 86400) return Math.floor(s / 3600) + 'h';
+    return Math.floor(s / 86400) + 'd';
+  }
 
   const SYSTEM_PREFIXES = ['[claimed ', '[done ', '[cancelled ', '[released ',
                            '[retracted ', '[joined ', '[left ', '[ended ',
-                           '[locked ', '[unlocked ', '[status ', '[pinned '];
+                           '[locked ', '[unlocked ', '[status ', '[pinned ',
+                           '[renamed '];
+  function isSystemContent(s) { return SYSTEM_PREFIXES.some(p => s.startsWith(p)); }
+
+  // ── Per-member agent stats (client-side aggregate, derived from event stream) ──
+  function agentState(id) {
+    if (!state.agentStats.has(id)) {
+      state.agentStats.set(id, {
+        sent: 0, sent_times: [], lengths: [], lastSnippet: '',
+        read_latencies: [], queue_depth: 0,
+        directed_received: 0, directed_replied: 0, pending_directed: [],
+        last_read_seen: 0,    // last snapshot of this member's DB last_read value
+      });
+    }
+    return state.agentStats.get(id);
+  }
+
+  function ingestMessageForStats(msg) {
+    const s = agentState(msg.member_id);
+    s.sent++;
+    s.sent_times.push(new Date(msg.created_at).getTime() || Date.now());
+    if (s.sent_times.length > 500) s.sent_times.shift();
+    s.lengths.push((msg.content || '').length);
+    if (s.lengths.length > 20) s.lengths.shift();
+    s.lastSnippet = (msg.content || '').slice(0, 100);
+
+    // @-reply accounting: if sender had pending directed messages to reply to,
+    // count this send as a reply to all of them (first-response-counts).
+    while (s.pending_directed.length > 0) {
+      s.pending_directed.shift();
+      s.directed_replied++;
+    }
+
+    // For every other member, this new message either bumps their queue
+    // (if their last_read < msg.id) or is for a mentioned recipient.
+    for (const [mid, mem] of state.members) {
+      if (mid === msg.member_id) continue;
+      if ((mem.last_read || 0) < msg.id) {
+        const ms = agentState(mid);
+        ms.queue_depth++;
+      }
+      if ((msg.mentions || []).includes(mid)) {
+        const ms = agentState(mid);
+        ms.directed_received++;
+        ms.pending_directed.push(msg.id);
+      }
+    }
+
+    // Global activity rate bins (10-second granularity)
+    const bin = Math.floor((new Date(msg.created_at).getTime() || Date.now()) / 10000) * 10000;
+    state.rateBins.set(bin, (state.rateBins.get(bin) || 0) + 1);
+  }
+
+  function applyRosterWatermarkDeltas(newMembers) {
+    const now = Date.now();
+    for (const m of newMembers) {
+      const prev = state.members.get(m.id);
+      const prevLR = prev ? (prev.last_read || 0) : 0;
+      const newLR = m.last_read || 0;
+      if (newLR > prevLR) {
+        const s = agentState(m.id);
+        // Credit read-latencies for messages in (prevLR, newLR]
+        for (const [msgId, msg] of state.messages) {
+          if (msgId > prevLR && msgId <= newLR && msg.member_id !== m.id) {
+            const sent = new Date(msg.created_at).getTime();
+            if (sent) {
+              s.read_latencies.push((now - sent) / 1000);
+              if (s.read_latencies.length > 20) s.read_latencies.shift();
+            }
+            // Decrement their queue — they've now read this one.
+            s.queue_depth = Math.max(0, s.queue_depth - 1);
+          }
+        }
+        s.last_read_seen = newLR;
+      }
+    }
+  }
+
+  function agentSendRatePerHour(id) {
+    const s = state.agentStats.get(id);
+    if (!s) return 0;
+    const cutoff = Date.now() - 3600 * 1000;
+    return s.sent_times.filter(t => t >= cutoff).length;
+  }
+  function agentAvgReadLatency(id) {
+    const s = state.agentStats.get(id);
+    if (!s || s.read_latencies.length === 0) return null;
+    return s.read_latencies.reduce((a, b) => a + b, 0) / s.read_latencies.length;
+  }
+  function agentAvgLen(id) {
+    const s = state.agentStats.get(id);
+    if (!s || s.lengths.length === 0) return null;
+    return s.lengths.reduce((a, b) => a + b, 0) / s.lengths.length;
+  }
+  function agentReplyRate(id) {
+    const s = state.agentStats.get(id);
+    if (!s || s.directed_received === 0) return null;
+    return s.directed_replied / s.directed_received;
+  }
+
+  // ── Ack badges per message ──
+  function updateAckBadges(msgId) {
+    const dom = state.messageDomById.get(msgId);
+    if (!dom) return;
+    const box = dom.querySelector('.acks');
+    if (!box) return;
+    box.innerHTML = '';
+    const msg = state.messages.get(msgId);
+    if (!msg) return;
+    // One badge per NON-operator, NON-sender member. Sender doesn't need to
+    // ack their own message; operator is already us.
+    for (const [mid, mem] of state.members) {
+      if (mid === state.operator.id) continue;
+      if (mid === msg.member_id) continue;
+      const read = (mem.last_read || 0) >= msgId;
+      const badge = document.createElement('span');
+      badge.className = 'ack-badge ' + (read ? 'read' : 'pending');
+      badge.textContent = initialOf(mem);
+      badge.style.background = colorFor(mid);
+      badge.style.color = '#0b0f14';
+      badge.title = `${mem.name} (${mid}) — ${read ? 'read ✓' : 'pending…'}  · last_read: ${mem.last_read}`;
+      badge.onclick = (e) => {
+        e.stopPropagation();
+        setFilter(mem.name);
+      };
+      box.appendChild(badge);
+    }
+  }
+
+  function updateAllAckBadges() {
+    for (const id of state.messageDomById.keys()) updateAckBadges(id);
+  }
+
+  // ── Message rendering ──
+  function applyCompactClass(node, id) {
+    const override = state.expandedMsgs.has(id);
+    if (state.compact && !override) node.classList.add('compact');
+    else node.classList.remove('compact');
+  }
 
   function appendMessage(m) {
     if (state.seenMsgIds.has(m.id)) return;
     state.seenMsgIds.add(m.id);
+    state.messages.set(m.id, m);
+    ingestMessageForStats(m);
 
     const isMine = m.member_id === state.operator.id;
-    const isSystem = SYSTEM_PREFIXES.some(p => m.content.startsWith(p));
+    const isSystem = isSystemContent(m.content || '');
     const mentionsOperator = (m.mentions || []).includes(state.operator.id);
 
     const div = document.createElement('div');
     div.className = 'msg' + (isMine ? ' mine' : '') + (isSystem ? ' system' : '')
                   + (mentionsOperator ? ' targeted' : '');
+    div.dataset.msgId = String(m.id);
+    div.dataset.search = (m.content || '').toLowerCase() + ' '
+                       + (m.member_name || '').toLowerCase();
 
     const head = document.createElement('div');
     head.className = 'head';
-    const time = document.createElement('span');
-    time.textContent = formatTime(m.created_at) + '  ';
-    head.appendChild(time);
+    const timeSpan = document.createElement('span');
+    timeSpan.className = 'time';
+    timeSpan.textContent = formatTime(m.created_at);
+    timeSpan.title = m.created_at || '';
+    head.appendChild(timeSpan);
     if (!isSystem) {
       const author = document.createElement('span');
       author.className = 'author';
@@ -630,15 +910,18 @@ INDEX_HTML = r"""<!doctype html>
       head.appendChild(author);
       if (m.mentions && m.mentions.length) {
         const mtag = document.createElement('span');
-        mtag.className = 'mentions';
+        mtag.className = 'mentions-tag';
         const names = m.mentions.map(id => {
           const mem = state.members.get(id);
           return '@' + (mem ? mem.name : id);
         });
-        mtag.textContent = ' → ' + names.join(', ');
+        mtag.textContent = '→ ' + names.join(', ');
         head.appendChild(mtag);
       }
     }
+    const acks = document.createElement('span');
+    acks.className = 'acks';
+    head.appendChild(acks);
     div.appendChild(head);
 
     const body = document.createElement('div');
@@ -646,62 +929,240 @@ INDEX_HTML = r"""<!doctype html>
     body.textContent = m.content;
     div.appendChild(body);
 
-    // Only auto-scroll if we were near the bottom already.
+    // Toggle expand/compact on click
+    div.addEventListener('click', (e) => {
+      if (e.target.closest('.ack-badge')) return;
+      if (state.expandedMsgs.has(m.id)) state.expandedMsgs.delete(m.id);
+      else state.expandedMsgs.add(m.id);
+      applyCompactClass(div, m.id);
+    });
+
+    applyCompactClass(div, m.id);
+    applyFilterToNode(div);
+
     const nearBottom = chat.scrollHeight - chat.clientHeight - chat.scrollTop < 80;
     chat.appendChild(div);
-    if (nearBottom) chat.scrollTop = chat.scrollHeight;
+    state.messageDomById.set(m.id, div);
+    updateAckBadges(m.id);
+
+    if (nearBottom) {
+      chat.scrollTop = chat.scrollHeight;
+    } else {
+      state.jumpUnread++;
+      updateJumpButton();
+    }
+
+    // Tab-title badge when hidden
+    if (document.hidden) {
+      state.unreadCount++;
+      updateTitle();
+    }
+
+    // Desktop notification on @you while hidden (opt-in)
+    if (document.hidden && mentionsOperator && state.notifyEnabled &&
+        'Notification' in window && Notification.permission === 'granted' && !isMine) {
+      try {
+        const n = new Notification(`@${state.operator.name} — ${m.member_name}`, {
+          body: (m.content || '').slice(0, 140),
+          tag: 'trio-' + m.id,
+          silent: false,
+        });
+        n.onclick = () => { window.focus(); n.close(); };
+      } catch (e) { /* ignore */ }
+    }
   }
 
-  function renderRoster(members) {
-    // Update map
-    state.members.clear();
-    for (const m of members) state.members.set(m.id, m);
+  // Existing message names may change (rename) — update author labels + mention
+  // resolutions in-place so backscroll stays readable.
+  function refreshMessageAuthors() {
+    for (const [id, m] of state.messages) {
+      const dom = state.messageDomById.get(id);
+      if (!dom) continue;
+      const author = dom.querySelector('.author');
+      if (author && !isSystemContent(m.content || '')) {
+        author.textContent = m.member_name;
+        author.style.color = colorFor(m.member_id);
+      }
+      const mentionsTag = dom.querySelector('.mentions-tag');
+      if (mentionsTag && m.mentions && m.mentions.length) {
+        const names = m.mentions.map(mid => {
+          const mem = state.members.get(mid);
+          return '@' + (mem ? mem.name : mid);
+        });
+        mentionsTag.textContent = '→ ' + names.join(', ');
+      }
+    }
+  }
 
-    // Render
+  // ── Roster rendering ──
+  function renderRoster(members) {
+    applyRosterWatermarkDeltas(members);
+
+    // Reconcile state.members — and detect name changes so the chat can
+    // retroactively re-label past messages from the renamed member.
+    const rename_from = new Map();  // id → old member_name for messages
+    for (const m of members) {
+      const old = state.members.get(m.id);
+      state.members.set(m.id, m);
+      if (old && old.name !== m.name) rename_from.set(m.id, { from: old.name, to: m.name });
+    }
+
+    if (rename_from.size > 0) {
+      // Patch cached message records so author label follows the current alias.
+      for (const [id, msg] of state.messages) {
+        const rename = rename_from.get(msg.member_id);
+        if (rename) {
+          msg.member_name = rename.to;
+        }
+      }
+      refreshMessageAuthors();
+    }
+
     rosterEl.innerHTML = '';
     const sorted = members.slice().sort((a, b) => {
-      // Operator last, then active → idle → stale → dead, then by name.
       const order = { active: 0, idle: 1, stale: 2, dead: 3 };
       if (a.id === state.operator.id) return 1;
       if (b.id === state.operator.id) return -1;
       const oa = order[a.status] ?? 4;
       const ob = order[b.status] ?? 4;
       if (oa !== ob) return oa - ob;
-      return a.name.localeCompare(b.name);
+      return (a.name || '').localeCompare(b.name || '');
     });
-    for (const m of sorted) {
-      const row = document.createElement('div');
-      row.className = 'member';
-      row.title = `${m.name} (${m.id})\n${m.status_text || ''}`;
-      row.onclick = () => insertMention(m);
-      const dot = document.createElement('div');
-      dot.className = 'dot ' + m.status;
-      row.appendChild(dot);
-      const box = document.createElement('div');
-      box.style.flex = '1';
-      box.style.overflow = 'hidden';
-      const name = document.createElement('div');
-      name.className = 'name';
-      name.textContent = m.name;
-      name.style.color = colorFor(m.id);
-      box.appendChild(name);
-      if (m.status_text) {
-        const st = document.createElement('div');
-        st.className = 'stext';
-        st.textContent = m.status_text;
-        box.appendChild(st);
-      }
-      row.appendChild(box);
-      const id = document.createElement('div');
-      id.className = 'id';
-      id.textContent = m.id.slice(0, 8);
-      row.appendChild(id);
-      rosterEl.appendChild(row);
-    }
+    for (const m of sorted) rosterEl.appendChild(renderMemberRow(m));
     rosterHeading.textContent = `Members (${members.length})`;
+
+    updateAllAckBadges();
+    updateChanStats();
   }
 
-  // ── Autocomplete ──
+  function renderMemberRow(m) {
+    const row = document.createElement('div');
+    row.className = 'member' + (state.expandedMembers.has(m.id) ? ' expanded' : '');
+    row.title = `${m.name} (${m.id})\n${m.status_text || ''}\nlast_read: ${m.last_read}`;
+
+    const topRow = document.createElement('div');
+    topRow.className = 'row';
+    const dot = document.createElement('div');
+    dot.className = 'dot ' + m.status;
+    topRow.appendChild(dot);
+    const nameBox = document.createElement('div');
+    nameBox.className = 'name';
+    nameBox.textContent = m.name;
+    nameBox.style.color = colorFor(m.id);
+    topRow.appendChild(nameBox);
+    const idSpan = document.createElement('div');
+    idSpan.className = 'id';
+    idSpan.textContent = m.id.slice(0, 8);
+    topRow.appendChild(idSpan);
+    const caret = document.createElement('span');
+    caret.className = 'caret';
+    caret.textContent = '▶';
+    topRow.appendChild(caret);
+    row.appendChild(topRow);
+
+    if (m.status_text) {
+      const st = document.createElement('div');
+      st.className = 'stext';
+      st.textContent = m.status_text;
+      row.appendChild(st);
+    }
+
+    const stats = document.createElement('div');
+    stats.className = 'stats';
+    stats.innerHTML = renderMemberStatsHTML(m);
+    row.appendChild(stats);
+
+    row.addEventListener('click', (e) => {
+      // Clicking the name on a mention-capable row? On shift-click → filter.
+      if (e.shiftKey) {
+        setFilter(m.name);
+        return;
+      }
+      if (state.expandedMembers.has(m.id)) state.expandedMembers.delete(m.id);
+      else state.expandedMembers.add(m.id);
+      row.classList.toggle('expanded');
+      stats.innerHTML = renderMemberStatsHTML(m);
+    });
+    return row;
+  }
+
+  function renderMemberStatsHTML(m) {
+    const maxId = Math.max(0, ...state.messages.keys());
+    const behind = Math.max(0, maxId - (m.last_read || 0));
+    const lat = agentAvgReadLatency(m.id);
+    const latClass = lat == null ? '' : (lat >= 20 ? 'bad' : (lat >= 5 ? 'warn' : 'good'));
+    const q = (state.agentStats.get(m.id) || {}).queue_depth || 0;
+    const qClass = q >= 10 ? 'bad' : (q >= 3 ? 'warn' : 'good');
+    const sent = (state.agentStats.get(m.id) || {}).sent || 0;
+    const rate = agentSendRatePerHour(m.id);
+    const rr = agentReplyRate(m.id);
+    const alen = agentAvgLen(m.id);
+    const snippet = (state.agentStats.get(m.id) || {}).lastSnippet || '';
+    const lastSeenAge = m.last_seen ? fmtRel((Date.now() - new Date(m.last_seen).getTime()) / 1000) : '—';
+
+    const rows = [
+      ['seen',          escapeHtml(lastSeenAge), ''],
+      ['last_read',     `${m.last_read} <span style="color:var(--dimmer)">(${behind} behind)</span>`, behind > 5 ? 'warn' : ''],
+      ['read-lat',      lat == null ? '—' : lat.toFixed(1) + 's', latClass],
+      ['sent',          `${sent} <span style="color:var(--dimmer)">(${rate}/h)</span>`, ''],
+      ['queue',         String(q), qClass],
+      ['@reply %',      rr == null ? '—' : Math.round(rr * 100) + '%', ''],
+      ['avg len',       alen == null ? '—' : Math.round(alen), ''],
+    ];
+    let html = '';
+    for (const [k, v, cls] of rows) {
+      html += `<div class="stat-row"><span class="stat-label">${k}</span>`
+           +  `<span class="stat-val ${cls}">${v}</span></div>`;
+    }
+    if (snippet) {
+      html += `<div class="snippet" title="${escapeHtml(snippet)}">${escapeHtml(snippet)}</div>`;
+    }
+    return html;
+  }
+
+  // ── Channel stats ──
+  function updateChanStats() {
+    const totalMsgs = state.messages.size;
+    const runtime = (Date.now() - state.startedAt) / 1000;
+    const now = Date.now();
+    const cutoff = now - 5 * 60 * 1000;
+    let recent = 0;
+    for (const [bin, count] of state.rateBins) if (bin >= cutoff) recent += count;
+    const ratePerMin = recent / 5;   // msgs/min over last 5 min
+
+    const stats = [
+      ['total messages', totalMsgs],
+      ['rate (5m avg)', ratePerMin.toFixed(1) + '/min'],
+      ['session uptime', fmtRel(runtime)],
+    ];
+    let html = '';
+    for (const [k, v] of stats) {
+      html += `<div class="stat-row"><span class="stat-label">${k}</span>`
+           +  `<span class="stat-val">${v}</span></div>`;
+    }
+    chanStatsEl.innerHTML = html;
+    renderSparkline();
+  }
+  function renderSparkline() {
+    const BARS = '▁▂▃▄▅▆▇█';
+    const WIN_MIN = 5;
+    const WIN_SEC = WIN_MIN * 60;
+    const binSize = 10;
+    const now = Date.now();
+    const nowBin = Math.floor(now / (binSize * 1000)) * (binSize * 1000);
+    const wantBins = WIN_SEC / binSize;
+    const vals = [];
+    for (let i = wantBins - 1; i >= 0; i--) {
+      const k = nowBin - i * (binSize * 1000);
+      vals.push(state.rateBins.get(k) || 0);
+    }
+    const hi = Math.max(1, ...vals);
+    sparkEl.textContent = vals.map(v =>
+      BARS[Math.min(BARS.length - 1, Math.floor(v / hi * (BARS.length - 1)))]).join('');
+    sparkEl.title = `5-min activity · max ${hi} msg / 10s bin`;
+  }
+
+  // ── Autocomplete (unchanged from v1) ──
   function currentAtToken() {
     const pos = input.selectionStart;
     const text = input.value.slice(0, pos);
@@ -712,7 +1173,6 @@ INDEX_HTML = r"""<!doctype html>
     if (frag && !/^[A-Za-z0-9_\-]*$/.test(frag)) return null;
     return { atPos, fragment: frag };
   }
-
   function computeCompletions() {
     const tok = currentAtToken();
     if (!tok) return { items: [], atPos: -1 };
@@ -721,9 +1181,7 @@ INDEX_HTML = r"""<!doctype html>
     for (const m of state.members.values()) {
       if (m.id === state.operator.id) continue;
       const nameL = (m.name || '').toLowerCase();
-      if (!frag || nameL.includes(frag) || m.id.toLowerCase().startsWith(frag)) {
-        matches.push(m);
-      }
+      if (!frag || nameL.includes(frag) || m.id.toLowerCase().startsWith(frag)) matches.push(m);
     }
     matches.sort((a, b) => {
       const an = (a.name || '').toLowerCase(), bn = (b.name || '').toLowerCase();
@@ -734,14 +1192,10 @@ INDEX_HTML = r"""<!doctype html>
     });
     return { items: matches.slice(0, 8), atPos: tok.atPos };
   }
-
   function renderCompletions() {
-    const { items, atPos } = state.completion;
+    const { items } = state.completion;
     compEl.innerHTML = '';
-    if (!state.completion.visible || items.length === 0) {
-      compEl.classList.remove('active');
-      return;
-    }
+    if (!state.completion.visible || items.length === 0) { compEl.classList.remove('active'); return; }
     items.forEach((m, i) => {
       const row = document.createElement('div');
       row.className = 'completion' + (i === state.completion.index ? ' selected' : '');
@@ -762,7 +1216,6 @@ INDEX_HTML = r"""<!doctype html>
     });
     compEl.classList.add('active');
   }
-
   function refreshCompletions() {
     const { items, atPos } = computeCompletions();
     state.completion.items = items;
@@ -771,7 +1224,6 @@ INDEX_HTML = r"""<!doctype html>
     if (state.completion.index >= items.length) state.completion.index = 0;
     renderCompletions();
   }
-
   function acceptCompletion(i) {
     const { items, atPos } = state.completion;
     if (atPos < 0 || !items.length) return;
@@ -779,7 +1231,6 @@ INDEX_HTML = r"""<!doctype html>
     const m = items[idx];
     if (!m) return;
     const before = input.value.slice(0, atPos);
-    const tok = currentAtToken();
     const endPos = input.selectionStart;
     const after = input.value.slice(endPos);
     const repl = '@' + (m.name || m.id) + ' ';
@@ -790,9 +1241,7 @@ INDEX_HTML = r"""<!doctype html>
     renderCompletions();
     updatePreview();
   }
-
   function insertMention(m) {
-    // Append @name at cursor position with surrounding spaces.
     const pos = input.selectionStart;
     const before = input.value.slice(0, pos);
     const after = input.value.slice(pos);
@@ -804,8 +1253,6 @@ INDEX_HTML = r"""<!doctype html>
     input.setSelectionRange(p, p);
     updatePreview();
   }
-
-  // ── Mention resolution (client side, for preview only) ──
   function resolveMentions(text) {
     const out = [];
     const seen = new Set();
@@ -821,7 +1268,6 @@ INDEX_HTML = r"""<!doctype html>
         }
       }
       if (!picked) {
-        // unique id prefix
         const prefix = [...state.members.values()]
           .filter(mem => mem.id !== state.operator.id
                         && mem.id.toLowerCase().startsWith(tok.toLowerCase()));
@@ -834,17 +1280,15 @@ INDEX_HTML = r"""<!doctype html>
     }
     return out;
   }
-
   function updatePreview() {
     const resolved = resolveMentions(input.value);
     if (!resolved.length) {
       preview.innerHTML = '(broadcast — all connected members receive this)';
     } else {
-      const names = resolved.map(m => `<span class="tgt">${m.name}</span>`).join(', ');
+      const names = resolved.map(m => `<span class="tgt">${escapeHtml(m.name)}</span>`).join(', ');
       preview.innerHTML = `to: ${names} <span style="color:var(--dimmer)">(other members won't get a targeted notification)</span>`;
     }
   }
-
   function autoResizeInput() {
     input.style.height = 'auto';
     input.style.height = Math.min(160, Math.max(36, input.scrollHeight)) + 'px';
@@ -913,7 +1357,97 @@ INDEX_HTML = r"""<!doctype html>
   });
   sendBtn.addEventListener('click', sendMessage);
 
-  // ── SSE connection + auto-reconnect ──
+  // ── Filter ──
+  function setFilter(q) {
+    state.filter = (q || '').toLowerCase();
+    filterEl.value = q || '';
+    filterBanner.classList.toggle('active', !!state.filter);
+    if (state.filter) filterBanner.textContent = `filter: “${q}” — click to clear`;
+    applyFilterToAll();
+  }
+  function applyFilterToAll() {
+    for (const node of chat.children) applyFilterToNode(node);
+  }
+  function applyFilterToNode(node) {
+    if (!state.filter) { node.classList.remove('filtered-out'); return; }
+    const hit = (node.dataset.search || '').includes(state.filter);
+    node.classList.toggle('filtered-out', !hit);
+  }
+  filterEl.addEventListener('input', () => setFilter(filterEl.value));
+  filterBanner.addEventListener('click', () => setFilter(''));
+
+  // ── Compact toggle ──
+  btnCompact.addEventListener('click', () => {
+    state.compact = !state.compact;
+    btnCompact.classList.toggle('on', state.compact);
+    for (const [id, dom] of state.messageDomById) applyCompactClass(dom, id);
+  });
+
+  // ── Notify toggle ──
+  btnNotify.addEventListener('click', async () => {
+    if (!('Notification' in window)) {
+      alert('This browser does not support desktop notifications.');
+      return;
+    }
+    if (!state.notifyEnabled) {
+      if (Notification.permission === 'default') {
+        const r = await Notification.requestPermission();
+        if (r !== 'granted') return;
+      } else if (Notification.permission === 'denied') {
+        alert('Notifications are blocked by the browser. Enable them in site settings.');
+        return;
+      }
+      state.notifyEnabled = true;
+      btnNotify.textContent = '🔔 on';
+      btnNotify.classList.add('on');
+    } else {
+      state.notifyEnabled = false;
+      btnNotify.textContent = '🔔 off';
+      btnNotify.classList.remove('on');
+    }
+  });
+
+  // ── Jump-to-latest + unread counter ──
+  function updateJumpButton() {
+    const atBottom = chat.scrollHeight - chat.clientHeight - chat.scrollTop < 80;
+    if (atBottom) {
+      state.jumpUnread = 0;
+      jumpBtn.classList.remove('show');
+      jumpCount.style.display = 'none';
+    } else {
+      jumpBtn.classList.add('show');
+      if (state.jumpUnread > 0) {
+        jumpCount.style.display = '';
+        jumpCount.textContent = state.jumpUnread;
+      } else {
+        jumpCount.style.display = 'none';
+      }
+    }
+  }
+  chat.addEventListener('scroll', updateJumpButton);
+  jumpBtn.addEventListener('click', () => {
+    chat.scrollTop = chat.scrollHeight;
+    state.jumpUnread = 0;
+    updateJumpButton();
+  });
+
+  // ── Title / tab badge ──
+  function updateTitle() {
+    const base = state.channel ? `trio#${state.channel}` : state.originalTitle;
+    document.title = state.unreadCount > 0 ? `(${state.unreadCount}) ${base}` : base;
+  }
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) {
+      state.unreadCount = 0;
+      updateTitle();
+    }
+  });
+  window.addEventListener('focus', () => {
+    state.unreadCount = 0;
+    updateTitle();
+  });
+
+  // ── SSE ──
   let es = null;
   let reconnectTimer = null;
   function connect() {
@@ -929,22 +1463,33 @@ INDEX_HTML = r"""<!doctype html>
         const payload = JSON.parse(ev.data);
         if (payload.type === 'message') appendMessage(payload);
         else if (payload.type === 'roster') renderRoster(payload.members);
-      } catch (e) {
-        console.error('bad event', e);
-      }
+      } catch (e) { console.error('bad event', e); }
     };
     es.onerror = () => {
       hConn.textContent = '● reconnecting…';
       hConn.classList.remove('ok');
       hConn.classList.add('bad');
       if (!reconnectTimer) {
-        reconnectTimer = setTimeout(() => {
-          reconnectTimer = null;
-          connect();
-        }, 2000);
+        reconnectTimer = setTimeout(() => { reconnectTimer = null; connect(); }, 2000);
       }
     };
   }
+
+  // Periodically refresh stats (queue-depth decay, rate window rolls, sparkline).
+  setInterval(() => {
+    updateChanStats();
+    // Re-render stats for any expanded member.
+    for (const id of state.expandedMembers) {
+      const m = state.members.get(id);
+      if (!m) continue;
+      const row = [...rosterEl.querySelectorAll('.member')].find(el =>
+        el.querySelector('.id')?.textContent === id.slice(0, 8));
+      if (row) {
+        const stats = row.querySelector('.stats');
+        if (stats) stats.innerHTML = renderMemberStatsHTML(m);
+      }
+    }
+  }, 2000);
 
   // ── Bootstrap ──
   async function boot() {
@@ -956,12 +1501,15 @@ INDEX_HTML = r"""<!doctype html>
       state.server_host = meta.server_host;
       hChannel.textContent = 'trio#' + meta.channel;
       hMeta.textContent = `posting as ${meta.operator.name} (${meta.operator.id})  ·  ${meta.server_host}`;
+      state.originalTitle = 'trio#' + meta.channel;
+      updateTitle();
     } catch (e) {
       hMeta.textContent = 'bootstrap failed: ' + e.message;
     }
     connect();
     input.focus();
     updatePreview();
+    updateChanStats();
   }
 
   boot();
