@@ -81,6 +81,7 @@ def monitor(channel, member_id, mention_filter=False, _db_path=None):
     local_hwm = None
     cadence_fired = False
     last_heartbeat_mono = 0.0
+    last_heartbeat_wall = 0.0
     db_error_streak = 0
 
     db_path = _db_path or DB_PATH
@@ -118,14 +119,16 @@ def monitor(channel, member_id, mention_filter=False, _db_path=None):
                     return
 
                 if ch["status"] == "ended":
-                    ender_name = ch["ended_by"]
+                    ender_name = None
                     if ch["ended_by"]:
                         ender = db.execute(
                             "SELECT name FROM members WHERE channel = ? AND id = ?",
                             (channel, ch["ended_by"]),
                         ).fetchone()
-                        if ender:
-                            ender_name = ender["name"]
+                        # If the ender has been culled/deleted since they called
+                        # trio_end, fall back to a readable label instead of leaking
+                        # the raw member_id into the event payload.
+                        ender_name = ender["name"] if ender else "(culled member)"
                     emit({"event": "channel_ended", "ended_by": ender_name})
                     return
 
@@ -133,8 +136,17 @@ def monitor(channel, member_id, mention_filter=False, _db_path=None):
                 # we'd otherwise do ~172k fsync-bearing commits/day just to bump a
                 # timestamp. The server's _sentinel_nag() threshold is 300s, so
                 # writing once every HEARTBEAT_INTERVAL (~10s) is 30× margin.
+                #
+                # Use BOTH monotonic and wall clock. Monotonic wins for tick-to-tick
+                # cadence (cheap, immune to wall-clock jumps) but freezes across
+                # host suspend — a laptop sleep for 10 min would leave the server
+                # seeing our heartbeat as stale while our monotonic delta only
+                # counts the ticks we actually ran. The wall-clock fallback forces
+                # a fresh write whenever real time has elapsed past the threshold.
                 mono = time.monotonic()
-                if mono - last_heartbeat_mono >= HEARTBEAT_INTERVAL:
+                wall = time.time()
+                if (mono - last_heartbeat_mono >= HEARTBEAT_INTERVAL
+                        or wall - last_heartbeat_wall >= HEARTBEAT_INTERVAL):
                     now_ts = now_iso()
                     db.execute(
                         "UPDATE members SET last_seen = ?, "
@@ -144,24 +156,31 @@ def monitor(channel, member_id, mention_filter=False, _db_path=None):
                     )
                     db.commit()
                     last_heartbeat_mono = mono
+                    last_heartbeat_wall = wall
 
                 sleeping = is_sleeping(member["status_text"])
                 check_interval = IDLE_INTERVAL if sleeping else ACTIVE_INTERVAL
 
                 # --- New messages ---
-                if local_hwm is None:
-                    legacy_hwm = member["last_read"] or 0
-                    try:
-                        sess_row = db.execute(
-                            "SELECT MAX(last_read) AS hwm FROM sessions "
-                            "WHERE channel = ? AND member_id = ? "
-                            "AND revoked_at IS NULL AND role = 'primary'",
-                            (channel, member_id),
-                        ).fetchone()
-                        sess_hwm = (sess_row["hwm"] or 0) if sess_row else 0
-                    except sqlite3.OperationalError:
-                        sess_hwm = 0
-                    local_hwm = max(legacy_hwm, sess_hwm)
+                # Reconcile local_hwm against the live DB watermark on every
+                # tick, not just at init. The agent can advance its own watermark
+                # via trio_ack (server writes members.last_read + sessions.last_read)
+                # while we're asleep between polls; without this reconciliation
+                # we'd re-notify on messages the agent already acked. We take the
+                # max so we never regress.
+                legacy_hwm = member["last_read"] or 0
+                try:
+                    sess_row = db.execute(
+                        "SELECT MAX(last_read) AS hwm FROM sessions "
+                        "WHERE channel = ? AND member_id = ? "
+                        "AND revoked_at IS NULL",
+                        (channel, member_id),
+                    ).fetchone()
+                    sess_hwm = (sess_row["hwm"] or 0) if sess_row else 0
+                except sqlite3.OperationalError:
+                    sess_hwm = 0
+                external_hwm = max(legacy_hwm, sess_hwm)
+                local_hwm = external_hwm if local_hwm is None else max(local_hwm, external_hwm)
 
                 unread = db.execute(
                     "SELECT id, mentions, member_name, content FROM messages "

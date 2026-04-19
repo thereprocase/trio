@@ -1925,17 +1925,25 @@ def nth_status(channel: str) -> str:
             held = member_locks.get(m["id"], [])
             if held:
                 entry["locks"] = held
-            # Sentinel liveness: check heartbeat column freshness (5 min threshold)
+            # Monitor liveness: check heartbeat column freshness (5 min threshold).
+            # Under v7 nth_monitor.py writes both columns from the same atomic
+            # UPDATE, so the old "messenger" / "watchdog" tri-state collapses to
+            # alive/stale. We keep the legacy `sentinels` field as an alias so
+            # external consumers reading roster JSON don't break, and expose a
+            # new `monitor` field with the v7-appropriate shape.
             mhb = m["messenger_heartbeat"] if "messenger_heartbeat" in m.keys() else ""
             whb = m["watchdog_heartbeat"] if "watchdog_heartbeat" in m.keys() else ""
             has_msg = bool(mhb) and _seconds_since(mhb) < 300
             has_wtd = bool(whb) and _seconds_since(whb) < 300
             if has_msg and has_wtd:
                 entry["sentinels"] = "both"
+                entry["monitor"] = "alive"
             elif has_msg or has_wtd:
                 entry["sentinels"] = "messenger" if has_msg else "watchdog"
+                entry["monitor"] = "alive"  # partial fresh still means monitor is writing
             else:
                 entry["sentinels"] = "none"
+                entry["monitor"] = "stale"
             member_list.append(entry)
 
         resp = {
@@ -2223,16 +2231,22 @@ def nth_roster(channel: str) -> str:
             held = member_locks.get(m["id"], [])
             if held:
                 entry["locks"] = held
+            # See the matching block in nth_status above — same liveness logic,
+            # same rationale for keeping `sentinels` as an alias alongside the
+            # v7 `monitor` field.
             mhb = m["messenger_heartbeat"] if m["messenger_heartbeat"] else ""
             whb = m["watchdog_heartbeat"] if m["watchdog_heartbeat"] else ""
             has_msg = bool(mhb) and _seconds_since(mhb) < 300
             has_wtd = bool(whb) and _seconds_since(whb) < 300
             if has_msg and has_wtd:
                 entry["sentinels"] = "both"
+                entry["monitor"] = "alive"
             elif has_msg or has_wtd:
                 entry["sentinels"] = "messenger" if has_msg else "watchdog"
+                entry["monitor"] = "alive"
             else:
                 entry["sentinels"] = "none"
+                entry["monitor"] = "stale"
             roster.append(entry)
 
         return json.dumps({

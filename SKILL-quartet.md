@@ -72,7 +72,9 @@ Monitor(
 
 Each line of stdout becomes a separate notification. The monitor runs until the session ends, `TaskStop` is called, or the channel is ended by a peer.
 
-**Hub vs spoke:** `nth_monitor.py` reads the local `~/.claude/nth/nth.db`. It works for any session running on the hub machine. On a remote spoke that talks to the hub over SSE, there is no local DB — fall back to inline `quartet_poll(..., wait_seconds=15)` in a loop instead of launching the monitor.
+**Hub vs spoke — how to tell:** check whether `~/.claude/nth/nth.db` exists on your host. If yes, you're on the hub (DB is local, launch the Monitor as above). If no, you're on a spoke (you reach the DB over SSE via `nth-qweb`, no local file). A one-line Bash check is enough: `[ -f ~/.claude/nth/nth.db ] && echo hub || echo spoke`. When in doubt, ask the user which machine this session is on.
+
+**Spoke fallback (no local DB):** skip the `Monitor(...)` launch. Instead, use long-poll as your event substitute: `quartet_poll(channel, member_id, session_token=TOKEN, wait_seconds=15)` in a loop. That call blocks server-side for up to 15s waiting for new messages, returns immediately when any arrive, and updates your heartbeat as a side-effect. Between long-polls, still do the normal **3-call cadence** peeks (`wait_seconds=0`) — they're free and keep the cadence rule honest. The two patterns are complementary: long-poll is the event stream, peeks are the status checkpoint.
 
 Event tables and failure recovery live in [PROTOCOLS.md § Monitor Events](PROTOCOLS.md).
 
@@ -176,6 +178,33 @@ Full lifecycle, conflict handling, release vs. cancel decision tree in [PROTOCOL
 - Never call `quartet_end` or `quartet_cull` without user permission.
 - Blockquote incoming messages to the user and explain what happened.
 - Keep the monitor running. The user should be free to chat with you while the monitor streams events in the background.
+
+## Console view for the user — mention it when they ask
+
+The user can watch channel traffic live from any terminal without spinning up a Claude session. It reads the SQLite DB directly and tails new messages (including server-generated task lifecycle events like `[claimed #N]` and `[done #N]`) with a simple chat-log format. The console tool is **hub-only** — it reads the local DB.
+
+```
+python3 ~/.claude/skills/nth/server/nth_console.py              # follow all channels
+python3 ~/.claude/skills/nth/server/nth_console.py -c MYCHAN    # filter to one
+python3 ~/.claude/skills/nth/server/nth_console.py -s 600       # last 10 min then follow
+python3 ~/.claude/skills/nth/server/nth_console.py --snapshot   # print current log and exit
+```
+
+Windows: substitute `py` for `python3`. Pure stdlib, works on Linux/macOS/Windows. ANSI colour auto-disables when piped.
+
+Surface this command to the user whenever they ask "how do I see what you're talking about?" or want to audit channel activity without interrupting the working Claudes.
+
+### Dashboard view — per-agent engagement signals (3-8 agent rooms)
+
+When the user is running a working group chat and wants to see who's engaging vs. who's lagging, point them at the dashboard instead of the plain console feed. Also hub-only — reads the local DB.
+
+```
+python3 ~/.claude/skills/nth/server/nth_dashboard.py MYCHAN
+```
+
+Columns per agent: status dot (active / working / idle / stale / dead), last-seen, avg read latency (headline), send count + /hr, queue depth, @-reply rate, avg send length, last snippet. Keys inside: `s` cycles sort, `p` pauses, `q` quits. Requires `pip install rich`.
+
+Good moment to mention it: the user is orchestrating a multi-Claude task and says something like "who's asleep?" or "is Bob keeping up?". Don't push it on small (2-member) channels — the plain console feed is easier to read for those.
 
 ---
 

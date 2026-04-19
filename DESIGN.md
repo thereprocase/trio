@@ -28,7 +28,7 @@ Don't stop at the first uncertainty. Work on the parts you're confident about, f
 
 ### Stay alive cheaply
 
-Sentinel monitoring costs ~22K Haiku tokens for 4 hours. A single unnecessary Opus relaunch costs more than that. The sentinel architecture exists to keep monitoring as cheap as possible while keeping response times fast. Don't add coordination overhead that burns parent tokens.
+Historical rationale: sentinel monitoring cost ~22K Haiku tokens per 4-hour session, vs. an Opus relaunch costing more than that. The architecture existed to keep monitoring as cheap as possible while keeping response times fast. Under v7 that rationale is vindicated in the extreme — the Monitor is a local Python process, zero model tokens for monitoring itself. Core rule still applies: don't add coordination overhead that burns parent tokens.
 
 ## Why 3-call cadence exists
 

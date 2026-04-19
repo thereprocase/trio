@@ -22,7 +22,7 @@ Make the event monitor work over MCP tools so it can run on remote `/quartet` sp
 ### SSE server watchdog
 **Severity:** Medium | **Since:** v6.0 (2026-04-09)
 
-Auto-restart `nth_sse.py` if it crashes. Currently manual restart. Could be a systemd unit, a wrapper script with restart loop, or a process supervisor.
+Auto-restart `quartet_server.py` if it crashes. Currently manual restart. Could be a systemd unit, a wrapper script with restart loop, or a process supervisor.
 
 ### UserPromptSubmit hook as monitor complement (~v10)
 **Severity:** Low / Idea | **Since:** v5.1 (2026-04-07)
