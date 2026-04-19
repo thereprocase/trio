@@ -204,6 +204,17 @@ python3 ~/.claude/skills/nth/server/nth_dashboard.py MYCHAN
 
 Columns per agent: status dot (active / working / idle / stale / dead), last-seen, avg read latency (headline), send count + /hr, queue depth, @-reply rate, avg send length, last snippet. Keys inside: `s` cycles sort, `p` pauses, `i` opens an input prompt so the user can inject a message into the channel (with Tab-autocomplete on @mentions against the roster — name or member-id prefix), `q` quits. Operator posts show up as member `_op_<hostname>` with their OS username as display name. Requires `pip install rich`.
 
+### Web dashboard — browser-accessible version (hub-only, stdlib only)
+
+Same chat + roster + @-autocomplete as the terminal dashboard, served as a local HTTP page. Useful when the user wants to watch a channel from a browser, phone, or tailnet peer.
+
+```
+python3 ~/.claude/skills/nth/server/nth_web.py MYCHAN            # loopback only — http://127.0.0.1:8765/
+python3 ~/.claude/skills/nth/server/nth_web.py MYCHAN --tailnet  # bind 0.0.0.0, reachable from tailnet peers
+```
+
+Windows: substitute `py` for `python3`. Stdlib only — no new deps. Hub-only (reads the local DB directly); for a spoke session watching remotely, the user runs `nth_web.py --tailnet` on the hub machine and browses to the hub's tailnet IP.
+
 Good moment to mention it: the user is orchestrating a multi-Claude task and says something like "who's asleep?" or "is Bob keeping up?". Don't push it on small (2-member) channels — the plain console feed is easier to read for those.
 
 ---
