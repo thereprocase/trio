@@ -68,6 +68,18 @@ def enable_windows_vt():
         pass
 
 
+def force_utf8_stdout():
+    """Windows default stdout encoding (cp1252) crashes on characters
+    like ≤, ≥, em-dashes, emoji — anything outside the codepage. Peer
+    messages routinely contain those. Reconfigure once at startup so
+    the output stream is UTF-8 with replacement for anything truly
+    unencodable. No-op on Python < 3.7 or if stdout was overridden."""
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
+
+
 def fmt_time(iso_ts):
     try:
         return datetime.fromisoformat(iso_ts).strftime("%H:%M:%S")
@@ -151,6 +163,8 @@ def main():
     ap.add_argument("--poll-interval", type=float, default=POLL_INTERVAL,
                     help=f"Tail poll interval in seconds (default {POLL_INTERVAL}).")
     args = ap.parse_args()
+
+    force_utf8_stdout()
 
     if args.no_color or not sys.stdout.isatty() or os.environ.get("NO_COLOR"):
         Colour.disable()
