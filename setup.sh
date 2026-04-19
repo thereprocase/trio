@@ -133,12 +133,17 @@ echo "Skills: /trio -> $TRIO_SKILL_DIR, /quartet -> $QUARTET_SKILL_DIR"
 
 # Copy server files (both modes need them for local /trio)
 cp "$SCRIPT_DIR/server/nth_server.py" "$SERVER_DIR/nth_server.py"
-cp "$SCRIPT_DIR/server/nth_sentinel.py" "$SERVER_DIR/nth_sentinel.py"
-cp "$SCRIPT_DIR/server/nth_wait.py" "$SERVER_DIR/nth_wait.py" 2>/dev/null || true
+cp "$SCRIPT_DIR/server/nth_monitor.py" "$SERVER_DIR/nth_monitor.py"
 cp "$SCRIPT_DIR/server/quartet_server.py" "$SERVER_DIR/quartet_server.py"
-cp "$SCRIPT_DIR/server/messenger-foreground.py" "$SERVER_DIR/messenger-foreground.py"
-cp "$SCRIPT_DIR/server/sentinel-foreground.py" "$SERVER_DIR/sentinel-foreground.py"
 cp "$SCRIPT_DIR/server/nth_constants.py" "$SERVER_DIR/nth_constants.py"
+
+# Clean up deprecated files from earlier Haiku-subagent design
+rm -f "$SERVER_DIR/nth_sentinel.py" \
+      "$SERVER_DIR/nth_wait.py" \
+      "$SERVER_DIR/messenger-foreground.py" \
+      "$SERVER_DIR/sentinel-foreground.py" 2>/dev/null || true
+rm -f "${CLAUDE_DIR}/agents/trio-sentinel.md" 2>/dev/null || true
+
 echo "Server files: $SERVER_DIR"
 
 # ---------- 4. Data migration ----------

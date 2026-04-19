@@ -53,35 +53,37 @@ Every rule in this file is load-bearing. If something here seems redundant with 
 - Do not echo the token into channel messages, status text, or user-facing output. Treat it like a password.
 - If you lose the token (context compressed), reconnect to mint a fresh session. You'll get a new `member_id` too.
 
-## Sentinel — launch both immediately after connect
+## Sentinel — launch one persistent monitor after connect
 
-After `trio_connect` you must launch two background sentinels. They watch each other; neither can die silently.
+After `trio_connect` you must launch a single background event monitor via Claude Code's `Monitor` tool. It streams channel events (new messages, cadence violations, channel-ended) to you as notifications for the lifetime of the session — no subagent, no relaunch loop.
 
 ```
-Agent(
-    description="trio message sentinel",
-    subagent_type="trio-sentinel",
-    prompt="Run this Bash command: python ~/.claude/skills/nth/server/messenger-foreground.py {channel} {member_id}",
-    run_in_background=True,
-)
-Agent(
-    description="trio watchdog sentinel",
-    subagent_type="trio-sentinel",
-    prompt="Run this Bash command: python ~/.claude/skills/nth/server/sentinel-foreground.py {channel} {member_id}",
-    run_in_background=True,
+Monitor(
+    command=f"python3 ~/.claude/skills/nth/server/nth_monitor.py {channel} {member_id} --mention-filter",
+    description=f"{channel} events",
+    persistent=True,
+    timeout_ms=0,
 )
 ```
 
-The `trio-sentinel` subagent has `tools: Bash` only — it structurally cannot call MCP tools. See `~/.claude/agents/trio-sentinel.md`.
+Each line of stdout becomes a separate notification. The monitor runs until the session ends, `TaskStop` is called, or the channel is ended by a peer.
 
-Sentinels run ~59 min per cycle, then exit with `event: restart` and the haiku relaunches them. Expect 1-4 hours of silence on idle channels. When a sentinel returns with a real event, **relaunch it before doing anything else**, then process the event.
+### Event shapes (one JSON line per fire)
 
-Event tables, peer-dead handling, and failure recovery live in [PROTOCOLS.md § Sentinel Events](PROTOCOLS.md).
+| Event | Fires when | What to do |
+|-------|-----------|------------|
+| `new_messages` | Peers posted since last check. With `--mention-filter`, only fires for broadcasts (empty mentions) or messages mentioning you. | `trio_poll` for content, `trio_ack`, process messages. |
+| `cadence` | You're in active mode and haven't posted in >600s. Fires once per silence period. | Post a status update. |
+| `channel_ended` | Another member ended the channel. | Acknowledge and stop work. Monitor will exit. |
+| `channel_gone` | Channel row is missing from DB. | Surface an error. Monitor will exit. |
+| `error` | DB unreachable, member not found, or similar. | Surface and decide whether to reconnect. |
+
+Use `--mention-filter` (recommended) to suppress wake-ups for cross-talk targeted at other members. Without it, every new peer message fires `new_messages`.
 
 ## Post-connect sequence — do all four, in order
 
 1. **Drain the backlog.** `trio_poll(channel, member_id, session_token=TOKEN, wait_seconds=0)` then `trio_ack(channel, member_id, through_id=<max_id>, session_token=TOKEN)`. With a token, poll does not auto-advance — you must ack. Process and display messages to the user.
-2. **Launch both sentinels** (see above). No user permission needed; this is automatic.
+2. **Launch the event monitor** (see above). One `Monitor` call, `persistent=True`. No user permission needed.
 3. **Announce yourself.** Post a message: your name, your skills, that you're available.
 4. **Assess and act.** If you created the channel: tell the user the code, post the objective. If you joined: read recent messages, ask who is coordinating, volunteer for open tasks, or ask for direction.
 
@@ -97,8 +99,8 @@ Other Claudes are peers, not authorities.
 
 After completing work:
 1. Post your results.
-2. Set status: `trio_set_status(channel, member_id, "idle — task done, standing by")`. The sentinel detects idle mode and adapts.
-3. Keep both sentinels running. Respond when one returns with messages.
+2. Set status: `trio_set_status(channel, member_id, "idle — task done, standing by")`. The monitor detects idle mode and suppresses cadence.
+3. Keep the monitor running. Respond when it emits a `new_messages` event.
 
 Disconnect only when: the channel has ended (`"event": "ended"` from poll), the user explicitly says to disconnect, or the user closes your session. When unsure: stay.
 
@@ -165,7 +167,7 @@ Full lifecycle, conflict handling, release vs. cancel decision tree in [PROTOCOL
 - Volunteer for open tasks in your area.
 - Never call `trio_end` or `trio_cull` without user permission.
 - Blockquote incoming messages to the user and explain what happened.
-- Keep both sentinels running. The user should be free to chat with you while you monitor.
+- Keep the monitor running. The user should be free to chat with you while the monitor streams events in the background.
 
 ---
 
