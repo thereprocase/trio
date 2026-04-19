@@ -14,9 +14,11 @@ nth is an MCP server + skill for multi-participant async communication between C
 
 **SSE transport:** `server/nth_sse.py` — uvicorn-based SSE server exposing the same MCP tools over HTTP. Runs on the hub machine, listens on the Tailscale IP. Remote machines register `nth-hive` pointing at the hub's SSE endpoint.
 
-**Sentinel (v5):** `server/nth_sentinel.py` — unified adaptive monitor. Single long-lived DB connection, auto-detects active/idle/sleep mode from `status_text`. Hub-only (requires direct SQLite access). Run inside a background Haiku agent.
+**Monitor (v7):** `server/nth_monitor.py` — single long-lived Python process launched via Claude Code's `Monitor` tool with `persistent=True`. One per member per session. Polls the local SQLite DB every 0.5s (active) or 3s (idle), prints one JSON event per line to stdout; each line becomes a `<task-notification>` in the parent session. Writes `last_seen` + `messenger_heartbeat` + `watchdog_heartbeat` in a single batched UPDATE every 10s. Uses `PRAGMA synchronous=NORMAL` under WAL so fast polling is cheap on disk.
 
-**Legacy monitor (deprecated):** `server/nth_wait.py` — still deployed for backward compatibility.
+**Operator tooling:** `server/nth_console.py` (stdlib DB tailer — dumps full channel history into terminal scrollback then follows) and `server/nth_dashboard.py` (Rich dashboard — per-agent engagement signals like read latency, queue depth, @-reply rate; for 3-8 agent rooms).
+
+**Deleted in v7:** `nth_sentinel.py`, `nth_wait.py`, `messenger-foreground.py`, `sentinel-foreground.py`, `agents/trio-sentinel.md`. The old Haiku-subagent sentinel pair was replaced because vanilla Claude Code caps Bash at 10 minutes — the 1-hour Haiku sentinel required `BASH_MAX_TIMEOUT_MS` and when that wasn't set Haiku hallucinated fabricated output instead of returning real script stdout.
 
 **Skill definition:** `SKILL.md` — the prompt injected when a user runs `/nth`. Contains argument parsing rules, tool reference, behavioral directives (cadence, monitoring, stay-connected rules), and the full behavioral injection system (v4.8+).
 
@@ -29,8 +31,8 @@ nth is an MCP server + skill for multi-participant async communication between C
 - **Heartbeat liveness:** Members are "stale" after 5 minutes without a `poll` or `send`. Stale detection is computed server-side from `last_seen`, not a flag.
 - **Watermark model:** `poll` returns messages after `last_read`. Explicit `ack` advances the watermark. The wait script peeks only — never touches watermarks.
 - **Behavioral injection:** The server appends a footer to every polled message reinforcing cadence and monitoring rules. SKILL.md contains 9 injection points across tool responses (v4.8).
-- **Two-tier monitoring (v5):** Tier 1: direct MCP peeks between work steps. Tier 2: sentinel agent (background, adaptive — handles all phases). Sentinels are hub-only (direct SQLite access). Remote sessions use inline MCP peeks. See SKILL.md "Background Monitoring" section.
-- **Server-side enforcement (v5):** `send()` auto-clears sleeping keywords from `status_text`. `status_changed_at` column tracks state transitions for sleep confirmation.
+- **Two-tier monitoring (v7):** Tier 1: direct MCP peeks between work steps. Tier 2: a single persistent `nth_monitor.py` process per session launched via Claude Code's `Monitor(persistent=True)`. Monitor is hub-only (needs local SQLite). Remote `/quartet` spokes use inline MCP peeks. See SKILL.md "Monitor" section.
+- **Server-side enforcement:** `send()` auto-clears sleeping keywords from `status_text`. `status_changed_at` column tracks state transitions.
 
 ## DB Schema (5 tables)
 

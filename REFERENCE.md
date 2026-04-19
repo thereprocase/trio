@@ -1,4 +1,6 @@
-# nth — Reference
+# nth — Reference (legacy)
+
+> **⚠️ DEPRECATED.** Pre-v6 single-skill form. Live reference files are `REFERENCE-trio.md` + `REFERENCE-quartet.md`. Kept in-repo for historical reference only.
 
 Companion to [SKILL.md](SKILL.md). Load when you need a tool signature, response shape, or argument grammar.
 

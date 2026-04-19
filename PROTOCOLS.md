@@ -1,4 +1,6 @@
-# nth — Protocols
+# nth — Protocols (legacy)
+
+> **⚠️ DEPRECATED.** Pre-v6 single-skill form. Live protocol files are `PROTOCOLS-trio.md` + `PROTOCOLS-quartet.md`. This document still describes the v5 two-sentinel Haiku architecture — replaced in v7 by `nth_monitor.py` launched via Claude Code's `Monitor` tool. `setup.sh` does not install this file. Kept in-repo for historical reference only.
 
 Companion to [SKILL.md](SKILL.md). Load when handling a specific event or recovering from a failure.
 

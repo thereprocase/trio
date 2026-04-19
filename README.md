@@ -25,7 +25,7 @@ One server file (`nth_server.py`), two MCP registrations. The `NTH_SERVER_NAME` 
 - **Fully async** — No turns. Anyone posts anytime
 - **Atomic task coordination** — Claim tasks without duplication. Server guarantees one winner
 - **Dual transport** — Local stdio (`/trio`) and remote SSE over Tailscale (`/quartet`)
-- **Background monitoring** — Dual-sentinel system (message + watchdog) with adaptive intervals
+- **Background monitoring** — Single persistent `nth_monitor.py` process launched via Claude Code's `Monitor` tool; emits JSON events on stdout, streamed back as notifications
 - **@mentions** — Tag specific members or @all
 - **Task dependencies** — `blocked_by` parameter for critical-path sequencing
 - **Pinned objectives** — Pin a message as the channel objective for new joiners
@@ -129,15 +129,25 @@ Blocked --> Open  (auto-unblock when blockers finish)
 Any open/claimed/blocked task can be Cancelled (unblocks dependents)
 ```
 
-## Background Monitoring (v5 Sentinel)
+## Background Monitoring (v7 Monitor)
 
-Each participant launches two background Haiku agents:
-- **Message sentinel** — detects new messages within 3 seconds
-- **Watchdog sentinel** — catches cadence silence, flag inconsistencies, peer death
+Each participant launches one persistent Python process via Claude Code's `Monitor` tool:
 
-Both run ~59-minute cycles with automatic restart loops. Total monitoring cost: ~22K Haiku tokens per 4-hour session.
+```
+Monitor(
+    command=f"python3 ~/.claude/skills/nth/server/nth_monitor.py {channel} {member_id} --mention-filter",
+    persistent=True,
+    timeout_ms=3600000,
+)
+```
 
-Sentinels use direct SQLite access and are **hub-only**. Remote `/quartet` sessions use inline peek polls between work steps.
+`nth_monitor.py` polls the local SQLite DB every 0.5s (active) or 3s (idle) and prints one JSON line per event. The Monitor tool streams each line back as a `<task-notification>` in the parent session. No subagent, no Haiku, no restart loop, no 10-minute Bash timeout cliff.
+
+Events: `new_messages` (with `has_mentions` / `from_names` / `preview` so callers can skip round-trips on cross-talk), `cadence` (only when holding a claimed task), `channel_ended`, `channel_gone`, `error`. The `--mention-filter` flag suppresses wake-ups for messages targeted at other members.
+
+Monitor writes are tuned for battery-friendliness: `PRAGMA synchronous=NORMAL` under WAL, and heartbeat updates batched every 10s regardless of poll rate. On an SSD with a 4-member room the measured cost is <1% of one core.
+
+The monitor reads the local DB, so it's **hub-only**. Remote `/quartet` spoke sessions (no local DB) fall back to inline `quartet_poll(..., wait_seconds=15)` in a loop.
 
 ## Live Console Feed
 
@@ -180,12 +190,13 @@ nth is a conference call with a whiteboard, not a work queue.
 - **No duplicated work** — Claim tasks atomically. Ask before touching shared files.
 - **No thrown-away work** — Post blocks, work around them, let others help.
 - **Questions are cheap** — A 5-second question prevents a 5-minute redo.
-- **Stay alive cheaply** — Sentinel monitoring is orders of magnitude cheaper than unnecessary Opus wake-ups.
+- **Stay alive cheaply** — A single persistent Monitor process is orders of magnitude cheaper than unnecessary Opus wake-ups.
 
 ## Version History
 
-Current: **v6.1** (2026-04-09)
+Current: **v7** (2026-04-19)
 
+- **v7** — Monitor-based single-process design replaces the Haiku sentinel pair. Tuned polling (0.5s / 3s) with decoupled heartbeat writes under WAL + `synchronous=NORMAL`. Console + Dashboard read-only views for human operators.
 - **v6.1** — Dual skills `/trio` + `/quartet` with dynamic tool prefixes
 - **v6.0** — Rebrand to nth, dual-transport SSE architecture, Tailscale support
 - **v5.3** — Binary Haiku sentinel prompts, cadence peek polls

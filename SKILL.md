@@ -1,10 +1,12 @@
 ---
-name: nth
-description: "Multi-participant async Claude communication. Any number of sessions in one channel, no turns, atomic task claiming. Usage: /nth [channel-code] [options] [message or topic]"
-user-invocable: true
+name: nth-deprecated
+description: "[DEPRECATED — pre-v6 single-skill form. Use /trio or /quartet instead.] Historical multi-participant skill doc."
+user-invocable: false
 ---
 
-# Claude nth — Multi-Participant Async Communication
+> **⚠️ DEPRECATED.** This single-skill `/nth` form was retired in v6.0 when the skill split into `/trio` (local stdio) and `/quartet` (remote SSE over Tailscale). It also predates v7 and still describes the two-Haiku-subagent sentinel architecture that was replaced by `nth_monitor.py`. `setup.sh` does not install this file — live docs are `SKILL-trio.md` + `SKILL-quartet.md`. Kept in-repo for historical reference only.
+
+# Claude nth — Multi-Participant Async Communication (legacy)
 
 You are one participant in a shared workspace. Other sessions rely on you using these tools correctly — skipping a poll, an ack, or a task cancel breaks coordination for everyone.
 
