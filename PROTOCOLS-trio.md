@@ -2,47 +2,32 @@
 
 Companion to [SKILL.md](SKILL.md). Load when handling a specific event or recovering from a failure.
 
-## Sentinel Events
+## Monitor Events
 
-Sentinels run in a restart loop. A sentinel returns only when a real event fires. When one returns, **relaunch it before processing the event**. Full launch blocks are in [SKILL.md § Sentinel](SKILL.md).
+After `trio_connect` you launched one persistent `Monitor` process (see [SKILL.md § Monitor](SKILL.md)). Each line of stdout from that process becomes a `<task-notification>` in your context — handle each event as it arrives, no relaunch dance.
 
-### Message sentinel (`messenger-foreground.py`)
+| Event | Fires when | Action |
+|-------|-----------|--------|
+| `new_messages` | Peers posted since last check. With `--mention-filter`, only fires for broadcasts or messages mentioning you. Payload includes `has_mentions` (bool), `from_names` (distinct senders), `preview` (80-char peek of latest). | `trio_poll` for content (pass `mentions_only=True` if you only want targeted bodies), then `trio_ack` through the highest id. Respond. |
+| `cadence` | You're in active mode, hold ≥1 claimed task, and haven't posted in >600s. Fires once per silence period. | Post a status update with confidence level. |
+| `channel_ended` | Another member called `trio_end`. | Process final messages. Monitor exits on its own — no relaunch. |
+| `channel_gone` | Channel row was deleted entirely. | Surface to user. Monitor exits. |
+| `error` | DB unreachable / member row missing / similar. | Surface to user and decide whether to reconnect. |
 
-| Event | Action |
-|-------|--------|
-| `new_messages` | Relaunch sentinel. Then `trio_poll` for content. Respond. |
-| `channel_ended` | Process final messages. No relaunch. |
-| `peer_dead` | Watchdog died. If idle: relaunch both. If actively working: note it, relaunch when idle. |
-| `channel_gone` | Channel was deleted. Tell user. No relaunch. |
-| `error` | DB failure or script crash. Relaunch sentinel, tell user. |
+### Monitor adaptive modes
 
-### Watchdog sentinel (`sentinel-foreground.py`) — emergencies
+The monitor auto-adapts based on your `status_text`:
 
-The watchdog fires only when something is wrong. Act immediately:
+- **Active** (no sleeping keywords): poll every 0.5s.
+- **Idle** (`status_text` contains `idle` / `standing by` / `tier 3` / `agent-monitor`): poll every 3s, cadence suppressed.
 
-1. **Relaunch the watchdog.** If unsure whether the message sentinel is alive, relaunch that too.
-2. **Then diagnose and fix.**
+Heartbeat writes to the DB are batched every 10s regardless of poll rate, so faster polling is free on disk.
 
-| Event | What went wrong | Fix |
-|-------|----------------|-----|
-| `cadence` | You went silent for 10+ minutes. Peers can't see you. | Post a status update with confidence level immediately. |
-| `flag_inconsistency` | Status says sleeping but you're actively working. | `trio_set_status` to fix status. |
-| `channel_ended` | Channel ended while you were out. | Process final messages. No relaunch. |
-| `peer_dead` | Message sentinel died. | If idle: relaunch both. If working: note, relaunch at idle. |
-| `channel_gone` | Channel deleted. | Tell user. No relaunch. |
-| `error` | DB failure or script crash. | Relaunch watchdog, tell user. |
+### Monitor exits unexpectedly
 
-### Sentinel adaptive modes
+The monitor runs for the full session and doesn't restart itself. If Claude Code reports the `Monitor` process exited before the channel ended, re-issue the exact `Monitor(...)` block from SKILL.md. One command, same arguments. The parent Claude does not relaunch in a loop — a one-time re-issue is enough.
 
-The sentinel auto-adapts based on your `status_text`:
-
-- **Active** (no sleeping keywords): check every 3s. Watch messages + cadence + heartbeat.
-- **Idle** (`status_text` contains `idle` / `standing by`): check every 30s. Skip cadence.
-- **Sleep** (idle + 60s of confirmed silence): check every 30s. Wide heartbeat threshold only.
-
-### Sentinel launch failure
-
-Retry once. If it fails again: tell the user (`"Sentinel launch failed — reduced monitoring"`). Keep the surviving sentinel running; it covers its own event types and detects the missing peer via heartbeat within ~6 minutes.
+There is no "peer_dead" event in the Monitor architecture. A single process per session per channel means there is no peer for it to watch. The old two-sentinel heartbeat dance is gone.
 
 ### Peek polls (inline, optional)
 
@@ -52,7 +37,7 @@ Between work steps:
 trio_poll(channel, member_id, session_token=TOKEN, wait_seconds=0)
 ```
 
-Zero cost if nothing is there. The sentinel is the reliability layer; peeks are the fast path. Peek at natural breakpoints: after edits, after builds, before new work.
+Zero cost if nothing is there. The monitor is the reliability layer; peeks are the fast path. Peek at natural breakpoints: after edits, after builds, before new work.
 
 ## Tasks — full lifecycle
 
@@ -141,7 +126,7 @@ Only the session that authored the message can retract (server checks `session_t
 Effects:
 - Marks the message `retracted_at` with `retraction_reason`.
 - Original content stays in the channel. `trio_history` renders as `[RETRACTED: reason] {original}` inline.
-- A synthetic `[retracted #N] reason` message is posted so peers with live sentinels see the retraction at normal cadence.
+- A synthetic `[retracted #N] reason` message is posted so peers with live monitors see the retraction at normal cadence.
 
 ### When to retract vs. post a correction
 
@@ -172,7 +157,7 @@ A peer who knows resolves this in seconds. Alone you may never find it.
 
 ### `send()` auto-clears sleeping status
 
-When you respond while flagged idle, the server clears sleeping keywords from `status_text` automatically. This puts you back in active mode (3s sentinel checks, cadence on). If you're still idle after responding, re-set your status: `trio_set_status(channel, member_id, "idle — ...")`. This is server-side enforcement — you don't trigger it manually.
+When you respond while flagged idle, the server clears sleeping keywords from `status_text` automatically. This puts you back in active mode (0.5s monitor polling, cadence re-armed). If you're still idle after responding, re-set your status: `trio_set_status(channel, member_id, "idle — ...")`. This is server-side enforcement — you don't trigger it manually.
 
 ### Reasoning-heavy work (no tool calls)
 
@@ -231,9 +216,9 @@ Run `trio_history(channel, last_n=50)`. Read-only, shows last 50 with retracted 
 3. Post a channel message listing which IDs were genuine vs. rogue.
 4. The `author_session` column on each message is the forensic trail. A `session_token` you don't recognize = not yours.
 
-### "My sentinel died and I don't know for how long"
+### "My monitor died and I don't know for how long"
 
-The peer's watchdog fires `peer_dead` at the 5-min heartbeat threshold. If you haven't heard from your own sentinel in longer than that, assume it's been dead that long. Relaunch both sentinels and post a heads-up: `"Sentinels were down for ~N minutes, re-launched. Re-draining backlog now."`
+The Monitor tool surfaces process exits in Claude Code's own task-notification stream — if the process quits, you see it. If you're unsure how long you were deaf, peek with `trio_poll(..., wait_seconds=0)` to pull everything since your last `trio_ack`, then re-issue the `Monitor(...)` block from SKILL.md. Post a heads-up: `"Monitor was down for ~N minutes, re-launched. Re-draining backlog now."`
 
 ---
 

@@ -4,6 +4,8 @@ Why the rules exist. Read this once if you're new to nth; skip on routine use.
 
 Prefix note: examples use `nth_*`. Substitute `trio_*` or `quartet_*` when invoking the respective flavored skill. See [SKILL.md](SKILL.md).
 
+> **v7 architecture note (2026-04).** The "two Haiku subagent sentinels" described in the history sections below were replaced with a single persistent `nth_monitor.py` process launched via Claude Code's `Monitor` tool. Everything rationale-ish (why monitoring must be cheap, why capability-scoping matters, why silence is invisible) still applies; the implementation mechanics documented historically (`trio-sentinel` subagent, 59-min restart cycles, peer-dead heartbeat dance) do not. Live protocol lives in `SKILL.md` and `PROTOCOLS.md`; this file is kept for design context only.
+
 ## Design philosophy — efficiency over brute force
 
 nth is a conference call, not a work queue. Every token spent on coordination is a token not spent on actual work. The rules exist to serve one principle: **maximize useful work per token across all participants.**

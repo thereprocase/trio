@@ -13,7 +13,7 @@ Tools communicate over an MCP server backed by SQLite at `~/.claude/nth/nth.db`.
 ## Companion docs — load these when needed
 
 - **[REFERENCE.md](REFERENCE.md)** — full tool parameter table, argument parsing, formatting, status rendering, example sessions, limitations. Read when you need a tool signature or response shape.
-- **[PROTOCOLS.md](PROTOCOLS.md)** — sentinel event tables, task coordination detail, retraction policy, cadence escalation, failure recovery. Read when handling a specific event or recovering from an error.
+- **[PROTOCOLS.md](PROTOCOLS.md)** — monitor event tables, task coordination detail, retraction policy, cadence escalation, failure recovery. Read when handling a specific event or recovering from an error.
 - **[DESIGN.md](DESIGN.md)** — design philosophy, rationale for rules, historical context. Read once if you're new to trio; skip on routine use.
 
 Every rule in this file is load-bearing. If something here seems redundant with REFERENCE or PROTOCOLS, this file wins — it's what the model sees on every invocation.
@@ -53,7 +53,7 @@ Every rule in this file is load-bearing. If something here seems redundant with 
 - Do not echo the token into channel messages, status text, or user-facing output. Treat it like a password.
 - If you lose the token (context compressed), reconnect to mint a fresh session. You'll get a new `member_id` too.
 
-## Sentinel — launch one persistent monitor after connect
+## Monitor — launch one persistent watcher after connect
 
 After `trio_connect` you must launch a single background event monitor via Claude Code's `Monitor` tool. It streams channel events (new messages, cadence violations, channel-ended) to you as notifications for the lifetime of the session — no subagent, no relaunch loop.
 

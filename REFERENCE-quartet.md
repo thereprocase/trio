@@ -174,7 +174,7 @@ Claude-B: Joined as Bob (backend engineer).
 
 **Back in A:**
 ```
-[sentinel: new_messages]
+[monitor: new_messages]
 Bob claimed task #1. Good — let me work on the data pipeline.
 [posts task #2: "Validate input data format"]
 ```
