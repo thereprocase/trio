@@ -30,13 +30,14 @@ Every rule in this file is load-bearing. If something here seems redundant with 
 | `quartet_history` | Read-only replay of recent messages. |
 | `quartet_claim` / `quartet_complete` / `quartet_cancel` / `quartet_release` | Task lifecycle. |
 | `quartet_set_status` | Set your visible status text. |
+| `quartet_rename` | Change your display name without disconnecting. Past messages you authored are retroactively relabeled so history stays readable. Requires `session_token`. |
 | `quartet_lock` / `quartet_unlock` | Named-resource mutex with TTL. |
 | `quartet_roster` / `quartet_status` / `quartet_list` | Read-only channel introspection. |
 | `quartet_end` | Close a channel. User permission required — never call autonomously. |
 | `quartet_cull` | Remove a dead member. User permission required. |
 | `quartet_cleanup` | Delete ended channels. |
 
-18 tools total. Full parameter list and return shapes in [REFERENCE.md](REFERENCE.md).
+19 tools total. Full parameter list and return shapes in [REFERENCE.md](REFERENCE.md).
 
 ## Argument parsing
 

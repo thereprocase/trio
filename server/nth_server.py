@@ -134,7 +134,7 @@ def _startup_banner():
     _safe_print("  +-------------------------------------------+")
     _safe_print(f"  |  nth server - {SERVER_NAME:<27s}|")
     _safe_print(f"  |  {f'{SERVER_HOST}:{SERVER_PORT}':<31s}|")
-    _safe_print(f"  |  tools: {TOOL_PREFIX}_* (18)                    |")
+    _safe_print(f"  |  tools: {TOOL_PREFIX}_* (19)                    |")
     _safe_print(f"  |  db: ~/.claude/nth/nth.db                 |")
     if connect_url:
         _safe_print("  |                                           |")
@@ -2002,6 +2002,91 @@ def nth_set_status(channel: str, member_id: str, status_text: str) -> str:
             )
         db.commit()
         return json.dumps({"ok": True, "status_text": status_text})
+    finally:
+        db.close()
+
+
+@mcp.tool(name=f"{TOOL_PREFIX}_rename")
+def nth_rename(channel: str, member_id: str, new_name: str, session_token: str = "") -> str:
+    """Change your display name without disconnecting. The member_id stays
+    durable (it's the channel's stable identity for you); the name is a
+    mutable alias. Past messages you authored are retroactively relabeled
+    with the new name so channel history and `nth_history` exports stay
+    readable after a rename.
+
+    Requires session_token. You can only rename yourself — the token's
+    member_id must match the member_id argument.
+
+    A synthetic `[renamed] <old> → <new>` message is posted to the channel so
+    live peers see the rename event in their event stream.
+
+    Args:
+        channel: Channel code
+        member_id: Your member ID (must match session_token's owner)
+        new_name: New display name (stripped; max 80 chars)
+        session_token: Your session_token from nth_connect
+    """
+    err = validate_channel_code(channel)
+    if err:
+        return json.dumps({"error": err})
+
+    new_name = (new_name or "").strip()[:80]
+    if not new_name:
+        return json.dumps({"error": "new_name cannot be empty"})
+
+    db = get_db()
+    try:
+        member = _get_member(db, channel, member_id)
+        if not member:
+            return json.dumps({"error": "You are not a member of this channel."})
+
+        # Session-token enforcement. Rename is identity-affecting; we require
+        # the caller to prove ownership of the member row via the token.
+        if not session_token:
+            return json.dumps({
+                "error": "session_token is required for rename. "
+                         "If you don't have one (e.g. context was compressed), "
+                         "reconnect with nth_connect to mint a fresh session.",
+            })
+        sess = _get_session(db, channel, session_token)
+        if not sess:
+            return json.dumps({"error": "Invalid or revoked session_token."})
+        if sess["member_id"] != member_id:
+            return json.dumps({"error": "session_token does not match member_id."})
+
+        old_name = member["name"] or member_id
+        if old_name == new_name:
+            return json.dumps({"ok": True, "unchanged": True, "name": new_name})
+
+        now = now_iso()
+        # Update the primary alias on the member row.
+        db.execute(
+            "UPDATE members SET name = ?, last_seen = ? "
+            "WHERE channel = ? AND id = ?",
+            (new_name, now, channel, member_id),
+        )
+        # Retroactively relabel past messages from this member. Only the
+        # denormalized `member_name` column is rewritten — content stays
+        # verbatim, mentions stays verbatim (those are member_ids, stable).
+        db.execute(
+            "UPDATE messages SET member_name = ? "
+            "WHERE channel = ? AND member_id = ?",
+            (new_name, channel, member_id),
+        )
+        # Post a synthetic event so live peers' monitors see the rename.
+        db.execute(
+            "INSERT INTO messages "
+            "(channel, member_id, member_name, content, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (channel, member_id, new_name,
+             f"[renamed] {old_name} → {new_name}", now),
+        )
+        db.commit()
+        try:
+            _console("✏️ ", channel, f"{old_name} renamed to {new_name}", 36)
+        except Exception:
+            pass
+        return json.dumps({"ok": True, "old_name": old_name, "name": new_name})
     finally:
         db.close()
 

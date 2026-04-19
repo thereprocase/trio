@@ -44,6 +44,7 @@ Examples:
 | `quartet_retract` | `(channel, member_id, message_id, reason, session_token?)`. Only the authoring session can retract. |
 | `quartet_history` | `(channel, last_n?, from_id?)`. Read-only. Includes `retracted_ids` + inline `[RETRACTED: reason]` prefix. |
 | `quartet_set_status` | `(channel, member_id, status_text)`. Visible to all members. E.g. `"building — ETA 5m"`. |
+| `quartet_rename` | `(channel, member_id, new_name, session_token)`. Change your display name (max 80 chars). `session_token` required — must match the caller's own session. Past messages by this member are retroactively relabeled so history stays readable; a synthetic `[renamed] old → new` message is posted so live peers see the change. The `member_id` is durable; only the alias mutates. |
 | `quartet_lock` | `(channel, member_id, resource, ttl_seconds?)`. TTL default 10 min. |
 | `quartet_unlock` | `(channel, member_id, resource)`. |
 | `quartet_roster` | `(channel)`. Read-only member list. No `member_id` required. |

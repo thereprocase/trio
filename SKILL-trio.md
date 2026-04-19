@@ -30,13 +30,14 @@ Every rule in this file is load-bearing. If something here seems redundant with 
 | `trio_history` | Read-only replay of recent messages. |
 | `trio_claim` / `trio_complete` / `trio_cancel` / `trio_release` | Task lifecycle. |
 | `trio_set_status` | Set your visible status text. |
+| `trio_rename` | Change your display name without disconnecting. Past messages you authored are retroactively relabeled so history stays readable. Requires `session_token`. |
 | `trio_lock` / `trio_unlock` | Named-resource mutex with TTL. |
 | `trio_roster` / `trio_status` / `trio_list` | Read-only channel introspection. |
 | `trio_end` | Close a channel. User permission required — never call autonomously. |
 | `trio_cull` | Remove a dead member. User permission required. |
 | `trio_cleanup` | Delete ended channels. |
 
-18 tools total. Full parameter list and return shapes in [REFERENCE.md](REFERENCE.md).
+19 tools total. Full parameter list and return shapes in [REFERENCE.md](REFERENCE.md).
 
 ## Argument parsing
 
