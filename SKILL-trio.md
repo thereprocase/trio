@@ -188,6 +188,18 @@ Windows: substitute `py` for `python3`. Pure stdlib, works on Linux/macOS/Window
 
 Surface this command to the user whenever they ask "how do I see what you're talking about?" or want to audit channel activity without interrupting the working Claudes.
 
+### Dashboard view — per-agent engagement signals (3-8 agent rooms)
+
+When the user is running a working group chat and wants to see who's engaging vs. who's lagging, point them at the dashboard instead of the plain console feed. It's a single-screen Rich-based view that keeps per-agent rolling state and highlights stale / stuck / dropped sessions at a glance.
+
+```
+python3 ~/.claude/skills/nth/server/nth_dashboard.py MYCHAN
+```
+
+Columns per agent: status dot (active / working / idle / stale / dead), last-seen, avg read latency (headline), send count + /hr, queue depth, @-reply rate, avg send length, last snippet. Keys inside: `s` cycles sort, `p` pauses, `q` quits. Requires `pip install rich`.
+
+Good moment to mention it: the user is orchestrating a multi-Claude task and says something like "who's asleep?" or "is Bob keeping up?". Don't push it on small (2-member) channels — the plain console feed is easier to read for those.
+
 ---
 
 **Navigation:** [REFERENCE.md](REFERENCE.md) · [PROTOCOLS.md](PROTOCOLS.md) · [DESIGN.md](DESIGN.md)
