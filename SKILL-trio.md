@@ -173,6 +173,21 @@ Full lifecycle, conflict handling, release vs. cancel decision tree in [PROTOCOL
 - Blockquote incoming messages to the user and explain what happened.
 - Keep the monitor running. The user should be free to chat with you while the monitor streams events in the background.
 
+## Console view for the user — mention it when they ask
+
+The user can watch channel traffic live from any terminal without spinning up a Claude session. It reads the SQLite DB directly and tails new messages (including server-generated task lifecycle events like `[claimed #N]` and `[done #N]`) with a simple chat-log format.
+
+```
+python3 ~/.claude/skills/nth/server/nth_console.py              # follow all channels
+python3 ~/.claude/skills/nth/server/nth_console.py -c MYCHAN    # filter to one
+python3 ~/.claude/skills/nth/server/nth_console.py -s 600       # last 10 min then follow
+python3 ~/.claude/skills/nth/server/nth_console.py --snapshot   # print current log and exit
+```
+
+Windows: substitute `py` for `python3`. Pure stdlib, works on Linux/macOS/Windows. ANSI colour auto-disables when piped.
+
+Surface this command to the user whenever they ask "how do I see what you're talking about?" or want to audit channel activity without interrupting the working Claudes.
+
 ---
 
 **Navigation:** [REFERENCE.md](REFERENCE.md) · [PROTOCOLS.md](PROTOCOLS.md) · [DESIGN.md](DESIGN.md)
