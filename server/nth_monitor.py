@@ -62,6 +62,12 @@ ACTIVE_INTERVAL = 0.5
 IDLE_INTERVAL = 3.0
 HEARTBEAT_INTERVAL = 10.0
 CADENCE_THRESHOLD = 600
+# Tap the parent session before the Anthropic prompt-cache TTL (1h) expires.
+# 55 min gives a 5-min buffer for clock skew, network latency, and the time
+# the agent takes to handle the event. Fires once per quiet period; resets
+# when the member posts or while they're sleeping/hibernating (hibernators
+# accept the eventual re-read cost in exchange for zero keepalive tap cost).
+KEEPALIVE_THRESHOLD = 55 * 60
 
 
 def emit(event_dict):
@@ -127,6 +133,7 @@ def should_wake(member_id, mentions_raw, refs_raw, bangs_raw, filter_mode):
 def monitor(channel, member_id, filter_mode="all", _db_path=None):
     local_hwm = None
     cadence_fired = False
+    keepalive_fired = False
     last_heartbeat_mono = 0.0
     last_heartbeat_wall = 0.0
     db_error_streak = 0
@@ -315,11 +322,33 @@ def monitor(channel, member_id, filter_mode="all", _db_path=None):
                             "filter": mode,
                         })
 
-                # --- Cadence (active mode, no claimed tasks → skip) ---
-                # Fire once per silence period if member is in active mode AND holds
-                # at least one claimed task. Workers standing by with no task claim
-                # don't need a nudge — the idle-reply/auto-clear cycle was producing
-                # pure-ceremony cadence pings.
+                # --- Cadence + cache keepalive ---
+                # Single query for this member's most-recent own message —
+                # drives two independent gates:
+                #
+                #   * cadence (10min, active + claimed-task only): nudges a
+                #     worker who holds a task and has gone silent.
+                #
+                #   * keepalive (55min, always): gives the parent session a
+                #     cheap wake so it can tap the Anthropic prompt cache
+                #     (1h TTL) with a single trio_poll before it expires —
+                #     ~$0.13 vs ~$2.25 for a full context rewrite on the
+                #     eventual real wake. Fires for every idle member,
+                #     including hibernators, because the cache cost is
+                #     paid on the parent session whether it's asleep or
+                #     not and we want it cheap to re-engage.
+                try:
+                    latest_own = db.execute(
+                        "SELECT created_at FROM messages "
+                        "WHERE channel = ? AND member_id = ? ORDER BY id DESC LIMIT 1",
+                        (channel, member_id),
+                    ).fetchone()
+                except sqlite3.OperationalError:
+                    latest_own = None
+                own_gap = seconds_since(
+                    latest_own["created_at"] if latest_own else None
+                )
+
                 if not sleeping:
                     try:
                         claimed_count_row = db.execute(
@@ -332,23 +361,25 @@ def monitor(channel, member_id, filter_mode="all", _db_path=None):
                         claimed_count = 0
 
                     if claimed_count > 0:
-                        latest_own = db.execute(
-                            "SELECT created_at FROM messages "
-                            "WHERE channel = ? AND member_id = ? ORDER BY id DESC LIMIT 1",
-                            (channel, member_id),
-                        ).fetchone()
-                        gap = seconds_since(
-                            latest_own["created_at"] if latest_own else None
-                        )
-                        if gap > CADENCE_THRESHOLD and not cadence_fired:
-                            emit({"event": "cadence", "gap_seconds": round(gap), "claimed_tasks": claimed_count})
+                        if own_gap > CADENCE_THRESHOLD and not cadence_fired:
+                            emit({"event": "cadence", "gap_seconds": round(own_gap), "claimed_tasks": claimed_count})
                             cadence_fired = True
-                        elif gap < CADENCE_THRESHOLD:
+                        elif own_gap < CADENCE_THRESHOLD:
                             cadence_fired = False
                     else:
                         cadence_fired = False
                 else:
                     cadence_fired = False
+
+                if own_gap > KEEPALIVE_THRESHOLD and not keepalive_fired:
+                    emit({
+                        "event": "keepalive",
+                        "gap_seconds": round(own_gap),
+                        "threshold_seconds": KEEPALIVE_THRESHOLD,
+                    })
+                    keepalive_fired = True
+                elif own_gap < KEEPALIVE_THRESHOLD:
+                    keepalive_fired = False
 
             except sqlite3.OperationalError as e:
                 if "no such table" in str(e):
