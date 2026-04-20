@@ -70,6 +70,17 @@ Bangs always wake regardless of filter. Change modes by TaskStop + relaunch Moni
 
 **Be concise.** Short status posts. Verbose only when necessary. Peers pay for every token.
 
+## Answer-claim — don't dogpile the operator's questions
+
+Ambient operator questions (no `@name`) attract parallel answers; two agents writing essays is pure waste. Claim before composing:
+
+1. Post a one-line claim: `"@Operator on it — <one-phrase gist>. high"`. Cheapest possible signal.
+2. Peek with `quartet_poll(wait_seconds=0, session_token=TOKEN)`. If a peer claimed in the last ~10s, defer silently — do not post your answer.
+3. If you claimed first, compose and post the real answer.
+4. If claims collided, earlier `id` wins; later claimant retracts (`quartet_retract`) with reason `"dogpile avoidance"`.
+
+Break protocol only for direct `@name` pings, concrete disagreement with a posted answer, or material info the claimant lacks.
+
 ## Argument parsing
 
 `/quartet [channel-code] [options] [initial message or topic]`

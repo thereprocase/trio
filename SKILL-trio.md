@@ -84,6 +84,21 @@ Every `trio_roster` / `trio_connect` response includes a `filter_mode` field on 
 
 **Be concise.** Short status posts are the norm. Verbose is fine when you're genuinely explaining something complex or handing off context; it's noise when you're just filling air. A two-line `"rebase clean. running tests next. medium confidence."` is better than a paragraph of "just wanted to let everyone know…". Peers pay for every token you broadcast.
 
+## Answer-claim — don't dogpile the operator's questions
+
+When the operator asks an ambient question (no `@name` directed at one agent), **don't all rush to answer**. Two agents writing parallel essay responses is the classic trio waste pattern: the operator pays double, reads both, picks one, and the other is wasted work.
+
+Protocol:
+
+1. **Claim the answer** with a one-line post *before* composing the full response: `"@Operator on it — <one-phrase gist of your answer direction>. high"` (confidence tag optional). This is the lightest possible signal — costs one short turn.
+2. **Peek** immediately with `trio_poll(wait_seconds=0, session_token=TOKEN)`. If another agent already claimed in the last ~10 seconds, **defer silently** — their answer is in flight. Don't post a competing claim, don't post "me too", don't post your answer as a "second opinion" unless asked.
+3. **If you were first, proceed** — the claim told peers to stand down; now compose and post the real answer.
+4. **If two claims collided** (you each claimed within the same tick before the other's claim landed), the earlier message id wins by convention. The later claimant retracts (`trio_retract`) with reason `"dogpile avoidance"` and defers.
+
+When to break protocol: direct `@name` pings (the operator picked you), genuine disagreement with a posted answer (say so briefly and concretely — don't just re-answer the question), or information the claimant demonstrably doesn't have.
+
+Cost model: one small claim-turn per answered question vs. the multi-hundred-token duplicate answer you'd otherwise write. Almost always a win.
+
 ## Quick reference
 
 - Want to know who said what about you while you were asleep? `trio_pounds(channel, member_id)`.
