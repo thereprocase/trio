@@ -40,21 +40,35 @@ Every rule in this file is load-bearing. If something here seems redundant with 
 
 20 tools total. Full parameter list and return shapes in [REFERENCE.md](REFERENCE.md).
 
-## `@pings` vs `#pounds` — when to use which
+## Sigils — how to address people
 
-- **`@name`** = PING. Wakes the target via their monitor. Use when you *need* a response or acknowledgement: direct questions, hand-offs, blocking dependencies.
-- **`#name`** = POUND reference. Separate `refs` field; never wakes the target on their default filter. Use when you're *talking about* a member — coordinating with someone else, discussing their work, leaving a breadcrumb they can grep on next wake.
+Three sigils parse server-side against roster names:
 
-**Role guidance.** Pick your monitor filter based on your role:
+- **`@name`** — PING. Filterable. Wakes target under `all` / `about` / `at`. Direct requests, hand-offs, blocking dependencies.
+- **`#name`** — POUND / reference. Filterable. Stored in `refs`. Never wakes on `at` or `all`; wakes on `about`. Talking ABOUT someone. Grep via `quartet_pounds`.
+- **`!name`** — BANG. **UNFILTERABLE.** Wakes target regardless of filter. `!all` wakes every member. Emergencies / channel-close only — agents cannot opt out.
 
-| Role | Filter | Rationale |
-|------|--------|-----------|
-| Primary worker claiming tasks | `--mention-filter` (= `at+broadcast`) — default | Wake on direct pings and room broadcasts. |
-| Side-piece agent (on-call) | `--filter at` | Silent until explicitly `@pinged`. On wake, call `quartet_pounds` to catch up. |
-| Reviewer / observer | `--filter at+pound` | Wake on direct pings or `#pound` refs. Skip broadcasts. |
-| Coordinator / scribe | `--filter all` (no flag) | Wake on everything. |
+## Listening modes
 
-Combining `#name` with `@name` is fine: `"@alice can you review #bob's parser change?"` pings alice and leaves a breadcrumb bob can `quartet_pounds` later without fragmenting alice's attention.
+`--filter MODE` for `nth_monitor.py`:
+
+| Mode | Wakes on | Role |
+|------|----------|------|
+| `all` (default) | everything | coordinator, scribe |
+| `about` (legacy `--mention-filter`) | `@me` + `#me` + bangs | primary worker, reviewer |
+| `at` | `@me` + bangs only | side-piece / on-call |
+
+Bangs always wake regardless of filter. Change modes by TaskStop + relaunch Monitor with a different `--filter`.
+
+## Filter awareness + conciseness
+
+`quartet_roster` / `quartet_connect` responses include a `filter_mode` field on every member. Before posting, check:
+
+- An ambient message (no sigil) is only heard by peers on `all`. If peers are all on `at` or `about`, either add a `@name` so someone actually hears it, or don't say it at all.
+- `#name` wakes only peers on `about` or `all`.
+- `!name` wakes everyone. Use sparingly.
+
+**Be concise.** Short status posts. Verbose only when necessary. Peers pay for every token.
 
 ## Argument parsing
 
@@ -77,7 +91,7 @@ After `quartet_connect` you must launch a single background event monitor via Cl
 
 ```
 Monitor(
-    command=f"python3 ~/.claude/skills/nth/server/nth_monitor.py {channel} {member_id} --filter at+broadcast",
+    command=f"python3 ~/.claude/skills/nth/server/nth_monitor.py {channel} {member_id} --filter about",
     description=f"{channel} events",
     persistent=True,
     timeout_ms=3600000,
@@ -100,22 +114,13 @@ Event tables and failure recovery live in [PROTOCOLS.md § Monitor Events](PROTO
 
 | Event | Fires when | What to do |
 |-------|-----------|------------|
-| `new_messages` | Peers posted since last check. `--filter` controls which categories wake you (see filter modes below). Payload includes `has_mentions` (bool), `has_refs` (bool), `from_names` (senders), `preview` (80-char peek of latest), `filter` (active mode). | `quartet_poll` for content (use `mentions_only=True` if you only want targeted bodies), `quartet_ack`, process. If `has_refs` but you didn't wake on `#pounds`, run `quartet_pounds` to backfill. |
+| `new_messages` | Peers posted since last check. `--filter` controls which categories wake you; bangs always wake. Payload includes `has_bangs`, `has_mentions`, `has_refs`, `from_names`, `preview`, `filter`. | `quartet_poll` for content, `quartet_ack`, process. If `has_refs` under an at-only filter, run `quartet_pounds` to backfill. |
 | `cadence` | You're active, hold ≥1 claimed task, and haven't posted in >600s. Fires once per silence period. | Post a status update. |
 | `channel_ended` | Another member ended the channel. | Acknowledge and stop work. Monitor will exit. |
 | `channel_gone` | Channel row is missing from DB. | Surface an error. Monitor will exit. |
 | `error` | DB unreachable, member not found, or similar. | Surface and decide whether to reconnect. |
 
-**Filter modes** (`--filter MODE` — pick one based on role; see the @/# section above):
-
-| Flag | Wakes on |
-|------|---------|
-| `--filter at` | `@me` only |
-| `--mention-filter` (= `--filter at+broadcast`) | `@me` or broadcasts — default primary worker |
-| `--filter at+pound` | `@me` or `#me` refs — no broadcasts |
-| `--filter at+pound+broadcast` | Everything addressed to you or the room |
-| `--filter pound` | `#me` only |
-| `--filter all` (or no flag) | Every peer message |
+**Filter modes** — see the Listening Modes table above (`all` / `about` / `at`). Bangs always wake regardless of filter.
 
 ## Post-connect sequence — do all four, in order
 

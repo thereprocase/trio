@@ -42,6 +42,7 @@ import subprocess
 import sys
 import threading
 import time
+import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -181,7 +182,19 @@ class OperatorRegistry:
         return ident
 
     def register_guest(self, token: str, raw_name: str) -> OperatorIdentity:
-        name = (raw_name or "").strip()[:40] or "Guest"
+        # Normalise Unicode + strip controls to blunt lookalike-impersonation.
+        # NFKC folds full-width ＠ / ＃ / ！ etc. into their ASCII twins so we
+        # can reject them consistently; the "Cc" category filter drops zero-
+        # width joiners and the like.
+        name = unicodedata.normalize("NFKC", raw_name or "")
+        name = "".join(c for c in name if unicodedata.category(c)[0] != "C")
+        name = name.strip()[:40] or "Guest"
+        lower = name.lower()
+        # Reserve sigil keywords so a guest can't name themselves "all" (and
+        # poison every #all / @all / !all broadcast) or spoof the operator
+        # member_id prefix.
+        if lower in {"all", "everyone", "here", "channel"} or lower.startswith("_op_"):
+            name = f"Guest-{token[:4]}"
         slug = _slug(name) or "guest"
         # Disambiguate multiple guests with the same chosen name by
         # suffixing a chunk of the token — keeps their rows distinct.
@@ -244,6 +257,44 @@ def member_status(last_seen_iso: Optional[str], status_text: str) -> str:
     return "active"
 
 
+def _parse_sigils_against_roster(
+    db: sqlite3.Connection, channel: str, content: str
+) -> Tuple[List[str], List[str], List[str]]:
+    """Resolve @name / #name / !name against channel members.
+
+    Mirrors the parser in nth_server.nth_send so web-operator posts carry
+    the same wake semantics as MCP-agent posts. @all + !all short-circuit
+    to every-member; #all has no analogue (reference-to-everyone is just
+    noise). Members named literally 'all' are skipped so they don't
+    double-count against the keyword shortcuts.
+    """
+    members = db.execute(
+        "SELECT id, name FROM members WHERE channel = ?",
+        (channel,),
+    ).fetchall()
+    lowered = content.lower()
+    all_ids = [m["id"] for m in members]
+    at_all   = re.search(r"@all(?:\b|$)", lowered) is not None
+    bang_all = re.search(r"!all(?:\b|$)", lowered) is not None
+    mention_ids: List[str] = list(all_ids) if at_all   else []
+    bang_ids:    List[str] = list(all_ids) if bang_all else []
+    ref_ids:     List[str] = []
+    for m in members:
+        name = (m["name"] or "").strip()
+        if name.lower() == "all" or not name:
+            continue
+        name_esc = re.escape(name)
+        if not at_all:
+            if re.search(r"@" + name_esc + r"(?:\b|$)", content, re.IGNORECASE):
+                mention_ids.append(m["id"])
+        if re.search(r"#" + name_esc + r"(?:\b|$)", content, re.IGNORECASE):
+            ref_ids.append(m["id"])
+        if not bang_all:
+            if re.search(r"!" + name_esc + r"(?:\b|$)", content, re.IGNORECASE):
+                bang_ids.append(m["id"])
+    return mention_ids, ref_ids, bang_ids
+
+
 def ensure_operator_row(db: sqlite3.Connection, channel: str, ident: OperatorIdentity) -> Tuple[str, str]:
     """Insert-or-update this operator's members row. On every send we
     refresh the summary so trust source is fresh if a guest later upgrades
@@ -304,7 +355,7 @@ class EventHub:
             q.put_nowait(json.dumps({"type": "roster", "members": members}))
             # Last-N history
             rows = db.execute(
-                "SELECT id, member_id, member_name, content, mentions, refs, created_at "
+                "SELECT id, member_id, member_name, content, mentions, refs, bangs, created_at "
                 "FROM messages WHERE channel = ? ORDER BY id DESC LIMIT ?",
                 (self.channel, HISTORY_LIMIT),
             ).fetchall()
@@ -317,6 +368,7 @@ class EventHub:
                     "content": r["content"] or "",
                     "mentions": parse_mentions_json(r["mentions"]),
                     "refs": parse_mentions_json(r["refs"] if "refs" in r.keys() else ""),
+                    "bangs": parse_mentions_json(r["bangs"] if "bangs" in r.keys() else ""),
                     "created_at": r["created_at"],
                 }))
             db.close()
@@ -341,38 +393,59 @@ class EventHub:
         # v6.2+ session-mode clients write sessions.last_read / last_seen
         # and never touch members.*. Reconcile like nth_monitor.py:171-183
         # so the web console sees real watermark + liveness movement.
-        rows = db.execute(
-            "SELECT m.id AS id, m.name AS name, m.status_text AS status_text, "
-            "m.last_seen AS member_last_seen, m.last_read AS member_last_read, "
-            "m.messenger_heartbeat AS messenger_heartbeat, "
-            "m.watchdog_heartbeat AS watchdog_heartbeat, "
-            "COALESCE(MAX(s.last_read), 0) AS session_last_read, "
-            "MAX(s.last_seen) AS session_last_seen "
-            "FROM members m "
-            "LEFT JOIN sessions s "
-            "  ON s.channel = m.channel AND s.member_id = m.id "
-            "  AND s.revoked_at IS NULL "
-            "WHERE m.channel = ? "
-            "GROUP BY m.id, m.channel "
-            "ORDER BY m.joined_at",
-            (self.channel,),
-        ).fetchall()
+        # filter_mode (v7.2) is best-effort; older schemas fall back to 'all'.
+        try:
+            rows = db.execute(
+                "SELECT m.id AS id, m.name AS name, m.status_text AS status_text, "
+                "m.last_seen AS member_last_seen, m.last_read AS member_last_read, "
+                "m.messenger_heartbeat AS messenger_heartbeat, "
+                "m.watchdog_heartbeat AS watchdog_heartbeat, "
+                "m.filter_mode AS filter_mode, "
+                "COALESCE(MAX(s.last_read), 0) AS session_last_read, "
+                "MAX(s.last_seen) AS session_last_seen "
+                "FROM members m "
+                "LEFT JOIN sessions s "
+                "  ON s.channel = m.channel AND s.member_id = m.id "
+                "  AND s.revoked_at IS NULL "
+                "WHERE m.channel = ? "
+                "GROUP BY m.id, m.channel "
+                "ORDER BY m.joined_at",
+                (self.channel,),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            rows = db.execute(
+                "SELECT m.id AS id, m.name AS name, m.status_text AS status_text, "
+                "m.last_seen AS member_last_seen, m.last_read AS member_last_read, "
+                "m.messenger_heartbeat AS messenger_heartbeat, "
+                "m.watchdog_heartbeat AS watchdog_heartbeat, "
+                "COALESCE(MAX(s.last_read), 0) AS session_last_read, "
+                "MAX(s.last_seen) AS session_last_seen "
+                "FROM members m "
+                "LEFT JOIN sessions s "
+                "  ON s.channel = m.channel AND s.member_id = m.id "
+                "  AND s.revoked_at IS NULL "
+                "WHERE m.channel = ? "
+                "GROUP BY m.id, m.channel "
+                "ORDER BY m.joined_at",
+                (self.channel,),
+            ).fetchall()
         out = []
         for r in rows:
             effective_last_read = max(
                 r["member_last_read"] or 0,
                 r["session_last_read"] or 0,
             )
-            # ISO-8601 strings compare lexicographically in UTC
             m_ls = r["member_last_seen"] or ""
             s_ls = r["session_last_seen"] or ""
             effective_last_seen = max(m_ls, s_ls) or None
+            fm = r["filter_mode"] if "filter_mode" in r.keys() else "all"
             out.append({
                 "id": r["id"],
                 "name": r["name"] or r["id"],
                 "status_text": r["status_text"] or "",
                 "last_seen": effective_last_seen,
                 "last_read": effective_last_read,
+                "filter_mode": fm or "all",
                 "status": member_status(effective_last_seen, r["status_text"] or ""),
             })
         return out
@@ -410,7 +483,7 @@ class EventHub:
             try:
                 # New messages
                 rows = db.execute(
-                    "SELECT id, member_id, member_name, content, mentions, refs, created_at "
+                    "SELECT id, member_id, member_name, content, mentions, refs, bangs, created_at "
                     "FROM messages WHERE channel = ? AND id > ? ORDER BY id",
                     (self.channel, self.last_msg_id),
                 ).fetchall()
@@ -423,6 +496,7 @@ class EventHub:
                         "content": r["content"] or "",
                         "mentions": parse_mentions_json(r["mentions"]),
                         "refs": parse_mentions_json(r["refs"] if "refs" in r.keys() else ""),
+                        "bangs": parse_mentions_json(r["bangs"] if "bangs" in r.keys() else ""),
                         "created_at": r["created_at"],
                     })
                     self.last_msg_id = r["id"]
@@ -459,10 +533,17 @@ class NthWebHandler(BaseHTTPRequestHandler):
 
     # ── identity ──
     def _client_ip(self) -> str:
-        """Remote IP — trust XFF only when it's set (reverse proxies)."""
-        xff = self.headers.get("X-Forwarded-For") or ""
-        if xff:
-            return xff.split(",")[0].strip()
+        """Remote IP of the direct TCP peer.
+
+        We DO NOT honour X-Forwarded-For here. nth_web is designed to be
+        served directly over Tailscale — no reverse proxy sits in front —
+        so any XFF header we see was attacker-controlled. Trusting it would
+        let a direct client send `X-Forwarded-For: 100.x.y.z` to have
+        `tailscale_whois()` resolve them as that tailnet peer, spoofing a
+        trusted `source=tailscale` identity. If a reverse-proxied deployment
+        ever becomes a real use case, add an explicit TRUSTED_PROXY_CIDRS
+        allowlist gated on `self.client_address[0]` before re-enabling XFF.
+        """
         return self.client_address[0] if self.client_address else ""
 
     def _get_or_mint_cookie(self) -> Tuple[str, bool]:
@@ -649,10 +730,6 @@ class NthWebHandler(BaseHTTPRequestHandler):
         if not content:
             self._error(400, "empty content")
             return
-        mentions = body.get("mentions") or []
-        if not isinstance(mentions, list) or not all(isinstance(m, str) for m in mentions):
-            self._error(400, "mentions must be a list of strings")
-            return
         if len(content) > 4000:
             self._error(400, "content too long (max 4000 chars)")
             return
@@ -668,12 +745,22 @@ class NthWebHandler(BaseHTTPRequestHandler):
             db.execute("PRAGMA synchronous=NORMAL")
             op_id, op_name = ensure_operator_row(db, self.channel, ident)
             now = now_iso()
+            # Server-side parse the three sigils against the current roster,
+            # matching nth_send's behavior so web-operator posts carry the
+            # same wake semantics as MCP-agent posts. The earlier version
+            # trusted a client-supplied `mentions` array (no refs, no bangs).
+            mention_ids, ref_ids, bang_ids = _parse_sigils_against_roster(
+                db, self.channel, content
+            )
             cursor = db.execute(
                 "INSERT INTO messages "
-                "(channel, member_id, member_name, content, created_at, mentions) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
+                "(channel, member_id, member_name, content, created_at, "
+                " mentions, refs, bangs) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (self.channel, op_id, op_name, content, now,
-                 json.dumps(mentions) if mentions else ""),
+                 json.dumps(mention_ids) if mention_ids else "",
+                 json.dumps(ref_ids)     if ref_ids     else "",
+                 json.dumps(bang_ids)    if bang_ids    else ""),
             )
             msg_id = cursor.lastrowid
             db.execute(
@@ -770,6 +857,21 @@ INDEX_HTML = r"""<!doctype html>
                           border: 1px solid rgba(126, 222, 126, 0.25);
                           font-weight: 500; }
   .msg .refs-bar .mchip .manimal { font-size: 13px; line-height: 1; }
+  /* !bangs bar — UNFILTERABLE. Loudest visual; rendered above @mentions. */
+  .msg .bangs-bar { font-size: 12px; margin: 2px 0 4px;
+                    display: flex; gap: 4px; flex-wrap: wrap; align-items: center; }
+  .msg .bangs-bar .to-label { color: #ff8470; font-size: 10px; font-weight: 700;
+                               text-transform: uppercase; letter-spacing: 1px;
+                               margin-right: 2px;
+                               padding: 1px 5px; border-radius: 3px;
+                               background: rgba(255, 132, 112, 0.15); }
+  .msg .bangs-bar .mchip { display: inline-flex; align-items: center; gap: 3px;
+                           padding: 1px 7px 1px 5px; border-radius: 10px;
+                           background: rgba(255, 132, 112, 0.2);
+                           color: #ff8470;
+                           border: 1px solid rgba(255, 132, 112, 0.5);
+                           font-weight: 700; }
+  .msg .bangs-bar .mchip .manimal { font-size: 13px; line-height: 1; }
   .msg .body { white-space: pre-wrap; }
   .msg.compact .body {
     display: -webkit-box;
@@ -846,6 +948,15 @@ INDEX_HTML = r"""<!doctype html>
                     text-transform: uppercase; letter-spacing: 0.5px; }
   .member .dm-btn:hover { background: var(--accent); color: var(--bg);
                           border-color: var(--accent); }
+  .member .fmode { font-size: 9px; padding: 1px 5px; border-radius: 3px;
+                   flex-shrink: 0; user-select: none;
+                   text-transform: uppercase; letter-spacing: 0.5px;
+                   border: 1px solid transparent; }
+  .member .fmode.all   { color: var(--dim); background: #1c2432; border-color: #283242; }
+  .member .fmode.about { color: #9ccf9c; background: rgba(126, 222, 126, 0.08);
+                         border-color: rgba(126, 222, 126, 0.25); }
+  .member .fmode.at    { color: #f0c060; background: rgba(240, 192, 96, 0.1);
+                         border-color: rgba(240, 192, 96, 0.3); }
   .member .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
                   font-weight: 500; }
   .member .caret { color: var(--dimmer); font-size: 9px; transition: transform 0.1s; }
@@ -1305,9 +1416,11 @@ INDEX_HTML = r"""<!doctype html>
     head.appendChild(acks);
     div.appendChild(head);
 
-    // Prominent @mentions bar (pings) — always rendered when there are pings,
-    // above the body so auto-@ recipients can't be missed even when the composer
-    // didn't write @name inline.
+    // !bangs bar FIRST — unfilterable, loudest visual signal.
+    if (!isSystem && m.bangs && m.bangs.length) {
+      div.appendChild(renderTargetBar(m.bangs, 'bangs-bar', '!', 'BANG'));
+    }
+    // @mentions bar (pings) — always rendered above body so auto-@ isn't missed.
     if (!isSystem && m.mentions && m.mentions.length) {
       div.appendChild(renderTargetBar(m.mentions, 'mentions-bar', '@', '→'));
     }
@@ -1403,8 +1516,9 @@ INDEX_HTML = r"""<!doctype html>
           bar.appendChild(chip);
         }
       }
+      rebuildBar(dom.querySelector('.bangs-bar'),    m.bangs,    '!');
       rebuildBar(dom.querySelector('.mentions-bar'), m.mentions, '@');
-      rebuildBar(dom.querySelector('.refs-bar'), m.refs, '#');
+      rebuildBar(dom.querySelector('.refs-bar'),     m.refs,     '#');
     }
   }
 
@@ -1525,6 +1639,18 @@ INDEX_HTML = r"""<!doctype html>
     idSpan.className = 'id';
     idSpan.textContent = m.id.slice(0, 8);
     topRow.appendChild(idSpan);
+    // Filter mode pill — "all" shown dim, "about" green, "at" amber. Helps
+    // humans see at a glance who will actually hear an ambient message.
+    const fm = m.filter_mode || 'all';
+    if (fm && fm !== 'all') {
+      const fmPill = document.createElement('span');
+      fmPill.className = 'fmode ' + fm;
+      fmPill.textContent = fm;
+      fmPill.title = fm === 'at'
+        ? 'Listening mode: at — only wakes on @pings. Ambient messages silent.'
+        : 'Listening mode: about — wakes on @pings and #pounds. Ambient silent.';
+      topRow.appendChild(fmPill);
+    }
     // DM button — opens a filtered-view tab for this agent.
     // Hide for self, for human operator rows, and inside an existing DM tab.
     if (!DM_MODE && m.id !== state.operator.id && !m.id.startsWith('_op_')) {
@@ -1647,14 +1773,15 @@ INDEX_HTML = r"""<!doctype html>
   }
 
   // ── Autocomplete ──
-  // Either @ (ping) or # (pound-reference) triggers the popup. Sigil is
-  // carried through so acceptance preserves the user's intent.
+  // @ (ping), # (pound-reference), or ! (bang / unfilterable) trigger the popup.
+  // Sigil is carried through so acceptance preserves the user's intent.
   function currentSigilToken() {
     const pos = input.selectionStart;
     const text = input.value.slice(0, pos);
-    const atPos = text.lastIndexOf('@');
+    const atPos   = text.lastIndexOf('@');
     const hashPos = text.lastIndexOf('#');
-    const sigilPos = Math.max(atPos, hashPos);
+    const bangPos = text.lastIndexOf('!');
+    const sigilPos = Math.max(atPos, hashPos, bangPos);
     if (sigilPos < 0) return null;
     const sigil = text[sigilPos];
     if (sigilPos > 0 && !' \t,;([\n'.includes(text[sigilPos - 1])) return null;
@@ -1778,19 +1905,44 @@ INDEX_HTML = r"""<!doctype html>
   }
   function resolveMentions(text) { return resolveSigilTokens(text, '@'); }
   function resolveRefs(text)     { return resolveSigilTokens(text, '#'); }
+  function resolveBangs(text)    { return resolveSigilTokens(text, '!'); }
   function updatePreview() {
-    const resolved = resolveMentions(input.value);
-    const refs = resolveRefs(input.value);
+    const pings = resolveMentions(input.value);
+    const refs  = resolveRefs(input.value);
+    const bangs = resolveBangs(input.value);
+    const txtL  = (input.value || '').toLowerCase();
+    const ambient = !pings.length && !refs.length && !bangs.length
+                    && !/(^|\s)@all(\b|$)/.test(txtL)
+                    && !/(^|\s)!all(\b|$)/.test(txtL);
     const parts = [];
-    if (!resolved.length) {
-      parts.push('(broadcast — all connected members receive this)');
-    } else {
-      const names = resolved.map(m => `<span class="tgt">@${escapeHtml(m.name)}</span>`).join(', ');
+    if (ambient) {
+      // Count how many peers will actually hear this under their filter.
+      let unreached = 0, total = 0;
+      for (const m of state.members.values()) {
+        if (m.id === state.operator.id) continue;
+        total++;
+        if (m.filter_mode && m.filter_mode !== 'all') unreached++;
+      }
+      if (total > 0 && unreached === total) {
+        parts.push('<span style="color:#ff8470">ambient — NO ONE will hear this (every peer is filtering)</span>');
+      } else if (unreached > 0) {
+        parts.push(`ambient — ${unreached}/${total} peers won't hear this (filtered)`);
+      } else {
+        parts.push('ambient — all listeners receive this');
+      }
+    }
+    if (pings.length) {
+      const names = pings.map(m => `<span class="tgt">@${escapeHtml(m.name)}</span>`).join(', ');
       parts.push(`pings: ${names}`);
     }
     if (refs.length) {
-      const rnames = refs.map(m => `<span class="tgt" style="color:#9ccf9c">#${escapeHtml(m.name)}</span>`).join(', ');
-      parts.push(`refs: ${rnames}`);
+      const n = refs.map(m => `<span class="tgt" style="color:#9ccf9c">#${escapeHtml(m.name)}</span>`).join(', ');
+      parts.push(`refs: ${n}`);
+    }
+    if (bangs.length || /(^|\s)!all(\b|$)/.test(txtL)) {
+      const n = bangs.map(m => `<span class="tgt" style="color:#ff8470">!${escapeHtml(m.name)}</span>`).join(', ');
+      const allTag = /(^|\s)!all(\b|$)/.test(txtL) ? '<span class="tgt" style="color:#ff8470">!all</span>' : '';
+      parts.push(`<b style="color:#ff8470">BANGS (unfilterable)</b>: ${[allTag, n].filter(Boolean).join(', ')}`);
     }
     preview.innerHTML = parts.join('  ·  ');
   }

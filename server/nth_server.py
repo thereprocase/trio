@@ -253,6 +253,17 @@ def get_db() -> sqlite3.Connection:
         # from mentions so the monitor can choose to notify on @ only while
         # a targeted agent can still grep `refs` on demand via nth_pounds.
         ("refs", "messages", "TEXT NOT NULL DEFAULT ''"),
+        # v7.2: !bangs — UNFILTERABLE pings. Wake the target regardless of
+        # their monitor filter. Last-resort / channel-close signalling. !all
+        # wakes every member. Agents CANNOT opt out. Using bang casually is
+        # abusive — the filter system exists precisely so agents can tune
+        # attention; bangs bypass that by design for genuine emergencies.
+        ("bangs", "messages", "TEXT NOT NULL DEFAULT ''"),
+        # v7.2: declared listening mode per member. The monitor writes this
+        # on heartbeat (all/about/at); peers use it to decide whether an
+        # ambient message will actually be heard before spending the tokens
+        # to post it. Not security — agents can lie. Etiquette signal only.
+        ("filter_mode", "members", "TEXT NOT NULL DEFAULT 'all'"),
         ("blocked_by", "tasks", "TEXT NOT NULL DEFAULT '[]'"),
         ("status_text", "members", "TEXT NOT NULL DEFAULT ''"),
         ("status_changed_at", "members", "TEXT NOT NULL DEFAULT ''"),
@@ -613,7 +624,7 @@ def nth_connect(
 
         # Gather current state for the joiner
         members = db.execute(
-            "SELECT id, name, summary, skills, last_seen FROM members WHERE channel = ? ORDER BY joined_at",
+            "SELECT * FROM members WHERE channel = ? ORDER BY joined_at",
             (channel,),
         ).fetchall()
 
@@ -670,7 +681,8 @@ def nth_connect(
             "action": action,
             "members": [
                 {"id": m["id"], "name": m["name"], "summary": m["summary"],
-                 "skills": m["skills"], "active": _is_member_active(m["last_seen"])}
+                 "skills": m["skills"], "active": _is_member_active(m["last_seen"]),
+                 "filter_mode": (m["filter_mode"] if "filter_mode" in m.keys() else "all") or "all"}
                 for m in members
             ],
             "recent_messages": [
@@ -709,17 +721,20 @@ def nth_send(channel: str, member_id: str, message: str, task: bool = False, pin
 
     All members will see this message on their next poll.
 
-    Mentions vs references:
-      • @name  — PING. Wakes the targeted agent via monitor. Use for direct
-                 requests, questions you need answered, or hand-offs.
-      • #name  — REFERENCE. Talks ABOUT someone without pinging them. Stored
-                 in `refs`, NOT `mentions`. Use when discussing another agent's
-                 work, coordinating with a third party, or leaving breadcrumbs
-                 a targeted agent can grep via nth_pounds on their next wake.
+    Sigil hierarchy (all auto-parsed against channel member names):
+      • @name — PING. Wakes the target under `at` / `about` / `all` filters.
+                The normal way to address someone directly.
+      • #name — POUND / REFERENCE. Talks ABOUT someone without pinging them.
+                Stored in `refs`. Never wakes on `at` / `all`; does wake on
+                `about`. Grep all refs on demand via nth_pounds.
+      • !name — BANG. UNFILTERABLE. Wakes the target regardless of filter.
+                !all wakes every member in the channel. For genuine
+                emergencies or channel-close signalling only — casual use
+                is abusive because agents CANNOT opt out.
 
-    Both syntaxes are auto-parsed server-side against channel member names.
-    Combine freely: "@alice can you review #bob's parser change?" pings alice
-    and references bob.
+    Combine freely. "@alice please review #bob's parser change" pings alice
+    and leaves a breadcrumb bob can read on wake. "!all channel closing in
+    60s" wakes every member unconditionally.
 
     Set task=True to simultaneously post the message as a claimable task.
     Set pin=True to pin this message as the channel objective (shown in
@@ -733,7 +748,7 @@ def nth_send(channel: str, member_id: str, message: str, task: bool = False, pin
     Args:
         channel: Channel code
         member_id: Your member ID (from nth_connect)
-        message: Your message (max 4000 chars). @name pings; #name references.
+        message: Your message (max 4000 chars). @name pings, #name references, !name bangs (unfilterable).
         task: If True, also create a claimable task from this message
         pin: If True, pin this message as the channel objective
         blocked_by: Comma-separated task IDs this task depends on (requires task=True)
@@ -850,37 +865,60 @@ def nth_send(channel: str, member_id: str, message: str, task: bool = False, pin
         else:
             content = message
 
-        # Detect @pings and #refs in content. Both resolve against member
-        # names; an agent who is both @pinged and #referenced lands in both
-        # arrays but that's fine — the monitor filter treats them separately
-        # and nth_pounds returns anyone with refs regardless of mention status.
+        # Detect @pings, #pounds, and !bangs in content. All three resolve
+        # against member names against the same roster pass:
+        #   @name  → mentions (wakes target under default filter modes)
+        #   #name  → refs     (never wakes on any filter; grep via nth_pounds)
+        #   !name  → bangs    (ALWAYS wakes the target, bypasses every filter)
+        # @all / !all both broadcast — @all pings everyone under their filter,
+        # !all wakes everyone unconditionally. There is no #all (a reference
+        # to every member is just noise).
         mention_ids: list[str] = []
         ref_ids: list[str] = []
-        if "@" in content or "#" in content:
+        bang_ids: list[str] = []
+        if "@" in content or "#" in content or "!" in content:
             all_members = db.execute(
                 "SELECT id, name FROM members WHERE channel = ?",
                 (channel,),
             ).fetchall()
             content_lower = content.lower()
-            if "@all" in content_lower:
-                mention_ids = [m["id"] for m in all_members]
-            else:
-                for m in all_members:
-                    at_pat = re.compile(r"@" + re.escape(m["name"]) + r"(?:\b|$)", re.IGNORECASE)
+            all_ids = [m["id"] for m in all_members]
+            # @all / !all short-circuits. Word-boundary-anchored so "@all-hands"
+            # doesn't broadcast; "@all" or "@all " or "@all," does.
+            at_all   = re.search(r"@all(?:\b|$)",  content_lower) is not None
+            bang_all = re.search(r"!all(?:\b|$)",  content_lower) is not None
+            if at_all:
+                mention_ids = list(all_ids)
+            if bang_all:
+                bang_ids = list(all_ids)
+            for m in all_members:
+                # Skip a member named literally "all" — the @all/!all shortcuts
+                # already handle that keyword; matching it as a regular name
+                # would double-count. "all" is also a reserved display name
+                # we refuse during identity registration on the web side.
+                if (m["name"] or "").strip().lower() == "all":
+                    continue
+                name_esc = re.escape(m["name"])
+                if not at_all:
+                    at_pat = re.compile(r"@" + name_esc + r"(?:\b|$)", re.IGNORECASE)
                     if at_pat.search(content):
                         mention_ids.append(m["id"])
-            for m in all_members:
-                hash_pat = re.compile(r"#" + re.escape(m["name"]) + r"(?:\b|$)", re.IGNORECASE)
+                hash_pat = re.compile(r"#" + name_esc + r"(?:\b|$)", re.IGNORECASE)
                 if hash_pat.search(content):
                     ref_ids.append(m["id"])
+                if not bang_all:
+                    bang_pat = re.compile(r"!" + name_esc + r"(?:\b|$)", re.IGNORECASE)
+                    if bang_pat.search(content):
+                        bang_ids.append(m["id"])
         mentions_json = json.dumps(mention_ids) if mention_ids else ""
         refs_json = json.dumps(ref_ids) if ref_ids else ""
+        bangs_json = json.dumps(bang_ids) if bang_ids else ""
 
         cur = db.execute(
-            "INSERT INTO messages (channel, member_id, member_name, content, mentions, refs, "
+            "INSERT INTO messages (channel, member_id, member_name, content, mentions, refs, bangs, "
             "author_session, reply_to, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (channel, member_id, member["name"], content, mentions_json, refs_json,
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (channel, member_id, member["name"], content, mentions_json, refs_json, bangs_json,
              author_session, reply_to, now),
         )
         msg_id = cur.lastrowid
@@ -1054,12 +1092,21 @@ def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: st
             )
             db.commit()
 
-            # Check for unread messages (from other members)
-            unread = db.execute(
-                "SELECT id, member_id, member_name, content, mentions, created_at "
-                "FROM messages WHERE channel = ? AND id > ? AND member_id != ? ORDER BY id",
-                (channel, current_watermark, member_id),
-            ).fetchall()
+            # Check for unread messages (from other members). Pull refs + bangs
+            # so the response-enrichment block below can mark 'referenced' /
+            # 'banged'. Fall back progressively on older schemas.
+            try:
+                unread = db.execute(
+                    "SELECT id, member_id, member_name, content, mentions, refs, bangs, created_at "
+                    "FROM messages WHERE channel = ? AND id > ? AND member_id != ? ORDER BY id",
+                    (channel, current_watermark, member_id),
+                ).fetchall()
+            except sqlite3.OperationalError:
+                unread = db.execute(
+                    "SELECT id, member_id, member_name, content, mentions, created_at "
+                    "FROM messages WHERE channel = ? AND id > ? AND member_id != ? ORDER BY id",
+                    (channel, current_watermark, member_id),
+                ).fetchall()
 
             if unread:
                 # Apply from_name filter if requested
@@ -1120,7 +1167,7 @@ def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: st
                     )
                     db.commit()
 
-                # Enrich with mention + reference flags
+                # Enrich with mention / reference / bang flags
                 has_mentions = False
                 msg_list = []
                 for m in display_msgs:
@@ -1134,9 +1181,15 @@ def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: st
                         ref_list = json.loads(refs_raw) if refs_raw else []
                     except (json.JSONDecodeError, TypeError):
                         ref_list = []
+                    bangs_raw = m["bangs"] if "bangs" in m.keys() and m["bangs"] else ""
+                    try:
+                        bang_list = json.loads(bangs_raw) if bangs_raw else []
+                    except (json.JSONDecodeError, TypeError):
+                        bang_list = []
                     mentioned = member_id in mention_list
                     referenced = member_id in ref_list
-                    if mentioned:
+                    banged = member_id in bang_list
+                    if mentioned or banged:
                         has_mentions = True
                     entry = {
                         "id": m["id"],
@@ -1148,6 +1201,8 @@ def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: st
                         entry["mentioned"] = True
                     if referenced:
                         entry["referenced"] = True
+                    if banged:
+                        entry["banged"] = True
                     msg_list.append(entry)
 
                 nag = _sentinel_nag(member)
@@ -2390,10 +2445,20 @@ def nth_roster(channel: str) -> str:
         if not ch:
             return json.dumps({"error": f'Channel "{channel}" not found.'})
 
-        members = db.execute(
-            "SELECT id, name, summary, skills, status_text, last_seen, messenger_heartbeat, watchdog_heartbeat FROM members WHERE channel = ? ORDER BY joined_at",
-            (channel,),
-        ).fetchall()
+        try:
+            members = db.execute(
+                "SELECT id, name, summary, skills, status_text, last_seen, "
+                "messenger_heartbeat, watchdog_heartbeat, filter_mode "
+                "FROM members WHERE channel = ? ORDER BY joined_at",
+                (channel,),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            members = db.execute(
+                "SELECT id, name, summary, skills, status_text, last_seen, "
+                "messenger_heartbeat, watchdog_heartbeat "
+                "FROM members WHERE channel = ? ORDER BY joined_at",
+                (channel,),
+            ).fetchall()
 
         now_dt = datetime.now(timezone.utc)
         locks = db.execute(
@@ -2424,6 +2489,11 @@ def nth_roster(channel: str) -> str:
             st = m["status_text"] if m["status_text"] else ""
             if st:
                 entry["status_text"] = st
+            # Declared listening mode (v7.2). Peers use this to decide
+            # whether an ambient (no @/#/!) message will actually be heard
+            # before spending tokens to post it. Self-declared, not enforced.
+            fm = m["filter_mode"] if "filter_mode" in m.keys() else "all"
+            entry["filter_mode"] = fm or "all"
             held = member_locks.get(m["id"], [])
             if held:
                 entry["locks"] = held

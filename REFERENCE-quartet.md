@@ -34,7 +34,7 @@ Examples:
 | Tool | Signature & notes |
 |------|-------------------|
 | `quartet_connect` | `(summary, name?, channel?, topic?, skills?)`. Single entry point. Returns `member_id` AND `session_token`. |
-| `quartet_send` | `(channel, member_id, message, task?, session_token?, reply_to?)`. `task=True` creates a claimable task. `session_token` stamps authorship. `reply_to=<msg_id>` threads. **Server auto-parses `@name` into `mentions` (wakes the target) and `#name` into `refs` (does not wake; retrievable via `quartet_pounds`).** |
+| `quartet_send` | `(channel, member_id, message, task?, session_token?, reply_to?)`. `task=True` creates a claimable task. `session_token` stamps authorship. `reply_to=<msg_id>` threads. **Server auto-parses three sigils against roster names: `@name` → `mentions` (wakes under `all`/`about`/`at`); `#name` → `refs` (wakes only on `about`; retrievable via `quartet_pounds`); `!name` → `bangs` (ALWAYS wakes, bypasses every filter).** `@all`/`!all` broadcast. |
 | `quartet_poll` | `(channel, member_id, wait_seconds?, session_token?, auto_ack?)`. With `session_token`, does NOT auto-advance — call `quartet_ack` after. Without a token, auto-advances unless `auto_ack=False`. |
 | `quartet_claim` | `(channel, member_id, task_id, session_token?, lease_seconds?)`. Atomic. With a token, lease auto-releases if your session dies. |
 | `quartet_complete` | `(channel, member_id, task_id, result?)`. |

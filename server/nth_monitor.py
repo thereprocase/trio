@@ -25,22 +25,19 @@ Events (one JSON line per fire):
     {"event": "channel_gone"}
     {"event": "error", "msg": "..."}
 
-Filter modes (pick ONE; default = fire on everything):
+Filter modes (pick ONE; default = all):
 
-    --filter at            — wake on @pings (mentions including me) only.
-                              Silent for broadcasts and for #pound refs.
-    --filter at+broadcast  — wake on @pings OR broadcasts (empty mentions).
-                              Same shape as the legacy --mention-filter.
-    --filter at+pound      — wake on @pings OR #pound refs. Silent on
-                              broadcasts.
-    --filter at+pound+broadcast
-                            — wake on anything addressed to me or broadcast.
-    --filter pound         — wake ONLY on #pound refs. For agents that
-                              came online to catch up on background chatter.
-    --filter all           — wake on everything. (Same as no --filter flag.)
+    --filter all    — wake on every peer message. (Default, no flag needed.)
+    --filter about  — wake on any message ABOUT me: @pings or #pounds.
+                       No wake on unrelated chatter between other members.
+    --filter at     — wake only on @pings. #pound refs are silent.
 
-The legacy --mention-filter flag is kept as an alias for
---filter at+broadcast.
+Bangs (`!name` / `!all`) ALWAYS wake the target regardless of filter. They
+are the last-resort / channel-close signal and deliberately bypass every
+opt-out. Agents cannot suppress bangs; using bang for routine messages is
+abusive to the room.
+
+The legacy --mention-filter flag is kept as an alias for --filter about.
 
 All unread messages advance the local watermark regardless of filter
 outcome, so nothing is re-surfaced.
@@ -92,40 +89,39 @@ def is_sleeping(status_text):
     return any(kw in lower for kw in SLEEPING_KEYWORDS)
 
 
-FILTER_MODES = {
-    # name → set of categories that WAKE the agent
-    "all":                    {"at", "pound", "broadcast", "other"},
-    "at":                     {"at"},
-    "at+broadcast":           {"at", "broadcast"},
-    "at+pound":               {"at", "pound"},
-    "at+pound+broadcast":     {"at", "pound", "broadcast"},
-    "pound":                  {"pound"},
-}
+FILTER_MODES = ("all", "about", "at")
 
 
-def classify_message(member_id, mentions_raw, refs_raw):
-    """Return one of 'at' | 'pound' | 'broadcast' | 'other'.
-
-    'at'        — member_id is in the mentions array (pinged)
-    'pound'     — member_id is in refs only (referenced, not pinged)
-    'broadcast' — both arrays are empty (talking to the room)
-    'other'     — someone else was pinged/referenced and member wasn't
-    """
+def _parse_id_list(raw):
     try:
-        mention_list = json.loads(mentions_raw) if mentions_raw else []
+        v = json.loads(raw) if raw else []
+        return v if isinstance(v, list) else []
     except (ValueError, TypeError):
-        mention_list = []
-    try:
-        ref_list = json.loads(refs_raw) if refs_raw else []
-    except (ValueError, TypeError):
-        ref_list = []
-    if member_id in mention_list:
-        return "at"
-    if member_id in ref_list:
-        return "pound"
-    if not mention_list and not ref_list:
-        return "broadcast"
-    return "other"
+        return []
+
+
+def should_wake(member_id, mentions_raw, refs_raw, bangs_raw, filter_mode):
+    """Decide whether a single message should wake this member under the
+    chosen filter. Bangs ALWAYS wake — they bypass every filter by design."""
+    bang_list = _parse_id_list(bangs_raw)
+    if member_id in bang_list:
+        return True, "bang"
+    mention_list = _parse_id_list(mentions_raw)
+    ref_list = _parse_id_list(refs_raw)
+    if filter_mode == "all":
+        return True, "at" if member_id in mention_list else ("pound" if member_id in ref_list else "ambient")
+    if filter_mode == "about":
+        if member_id in mention_list:
+            return True, "at"
+        if member_id in ref_list:
+            return True, "pound"
+        return False, None
+    if filter_mode == "at":
+        if member_id in mention_list:
+            return True, "at"
+        return False, None
+    # Unknown mode — fail open (wake on everything) rather than silencing.
+    return True, "ambient"
 
 
 def monitor(channel, member_id, filter_mode="all", _db_path=None):
@@ -199,12 +195,23 @@ def monitor(channel, member_id, filter_mode="all", _db_path=None):
                 if (mono - last_heartbeat_mono >= HEARTBEAT_INTERVAL
                         or wall - last_heartbeat_wall >= HEARTBEAT_INTERVAL):
                     now_ts = now_iso()
-                    db.execute(
-                        "UPDATE members SET last_seen = ?, "
-                        "messenger_heartbeat = ?, watchdog_heartbeat = ? "
-                        "WHERE channel = ? AND id = ?",
-                        (now_ts, now_ts, now_ts, channel, member_id),
-                    )
+                    # Best-effort filter_mode write (added v7.2). Older DBs
+                    # without the column drop back to the pre-v7.2 heartbeat.
+                    try:
+                        db.execute(
+                            "UPDATE members SET last_seen = ?, "
+                            "messenger_heartbeat = ?, watchdog_heartbeat = ?, "
+                            "filter_mode = ? "
+                            "WHERE channel = ? AND id = ?",
+                            (now_ts, now_ts, now_ts, filter_mode, channel, member_id),
+                        )
+                    except sqlite3.OperationalError:
+                        db.execute(
+                            "UPDATE members SET last_seen = ?, "
+                            "messenger_heartbeat = ?, watchdog_heartbeat = ? "
+                            "WHERE channel = ? AND id = ?",
+                            (now_ts, now_ts, now_ts, channel, member_id),
+                        )
                     db.commit()
                     last_heartbeat_mono = mono
                     last_heartbeat_wall = wall
@@ -233,44 +240,56 @@ def monitor(channel, member_id, filter_mode="all", _db_path=None):
                 external_hwm = max(legacy_hwm, sess_hwm)
                 local_hwm = external_hwm if local_hwm is None else max(local_hwm, external_hwm)
 
-                # Pull refs alongside mentions so the filter can distinguish
-                # @pings from #pound refs. If the refs column is missing (older
-                # schema), treat it as empty and fall back cleanly.
+                # Pull mentions + refs + bangs alongside the message. If the
+                # schema is pre-v7.1 (no refs) or pre-v7.2 (no bangs), the
+                # OperationalError drops us to progressively older SELECTs.
+                # refs/bangs are both treated as empty when missing — agents
+                # on old DBs just get the pre-bang behavior.
                 try:
                     unread = db.execute(
-                        "SELECT id, mentions, refs, member_name, content FROM messages "
+                        "SELECT id, mentions, refs, bangs, member_name, content FROM messages "
                         "WHERE channel = ? AND id > ? AND member_id != ? "
                         "ORDER BY id",
                         (channel, local_hwm, member_id),
                     ).fetchall()
                 except sqlite3.OperationalError:
-                    unread = db.execute(
-                        "SELECT id, mentions, member_name, content FROM messages "
-                        "WHERE channel = ? AND id > ? AND member_id != ? "
-                        "ORDER BY id",
-                        (channel, local_hwm, member_id),
-                    ).fetchall()
+                    try:
+                        unread = db.execute(
+                            "SELECT id, mentions, refs, member_name, content FROM messages "
+                            "WHERE channel = ? AND id > ? AND member_id != ? "
+                            "ORDER BY id",
+                            (channel, local_hwm, member_id),
+                        ).fetchall()
+                    except sqlite3.OperationalError:
+                        unread = db.execute(
+                            "SELECT id, mentions, member_name, content FROM messages "
+                            "WHERE channel = ? AND id > ? AND member_id != ? "
+                            "ORDER BY id",
+                            (channel, local_hwm, member_id),
+                        ).fetchall()
 
                 if unread:
                     local_hwm = max(m["id"] for m in unread)
 
-                    wake_categories = FILTER_MODES.get(filter_mode, FILTER_MODES["all"])
+                    mode = filter_mode if filter_mode in FILTER_MODES else "all"
                     relevant = []
                     for m in unread:
                         mraw = m["mentions"] if "mentions" in m.keys() else ""
                         rraw = m["refs"] if "refs" in m.keys() else ""
-                        cat = classify_message(member_id, mraw, rraw)
-                        if cat in wake_categories:
-                            relevant.append((m, cat))
+                        braw = m["bangs"] if "bangs" in m.keys() else ""
+                        wake, kind = should_wake(member_id, mraw, rraw, braw, mode)
+                        if wake:
+                            relevant.append((m, kind))
 
                     if relevant:
-                        # Classify aggregate flags so the agent can skip the
-                        # trio_poll round-trip on low-signal wake-ups.
-                        has_mentions = any(cat == "at" for _m, cat in relevant)
-                        has_refs     = any(cat == "pound" for _m, cat in relevant)
+                        # Aggregate flags so the agent can skip trio_poll on
+                        # low-signal wake-ups.
+                        has_bangs    = any(k == "bang"  for _m, k in relevant)
+                        has_mentions = any(k == "at"    for _m, k in relevant)
+                        has_refs     = any(k == "pound" for _m, k in relevant)
                         from_names = []
                         seen = set()
-                        for m, _cat in relevant:
+                        for m, _kind in relevant:
                             n = m["member_name"] or ""
                             if n and n not in seen:
                                 seen.add(n)
@@ -281,13 +300,14 @@ def monitor(channel, member_id, filter_mode="all", _db_path=None):
                         emit({
                             "event": "new_messages",
                             "mode": "idle" if sleeping else "active",
-                            "message_ids": [m["id"] for m, _c in relevant],
+                            "message_ids": [m["id"] for m, _k in relevant],
                             "count": len(relevant),
+                            "has_bangs": has_bangs,
                             "has_mentions": has_mentions,
                             "has_refs": has_refs,
                             "from_names": from_names,
                             "preview": preview,
-                            "filter": filter_mode,
+                            "filter": mode,
                         })
 
                 # --- Cadence (active mode, no claimed tasks → skip) ---
@@ -344,9 +364,17 @@ def monitor(channel, member_id, filter_mode="all", _db_path=None):
 
 def parse_filter_arg(argv_tail):
     """Return a filter_mode string. Flags accepted:
-      --filter MODE        (where MODE is a key of FILTER_MODES)
-      --mention-filter     (legacy alias for --filter at+broadcast)
+      --filter MODE        where MODE is one of FILTER_MODES (all, about, at).
+      --mention-filter     legacy alias for --filter about.
+      --filter at+broadcast / at+pound / at+pound+broadcast / pound
+                           pre-v7.2 names; mapped to the nearest current mode.
     """
+    legacy_map = {
+        "at+broadcast":        "about",
+        "at+pound":            "about",
+        "at+pound+broadcast":  "about",
+        "pound":               "about",
+    }
     i = 0
     while i < len(argv_tail):
         arg = argv_tail[i]
@@ -354,14 +382,16 @@ def parse_filter_arg(argv_tail):
             if i + 1 >= len(argv_tail):
                 raise ValueError("--filter requires a value")
             mode = argv_tail[i + 1]
-            if mode not in FILTER_MODES:
-                raise ValueError(
-                    f"unknown filter mode '{mode}'. "
-                    f"valid: {', '.join(sorted(FILTER_MODES.keys()))}"
-                )
-            return mode
+            if mode in FILTER_MODES:
+                return mode
+            if mode in legacy_map:
+                return legacy_map[mode]
+            raise ValueError(
+                f"unknown filter mode '{mode}'. "
+                f"valid: {', '.join(FILTER_MODES)}"
+            )
         if arg == "--mention-filter":
-            return "at+broadcast"
+            return "about"
         i += 1
     return "all"
 
@@ -370,7 +400,7 @@ if __name__ == "__main__":
     if len(sys.argv) < 3:
         emit({"event": "error",
               "msg": "Usage: nth_monitor.py <channel> <member_id> "
-                     "[--filter MODE | --mention-filter]"})
+                     "[--filter all|about|at | --mention-filter]"})
         sys.exit(1)
 
     channel_arg = sys.argv[1]

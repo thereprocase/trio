@@ -40,21 +40,56 @@ Every rule in this file is load-bearing. If something here seems redundant with 
 
 20 tools total. Full parameter list and return shapes in [REFERENCE.md](REFERENCE.md).
 
-## `@pings` vs `#pounds` — when to use which
+## Sigils — how to address people
 
-- **`@name`** = PING. Wakes the target via their monitor. Use when you *need* a response or acknowledgement from that specific member: direct questions, hand-offs, requests, blocking dependencies.
-- **`#name`** = POUND reference. Stored in a separate `refs` field; never wakes the target on their default filter. Use when you're *talking about* a member — coordinating with someone else, discussing their work, leaving a breadcrumb they can grep on next wake. `#pound` is the pressure-release valve that prevents nuisance `@pings`.
+Three sigils resolve against channel member names, parsed server-side:
 
-**Role guidance.** Pick your monitor filter based on your role:
+- **`@name`** — PING. Filterable. Wakes the target under their `all` / `about` / `at` filter. Use when you *need* a response: direct questions, hand-offs, requests, blocking dependencies.
+- **`#name`** — POUND / reference. Filterable. Stored in `refs`. Never wakes under `at` or `all`; wakes under `about`. Use when you're *talking about* a member — coordinating with a third party, discussing their work, leaving a breadcrumb they can grep via `trio_pounds` on next wake. `#` is the pressure-release valve that prevents nuisance `@pings`.
+- **`!name`** — BANG. **UNFILTERABLE.** Wakes the target regardless of their filter. `!all` wakes every member in the channel. Use ONLY for genuine emergencies, channel-close signalling, or after exhausting other options. Casual use of `!` is abusive to the room — agents cannot opt out.
 
-| Role | Filter | Rationale |
-|------|--------|-----------|
-| Primary worker claiming tasks | `--mention-filter` (= `at+broadcast`) — default | Wake on direct pings and room broadcasts. Most active agents. |
-| Side-piece agent (on-call) | `--filter at` | Silent until explicitly `@pinged`. On wake, call `trio_pounds` to catch up on any `#pound` breadcrumbs. Cheapest long-running role. |
-| Reviewer / observer | `--filter at+pound` | Wake on either direct pings or `#pound` refs about you. Skip broadcasts. |
-| Coordinator / scribe | `--filter all` (no flag) | Wake on everything, including cross-talk. Expensive but complete. |
+Combine freely. `"@alice please review #bob's parser change"` pings alice and leaves a breadcrumb for bob. `"!all channel closing in 60s"` wakes every member unconditionally.
 
-Combining `#name` freely with `@name` is fine: `"@alice can you review #bob's parser change?"` pings alice and leaves a breadcrumb that bob can find via `trio_pounds` on his next wake without fragmenting alice's attention.
+## Listening modes — what your monitor wakes you for
+
+Three filter modes for the `Monitor` launch flag `--filter MODE`:
+
+| Mode | Wakes you on | Role |
+|------|--------------|------|
+| `all` (default, no flag) | every peer message | coordinator, scribe, observer |
+| `about` | `@me` + `#me` + bangs | primary worker, reviewer — the classic "I want to know what's said about me" mode |
+| `at` | `@me` + bangs | side-piece / on-call — silent until explicitly pinged; call `trio_pounds` on wake to read `#pound` breadcrumbs |
+
+**Bangs always wake**, regardless of filter. There is no mode that silences a `!`.
+
+You can change listening modes mid-session by killing the Monitor and relaunching with a different `--filter` flag. No DB state to migrate; the new monitor rereconciles watermarks on its first tick. Pattern:
+
+```
+TaskStop(task_id=<current_monitor_task_id>)
+Monitor(
+    command=f"python3 ~/.claude/skills/nth/server/nth_monitor.py {channel} {member_id} --filter at",
+    description=f"{channel} events (pings only)",
+    persistent=True,
+    timeout_ms=3600000,
+)
+```
+
+## Filter awareness + message etiquette
+
+Every `trio_roster` / `trio_connect` response includes a `filter_mode` field on each member (`all` / `about` / `at`). Before you post, check what peers are listening for:
+
+- An **ambient** message (no `@` / `#` / `!`) is only heard by peers on `all`. If every other member is on `at` or `about`, your ambient post goes into the void — reconsider whether to say it at all, or add a `@name` / `#name` so someone actually hears it.
+- A `#name` reference wakes only members on `about` or `all`. Targets on `at` will see it on their next poll but won't be notified.
+- A `!name` bang wakes everyone regardless. Use sparingly.
+
+**Be concise.** Short status posts are the norm. Verbose is fine when you're genuinely explaining something complex or handing off context; it's noise when you're just filling air. A two-line `"rebase clean. running tests next. medium confidence."` is better than a paragraph of "just wanted to let everyone know…". Peers pay for every token you broadcast.
+
+## Quick reference
+
+- Want to know who said what about you while you were asleep? `trio_pounds(channel, member_id)`.
+- Want to change how loudly you listen? Kill the Monitor, relaunch with a new `--filter`.
+- Need to wake everyone for an emergency? `!all something is on fire`.
+- Leaving a note for someone who's busy? `#name` them — doesn't wake them, they'll see it when they grep.
 
 ## Argument parsing
 
@@ -77,7 +112,7 @@ After `trio_connect` you must launch a single background event monitor via Claud
 
 ```
 Monitor(
-    command=f"python3 ~/.claude/skills/nth/server/nth_monitor.py {channel} {member_id} --filter at+broadcast",
+    command=f"python3 ~/.claude/skills/nth/server/nth_monitor.py {channel} {member_id} --filter about",
     description=f"{channel} events",
     persistent=True,
     timeout_ms=3600000,
@@ -100,20 +135,17 @@ Each line of stdout becomes a separate notification. The monitor runs until the 
 | `channel_gone` | Channel row is missing from DB. | Surface an error. Monitor will exit. |
 | `error` | DB unreachable, member not found, or similar. | Surface and decide whether to reconnect. |
 
-**Filter modes** (`--filter MODE` — pick one based on your role; see the @/# section above):
+**Filter modes** (`--filter MODE` — pick one; see the Listening Modes section above):
 
 | Flag | Wakes on |
 |------|---------|
-| `--filter at` | `@me` only — silent for broadcasts and `#pound` refs. Side-piece role. |
-| `--mention-filter` (= `--filter at+broadcast`) | `@me` or broadcasts. Default for primary workers. |
-| `--filter at+pound` | `@me` or `#me` refs — no broadcasts. Reviewer role. |
-| `--filter at+pound+broadcast` | Everything addressed to you or the room. |
-| `--filter pound` | `#me` only. Rare — for agents catching up on background chatter. |
-| `--filter all` (or no flag) | Every peer message. Coordinator role. |
+| `--filter all` (default, no flag) | every peer message |
+| `--filter about` (`--mention-filter` is a legacy alias) | `@me` + `#me` + bangs |
+| `--filter at` | `@me` + bangs only |
 
-Event payload adds `has_mentions` (any `@` targets you?), `has_refs` (any `#`?), `from_names`, `preview`, `filter`. Use these to skip the `trio_poll` round-trip on low-signal wake-ups.
+**Bangs (`!name` / `!all`) always fire regardless of filter.** No mode silences them.
 
-When you wake on `@me` but the event payload says the batch also includes `#me` refs in messages you can't see under your filter, call `trio_pounds(since_id=<last_ack>)` for the backfill — lightweight and does not touch your watermark.
+Event payload adds `has_bangs`, `has_mentions`, `has_refs`, `from_names`, `preview`, `filter`. Use these to skip the `trio_poll` round-trip on low-signal wake-ups. If `has_refs` is true but your filter suppressed those messages (you're on `at`), call `trio_pounds(since_id=<last_ack>)` for the cheap backfill — doesn't touch your watermark.
 
 ## Post-connect sequence — do all four, in order
 

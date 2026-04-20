@@ -1,5 +1,65 @@
 # nth Changelog
 
+## v7.2 — 2026-04-20
+
+### Three-sigil model, simplified filters, filter awareness, security fix
+
+Demo-driven iteration on top of v7.1. The user pushed back on two parts of the v7.1 design during live testing:
+
+1. "Broadcast" as a first-class filter category was noise — every legitimate filter mode should include ambient messages, so breaking them out invited wrong configurations.
+2. There was no unfilterable tier. Sometimes you genuinely need to wake everyone (channel close, "I'm about to force-push", emergencies). `@all` respects filters; there was no "override the room's attention" signal.
+
+The fix reshaped the sigil model and collapsed filter modes.
+
+**Sigils.** Three, auto-parsed server-side against roster names:
+
+| Sigil | Array | Filterable? | Typical use |
+|---|---|---|---|
+| `@name` | `mentions` | yes — wakes on `all` / `about` / `at` | direct request, hand-off, blocking dep |
+| `#name` | `refs` | yes — wakes on `about` only | talking ABOUT someone; breadcrumb for `trio_pounds` |
+| `!name` | `bangs` (new in v7.2) | **no — always wakes** | emergencies, channel close, last resort |
+
+`@all` and `!all` are first-class broadcasts (every member in mentions / bangs respectively). Members named literally `all` are skipped during parsing so they don't double-count against the keyword.
+
+**Filter modes collapsed to three.** The old `at+broadcast` / `at+pound` / `at+pound+broadcast` / `pound` combos aliased away. New set:
+
+| Mode | Wakes on | Role |
+|---|---|---|
+| `all` (default) | everything | coordinator, scribe |
+| `about` (legacy `--mention-filter` aliases here) | `@me` + `#me` + bangs | primary worker, reviewer |
+| `at` | `@me` + bangs only | side-piece / on-call |
+
+Bangs always wake regardless of mode. `classify_message` was replaced by `should_wake(member_id, mentions, refs, bangs, filter_mode) → (wake, kind)` which returns a four-way kind tag (`bang`/`at`/`pound`/`ambient`). Old `--mention-filter` still works (aliased to `about`).
+
+**Filter awareness.** Monitor now writes its active filter mode into `members.filter_mode` on every heartbeat. `trio_roster` / `trio_connect` surface that field on each member so agents can check before posting whether an ambient message will actually be heard. The web composer's preview pane now shows:
+
+- `ambient — N/M peers won't hear this (filtered)` when a plain message goes out to peers on `at` / `about`
+- `BANGS (unfilterable)` with red pills when a `!` is in-draft
+- Explicit `pings:` and `refs:` sections for the normal signals
+
+Agents are expected to self-police: if everyone in the room is on `at`, don't send an ambient message just to hear yourself type. This is etiquette, not enforcement — members can lie about their filter mode; the filter_mode field is a courtesy signal.
+
+**Conciseness norm.** SKILL-trio and SKILL-quartet now explicitly state: default to terse status posts, verbose only when necessary. Every broadcast token costs peers attention.
+
+**Web client.**
+- `!` triggers the same autocomplete popup as `@` and `#`; sigil preserved through acceptance.
+- New `bangs-bar` (red, loudest) rendered above `mentions-bar` (orange) and `refs-bar` (muted green). Three independent chip rows per message.
+- Roster rows display a filter-mode pill (amber `AT`, green `ABOUT`, dim-grey `ALL`) when the member isn't on the default.
+- Composer preview explains what each sigil will do before send, including "ambient — NO ONE will hear this" when all peers are filtering.
+- `/api/send` now server-side-parses all three sigils against the roster (previous version trusted a client-supplied `mentions` array, so `#` and `!` from the web were silently dropped into the `content` field without wake semantics).
+
+**Security fix (Aragorn critical, v7.1 regression).** `nth_web.py::_client_ip()` no longer honours `X-Forwarded-For`. Previous behavior let any direct client on the tailnet (or anyone reaching the port) send `X-Forwarded-For: 100.x.y.z` and have `tailscale_whois()` resolve them as the spoofed tailnet peer — minting a `source=tailscale` operator identity under the victim's name. No reverse proxy sits in front of the web server in the shipped deployment; the XFF path was purely attacker-controlled. Also: guest display names are now NFKC-normalised (folds full-width `＠` / `＃` / `！` into ASCII so reserved-name filters catch lookalikes), control characters stripped, and `all` / `everyone` / `here` / `channel` / `_op_*` refused to block impersonation.
+
+**Schema.** Additive:
+- `messages.bangs TEXT NOT NULL DEFAULT ''` — JSON array of banged member_ids, parallel to `mentions` / `refs`.
+- `members.filter_mode TEXT NOT NULL DEFAULT 'all'` — member's declared listening mode.
+
+Older clients that never write these columns keep working; older DBs fall back gracefully on OperationalError.
+
+**Instructional surfaces.** `SKILL-trio.md`, `SKILL-quartet.md`, `REFERENCE-trio.md`, `REFERENCE-quartet.md`, `CLAUDE.md`, `CURRENT.md`, this file. `nth_send` docstring rewritten to lead with the three-sigil hierarchy. New "Filter awareness + conciseness" section in both skill docs.
+
+---
+
 ## v7.1 — 2026-04-20
 
 ### `#pounds` — References that don't wake their target
