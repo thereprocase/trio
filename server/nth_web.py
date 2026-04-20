@@ -1050,11 +1050,15 @@ INDEX_HTML = r"""<!doctype html>
     --mention: #e3c34c;
   }
   * { box-sizing: border-box; }
+  :root {
+    --msg-font: "JetBrains Mono", "Fira Code", "Cascadia Code", ui-monospace, Menlo, monospace;
+  }
   html, body { margin: 0; padding: 0; height: 100%;
     background: var(--bg); color: var(--fg);
     font-family: "JetBrains Mono", "Fira Code", "Cascadia Code", ui-monospace, Menlo, monospace;
     font-size: 13px; line-height: 1.45;
   }
+  #chat, #chat .msg, #chat .msg * { font-family: var(--msg-font); }
   button { font-family: inherit; }
 
   #app { display: grid; grid-template-columns: 1fr 300px; grid-template-rows: 42px 1fr auto;
@@ -1080,6 +1084,10 @@ INDEX_HTML = r"""<!doctype html>
                    padding: 3px 8px; border-radius: 3px; font-family: inherit; font-size: 11px;
                    width: 160px; }
   header #filter:focus { outline: none; border-color: var(--accent); }
+  header #font-picker { background: var(--panel); color: var(--fg); border: 1px solid var(--border);
+                        padding: 3px 6px; border-radius: 3px; font-family: inherit; font-size: 11px;
+                        cursor: pointer; }
+  header #font-picker:focus { outline: none; border-color: var(--accent); }
 
   /* ── Chat ── */
   #chat-wrap { grid-row: 2 / 3; grid-column: 1 / 2; position: relative; overflow: hidden; }
@@ -1368,6 +1376,18 @@ INDEX_HTML = r"""<!doctype html>
     <span class="title" id="h-channel">trio#…</span>
     <span class="meta" id="h-meta">connecting…</span>
     <span class="spacer"></span>
+    <select id="font-picker" title="message font">
+      <option value='"JetBrains Mono", "Fira Code", "Cascadia Code", ui-monospace, Menlo, monospace'>JetBrains Mono (default)</option>
+      <option value='"Fira Code", ui-monospace, Menlo, monospace'>Fira Code</option>
+      <option value='"Cascadia Code", "Cascadia Mono", ui-monospace, Consolas, monospace'>Cascadia Code</option>
+      <option value='"Hack", ui-monospace, Menlo, monospace'>Hack</option>
+      <option value='"IBM Plex Mono", ui-monospace, Menlo, monospace'>IBM Plex Mono</option>
+      <option value='"Source Code Pro", ui-monospace, Menlo, monospace'>Source Code Pro</option>
+      <option value='Menlo, Monaco, ui-monospace, monospace'>Menlo</option>
+      <option value='Monaco, Menlo, ui-monospace, monospace'>Monaco</option>
+      <option value='Consolas, "Cascadia Mono", ui-monospace, monospace'>Consolas</option>
+      <option value='ui-monospace, SFMono-Regular, Menlo, Consolas, monospace'>System mono</option>
+    </select>
     <input id="filter" type="text" placeholder="filter messages…" spellcheck="false">
     <span class="pill" id="btn-compact" title="clamp every message body to 3 lines">compact</span>
     <span class="pill" id="btn-notify" title="desktop notifications on @you">🔔 off</span>
@@ -1431,8 +1451,25 @@ INDEX_HTML = r"""<!doctype html>
   const filterBanner = document.getElementById('filter-banner');
   const btnCompact = document.getElementById('btn-compact');
   const btnNotify = document.getElementById('btn-notify');
+  const fontPicker = document.getElementById('font-picker');
   const jumpBtn = document.getElementById('jump-btn');
   const jumpCount = document.getElementById('jump-count');
+
+  // Message-font picker — persists per-origin via localStorage.
+  try {
+    const saved = localStorage.getItem('trio.msgFont');
+    if (saved) {
+      document.documentElement.style.setProperty('--msg-font', saved);
+      for (const opt of fontPicker.options) {
+        if (opt.value === saved) { fontPicker.value = saved; break; }
+      }
+    }
+  } catch (_) { /* private-mode: ignore */ }
+  fontPicker.addEventListener('change', () => {
+    const v = fontPicker.value;
+    document.documentElement.style.setProperty('--msg-font', v);
+    try { localStorage.setItem('trio.msgFont', v); } catch (_) {}
+  });
 
   // ── URL params ──
   const URL_PARAMS = new URLSearchParams(location.search);
