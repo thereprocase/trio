@@ -1131,7 +1131,43 @@ INDEX_HTML = r"""<!doctype html>
                            border: 1px solid rgba(255, 132, 112, 0.5);
                            font-weight: 700; }
   .msg .bangs-bar .mchip .manimal { font-size: 13px; line-height: 1; }
-  .msg .body { white-space: pre-wrap; }
+  .msg .body { word-wrap: break-word; overflow-wrap: break-word; }
+  .msg .body.plain { white-space: pre-wrap; }
+  .msg .body > *:first-child { margin-top: 0; }
+  .msg .body > *:last-child { margin-bottom: 0; }
+  .msg .body p { margin: 4px 0; white-space: pre-wrap; }
+  .msg .body code.mdic { background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.1);
+                         border-radius: 3px; padding: 0 4px; font-family: ui-monospace, Menlo, Monaco, monospace;
+                         font-size: 0.92em; }
+  .msg .body pre.mdcode { background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1);
+                          border-radius: 4px; padding: 6px 8px; margin: 4px 0;
+                          font-family: ui-monospace, Menlo, Monaco, monospace; font-size: 0.9em;
+                          white-space: pre-wrap; overflow-x: auto; }
+  .msg .body strong { font-weight: 700; }
+  .msg .body em { font-style: italic; }
+  .msg .body del { opacity: 0.7; }
+  .msg .body a { color: var(--accent2); text-decoration: underline; }
+  .msg .body h1, .msg .body h2, .msg .body h3,
+  .msg .body h4, .msg .body h5, .msg .body h6 {
+    margin: 8px 0 4px; font-weight: 700; line-height: 1.25; }
+  .msg .body h1 { font-size: 1.35em; border-bottom: 1px solid rgba(255,255,255,0.15); padding-bottom: 2px; }
+  .msg .body h2 { font-size: 1.2em; border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom: 2px; }
+  .msg .body h3 { font-size: 1.1em; }
+  .msg .body h4 { font-size: 1.0em; }
+  .msg .body h5 { font-size: 0.95em; opacity: 0.9; }
+  .msg .body h6 { font-size: 0.9em; opacity: 0.8; }
+  .msg .body ul, .msg .body ol { margin: 4px 0; padding-left: 22px; }
+  .msg .body ul ul, .msg .body ol ol,
+  .msg .body ul ol, .msg .body ol ul { margin: 0; }
+  .msg .body li { margin: 1px 0; }
+  .msg .body li.task { list-style: none; margin-left: -18px; }
+  .msg .body li.task input { margin-right: 6px; vertical-align: -1px; }
+  .msg .body blockquote { margin: 4px 0; padding: 2px 10px; border-left: 3px solid var(--accent2);
+                          background: rgba(255,255,255,0.03); color: rgba(255,255,255,0.85); }
+  .msg .body hr { border: 0; border-top: 1px solid rgba(255,255,255,0.18); margin: 8px 0; }
+  .msg .body table { border-collapse: collapse; margin: 4px 0; font-size: 0.95em; }
+  .msg .body th, .msg .body td { border: 1px solid rgba(255,255,255,0.15); padding: 3px 8px; }
+  .msg .body th { background: rgba(255,255,255,0.06); font-weight: 700; text-align: left; }
   .msg.compact .body {
     display: -webkit-box;
     -webkit-line-clamp: 3;
@@ -1479,6 +1515,239 @@ INDEX_HTML = r"""<!doctype html>
   function escapeHtml(s) { return s.replace(/[&<>"']/g, c =>
     ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]); }
 
+  // Markdown → HTML. Server is stdlib-only; render on the client.
+  // Block-level: ATX headings (# … ######), fenced code (```lang), lists
+  // (ul/ol, nested by indent), GFM task lists (- [ ] / - [x]), blockquotes
+  // (nested with renderMarkdown recursion), thematic breaks (---, ***, ___),
+  // GFM pipe tables (with :---: alignment), paragraphs.
+  // Inline: **bold**, *italic*/_italic_, ~~strike~~, `inline code`,
+  // [text](url), autolinked http(s). Soft line breaks inside a paragraph
+  // become <br>.
+  function renderMarkdown(text) {
+    if (!text) return '';
+    // Stash fenced and inline code FIRST so their contents survive every
+    // subsequent transform (including line splitting for block parsing).
+    const fences = [];
+    let src = text.replace(/```(?:([A-Za-z0-9_+-]+))?\n?([\s\S]*?)```/g, (_m, lang, code) => {
+      fences.push(code.replace(/\n$/, ''));
+      return '\u0000F' + (fences.length - 1) + '\u0000';
+    });
+    const inlines = [];
+    src = src.replace(/`([^`\n]+)`/g, (_m, code) => {
+      inlines.push(code);
+      return '\u0000I' + (inlines.length - 1) + '\u0000';
+    });
+
+    function inlineFmt(t) {
+      t = escapeHtml(t);
+      t = humanizeIdSigils(t);
+      t = t.replace(/\*\*([^*\n][^*\n]*?)\*\*/g, '<strong>$1</strong>');
+      t = t.replace(/(^|[\s(\[])\*([^*\n]+?)\*(?=[\s.,!?;:)\]]|$)/g, '$1<em>$2</em>');
+      t = t.replace(/(^|[\s(\[])_([^_\n]+?)_(?=[\s.,!?;:)\]]|$)/g, '$1<em>$2</em>');
+      t = t.replace(/~~([^~\n]+?)~~/g, '<del>$1</del>');
+      t = t.replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g,
+        '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+      t = t.replace(/(^|[\s(])(https?:\/\/[^\s<]+[^\s<.,;:!?)])/g,
+        '$1<a href="$2" target="_blank" rel="noopener noreferrer">$2</a>');
+      return t;
+    }
+
+    function splitRow(row) {
+      let r = row.trim();
+      if (r.startsWith('|')) r = r.slice(1);
+      if (r.endsWith('|')) r = r.slice(0, -1);
+      return r.split('|').map(c => c.trim());
+    }
+    function isTableSep(line) {
+      return /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(line);
+    }
+    function parseAlign(sep) {
+      return splitRow(sep).map(c => {
+        const left = c.startsWith(':'), right = c.endsWith(':');
+        if (left && right) return 'center';
+        if (right) return 'right';
+        if (left) return 'left';
+        return '';
+      });
+    }
+
+    // A list marker at the start (after stripping leading indent).
+    function listMarker(line) {
+      const m = line.match(/^(\s*)(-|\*|\+|\d+\.)\s+(.*)$/);
+      if (!m) return null;
+      const indent = m[1].replace(/\t/g, '    ').length;
+      const ordered = /^\d+\./.test(m[2]);
+      let content = m[3];
+      let task = null;
+      const tm = content.match(/^\[( |x|X)\]\s+(.*)$/);
+      if (tm) { task = tm[1].toLowerCase() === 'x'; content = tm[2]; }
+      return { indent, ordered, content, task };
+    }
+
+    // Consume a list beginning at lines[start] with baseline indent.
+    // Returns [html, nextIndex]. Nested lists handled by recursion: a line
+    // whose indent is > baseline and is itself a list marker becomes a
+    // child list attached to the previous <li>.
+    function parseList(lines, start) {
+      const first = listMarker(lines[start]);
+      if (!first) return null;
+      const baseIndent = first.indent;
+      const ordered = first.ordered;
+      const items = [];  // { html, task }
+      let i = start;
+      while (i < lines.length) {
+        const line = lines[i];
+        if (!line.trim()) {
+          // Blank line: list continues if the next non-blank is still a
+          // list item at the same indent. Otherwise break.
+          let j = i + 1;
+          while (j < lines.length && !lines[j].trim()) j++;
+          if (j >= lines.length) { i = j; break; }
+          const nxt = listMarker(lines[j]);
+          if (!nxt || nxt.indent < baseIndent) { i = j; break; }
+          i = j; continue;
+        }
+        const mk = listMarker(line);
+        if (mk && mk.indent === baseIndent && mk.ordered === ordered) {
+          // Collect continuation lines (indented more, non-list) and
+          // child lists (indented more, list marker).
+          let body = inlineFmt(mk.content);
+          let task = mk.task;
+          i++;
+          let childHtml = '';
+          while (i < lines.length) {
+            const ln = lines[i];
+            if (!ln.trim()) break;
+            const sub = listMarker(ln);
+            if (sub && sub.indent > baseIndent) {
+              const [h, ni] = parseList(lines, i);
+              childHtml += h;
+              i = ni;
+              continue;
+            }
+            if (sub && sub.indent <= baseIndent) break;
+            // Lazy continuation — appended as soft-wrapped text.
+            body += '\n' + inlineFmt(ln.trim());
+            i++;
+          }
+          items.push({ body: body.replace(/\n/g, '<br>') + childHtml, task });
+        } else if (mk && mk.indent < baseIndent) {
+          break;
+        } else if (!mk) {
+          break;
+        } else {
+          // Different list type (ordered vs unordered) or deeper start —
+          // terminate this list so the caller can start a new one.
+          break;
+        }
+      }
+      const tag = ordered ? 'ol' : 'ul';
+      let html = '<' + tag + '>';
+      for (const it of items) {
+        if (it.task === null || it.task === undefined) {
+          html += '<li>' + it.body + '</li>';
+        } else {
+          const checked = it.task ? ' checked' : '';
+          html += '<li class="task"><input type="checkbox" disabled' + checked + '>' +
+                  it.body + '</li>';
+        }
+      }
+      html += '</' + tag + '>';
+      return [html, i];
+    }
+
+    const lines = src.split('\n');
+    const out = [];
+    let i = 0;
+    while (i < lines.length) {
+      const line = lines[i];
+
+      // Skip blank lines between blocks.
+      if (!line.trim()) { i++; continue; }
+
+      // Thematic break.
+      if (/^\s{0,3}([-*_])(\s*\1){2,}\s*$/.test(line)) {
+        out.push('<hr>'); i++; continue;
+      }
+
+      // ATX heading.
+      const h = line.match(/^\s{0,3}(#{1,6})\s+(.*?)\s*#*\s*$/);
+      if (h) {
+        const lvl = h[1].length;
+        out.push('<h' + lvl + '>' + inlineFmt(h[2]) + '</h' + lvl + '>');
+        i++; continue;
+      }
+
+      // Blockquote — collect consecutive `>` lines, recurse on dequoted body.
+      if (/^\s{0,3}>\s?/.test(line)) {
+        const block = [];
+        while (i < lines.length && /^\s{0,3}>\s?/.test(lines[i])) {
+          block.push(lines[i].replace(/^\s{0,3}>\s?/, ''));
+          i++;
+        }
+        out.push('<blockquote>' + renderMarkdown(block.join('\n')) + '</blockquote>');
+        continue;
+      }
+
+      // GFM table — require a pipe in the first line AND a separator on the next.
+      if (line.includes('|') && i + 1 < lines.length && isTableSep(lines[i + 1])) {
+        const header = splitRow(line);
+        const align = parseAlign(lines[i + 1]);
+        i += 2;
+        const rows = [];
+        while (i < lines.length && lines[i].includes('|') && lines[i].trim()) {
+          rows.push(splitRow(lines[i]));
+          i++;
+        }
+        let t = '<table><thead><tr>';
+        header.forEach((cell, j) => {
+          const a = align[j] ? ' style="text-align:' + align[j] + '"' : '';
+          t += '<th' + a + '>' + inlineFmt(cell) + '</th>';
+        });
+        t += '</tr></thead><tbody>';
+        rows.forEach(r => {
+          t += '<tr>';
+          for (let j = 0; j < header.length; j++) {
+            const a = align[j] ? ' style="text-align:' + align[j] + '"' : '';
+            t += '<td' + a + '>' + inlineFmt(r[j] || '') + '</td>';
+          }
+          t += '</tr>';
+        });
+        t += '</tbody></table>';
+        out.push(t);
+        continue;
+      }
+
+      // List (ul / ol).
+      if (listMarker(line)) {
+        const parsed = parseList(lines, i);
+        if (parsed) { out.push(parsed[0]); i = parsed[1]; continue; }
+      }
+
+      // Paragraph — consume until a block boundary.
+      const p = [];
+      while (i < lines.length) {
+        const ln = lines[i];
+        if (!ln.trim()) break;
+        if (/^\s{0,3}(#{1,6})\s+/.test(ln)) break;
+        if (/^\s{0,3}>\s?/.test(ln)) break;
+        if (/^\s{0,3}([-*_])(\s*\1){2,}\s*$/.test(ln)) break;
+        if (listMarker(ln)) break;
+        if (ln.includes('|') && i + 1 < lines.length && isTableSep(lines[i + 1])) break;
+        p.push(ln);
+        i++;
+      }
+      out.push('<p>' + p.map(inlineFmt).join('<br>') + '</p>');
+    }
+
+    let html = out.join('');
+    html = html.replace(/\u0000I(\d+)\u0000/g, (_m, k) =>
+      '<code class="mdic">' + escapeHtml(inlines[+k]) + '</code>');
+    html = html.replace(/\u0000F(\d+)\u0000/g, (_m, k) =>
+      '<pre class="mdcode">' + escapeHtml(fences[+k]) + '</pre>');
+    return html;
+  }
+
   // ── Time ──
   function formatTime(iso) {
     if (!iso) return '--:--';
@@ -1740,7 +2009,12 @@ INDEX_HTML = r"""<!doctype html>
 
     const body = document.createElement('div');
     body.className = 'body';
-    body.textContent = humanizeIdSigils(m.content);
+    if (isSystem) {
+      body.classList.add('plain');
+      body.textContent = humanizeIdSigils(m.content || '');
+    } else {
+      body.innerHTML = renderMarkdown(m.content || '');
+    }
     div.appendChild(body);
 
     // Watermark pins — animals of agents whose last_read == this message id.
@@ -1812,7 +2086,15 @@ INDEX_HTML = r"""<!doctype html>
       // form, and any unknown ids that have since joined the roster
       // should now resolve.
       const body = dom.querySelector('.body');
-      if (body) body.textContent = humanizeIdSigils(m.content || '');
+      if (body) {
+        if (isSystemContent(m.content || '')) {
+          body.classList.add('plain');
+          body.textContent = humanizeIdSigils(m.content || '');
+        } else {
+          body.classList.remove('plain');
+          body.innerHTML = renderMarkdown(m.content || '');
+        }
+      }
       function rebuildBar(bar, ids, sigil) {
         if (!bar || !ids || !ids.length) return;
         while (bar.childNodes.length > 1) bar.removeChild(bar.lastChild);
