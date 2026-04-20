@@ -144,6 +144,11 @@ def monitor(channel, member_id, filter_mode="all", _db_path=None):
 
     try:
         while True:
+            # Default poll cadence. Reassigned below once we know whether the
+            # member is sleeping, but needs a value here so the trailing
+            # time.sleep(check_interval) is safe even when the try-block bails
+            # on OperationalError before reaching the sleeping-check.
+            check_interval = ACTIVE_INTERVAL
             try:
                 member = db.execute(
                     "SELECT last_seen, last_read, status_text "
@@ -349,6 +354,16 @@ def monitor(channel, member_id, filter_mode="all", _db_path=None):
                 if "no such table" in str(e):
                     emit({"event": "error", "msg": "Database not initialized."})
                     return
+                # Release any implicit BEGIN started by the heartbeat UPDATE
+                # before the exception. Without this, a failed commit leaves
+                # the connection holding the WAL writer lock across the sleep
+                # until close() — which is exactly the starvation we're trying
+                # to avoid in peers. Best-effort: a rollback that itself fails
+                # just drops us to the next loop tick.
+                try:
+                    db.rollback()
+                except sqlite3.Error:
+                    pass
                 db_error_streak += 1
                 if db_error_streak >= 10:
                     emit({"event": "error", "msg": f"Persistent DB failure: {e}"})

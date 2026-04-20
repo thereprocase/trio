@@ -346,14 +346,18 @@ class EventHub:
                 self._subs.remove(q)
 
     def _prime_subscriber(self, q: queue.Queue) -> None:
+        # try/finally so queue.Full or a transient sqlite error doesn't leak
+        # the connection. A leaked read connection holds a SHARED lock and,
+        # worse, if Python's default isolation_level has auto-BEGUN any write,
+        # holds the WAL writer lock until GC — which starved the monitor's
+        # 0.5s polls below busy_timeout under contention.
+        db = None
         try:
             db = sqlite3.connect(str(self.db_path), timeout=5)
             db.row_factory = sqlite3.Row
             db.execute("PRAGMA busy_timeout=2000")
-            # Snapshot roster
             members = self._fetch_roster(db)
             q.put_nowait(json.dumps({"type": "roster", "members": members}))
-            # Last-N history
             rows = db.execute(
                 "SELECT id, member_id, member_name, content, mentions, refs, bangs, created_at "
                 "FROM messages WHERE channel = ? ORDER BY id DESC LIMIT ?",
@@ -371,9 +375,14 @@ class EventHub:
                     "bangs": parse_mentions_json(r["bangs"] if "bangs" in r.keys() else ""),
                     "created_at": r["created_at"],
                 }))
-            db.close()
         except (sqlite3.Error, queue.Full):
             pass
+        finally:
+            if db is not None:
+                try:
+                    db.close()
+                except sqlite3.Error:
+                    pass
 
     # ── broadcast ──
     def _broadcast(self, event: Dict[str, Any]) -> None:
@@ -462,6 +471,11 @@ class EventHub:
     def _run(self) -> None:
         try:
             db = sqlite3.connect(str(self.db_path), timeout=5)
+        except sqlite3.Error as e:
+            sys.stderr.write(f"[nth_web] DB open failed: {e}\n")
+            return
+
+        try:
             db.row_factory = sqlite3.Row
             db.execute("PRAGMA journal_mode=WAL")
             db.execute("PRAGMA busy_timeout=2000")
@@ -475,48 +489,47 @@ class EventHub:
                 self.last_msg_id = int(row[0] or 0)
             except sqlite3.Error:
                 self.last_msg_id = 0
-        except sqlite3.Error as e:
-            sys.stderr.write(f"[nth_web] DB open failed: {e}\n")
-            return
 
-        while not self._stop.is_set():
+            while not self._stop.is_set():
+                try:
+                    rows = db.execute(
+                        "SELECT id, member_id, member_name, content, mentions, refs, bangs, created_at "
+                        "FROM messages WHERE channel = ? AND id > ? ORDER BY id",
+                        (self.channel, self.last_msg_id),
+                    ).fetchall()
+                    for r in rows:
+                        self._broadcast({
+                            "type": "message",
+                            "id": r["id"],
+                            "member_id": r["member_id"],
+                            "member_name": r["member_name"] or r["member_id"],
+                            "content": r["content"] or "",
+                            "mentions": parse_mentions_json(r["mentions"]),
+                            "refs": parse_mentions_json(r["refs"] if "refs" in r.keys() else ""),
+                            "bangs": parse_mentions_json(r["bangs"] if "bangs" in r.keys() else ""),
+                            "created_at": r["created_at"],
+                        })
+                        self.last_msg_id = r["id"]
+
+                    members = self._fetch_roster(db)
+                    snapshot = json.dumps(members, sort_keys=True)
+                    if snapshot != self._last_roster_snapshot:
+                        self._last_roster_snapshot = snapshot
+                        self._broadcast({"type": "roster", "members": members})
+
+                except sqlite3.Error as e:
+                    sys.stderr.write(f"[nth_web] poll error: {e}\n")
+
+                self._stop.wait(DB_POLL_INTERVAL)
+        finally:
+            # Always close, even on unexpected thread exit. A leaked
+            # connection would keep holding any in-flight read lock (and
+            # under default isolation_level, any implicit BEGIN) for the
+            # rest of the process lifetime.
             try:
-                # New messages
-                rows = db.execute(
-                    "SELECT id, member_id, member_name, content, mentions, refs, bangs, created_at "
-                    "FROM messages WHERE channel = ? AND id > ? ORDER BY id",
-                    (self.channel, self.last_msg_id),
-                ).fetchall()
-                for r in rows:
-                    self._broadcast({
-                        "type": "message",
-                        "id": r["id"],
-                        "member_id": r["member_id"],
-                        "member_name": r["member_name"] or r["member_id"],
-                        "content": r["content"] or "",
-                        "mentions": parse_mentions_json(r["mentions"]),
-                        "refs": parse_mentions_json(r["refs"] if "refs" in r.keys() else ""),
-                        "bangs": parse_mentions_json(r["bangs"] if "bangs" in r.keys() else ""),
-                        "created_at": r["created_at"],
-                    })
-                    self.last_msg_id = r["id"]
-
-                # Roster snapshot (diffed against previous to avoid pointless fan-out)
-                members = self._fetch_roster(db)
-                snapshot = json.dumps(members, sort_keys=True)
-                if snapshot != self._last_roster_snapshot:
-                    self._last_roster_snapshot = snapshot
-                    self._broadcast({"type": "roster", "members": members})
-
-            except sqlite3.Error as e:
-                sys.stderr.write(f"[nth_web] poll error: {e}\n")
-
-            self._stop.wait(DB_POLL_INTERVAL)
-
-        try:
-            db.close()
-        except Exception:
-            pass
+                db.close()
+            except sqlite3.Error:
+                pass
 
 
 # ───────── HTTP handler ─────────
@@ -739,39 +752,59 @@ class NthWebHandler(BaseHTTPRequestHandler):
             self._error(403, "identity required — POST /api/identify first")
             return
 
+        db = None
         try:
-            db = sqlite3.connect(str(self.db_path), timeout=5)
+            # isolation_level=None puts the connection in autocommit mode —
+            # we wrap the send in an explicit BEGIN/COMMIT transaction below.
+            # With the default isolation_level, any sqlite3.Error between the
+            # first DML and commit() leaves the connection holding the WAL
+            # writer lock until close(); the finally clause below is the only
+            # thing that reliably returned us to a releasable state.
+            db = sqlite3.connect(str(self.db_path), timeout=5, isolation_level=None)
             db.execute("PRAGMA journal_mode=WAL")
             db.execute("PRAGMA synchronous=NORMAL")
-            op_id, op_name = ensure_operator_row(db, self.channel, ident)
-            now = now_iso()
-            # Server-side parse the three sigils against the current roster,
-            # matching nth_send's behavior so web-operator posts carry the
-            # same wake semantics as MCP-agent posts. The earlier version
-            # trusted a client-supplied `mentions` array (no refs, no bangs).
-            mention_ids, ref_ids, bang_ids = _parse_sigils_against_roster(
-                db, self.channel, content
-            )
-            cursor = db.execute(
-                "INSERT INTO messages "
-                "(channel, member_id, member_name, content, created_at, "
-                " mentions, refs, bangs) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (self.channel, op_id, op_name, content, now,
-                 json.dumps(mention_ids) if mention_ids else "",
-                 json.dumps(ref_ids)     if ref_ids     else "",
-                 json.dumps(bang_ids)    if bang_ids    else ""),
-            )
-            msg_id = cursor.lastrowid
-            db.execute(
-                "UPDATE members SET last_seen = ? WHERE channel = ? AND id = ?",
-                (now, self.channel, op_id),
-            )
-            db.commit()
-            db.close()
+            db.execute("PRAGMA busy_timeout=5000")
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                op_id, op_name = ensure_operator_row(db, self.channel, ident)
+                now = now_iso()
+                # Server-side parse the three sigils against the current roster,
+                # matching nth_send's behavior so web-operator posts carry the
+                # same wake semantics as MCP-agent posts.
+                mention_ids, ref_ids, bang_ids = _parse_sigils_against_roster(
+                    db, self.channel, content
+                )
+                cursor = db.execute(
+                    "INSERT INTO messages "
+                    "(channel, member_id, member_name, content, created_at, "
+                    " mentions, refs, bangs) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    (self.channel, op_id, op_name, content, now,
+                     json.dumps(mention_ids) if mention_ids else "",
+                     json.dumps(ref_ids)     if ref_ids     else "",
+                     json.dumps(bang_ids)    if bang_ids    else ""),
+                )
+                msg_id = cursor.lastrowid
+                db.execute(
+                    "UPDATE members SET last_seen = ? WHERE channel = ? AND id = ?",
+                    (now, self.channel, op_id),
+                )
+                db.execute("COMMIT")
+            except sqlite3.Error:
+                try:
+                    db.execute("ROLLBACK")
+                except sqlite3.Error:
+                    pass
+                raise
         except sqlite3.Error as e:
             self._error(500, f"db error: {e}")
             return
+        finally:
+            if db is not None:
+                try:
+                    db.close()
+                except sqlite3.Error:
+                    pass
 
         self._json({"ok": True, "id": msg_id})
 

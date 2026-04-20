@@ -274,6 +274,7 @@ class Dashboard:
         self.db = sqlite3.connect(str(self.db_path), timeout=5)
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA journal_mode=WAL")
+        self.db.execute("PRAGMA synchronous=NORMAL")
         self.db.execute("PRAGMA busy_timeout=2000")
 
     def close(self) -> None:
