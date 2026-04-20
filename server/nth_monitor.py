@@ -64,10 +64,17 @@ HEARTBEAT_INTERVAL = 10.0
 CADENCE_THRESHOLD = 600
 # Tap the parent session before the Anthropic prompt-cache TTL (1h) expires.
 # 55 min gives a 5-min buffer for clock skew, network latency, and the time
-# the agent takes to handle the event. Fires once per quiet period; resets
-# when the member posts or while they're sleeping/hibernating (hibernators
-# accept the eventual re-read cost in exchange for zero keepalive tap cost).
+# the agent takes to handle the event. Fires once per quiet period.
 KEEPALIVE_THRESHOLD = 55 * 60
+# Give up on tapping when the channel has been genuinely dead for this long
+# — no peer messages (regardless of whether they mention us). At 1M-tier
+# pricing a typical tap costs ~$1.25/hr; a full rewrite on return is ~$24.
+# Break-even lands around 17h, but the pathological-idle losses scale with
+# absolute idle time. 7h is well inside the break-even margin and caps the
+# worst-case "channel abandoned overnight" waste at a few taps worth of
+# spend. On eventual re-engagement the agent pays one rewrite, which the
+# taps we would have spent more than covered already.
+KEEPALIVE_GIVEUP = 7 * 3600
 
 
 def emit(event_dict):
@@ -371,11 +378,32 @@ def monitor(channel, member_id, filter_mode="all", _db_path=None):
                 else:
                     cadence_fired = False
 
-                if own_gap > KEEPALIVE_THRESHOLD and not keepalive_fired:
+                # Check how long since any peer posted anything. If the
+                # channel is genuinely abandoned we stop tapping — better
+                # to eat one rewrite on eventual re-engagement than to
+                # spend indefinitely on cache refreshes for a dead room.
+                try:
+                    last_peer = db.execute(
+                        "SELECT created_at FROM messages "
+                        "WHERE channel = ? AND member_id != ? "
+                        "ORDER BY id DESC LIMIT 1",
+                        (channel, member_id),
+                    ).fetchone()
+                except sqlite3.OperationalError:
+                    last_peer = None
+                peer_gap = seconds_since(
+                    last_peer["created_at"] if last_peer else None
+                )
+                channel_abandoned = peer_gap > KEEPALIVE_GIVEUP
+
+                if (own_gap > KEEPALIVE_THRESHOLD
+                        and not channel_abandoned
+                        and not keepalive_fired):
                     emit({
                         "event": "keepalive",
                         "gap_seconds": round(own_gap),
                         "threshold_seconds": KEEPALIVE_THRESHOLD,
+                        "peer_gap_seconds": round(peer_gap),
                     })
                     keepalive_fired = True
                 elif own_gap < KEEPALIVE_THRESHOLD:
