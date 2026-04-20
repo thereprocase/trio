@@ -761,6 +761,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
             # writer lock until close(); the finally clause below is the only
             # thing that reliably returned us to a releasable state.
             db = sqlite3.connect(str(self.db_path), timeout=5, isolation_level=None)
+            db.row_factory = sqlite3.Row
             db.execute("PRAGMA journal_mode=WAL")
             db.execute("PRAGMA synchronous=NORMAL")
             db.execute("PRAGMA busy_timeout=5000")
