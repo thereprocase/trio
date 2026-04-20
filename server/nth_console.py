@@ -26,6 +26,9 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).parent))
+from nth_constants import animal_for
+
 DB_PATH = Path.home() / ".claude" / "nth" / "nth.db"
 POLL_INTERVAL = 0.5
 SYSTEM_PREFIXES = ("[claimed ", "[done ", "[cancelled ", "[released ",
@@ -102,6 +105,7 @@ def render(row, show_channel):
     """Turn a messages row into a printable line."""
     ts = fmt_time(row["created_at"])
     author = row["member_name"] or row["member_id"] or "?"
+    _animal_name, animal_emoji = animal_for(row["member_id"] or "")
     content = row["content"] or ""
     mentions = parse_mentions(row["mentions"] if "mentions" in row.keys() else "")
 
@@ -113,12 +117,12 @@ def render(row, show_channel):
         parts.append(f"{Colour.CHANNEL}{row['channel']:>8}{Colour.RESET}")
 
     if is_retracted:
-        parts.append(f"{Colour.AUTHOR}{author}{Colour.RESET}")
+        parts.append(f"{animal_emoji} {Colour.AUTHOR}{author}{Colour.RESET}")
         parts.append(f"{Colour.RETRACTED}{content}{Colour.RESET}")
     elif is_system:
         parts.append(f"{Colour.SYSTEM}{content}{Colour.RESET}")
     else:
-        parts.append(f"{Colour.AUTHOR}{author}{Colour.RESET}")
+        parts.append(f"{animal_emoji} {Colour.AUTHOR}{author}{Colour.RESET}")
         if mentions:
             tag = "@" + ",@".join(mentions)
             parts.append(f"{Colour.MENTION}{tag}{Colour.RESET}")

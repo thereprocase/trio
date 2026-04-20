@@ -46,6 +46,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Deque, Dict, List, Optional, Tuple
 
+sys.path.insert(0, str(Path(__file__).parent))
+from nth_constants import animal_for
+
 try:
     from rich.box import SIMPLE_HEAD
     from rich.console import Console, Group
@@ -292,19 +295,33 @@ class Dashboard:
 
     def _fetch_members(self) -> None:
         assert self.db
+        # v6.2+ session-mode clients update sessions.last_read / last_seen
+        # without touching members.* — reconcile both tables so the dashboard
+        # credits reads and shows live heartbeats for them.
         rows = self.db.execute(
-            "SELECT id, name, status_text, last_seen, last_read "
-            "FROM members WHERE channel = ?",
+            "SELECT m.id AS id, m.name AS name, m.status_text AS status_text, "
+            "m.last_seen AS member_last_seen, m.last_read AS member_last_read, "
+            "COALESCE(MAX(s.last_read), 0) AS session_last_read, "
+            "MAX(s.last_seen) AS session_last_seen "
+            "FROM members m "
+            "LEFT JOIN sessions s "
+            "  ON s.channel = m.channel AND s.member_id = m.id "
+            "  AND s.revoked_at IS NULL "
+            "WHERE m.channel = ? "
+            "GROUP BY m.id, m.channel",
             (self.channel,),
         ).fetchall()
         for r in rows:
             agent = self._ensure_agent(r["id"], r["name"])
             agent.status_text = r["status_text"] or ""
-            if r["last_seen"]:
-                agent.last_seen_iso = r["last_seen"]
-                agent.last_seen = parse_ts(r["last_seen"])
+            m_ls = r["member_last_seen"] or ""
+            s_ls = r["session_last_seen"] or ""
+            effective_last_seen = max(m_ls, s_ls) or None
+            if effective_last_seen:
+                agent.last_seen_iso = effective_last_seen
+                agent.last_seen = parse_ts(effective_last_seen)
 
-            new_wm = r["last_read"] or 0
+            new_wm = max(r["member_last_read"] or 0, r["session_last_read"] or 0)
             if new_wm > agent.last_read:
                 self._credit_read(agent, agent.last_read, new_wm)
                 agent.last_read = new_wm
@@ -449,6 +466,7 @@ class Dashboard:
             header_style="bold bright_black",
         )
         table.add_column(" ", width=2)                       # status glyph
+        table.add_column(" ", width=2)                       # animal emoji
         table.add_column("Agent", no_wrap=True, min_width=8)
         table.add_column("Model", no_wrap=True, style="dim", width=6)
         table.add_column("Seen", no_wrap=True, justify="right", width=5)
@@ -484,8 +502,11 @@ class Dashboard:
 
             model = "-"        # we don't have this; placeholder kept for future
 
+            _animal_name, animal_emoji = animal_for(a.id)
+
             table.add_row(
                 Text(glyph, style=sty),
+                animal_emoji,
                 Text(a.name, style=a.color if status not in ("stale", "dead") else "dim"),
                 model,
                 fmt_rel(age),
@@ -498,7 +519,7 @@ class Dashboard:
             )
 
         if not agents_sorted:
-            table.add_row("", Text("(no members yet)", style="dim"), "", "", "", "", "", "", "", "")
+            table.add_row("", "", Text("(no members yet)", style="dim"), "", "", "", "", "", "", "", "")
 
         # ── Hotkey bar — always visible, swaps on mode ──
         hotkeys = self._render_hotkey_bar()
@@ -628,8 +649,10 @@ class Dashboard:
             mentions = parse_mentions(r["mentions"])
             content = r["content"] or ""
 
+            _animal_name, animal_emoji = animal_for(r["member_id"] or "")
             header = Text()
             header.append(f"{hhmmss}  ", style="bright_black")
+            header.append(f"{animal_emoji} ", style="default")
             header.append(sender.name, style=f"{sender.color} bold")
             if mentions:
                 header.append(" → @" + ",@".join(mentions), style="yellow")
