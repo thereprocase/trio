@@ -163,6 +163,34 @@ def generate_member_id() -> str:
     return "".join(random.choices(string.ascii_lowercase + string.digits, k=6))
 
 
+_GUEST_SUFFIX_RE = re.compile(r"\s*\(\s*guest\s*\)\s*$", re.IGNORECASE)
+_GUEST_KEBAB_RE = re.compile(r"[-_]guest\s*$", re.IGNORECASE)
+_GUEST_PREFIX_RE = re.compile(r"^\s*guest[:\-]\s*", re.IGNORECASE)
+
+
+def _guest_stem(name: str) -> str | None:
+    """Return the human-friendly stem of a guest-tagged name, or None.
+
+    Mirrors nth_web._guest_stem. Used as a belt-and-suspenders fallback
+    in the sigil parser so `@Gabe` still routes when the roster entry is
+    `gabe-guest` (or `Gabe (Guest)`, for pre-v7.3 names still lingering
+    in long-lived channels). The sigil parser is a strict literal match
+    by design — this is the narrow exception for the guest trust tag."""
+    if not name:
+        return None
+    s = name.strip()
+    m = _GUEST_SUFFIX_RE.search(s)
+    if m:
+        return (s[: m.start()].rstrip(" -_").strip()) or None
+    m = _GUEST_KEBAB_RE.search(s)
+    if m:
+        return (s[: m.start()].rstrip(" -_").strip()) or None
+    m = _GUEST_PREFIX_RE.match(s)
+    if m:
+        return (s[m.end():].lstrip(" -_").strip()) or None
+    return None
+
+
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -892,25 +920,90 @@ def nth_send(channel: str, member_id: str, message: str, task: bool = False, pin
                 mention_ids = list(all_ids)
             if bang_all:
                 bang_ids = list(all_ids)
+            hit_at: set = set()
+            hit_ref: set = set()
+            hit_bang: set = set()
+            literal_names_lower: set = set()
             for m in all_members:
+                name_stripped = (m["name"] or "").strip()
+                mid = m["id"]
+                # Direct-id mention path: @<member_id> routes regardless of
+                # name. Agents that cache the id from nth_connect survive
+                # renames and don't need to re-parse the roster on every send.
+                id_esc = re.escape(mid)
+                if not at_all:
+                    if re.search(r"@" + id_esc + r"(?:\b|$)", content, re.IGNORECASE):
+                        if mid not in hit_at:
+                            mention_ids.append(mid)
+                            hit_at.add(mid)
+                if re.search(r"#" + id_esc + r"(?:\b|$)", content, re.IGNORECASE):
+                    if mid not in hit_ref:
+                        ref_ids.append(mid)
+                        hit_ref.add(mid)
+                if not bang_all:
+                    if re.search(r"!" + id_esc + r"(?:\b|$)", content, re.IGNORECASE):
+                        if mid not in hit_bang:
+                            bang_ids.append(mid)
+                            hit_bang.add(mid)
                 # Skip a member named literally "all" — the @all/!all shortcuts
                 # already handle that keyword; matching it as a regular name
                 # would double-count. "all" is also a reserved display name
                 # we refuse during identity registration on the web side.
-                if (m["name"] or "").strip().lower() == "all":
+                if name_stripped.lower() == "all" or not name_stripped:
                     continue
-                name_esc = re.escape(m["name"])
-                if not at_all:
+                literal_names_lower.add(name_stripped.lower())
+                name_esc = re.escape(name_stripped)
+                if not at_all and mid not in hit_at:
                     at_pat = re.compile(r"@" + name_esc + r"(?:\b|$)", re.IGNORECASE)
                     if at_pat.search(content):
-                        mention_ids.append(m["id"])
-                hash_pat = re.compile(r"#" + name_esc + r"(?:\b|$)", re.IGNORECASE)
-                if hash_pat.search(content):
-                    ref_ids.append(m["id"])
-                if not bang_all:
+                        mention_ids.append(mid)
+                        hit_at.add(mid)
+                if mid not in hit_ref:
+                    hash_pat = re.compile(r"#" + name_esc + r"(?:\b|$)", re.IGNORECASE)
+                    if hash_pat.search(content):
+                        ref_ids.append(mid)
+                        hit_ref.add(mid)
+                if not bang_all and mid not in hit_bang:
                     bang_pat = re.compile(r"!" + name_esc + r"(?:\b|$)", re.IGNORECASE)
                     if bang_pat.search(content):
-                        bang_ids.append(m["id"])
+                        bang_ids.append(mid)
+                        hit_bang.add(mid)
+
+            # Guest-stem fallback: if the roster has `gabe-guest` (or the
+            # legacy `Gabe (Guest)`) and an agent wrote @gabe, route to
+            # the guest — the `-guest` tag is a trust label, not part of
+            # the handle. Skip when the stem collides with a real member's
+            # literal name (trust favors the non-guest identity), or when
+            # multiple guests share a stem (ambiguous — force literal).
+            guest_by_stem: dict[str, list] = {}
+            for m in all_members:
+                stem = _guest_stem(m["name"] or "")
+                if not stem:
+                    continue
+                guest_by_stem.setdefault(stem.lower(), []).append(m)
+            _RESERVED_STEMS = {"all", "everyone", "here", "channel"}
+            for stem_lower, guests in guest_by_stem.items():
+                if stem_lower in _RESERVED_STEMS:
+                    continue  # never let a stem fight the @all/!all broadcast shortcut
+                if stem_lower in literal_names_lower:
+                    continue
+                if len(guests) != 1:
+                    continue
+                g = guests[0]
+                stem = _guest_stem(g["name"] or "") or ""
+                if not stem:
+                    continue
+                stem_esc = re.escape(stem)
+                gid = g["id"]
+                if not at_all and gid not in hit_at:
+                    if re.search(r"@" + stem_esc + r"(?:\b|$)", content, re.IGNORECASE):
+                        mention_ids.append(gid)
+                if gid not in hit_ref:
+                    if re.search(r"#" + stem_esc + r"(?:\b|$)", content, re.IGNORECASE):
+                        ref_ids.append(gid)
+                if not bang_all and gid not in hit_bang:
+                    if re.search(r"!" + stem_esc + r"(?:\b|$)", content, re.IGNORECASE):
+                        bang_ids.append(gid)
         mentions_json = json.dumps(mention_ids) if mention_ids else ""
         refs_json = json.dumps(ref_ids) if ref_ids else ""
         bangs_json = json.dumps(bang_ids) if bang_ids else ""

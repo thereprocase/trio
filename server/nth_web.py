@@ -30,6 +30,7 @@ import argparse
 import getpass
 import html
 import http.cookies
+import ipaddress
 import json
 import os
 import queue
@@ -68,12 +69,37 @@ OPERATOR_NAME_FALLBACK = "Operator"
 OP_COOKIE = "nth_op"
 OP_COOKIE_MAX_AGE = 60 * 60 * 24 * 30   # 30 days
 IDENTITY_SOURCE_TAILSCALE = "tailscale"
+IDENTITY_SOURCE_LOOPBACK = "loopback"
 IDENTITY_SOURCE_GUEST = "guest"
 IDENTITY_SOURCE_PENDING = "pending"
 # Agents reading the roster can check the member's summary field:
-#   "human — tailnet: knelsonb"   → identity-traceable via Tailscale
-#   "human — GUEST (self-declared)" → untrusted self-declared identity
+#   "human — tailnet: knelsonb"       → identity-traceable via Tailscale
+#   "human — local (user: repro)"     → connected via loopback; trust level is
+#                                       "already has a shell on this box"
+#   "human — GUEST (self-declared)"   → untrusted self-declared identity
 # Neither replaces direct hub-console input.
+
+
+def _is_loopback_ip(remote_ip: str) -> bool:
+    """True iff remote_ip is a loopback address (127.0.0.0/8, ::1, or an
+    IPv4-mapped-IPv6 loopback like ::ffff:127.0.0.1). Uses the stdlib's
+    ipaddress parser so the check rejects impostors like "::1.2.3.4" that
+    a naive string prefix would accept."""
+    if not remote_ip:
+        return False
+    # Strip IPv6 zone identifier ("fe80::1%eth0") — ipaddress refuses it.
+    ip_str = remote_ip.split("%", 1)[0]
+    try:
+        ip = ipaddress.ip_address(ip_str)
+    except ValueError:
+        return False
+    if ip.is_loopback:
+        return True
+    # IPv4-mapped IPv6: ipaddress flags the v6 address as is_loopback=False
+    # but the embedded v4 may be loopback. Unwrap and recheck.
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        return ip.ipv4_mapped.is_loopback
+    return False
 
 
 # ───────── Helpers ─────────
@@ -82,9 +108,12 @@ def now_iso() -> str:
 
 
 def _slug(s: str, maxlen: int = 20) -> str:
+    """Slugify for ASCII-safe handles. Returns "" on empty/no-useful-chars
+    so callers can pick their own fallback via `or "xxx"`. (Used to return
+    "x" on empty, which defeated every `_slug(x) or 'guest'` call site.)"""
     s = re.sub(r"[^a-z0-9_-]", "-", (s or "").lower())
     s = re.sub(r"-+", "-", s).strip("-")
-    return s[:maxlen] or "x"
+    return s[:maxlen]
 
 
 def _hostname_slug() -> str:
@@ -101,14 +130,22 @@ class OperatorIdentity:
 
     @property
     def display_name(self) -> str:
+        # Guests get a kebab'd handle with a `-guest` suffix so the trust
+        # tag lives inside a single whitespace-free token. Earlier designs
+        # stored "Bob (Guest)" which parsed correctly but invited agents
+        # (and humans) to treat "(Guest)" as a parenthetical annotation
+        # they could strip — which silently broke mention routing when
+        # they wrote @Bob instead of @Bob (Guest).
         if self.source == IDENTITY_SOURCE_GUEST:
-            return f"{self.name} (Guest)"
+            return f"{_slug(self.name) or 'guest'}-guest"
         return self.name
 
     @property
     def summary(self) -> str:
         if self.source == IDENTITY_SOURCE_TAILSCALE:
             return f"human — tailnet: {self.login or self.name}"
+        if self.source == IDENTITY_SOURCE_LOOPBACK:
+            return f"human — local (user: {self.login or self.name})"
         if self.source == IDENTITY_SOURCE_GUEST:
             return f"human — GUEST (self-declared)"
         return "human — pending identity"
@@ -162,6 +199,40 @@ class OperatorRegistry:
         with self._lock:
             self._by_token[token] = ident
 
+    def resolve_from_loopback(self, token: str, remote_ip: str) -> Optional[OperatorIdentity]:
+        """If the peer came in over loopback, trust the OS account the server
+        is running under. Rationale: anyone who can open a TCP connection to
+        127.0.0.1 already has a shell on this box — they could write directly
+        to the SQLite DB or run any skill. Asking them to self-declare a
+        Guest name would be theatre. The tradeoff is that every local user
+        on a shared host would get the same identity; nth is single-user on
+        a personal box, so that's fine.
+
+        Returns None for non-loopback IPs so the caller can fall through to
+        the self-declared Guest path.
+        """
+        if not _is_loopback_ip(remote_ip):
+            return None
+        # Cross-platform username discovery. getpass.getuser() checks the
+        # usual environment variables then falls back to pwd on POSIX; we
+        # wrap it in a broad except because on weird sandboxes it can raise
+        # OSError/KeyError when neither env nor pwd resolves.
+        try:
+            user = getpass.getuser() or "local"
+        except Exception:
+            user = os.environ.get("USER") or os.environ.get("USERNAME") or "local"
+        display = user
+        slug = _slug(user) or "local"
+        ident = OperatorIdentity(
+            member_id=f"{OPERATOR_MEMBER_ID_PREFIX}l_{_hostname_slug()}_{slug}",
+            name=display,
+            source=IDENTITY_SOURCE_LOOPBACK,
+            login=user,
+            created_at=time.time(),
+        )
+        self.put(token, ident)
+        return ident
+
     def resolve_from_tailscale(self, token: str, remote_ip: str) -> Optional[OperatorIdentity]:
         info = tailscale_whois(remote_ip)
         if not info:
@@ -196,10 +267,20 @@ class OperatorRegistry:
         if lower in {"all", "everyone", "here", "channel"} or lower.startswith("_op_"):
             name = f"Guest-{token[:4]}"
         slug = _slug(name) or "guest"
-        # Disambiguate multiple guests with the same chosen name by
-        # suffixing a chunk of the token — keeps their rows distinct.
+        # Reuse the existing guest member_id when this token already has a
+        # guest identity — a re-identify is a rename, not a new member.
+        # Otherwise every typo-correction would orphan a members-table row
+        # and spawn a ghost in the roster.
+        with self._lock:
+            prior = self._by_token.get(token)
+        if prior is not None and prior.source == IDENTITY_SOURCE_GUEST:
+            member_id = prior.member_id
+        else:
+            # Disambiguate multiple guests with the same chosen name by
+            # suffixing a chunk of the token — keeps their rows distinct.
+            member_id = f"{OPERATOR_MEMBER_ID_PREFIX}g_{slug}_{token[:6]}"
         ident = OperatorIdentity(
-            member_id=f"{OPERATOR_MEMBER_ID_PREFIX}g_{slug}_{token[:6]}",
+            member_id=member_id,
             name=name,
             source=IDENTITY_SOURCE_GUEST,
             login=name,
@@ -257,6 +338,39 @@ def member_status(last_seen_iso: Optional[str], status_text: str) -> str:
     return "active"
 
 
+_GUEST_SUFFIX_RE = re.compile(r"\s*\(\s*guest\s*\)\s*$", re.IGNORECASE)
+_GUEST_KEBAB_RE = re.compile(r"[-_]guest\s*$", re.IGNORECASE)
+_GUEST_PREFIX_RE = re.compile(r"^\s*guest[:\-]\s*", re.IGNORECASE)
+
+
+def _guest_stem(name: str) -> Optional[str]:
+    """Return the human-friendly stem of a guest-tagged name, or None.
+
+    The sigil parser is a strict literal match — an agent who writes
+    `@Gabe` when the roster has `Gabe (Guest)` would otherwise silently
+    fail to route. Treating the guest tag as a trust label (not part of
+    the handle) and falling back to the stem lets mentions survive that
+    common mistake without the server having to guess at arbitrary
+    abbreviations. Recognised shapes: ``Alice (Guest)``, ``alice-guest``,
+    ``Guest: Alice``, ``Guest-Alice``."""
+    if not name:
+        return None
+    s = name.strip()
+    m = _GUEST_SUFFIX_RE.search(s)
+    if m:
+        stem = s[: m.start()].rstrip(" -_").strip()
+        return stem or None
+    m = _GUEST_KEBAB_RE.search(s)
+    if m:
+        stem = s[: m.start()].rstrip(" -_").strip()
+        return stem or None
+    m = _GUEST_PREFIX_RE.match(s)
+    if m:
+        stem = s[m.end():].lstrip(" -_").strip()
+        return stem or None
+    return None
+
+
 def _parse_sigils_against_roster(
     db: sqlite3.Connection, channel: str, content: str
 ) -> Tuple[List[str], List[str], List[str]]:
@@ -267,6 +381,12 @@ def _parse_sigils_against_roster(
     to every-member; #all has no analogue (reference-to-everyone is just
     noise). Members named literally 'all' are skipped so they don't
     double-count against the keyword shortcuts.
+
+    Belt-and-suspenders: after the literal-match pass, a second pass tries
+    the "guest stem" of each guest-tagged member (so @Gabe still reaches
+    @Gabe (Guest)). The fallback is skipped when the stem collides with
+    another member's literal name (real identity wins) or when two guests
+    share a stem (ambiguity — force the agent to type the literal).
     """
     members = db.execute(
         "SELECT id, name FROM members WHERE channel = ?",
@@ -279,19 +399,81 @@ def _parse_sigils_against_roster(
     mention_ids: List[str] = list(all_ids) if at_all   else []
     bang_ids:    List[str] = list(all_ids) if bang_all else []
     ref_ids:     List[str] = []
+    # Track which members we hit literally and which names were already
+    # claimed, so the guest-stem pass doesn't shadow a real identity.
+    hit_at: set = set()
+    hit_ref: set = set()
+    hit_bang: set = set()
+    literal_names_lower: set = set()
     for m in members:
         name = (m["name"] or "").strip()
+        mid = m["id"]
+        # Direct-id mention path: @<member_id> always routes, independent of
+        # name. Agents that cache the id from trio_connect survive renames.
+        id_esc = re.escape(mid)
+        if not at_all:
+            if re.search(r"@" + id_esc + r"(?:\b|$)", content, re.IGNORECASE):
+                if mid not in hit_at:
+                    mention_ids.append(mid)
+                    hit_at.add(mid)
+        if re.search(r"#" + id_esc + r"(?:\b|$)", content, re.IGNORECASE):
+            if mid not in hit_ref:
+                ref_ids.append(mid)
+                hit_ref.add(mid)
+        if not bang_all:
+            if re.search(r"!" + id_esc + r"(?:\b|$)", content, re.IGNORECASE):
+                if mid not in hit_bang:
+                    bang_ids.append(mid)
+                    hit_bang.add(mid)
         if name.lower() == "all" or not name:
             continue
+        literal_names_lower.add(name.lower())
         name_esc = re.escape(name)
-        if not at_all:
+        if not at_all and mid not in hit_at:
             if re.search(r"@" + name_esc + r"(?:\b|$)", content, re.IGNORECASE):
-                mention_ids.append(m["id"])
-        if re.search(r"#" + name_esc + r"(?:\b|$)", content, re.IGNORECASE):
-            ref_ids.append(m["id"])
-        if not bang_all:
+                mention_ids.append(mid)
+                hit_at.add(mid)
+        if mid not in hit_ref:
+            if re.search(r"#" + name_esc + r"(?:\b|$)", content, re.IGNORECASE):
+                ref_ids.append(mid)
+                hit_ref.add(mid)
+        if not bang_all and mid not in hit_bang:
             if re.search(r"!" + name_esc + r"(?:\b|$)", content, re.IGNORECASE):
-                bang_ids.append(m["id"])
+                bang_ids.append(mid)
+                hit_bang.add(mid)
+
+    # Guest-stem fallback. Group guest members by stem so we can detect
+    # ambiguity (two guests named "Gabe (Guest)" / "gabe-guest" would both
+    # want @Gabe — skip both rather than broadcast silently).
+    guest_by_stem: Dict[str, List[sqlite3.Row]] = {}
+    for m in members:
+        stem = _guest_stem(m["name"] or "")
+        if not stem:
+            continue
+        guest_by_stem.setdefault(stem.lower(), []).append(m)
+    _RESERVED_STEMS = {"all", "everyone", "here", "channel"}
+    for stem_lower, guests in guest_by_stem.items():
+        if stem_lower in _RESERVED_STEMS:
+            continue  # never let a stem fight the @all/!all broadcast shortcut
+        if stem_lower in literal_names_lower:
+            continue  # a real member already owns this name
+        if len(guests) != 1:
+            continue  # ambiguous — multiple guests share a stem
+        g = guests[0]
+        stem = _guest_stem(g["name"] or "") or ""
+        if not stem:
+            continue
+        stem_esc = re.escape(stem)
+        gid = g["id"]
+        if not at_all and gid not in hit_at:
+            if re.search(r"@" + stem_esc + r"(?:\b|$)", content, re.IGNORECASE):
+                mention_ids.append(gid)
+        if gid not in hit_ref:
+            if re.search(r"#" + stem_esc + r"(?:\b|$)", content, re.IGNORECASE):
+                ref_ids.append(gid)
+        if not bang_all and gid not in hit_bang:
+            if re.search(r"!" + stem_esc + r"(?:\b|$)", content, re.IGNORECASE):
+                bang_ids.append(gid)
     return mention_ids, ref_ids, bang_ids
 
 
@@ -581,15 +763,21 @@ class NthWebHandler(BaseHTTPRequestHandler):
         return OPERATOR_REGISTRY.new_token(), True
 
     def _resolve_identity(self) -> Tuple[str, OperatorIdentity, bool]:
-        """Resolve (token, identity, is_new_cookie). Tailscale first,
-        pending-guest fallback. The pending identity has no name yet;
-        the browser must POST /api/identify to set one."""
+        """Resolve (token, identity, is_new_cookie). Trust ladder:
+        Tailscale whois → loopback-OS-user → pending (browser must POST
+        /api/identify to self-declare a Guest name).
+        """
         token, is_new = self._get_or_mint_cookie()
         ident = OPERATOR_REGISTRY.get(token)
         if ident is not None:
             return token, ident, is_new
+        remote_ip = self._client_ip()
         # Try Tailscale whois on the remote address
-        ident = OPERATOR_REGISTRY.resolve_from_tailscale(token, self._client_ip())
+        ident = OPERATOR_REGISTRY.resolve_from_tailscale(token, remote_ip)
+        if ident is not None:
+            return token, ident, is_new
+        # Loopback: peer is already on the machine, trust the OS user
+        ident = OPERATOR_REGISTRY.resolve_from_loopback(token, remote_ip)
         if ident is not None:
             return token, ident, is_new
         # Park as pending until the browser supplies a name
@@ -728,7 +916,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
             return
         token, _is_new = self._get_or_mint_cookie()
         existing = OPERATOR_REGISTRY.get(token)
-        if existing and existing.source == IDENTITY_SOURCE_TAILSCALE:
+        if existing and existing.source in (IDENTITY_SOURCE_TAILSCALE, IDENTITY_SOURCE_LOOPBACK):
             # Already identity-traceable — refuse to downgrade to Guest.
             self._json({
                 "ok": True, "upgraded": False,
@@ -1314,6 +1502,30 @@ INDEX_HTML = r"""<!doctype html>
                            '[renamed '];
   function isSystemContent(s) { return SYSTEM_PREFIXES.some(p => s.startsWith(p)); }
 
+  // Rewrite @<member_id> / #<member_id> / !<member_id> to @<friendly-name>
+  // in message bodies before rendering. The raw id-sigil form is valid
+  // input (the server-side parser routes it correctly) but ugly to read;
+  // agents can address-by-id for rename resilience and the UI translates
+  // back to the current display name on the fly. Unknown ids are left
+  // alone so stale history isn't mangled.
+  function humanizeIdSigils(text) {
+    if (!text) return text;
+    if (!state.members || !state.members.size) return text;
+    // Build a single alternation across all known ids, longest first so
+    // "_op_g_bob_abcdef" beats a hypothetical prefix "_op_g_bob".
+    const ids = Array.from(state.members.keys())
+      .filter(Boolean)
+      .sort((a, b) => b.length - a.length)
+      .map(id => id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+    if (!ids.length) return text;
+    const re = new RegExp('([@#!])(' + ids.join('|') + ')(?=\\b|$)', 'g');
+    return text.replace(re, (match, sigil, id) => {
+      const mem = state.members.get(id);
+      const name = mem && mem.name ? mem.name : id;
+      return sigil + name;
+    });
+  }
+
   // ── Per-member agent stats (client-side aggregate, derived from event stream) ──
   function agentState(id) {
     if (!state.agentStats.has(id)) {
@@ -1491,6 +1703,7 @@ INDEX_HTML = r"""<!doctype html>
                   + (mentionsOperator ? ' targeted' : '');
     div.dataset.msgId = String(m.id);
     div.dataset.search = (m.content || '').toLowerCase() + ' '
+                       + humanizeIdSigils(m.content || '').toLowerCase() + ' '
                        + (m.member_name || '').toLowerCase();
 
     const head = document.createElement('div');
@@ -1527,7 +1740,7 @@ INDEX_HTML = r"""<!doctype html>
 
     const body = document.createElement('div');
     body.className = 'body';
-    body.textContent = m.content;
+    body.textContent = humanizeIdSigils(m.content);
     div.appendChild(body);
 
     // Watermark pins — animals of agents whose last_read == this message id.
@@ -1575,7 +1788,7 @@ INDEX_HTML = r"""<!doctype html>
         'Notification' in window && Notification.permission === 'granted') {
       try {
         const n = new Notification(`@${state.operator.name} — ${m.member_name}`, {
-          body: (m.content || '').slice(0, 140),
+          body: humanizeIdSigils(m.content || '').slice(0, 140),
           tag: 'trio-' + m.id,
           silent: false,
         });
@@ -1595,6 +1808,11 @@ INDEX_HTML = r"""<!doctype html>
         author.textContent = m.member_name;
         author.style.color = colorFor(m.member_id);
       }
+      // Re-humanize id-sigils in the body: a rename changes the display
+      // form, and any unknown ids that have since joined the roster
+      // should now resolve.
+      const body = dom.querySelector('.body');
+      if (body) body.textContent = humanizeIdSigils(m.content || '');
       function rebuildBar(bar, ids, sigil) {
         if (!bar || !ids || !ids.length) return;
         while (bar.childNodes.length > 1) bar.removeChild(bar.lastChild);
@@ -2370,7 +2588,8 @@ INDEX_HTML = r"""<!doctype html>
     state.operator = op;
     const opAnimal = animalFor(op);
     const srcTag = op.source === 'tailscale' ? '[tailnet]' :
-                   op.source === 'guest'     ? '[GUEST]'    : '';
+                   op.source === 'loopback'  ? '[local]'   :
+                   op.source === 'guest'     ? '[GUEST]'   : '';
     hMeta.textContent = `posting as ${opAnimal.emoji} ${op.name} (${op.id}) — the ${opAnimal.name} ${srcTag}  ·  ${state.server_host}`;
   }
 

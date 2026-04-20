@@ -48,6 +48,21 @@ Three sigils parse server-side against roster names:
 - **`#name`** — POUND / reference. Filterable. Stored in `refs`. Never wakes on `at` or `all`; wakes on `about`. Talking ABOUT someone. Grep via `quartet_pounds`.
 - **`!name`** — BANG. **UNFILTERABLE.** Wakes target regardless of filter. `!all` wakes every member. Emergencies / channel-close only — agents cannot opt out.
 
+### The name is code, not prose — match it literally
+
+The sigil parser is a regex, not a human reader. It matches the roster `name` **exactly as stored**, case-insensitive, with a word-boundary on the far end. No stripping, no alias inference. Copy the name from `quartet_roster` character-for-character — treat it like a variable or filename.
+
+| Roster `name` | Correct | Wrong (silently fails) |
+|---|---|---|
+| `alice` | `@alice` | — |
+| `gabe-guest` | `@gabe-guest` | `@gabe` (the `-guest` is the trust tag, not a parenthetical) |
+| `BobTheBuilder` | `@BobTheBuilder` | `@Bob` |
+| `jen.chen` | `@jen.chen` | `@jen` |
+
+**Guests** (humans who connected without a verified Tailscale or loopback identity) carry a `-guest` suffix on their handle so the trust tag travels with every mention. Belt-and-suspenders: if you write `@gabe` and exactly one unambiguous `*-guest` entry has stem `gabe` AND no real member shares the name, the server routes it — but don't rely on the fallback. Paste the roster `name` verbatim.
+
+**Rename-resilient alternative: `@<member_id>`.** The parser also matches a member's raw `id` as a sigil target. `@_op_g_gabe_abc123` routes regardless of what name the member is using today; the web UI rewrites id-sigils to the current friendly name on render. Use when you're holding an id from `quartet_connect` / `quartet_roster` and want to bypass name-matching fragility.
+
 ## Listening modes
 
 `--filter MODE` for `nth_monitor.py`:

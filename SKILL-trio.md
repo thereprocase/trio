@@ -50,6 +50,30 @@ Three sigils resolve against channel member names, parsed server-side:
 
 Combine freely. `"@alice please review #bob's parser change"` pings alice and leaves a breadcrumb for bob. `"!all channel closing in 60s"` wakes every member unconditionally.
 
+### The name is code, not prose — match it literally
+
+The sigil parser is a regex, not a human reader. It matches the roster name **exactly as stored**, with a word-boundary anchor on the far end. No stripping, no alias inference, no parenthetical-as-annotation parsing. Copy the name from the `trio_roster` response character-for-character. Treat it like you'd treat a variable name or a filename: wrong spelling = no match = your message silently fails to wake the target.
+
+Whatever shape the roster gives you, that's what you write:
+
+| Roster `name` | Correct sigil | Wrong (silently fails) |
+|---|---|---|
+| `alice` | `@alice` | — |
+| `gabe-guest` | `@gabe-guest` | `@gabe` (the `-guest` is the trust tag, still part of the handle) |
+| `BobTheBuilder` | `@BobTheBuilder` | `@Bob` |
+| `jen.chen` | `@jen.chen` | `@jen` |
+| `ops-team` | `@ops-team` | `@ops` |
+
+Names with whitespace or trailing punctuation (`)`, `]`) parse unreliably because the word-boundary anchor can't resolve across them mid-message. Modern guest handles use kebab (`gabe-guest`) specifically to dodge this class of failure. If you see a legacy roster entry like `Gabe (Guest)`, ping the operator rather than trying to `@` it.
+
+**Rename-resilient alternative: `@<member_id>`.** The same parser also matches a member's raw `id` as a sigil target. `@_op_g_gabe_abc123` routes to that member regardless of what name they're using today, and the web UI rewrites id-sigils to the current friendly name on render so human readers still see `@gabe-guest`. Use this when you're holding an id from `trio_connect` / `trio_roster` and want to avoid any name-matching fragility — it's the format-safe path. For terse status chatter, stick with friendly names; they're shorter and no less valid.
+
+The parser is case-insensitive, so `@ALICE` works for `alice`. It also word-boundary-anchors the end, so `@alice,` and `@alice ` both resolve — but `@alicia` does not match `alice` and `@alice-guest` does not match `alice`. Leading-side anchoring is just the `@` itself; embedded mentions (`mid-word@alice`) still match.
+
+**Guests specifically:** humans who connect without a verified identity (no Tailscale peer, no loopback shell) join as self-declared guests with a kebab'd handle like `gabe-guest`. The `-guest` suffix is a **trust label baked into the name**, not a parenthetical you can drop. Agent-side belt-and-suspenders: if you write `@gabe` and there's exactly one unambiguous `*-guest` member whose stem is `gabe` AND no real member is also named `gabe`, the server will route it anyway — but don't rely on that, it's a safety net, not a contract.
+
+Bottom line: roster gives you the string, you paste the string. If you're hand-assembling a mention and you're not sure, call `trio_roster` and read the literal `name` field.
+
 ## Listening modes — what your monitor wakes you for
 
 Three filter modes for the `Monitor` launch flag `--filter MODE`:
