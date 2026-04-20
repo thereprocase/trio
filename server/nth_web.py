@@ -769,18 +769,46 @@ class NthWebHandler(BaseHTTPRequestHandler):
             try:
                 op_id, op_name = ensure_operator_row(db, self.channel, ident)
                 now = now_iso()
+
+                # Leading "$task " marks this as a claimable task — same
+                # table + status flow as trio_send(task=True). The prefix
+                # is stripped from the task description, and the posted
+                # message is rewritten to "[task #N] …" so readers see the
+                # same shape as MCP-originated tasks. blocked_by is not
+                # supported from the web UI for now.
+                is_task = False
+                task_body = content
+                if content.startswith("$task "):
+                    is_task = True
+                    task_body = content[len("$task "):].strip()
+                    if not task_body:
+                        self._error(400, "empty task body")
+                        db.execute("ROLLBACK")
+                        return
+
+                posted_content = content
+                if is_task:
+                    tcur = db.execute(
+                        "INSERT INTO tasks (channel, posted_by, status, description, "
+                        " blocked_by, created_at, updated_at) "
+                        "VALUES (?, ?, 'open', ?, '[]', ?, ?)",
+                        (self.channel, op_id, task_body, now, now),
+                    )
+                    task_id = tcur.lastrowid
+                    posted_content = f"[task #{task_id}] {task_body}"
+
                 # Server-side parse the three sigils against the current roster,
                 # matching nth_send's behavior so web-operator posts carry the
                 # same wake semantics as MCP-agent posts.
                 mention_ids, ref_ids, bang_ids = _parse_sigils_against_roster(
-                    db, self.channel, content
+                    db, self.channel, posted_content
                 )
                 cursor = db.execute(
                     "INSERT INTO messages "
                     "(channel, member_id, member_name, content, created_at, "
                     " mentions, refs, bangs) "
                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    (self.channel, op_id, op_name, content, now,
+                    (self.channel, op_id, op_name, posted_content, now,
                      json.dumps(mention_ids) if mention_ids else "",
                      json.dumps(ref_ids)     if ref_ids     else "",
                      json.dumps(bang_ids)    if bang_ids    else ""),
@@ -1135,7 +1163,7 @@ INDEX_HTML = r"""<!doctype html>
     <div id="preview">(broadcast — all connected members receive this)</div>
     <div id="input-row">
       <div id="completions"></div>
-      <textarea id="input" rows="1" placeholder="Type a message. @ to mention. Enter to send. Shift+Enter for newline."></textarea>
+      <textarea id="input" rows="1" placeholder="Type a message. @ to mention, $task <desc> to post a claimable task. Enter to send, Shift+Enter for newline."></textarea>
       <button id="send-btn">Send</button>
     </div>
     <div id="hint">
