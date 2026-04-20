@@ -47,7 +47,7 @@ from pathlib import Path
 from typing import Deque, Dict, List, Optional, Tuple
 
 sys.path.insert(0, str(Path(__file__).parent))
-from nth_constants import animal_for
+from nth_constants import animal_for, animal_for_channel
 
 try:
     from rich.box import SIMPLE_HEAD
@@ -479,6 +479,9 @@ class Dashboard:
         table.add_column("Last snippet", no_wrap=True, overflow="ellipsis", ratio=1)
 
         agents_sorted = sorted(self.agents.values(), key=SORT_MODES[self.sort_idx][1])
+        # Per-channel collision-free avatar assignment for everyone
+        # currently rendered. Ensures no two agents share an emoji.
+        avatar_map = animal_for_channel([a.id for a in agents_sorted])
 
         for a in agents_sorted:
             status = a.status()
@@ -503,7 +506,7 @@ class Dashboard:
 
             model = "-"        # we don't have this; placeholder kept for future
 
-            _animal_name, animal_emoji = animal_for(a.id)
+            _animal_name, animal_emoji = avatar_map.get(a.id, animal_for(a.id))
 
             table.add_row(
                 Text(glyph, style=sty),
@@ -640,6 +643,12 @@ class Dashboard:
         ).fetchall()
         rows = list(reversed(rows))                         # oldest first
 
+        # Collision-free avatars for everyone who appears in this tail.
+        # Using the full known agent set (self.agents) keeps avatars
+        # stable across tail refreshes even if older messages scroll
+        # out.
+        avatar_map = animal_for_channel(list(self.agents.keys()))
+
         # Build a chronological stream of wrapped display lines.
         wrap_width = max(20, self.console.size.width - 2)
         all_lines: List[Text] = []
@@ -650,7 +659,8 @@ class Dashboard:
             mentions = parse_mentions(r["mentions"])
             content = r["content"] or ""
 
-            _animal_name, animal_emoji = animal_for(r["member_id"] or "")
+            mid = r["member_id"] or ""
+            _animal_name, animal_emoji = avatar_map.get(mid, animal_for(mid))
             header = Text()
             header.append(f"{hhmmss}  ", style="bright_black")
             header.append(f"{animal_emoji} ", style="default")

@@ -37,8 +37,41 @@ ANIMAL_EMOJIS = [
 
 
 def animal_for(member_id: str) -> tuple[str, str]:
-    """Return (name, emoji) for a member_id. Deterministic and stable."""
+    """Return (name, emoji) for a member_id. Deterministic and stable.
+
+    No collision avoidance — two different member_ids can hash to the
+    same slot. Use animal_for_channel() when rendering a roster where
+    per-channel uniqueness matters.
+    """
     h = 0
     for c in member_id or "":
         h = (h * 31 + ord(c)) & 0xFFFFFFFF
     return ANIMAL_EMOJIS[h % len(ANIMAL_EMOJIS)]
+
+
+def animal_for_channel(member_ids):
+    """Assign a unique (name, emoji) to every member in a channel.
+
+    Returns a dict {member_id: (name, emoji)}. Members are resolved in
+    sorted member_id order (stable across reorderings of the input) and
+    each collision linearly probes to the next free slot. When the
+    roster exceeds the avatar pool (currently 63), later members wrap
+    and collisions are unavoidable — they fall back to the plain hash
+    pick for those overflow members only.
+    """
+    pool_size = len(ANIMAL_EMOJIS)
+    taken = set()
+    result = {}
+    for mid in sorted(set(member_ids or [])):
+        h = 0
+        for c in mid or "":
+            h = (h * 31 + ord(c)) & 0xFFFFFFFF
+        start = h % pool_size
+        pick = start
+        for _ in range(pool_size):
+            if pick not in taken:
+                break
+            pick = (pick + 1) % pool_size
+        taken.add(pick)
+        result[mid] = ANIMAL_EMOJIS[pick]
+    return result

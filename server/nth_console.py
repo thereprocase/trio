@@ -27,7 +27,7 @@ from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from nth_constants import animal_for
+from nth_constants import animal_for, animal_for_channel
 
 DB_PATH = Path.home() / ".claude" / "nth" / "nth.db"
 POLL_INTERVAL = 0.5
@@ -101,11 +101,20 @@ def parse_mentions(raw):
         return []
 
 
-def render(row, show_channel):
-    """Turn a messages row into a printable line."""
+def render(row, show_channel, avatars=None):
+    """Turn a messages row into a printable line.
+
+    avatars: optional {member_id: (name, emoji)} map. When provided, the
+    per-channel collision-free assignment wins; otherwise fall back to
+    the plain hash pick (used for authors no longer in the roster).
+    """
     ts = fmt_time(row["created_at"])
     author = row["member_name"] or row["member_id"] or "?"
-    _animal_name, animal_emoji = animal_for(row["member_id"] or "")
+    mid = row["member_id"] or ""
+    if avatars and mid in avatars:
+        _animal_name, animal_emoji = avatars[mid]
+    else:
+        _animal_name, animal_emoji = animal_for(mid)
     content = row["content"] or ""
     mentions = parse_mentions(row["mentions"] if "mentions" in row.keys() else "")
 
@@ -197,9 +206,31 @@ def main():
     if args.since is not None and args.since > 0:
         since_ts = datetime.fromtimestamp(time.time() - args.since).astimezone().isoformat()
 
+    # Refresh per-channel avatar assignments periodically. The map keys
+    # on (channel, member_id) because console can tail all channels.
+    def refresh_avatars():
+        sql = "SELECT channel, id AS mid FROM members"
+        out = {}  # (channel, mid) → (name, emoji)
+        try:
+            rows = db.execute(sql).fetchall()
+        except sqlite3.Error:
+            return out
+        by_channel = {}
+        for r in rows:
+            by_channel.setdefault(r["channel"], []).append(r["mid"])
+        for ch, ids in by_channel.items():
+            for mid, (nm, em) in animal_for_channel(ids).items():
+                out[(ch, mid)] = (nm, em)
+        return out
+
+    def row_avatar_map(avatar_state, row_channel):
+        return {mid: v for (ch, mid), v in avatar_state.items() if ch == row_channel}
+
+    avatar_state = refresh_avatars()
+
     rows = fetch(db, args.channel, 0, since_ts)
     for r in rows:
-        print(render(r, show_channel))
+        print(render(r, show_channel, row_avatar_map(avatar_state, r["channel"])))
     last_id = rows[-1]["id"] if rows else 0
 
     if args.snapshot:
@@ -217,10 +248,20 @@ def main():
     print(f"{Colour.DIM}{header}{Colour.RESET}", file=sys.stderr)
 
     try:
+        last_avatar_refresh = time.monotonic()
         while not stop["flag"]:
             new = fetch(db, args.channel, last_id, None)
+            if new:
+                # Any new message may have introduced a new member;
+                # cheaper to refresh on-demand than on every tick.
+                avatar_state = refresh_avatars()
+                last_avatar_refresh = time.monotonic()
+            elif time.monotonic() - last_avatar_refresh > 30:
+                # Periodic safety refresh for renames / join-while-idle.
+                avatar_state = refresh_avatars()
+                last_avatar_refresh = time.monotonic()
             for r in new:
-                print(render(r, show_channel))
+                print(render(r, show_channel, row_avatar_map(avatar_state, r["channel"])))
                 last_id = r["id"]
             sys.stdout.flush()
             time.sleep(args.poll_interval)

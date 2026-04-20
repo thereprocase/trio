@@ -51,7 +51,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, urlparse
 
 sys.path.insert(0, str(Path(__file__).parent))
-from nth_constants import ANIMAL_EMOJIS, animal_for
+from nth_constants import ANIMAL_EMOJIS, animal_for, animal_for_channel
 
 
 # ───────── Config ─────────
@@ -438,6 +438,12 @@ class EventHub:
                 "ORDER BY m.joined_at",
                 (self.channel,),
             ).fetchall()
+        # Collision-free avatars per channel. Sorted-id assignment in
+        # animal_for_channel() makes the mapping stable across roster
+        # refreshes as long as the member set is fixed; joins/leaves
+        # may reshuffle affected members, which the client handles by
+        # keying on the emoji/name fields we ship instead of hashing.
+        avatars = animal_for_channel([r["id"] for r in rows])
         out = []
         for r in rows:
             effective_last_read = max(
@@ -448,6 +454,7 @@ class EventHub:
             s_ls = r["session_last_seen"] or ""
             effective_last_seen = max(m_ls, s_ls) or None
             fm = r["filter_mode"] if "filter_mode" in r.keys() else "all"
+            aname, aemoji = avatars.get(r["id"], animal_for(r["id"]))
             out.append({
                 "id": r["id"],
                 "name": r["name"] or r["id"],
@@ -456,6 +463,8 @@ class EventHub:
                 "last_read": effective_last_read,
                 "filter_mode": fm or "all",
                 "status": member_status(effective_last_seen, r["status_text"] or ""),
+                "animal_name": aname,
+                "animal_emoji": aemoji,
             })
         return out
 
@@ -1245,7 +1254,32 @@ INDEX_HTML = r"""<!doctype html>
     return PALETTE[hash32(id) % PALETTE.length];
   }
   function animalFor(member) {
+    // Prefer the server-assigned avatar when present — the server runs
+    // a per-channel collision-free assignment (animal_for_channel) so
+    // no two current members share an emoji. Fall back to a local hash
+    // pick for historical message authors no longer in the roster.
+    if (member && member.animal_emoji) {
+      return { name: member.animal_name || '', emoji: member.animal_emoji };
+    }
     const id = (member && (member.id || member.member_id)) || '';
+    const i = hash32(id) % ANIMAL_EMOJIS.length;
+    return { name: ANIMAL_NAMES[i], emoji: ANIMAL_EMOJIS[i] };
+  }
+  // Lookup table: member_id → {name, emoji} from the most recent roster.
+  // Used to resolve avatars on messages whose author is still in the
+  // channel — the message object itself doesn't carry the avatar.
+  const AVATAR_BY_ID = new Map();
+  function rememberAvatars(members) {
+    AVATAR_BY_ID.clear();
+    for (const m of (members || [])) {
+      if (m && m.id && m.animal_emoji) {
+        AVATAR_BY_ID.set(m.id, { name: m.animal_name || '', emoji: m.animal_emoji });
+      }
+    }
+  }
+  function animalForId(id) {
+    const cached = AVATAR_BY_ID.get(id);
+    if (cached) return cached;
     const i = hash32(id) % ANIMAL_EMOJIS.length;
     return { name: ANIMAL_NAMES[i], emoji: ANIMAL_EMOJIS[i] };
   }
@@ -1587,6 +1621,10 @@ INDEX_HTML = r"""<!doctype html>
   // ── Roster rendering ──
   function renderRoster(members) {
     applyRosterWatermarkDeltas(members);
+    // Refresh the id→avatar cache so animalForId() resolves message
+    // authors to the server-assigned collision-free emoji. Must run
+    // before any render path that looks up avatars by id.
+    rememberAvatars(members);
 
     // Reconcile state.members — and detect name changes so the chat can
     // retroactively re-label past messages from the renamed member.
