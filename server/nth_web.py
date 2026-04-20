@@ -304,7 +304,7 @@ class EventHub:
             q.put_nowait(json.dumps({"type": "roster", "members": members}))
             # Last-N history
             rows = db.execute(
-                "SELECT id, member_id, member_name, content, mentions, created_at "
+                "SELECT id, member_id, member_name, content, mentions, refs, created_at "
                 "FROM messages WHERE channel = ? ORDER BY id DESC LIMIT ?",
                 (self.channel, HISTORY_LIMIT),
             ).fetchall()
@@ -316,6 +316,7 @@ class EventHub:
                     "member_name": r["member_name"] or r["member_id"],
                     "content": r["content"] or "",
                     "mentions": parse_mentions_json(r["mentions"]),
+                    "refs": parse_mentions_json(r["refs"] if "refs" in r.keys() else ""),
                     "created_at": r["created_at"],
                 }))
             db.close()
@@ -409,7 +410,7 @@ class EventHub:
             try:
                 # New messages
                 rows = db.execute(
-                    "SELECT id, member_id, member_name, content, mentions, created_at "
+                    "SELECT id, member_id, member_name, content, mentions, refs, created_at "
                     "FROM messages WHERE channel = ? AND id > ? ORDER BY id",
                     (self.channel, self.last_msg_id),
                 ).fetchall()
@@ -421,6 +422,7 @@ class EventHub:
                         "member_name": r["member_name"] or r["member_id"],
                         "content": r["content"] or "",
                         "mentions": parse_mentions_json(r["mentions"]),
+                        "refs": parse_mentions_json(r["refs"] if "refs" in r.keys() else ""),
                         "created_at": r["created_at"],
                     })
                     self.last_msg_id = r["id"]
@@ -743,7 +745,31 @@ INDEX_HTML = r"""<!doctype html>
                display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
   .msg .head .time { cursor: help; }
   .msg .author { font-weight: 600; }
-  .msg .mentions-tag { color: var(--mention); }
+  .msg .mentions-bar { font-size: 11px; margin: 2px 0 4px;
+                       display: flex; gap: 4px; flex-wrap: wrap; align-items: center; }
+  .msg .mentions-bar .to-label { color: var(--dim); font-size: 10px;
+                                  text-transform: uppercase; letter-spacing: 0.5px;
+                                  margin-right: 2px; }
+  .msg .mentions-bar .mchip { display: inline-flex; align-items: center; gap: 3px;
+                               padding: 1px 7px 1px 5px; border-radius: 10px;
+                               background: rgba(255, 196, 116, 0.15);
+                               color: var(--mention);
+                               border: 1px solid rgba(255, 196, 116, 0.3);
+                               font-weight: 600; }
+  .msg .mentions-bar .mchip .manimal { font-size: 13px; line-height: 1; }
+  /* #pound references bar — "about" someone, not "to" them. Muted vs. @ pings. */
+  .msg .refs-bar { font-size: 11px; margin: 2px 0 4px;
+                   display: flex; gap: 4px; flex-wrap: wrap; align-items: center; }
+  .msg .refs-bar .to-label { color: var(--dim); font-size: 10px;
+                              text-transform: uppercase; letter-spacing: 0.5px;
+                              margin-right: 2px; }
+  .msg .refs-bar .mchip { display: inline-flex; align-items: center; gap: 3px;
+                          padding: 1px 7px 1px 5px; border-radius: 10px;
+                          background: rgba(126, 222, 126, 0.08);
+                          color: #9ccf9c;
+                          border: 1px solid rgba(126, 222, 126, 0.25);
+                          font-weight: 500; }
+  .msg .refs-bar .mchip .manimal { font-size: 13px; line-height: 1; }
   .msg .body { white-space: pre-wrap; }
   .msg.compact .body {
     display: -webkit-box;
@@ -1017,7 +1043,7 @@ INDEX_HTML = r"""<!doctype html>
     messages: new Map(),            // id → message
     messageDomById: new Map(),      // id → DOM node (for ack badge updates)
     seenMsgIds: new Set(),
-    completion: { visible: false, index: 0, items: [], atPos: -1 },
+    completion: { visible: false, index: 0, items: [], atPos: -1, sigil: '@' },
     agentStats: new Map(),          // id → {sent, sent_times[], lengths[], lastSnippet,
                                     //        read_latencies[], queue_depth,
                                     //        directed_received, directed_replied, pending_directed[]}
@@ -1210,6 +1236,32 @@ INDEX_HTML = r"""<!doctype html>
     for (const id of state.messageDomById.keys()) updateAckBadges(id);
   }
 
+  // Build a sigil-bar (@mentions or #refs) for a message — factored so
+  // both visual styles use identical markup and differ only in class +
+  // label + sigil.
+  function renderTargetBar(ids, className, sigil, label) {
+    const bar = document.createElement('div');
+    bar.className = className;
+    const lab = document.createElement('span');
+    lab.className = 'to-label';
+    lab.textContent = label;
+    bar.appendChild(lab);
+    for (const id of ids) {
+      const mem = state.members.get(id);
+      const nm = mem ? mem.name : id;
+      const anim = animalFor(mem || { id });
+      const chip = document.createElement('span');
+      chip.className = 'mchip';
+      const a = document.createElement('span');
+      a.className = 'manimal';
+      a.textContent = anim.emoji;
+      chip.appendChild(a);
+      chip.appendChild(document.createTextNode(sigil + nm));
+      bar.appendChild(chip);
+    }
+    return bar;
+  }
+
   // ── Message rendering ──
   function applyCompactClass(node, id) {
     const override = state.expandedMsgs.has(id);
@@ -1247,21 +1299,22 @@ INDEX_HTML = r"""<!doctype html>
       author.textContent = m.member_name;
       author.style.color = colorFor(m.member_id);
       head.appendChild(author);
-      if (m.mentions && m.mentions.length) {
-        const mtag = document.createElement('span');
-        mtag.className = 'mentions-tag';
-        const names = m.mentions.map(id => {
-          const mem = state.members.get(id);
-          return '@' + (mem ? mem.name : id);
-        });
-        mtag.textContent = '→ ' + names.join(', ');
-        head.appendChild(mtag);
-      }
     }
     const acks = document.createElement('span');
     acks.className = 'acks';
     head.appendChild(acks);
     div.appendChild(head);
+
+    // Prominent @mentions bar (pings) — always rendered when there are pings,
+    // above the body so auto-@ recipients can't be missed even when the composer
+    // didn't write @name inline.
+    if (!isSystem && m.mentions && m.mentions.length) {
+      div.appendChild(renderTargetBar(m.mentions, 'mentions-bar', '@', '→'));
+    }
+    // #pound refs bar (talked about, not pinged). Softer visual.
+    if (!isSystem && m.refs && m.refs.length) {
+      div.appendChild(renderTargetBar(m.refs, 'refs-bar', '#', 'about'));
+    }
 
     const body = document.createElement('div');
     body.className = 'body';
@@ -1333,14 +1386,25 @@ INDEX_HTML = r"""<!doctype html>
         author.textContent = m.member_name;
         author.style.color = colorFor(m.member_id);
       }
-      const mentionsTag = dom.querySelector('.mentions-tag');
-      if (mentionsTag && m.mentions && m.mentions.length) {
-        const names = m.mentions.map(mid => {
+      function rebuildBar(bar, ids, sigil) {
+        if (!bar || !ids || !ids.length) return;
+        while (bar.childNodes.length > 1) bar.removeChild(bar.lastChild);
+        for (const mid of ids) {
           const mem = state.members.get(mid);
-          return '@' + (mem ? mem.name : mid);
-        });
-        mentionsTag.textContent = '→ ' + names.join(', ');
+          const nm = mem ? mem.name : mid;
+          const anim = animalFor(mem || { id: mid });
+          const chip = document.createElement('span');
+          chip.className = 'mchip';
+          const a = document.createElement('span');
+          a.className = 'manimal';
+          a.textContent = anim.emoji;
+          chip.appendChild(a);
+          chip.appendChild(document.createTextNode(sigil + nm));
+          bar.appendChild(chip);
+        }
       }
+      rebuildBar(dom.querySelector('.mentions-bar'), m.mentions, '@');
+      rebuildBar(dom.querySelector('.refs-bar'), m.refs, '#');
     }
   }
 
@@ -1582,20 +1646,25 @@ INDEX_HTML = r"""<!doctype html>
     sparkEl.title = `5-min activity · max ${hi} msg / 10s bin`;
   }
 
-  // ── Autocomplete (unchanged from v1) ──
-  function currentAtToken() {
+  // ── Autocomplete ──
+  // Either @ (ping) or # (pound-reference) triggers the popup. Sigil is
+  // carried through so acceptance preserves the user's intent.
+  function currentSigilToken() {
     const pos = input.selectionStart;
     const text = input.value.slice(0, pos);
     const atPos = text.lastIndexOf('@');
-    if (atPos < 0) return null;
-    if (atPos > 0 && !' \t,;([\n'.includes(text[atPos - 1])) return null;
-    const frag = text.slice(atPos + 1);
+    const hashPos = text.lastIndexOf('#');
+    const sigilPos = Math.max(atPos, hashPos);
+    if (sigilPos < 0) return null;
+    const sigil = text[sigilPos];
+    if (sigilPos > 0 && !' \t,;([\n'.includes(text[sigilPos - 1])) return null;
+    const frag = text.slice(sigilPos + 1);
     if (frag && !/^[A-Za-z0-9_\-]*$/.test(frag)) return null;
-    return { atPos, fragment: frag };
+    return { sigilPos, sigil, fragment: frag };
   }
   function computeCompletions() {
-    const tok = currentAtToken();
-    if (!tok) return { items: [], atPos: -1 };
+    const tok = currentSigilToken();
+    if (!tok) return { items: [], atPos: -1, sigil: '@' };
     const frag = tok.fragment.toLowerCase();
     const matches = [];
     for (const m of state.members.values()) {
@@ -1610,7 +1679,7 @@ INDEX_HTML = r"""<!doctype html>
       if (as !== bs) return as - bs;
       return an.localeCompare(bn);
     });
-    return { items: matches.slice(0, 8), atPos: tok.atPos };
+    return { items: matches.slice(0, 8), atPos: tok.sigilPos, sigil: tok.sigil };
   }
   function renderCompletions() {
     const { items } = state.completion;
@@ -1622,9 +1691,14 @@ INDEX_HTML = r"""<!doctype html>
       const dot = document.createElement('div');
       dot.className = 'cdot dot ' + m.status;
       row.appendChild(dot);
+      const anim = animalFor(m);
+      const emoji = document.createElement('span');
+      emoji.textContent = anim.emoji;
+      emoji.style.fontSize = '14px';
+      row.appendChild(emoji);
       const name = document.createElement('span');
       name.className = 'cname';
-      name.textContent = '@' + m.name;
+      name.textContent = (state.completion.sigil || '@') + m.name;
       name.style.color = colorFor(m.id);
       row.appendChild(name);
       const id = document.createElement('span');
@@ -1637,15 +1711,16 @@ INDEX_HTML = r"""<!doctype html>
     compEl.classList.add('active');
   }
   function refreshCompletions() {
-    const { items, atPos } = computeCompletions();
+    const { items, atPos, sigil } = computeCompletions();
     state.completion.items = items;
     state.completion.atPos = atPos;
+    state.completion.sigil = sigil;
     state.completion.visible = items.length > 0 && atPos >= 0;
     if (state.completion.index >= items.length) state.completion.index = 0;
     renderCompletions();
   }
   function acceptCompletion(i) {
-    const { items, atPos } = state.completion;
+    const { items, atPos, sigil } = state.completion;
     if (atPos < 0 || !items.length) return;
     const idx = i ?? state.completion.index;
     const m = items[idx];
@@ -1653,7 +1728,7 @@ INDEX_HTML = r"""<!doctype html>
     const before = input.value.slice(0, atPos);
     const endPos = input.selectionStart;
     const after = input.value.slice(endPos);
-    const repl = '@' + (m.name || m.id) + ' ';
+    const repl = (sigil || '@') + (m.name || m.id) + ' ';
     input.value = before + repl + after;
     const newPos = (before + repl).length;
     input.setSelectionRange(newPos, newPos);
@@ -1673,10 +1748,11 @@ INDEX_HTML = r"""<!doctype html>
     input.setSelectionRange(p, p);
     updatePreview();
   }
-  function resolveMentions(text) {
+  function resolveSigilTokens(text, sigil) {
     const out = [];
     const seen = new Set();
-    const re = /(?<![A-Za-z0-9_])@([A-Za-z0-9_\-]+)/g;
+    const esc = sigil === '@' ? '@' : '#';
+    const re = new RegExp(`(?<![A-Za-z0-9_])${esc}([A-Za-z0-9_\\-]+)`, 'g');
     let m;
     while ((m = re.exec(text))) {
       const tok = m[1];
@@ -1700,14 +1776,23 @@ INDEX_HTML = r"""<!doctype html>
     }
     return out;
   }
+  function resolveMentions(text) { return resolveSigilTokens(text, '@'); }
+  function resolveRefs(text)     { return resolveSigilTokens(text, '#'); }
   function updatePreview() {
     const resolved = resolveMentions(input.value);
+    const refs = resolveRefs(input.value);
+    const parts = [];
     if (!resolved.length) {
-      preview.innerHTML = '(broadcast — all connected members receive this)';
+      parts.push('(broadcast — all connected members receive this)');
     } else {
-      const names = resolved.map(m => `<span class="tgt">${escapeHtml(m.name)}</span>`).join(', ');
-      preview.innerHTML = `to: ${names} <span style="color:var(--dimmer)">(other members won't get a targeted notification)</span>`;
+      const names = resolved.map(m => `<span class="tgt">@${escapeHtml(m.name)}</span>`).join(', ');
+      parts.push(`pings: ${names}`);
     }
+    if (refs.length) {
+      const rnames = refs.map(m => `<span class="tgt" style="color:#9ccf9c">#${escapeHtml(m.name)}</span>`).join(', ');
+      parts.push(`refs: ${rnames}`);
+    }
+    preview.innerHTML = parts.join('  ·  ');
   }
   function autoResizeInput() {
     input.style.height = 'auto';
@@ -1716,14 +1801,22 @@ INDEX_HTML = r"""<!doctype html>
 
   // ── Send ──
   async function sendMessage() {
-    const text = input.value.trim();
+    let text = input.value.trim();
     if (!text) return;
     const resolved = resolveMentions(input.value);
     const mentionIds = resolved.map(m => m.id);
     // DM mode: always include the DM target so the agent sees the message
-    // (even if the operator forgot the @mention).
-    if (state.dmTargetId && !mentionIds.includes(state.dmTargetId)) {
-      mentionIds.push(state.dmTargetId);
+    // (even if the operator forgot the @mention). Also prepend the visible
+    // @name to the content so it's unambiguous in main-tab backscroll — the
+    // composer doesn't need to show it; it's added at send time.
+    if (state.dmTargetId) {
+      if (!mentionIds.includes(state.dmTargetId)) mentionIds.push(state.dmTargetId);
+      const tgt = state.members.get(state.dmTargetId);
+      const tgtName = tgt ? tgt.name : state.dmTargetId;
+      const atTag = '@' + tgtName;
+      if (!text.toLowerCase().startsWith(atTag.toLowerCase())) {
+        text = atTag + ' ' + text;
+      }
     }
     sendBtn.disabled = true;
     try {

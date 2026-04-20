@@ -25,10 +25,25 @@ Events (one JSON line per fire):
     {"event": "channel_gone"}
     {"event": "error", "msg": "..."}
 
-Mention filter: when --mention-filter is passed, new_messages only
-fires when the message's `mentions` JSON array is empty (broadcast)
-or contains this member_id. Other messages still advance the
-watermark so they are never re-surfaced.
+Filter modes (pick ONE; default = fire on everything):
+
+    --filter at            — wake on @pings (mentions including me) only.
+                              Silent for broadcasts and for #pound refs.
+    --filter at+broadcast  — wake on @pings OR broadcasts (empty mentions).
+                              Same shape as the legacy --mention-filter.
+    --filter at+pound      — wake on @pings OR #pound refs. Silent on
+                              broadcasts.
+    --filter at+pound+broadcast
+                            — wake on anything addressed to me or broadcast.
+    --filter pound         — wake ONLY on #pound refs. For agents that
+                              came online to catch up on background chatter.
+    --filter all           — wake on everything. (Same as no --filter flag.)
+
+The legacy --mention-filter flag is kept as an alias for
+--filter at+broadcast.
+
+All unread messages advance the local watermark regardless of filter
+outcome, so nothing is re-surfaced.
 
 Cadence: fires once per silence period when the member is in active
 mode (no sleeping keyword in status_text) and has not posted for
@@ -77,7 +92,43 @@ def is_sleeping(status_text):
     return any(kw in lower for kw in SLEEPING_KEYWORDS)
 
 
-def monitor(channel, member_id, mention_filter=False, _db_path=None):
+FILTER_MODES = {
+    # name → set of categories that WAKE the agent
+    "all":                    {"at", "pound", "broadcast", "other"},
+    "at":                     {"at"},
+    "at+broadcast":           {"at", "broadcast"},
+    "at+pound":               {"at", "pound"},
+    "at+pound+broadcast":     {"at", "pound", "broadcast"},
+    "pound":                  {"pound"},
+}
+
+
+def classify_message(member_id, mentions_raw, refs_raw):
+    """Return one of 'at' | 'pound' | 'broadcast' | 'other'.
+
+    'at'        — member_id is in the mentions array (pinged)
+    'pound'     — member_id is in refs only (referenced, not pinged)
+    'broadcast' — both arrays are empty (talking to the room)
+    'other'     — someone else was pinged/referenced and member wasn't
+    """
+    try:
+        mention_list = json.loads(mentions_raw) if mentions_raw else []
+    except (ValueError, TypeError):
+        mention_list = []
+    try:
+        ref_list = json.loads(refs_raw) if refs_raw else []
+    except (ValueError, TypeError):
+        ref_list = []
+    if member_id in mention_list:
+        return "at"
+    if member_id in ref_list:
+        return "pound"
+    if not mention_list and not ref_list:
+        return "broadcast"
+    return "other"
+
+
+def monitor(channel, member_id, filter_mode="all", _db_path=None):
     local_hwm = None
     cadence_fired = False
     last_heartbeat_mono = 0.0
@@ -182,66 +233,61 @@ def monitor(channel, member_id, mention_filter=False, _db_path=None):
                 external_hwm = max(legacy_hwm, sess_hwm)
                 local_hwm = external_hwm if local_hwm is None else max(local_hwm, external_hwm)
 
-                unread = db.execute(
-                    "SELECT id, mentions, member_name, content FROM messages "
-                    "WHERE channel = ? AND id > ? AND member_id != ? "
-                    "ORDER BY id",
-                    (channel, local_hwm, member_id),
-                ).fetchall()
+                # Pull refs alongside mentions so the filter can distinguish
+                # @pings from #pound refs. If the refs column is missing (older
+                # schema), treat it as empty and fall back cleanly.
+                try:
+                    unread = db.execute(
+                        "SELECT id, mentions, refs, member_name, content FROM messages "
+                        "WHERE channel = ? AND id > ? AND member_id != ? "
+                        "ORDER BY id",
+                        (channel, local_hwm, member_id),
+                    ).fetchall()
+                except sqlite3.OperationalError:
+                    unread = db.execute(
+                        "SELECT id, mentions, member_name, content FROM messages "
+                        "WHERE channel = ? AND id > ? AND member_id != ? "
+                        "ORDER BY id",
+                        (channel, local_hwm, member_id),
+                    ).fetchall()
 
                 if unread:
                     local_hwm = max(m["id"] for m in unread)
 
-                    if mention_filter:
-                        relevant = []
-                        for m in unread:
-                            raw = m["mentions"] if "mentions" in m.keys() else ""
-                            if not raw:
-                                relevant.append(m)
-                                continue
-                            try:
-                                ids = json.loads(raw)
-                            except (ValueError, TypeError):
-                                ids = []
-                            if member_id in ids:
-                                relevant.append(m)
-                    else:
-                        relevant = list(unread)
+                    wake_categories = FILTER_MODES.get(filter_mode, FILTER_MODES["all"])
+                    relevant = []
+                    for m in unread:
+                        mraw = m["mentions"] if "mentions" in m.keys() else ""
+                        rraw = m["refs"] if "refs" in m.keys() else ""
+                        cat = classify_message(member_id, mraw, rraw)
+                        if cat in wake_categories:
+                            relevant.append((m, cat))
 
                     if relevant:
-                        # Classify: has_mentions (any message targets me), from_names
-                        # (distinct senders), preview (80 chars of latest). Callers can
-                        # skip the trio_poll round-trip for cross-talk they don't care
-                        # about.
-                        has_mentions = False
-                        for m in relevant:
-                            raw = m["mentions"] if "mentions" in m.keys() else ""
-                            if raw:
-                                try:
-                                    ids = json.loads(raw)
-                                except (ValueError, TypeError):
-                                    ids = []
-                                if member_id in ids:
-                                    has_mentions = True
-                                    break
+                        # Classify aggregate flags so the agent can skip the
+                        # trio_poll round-trip on low-signal wake-ups.
+                        has_mentions = any(cat == "at" for _m, cat in relevant)
+                        has_refs     = any(cat == "pound" for _m, cat in relevant)
                         from_names = []
                         seen = set()
-                        for m in relevant:
+                        for m, _cat in relevant:
                             n = m["member_name"] or ""
                             if n and n not in seen:
                                 seen.add(n)
                                 from_names.append(n)
-                        latest_content = relevant[-1]["content"] or ""
+                        latest_content = relevant[-1][0]["content"] or ""
                         preview = latest_content[:80] + ("…" if len(latest_content) > 80 else "")
 
                         emit({
                             "event": "new_messages",
                             "mode": "idle" if sleeping else "active",
-                            "message_ids": [m["id"] for m in relevant],
+                            "message_ids": [m["id"] for m, _c in relevant],
                             "count": len(relevant),
                             "has_mentions": has_mentions,
+                            "has_refs": has_refs,
                             "from_names": from_names,
                             "preview": preview,
+                            "filter": filter_mode,
                         })
 
                 # --- Cadence (active mode, no claimed tasks → skip) ---
@@ -296,17 +342,46 @@ def monitor(channel, member_id, mention_filter=False, _db_path=None):
         db.close()
 
 
+def parse_filter_arg(argv_tail):
+    """Return a filter_mode string. Flags accepted:
+      --filter MODE        (where MODE is a key of FILTER_MODES)
+      --mention-filter     (legacy alias for --filter at+broadcast)
+    """
+    i = 0
+    while i < len(argv_tail):
+        arg = argv_tail[i]
+        if arg == "--filter":
+            if i + 1 >= len(argv_tail):
+                raise ValueError("--filter requires a value")
+            mode = argv_tail[i + 1]
+            if mode not in FILTER_MODES:
+                raise ValueError(
+                    f"unknown filter mode '{mode}'. "
+                    f"valid: {', '.join(sorted(FILTER_MODES.keys()))}"
+                )
+            return mode
+        if arg == "--mention-filter":
+            return "at+broadcast"
+        i += 1
+    return "all"
+
+
 if __name__ == "__main__":
     if len(sys.argv) < 3:
         emit({"event": "error",
-              "msg": "Usage: nth_monitor.py <channel> <member_id> [--mention-filter]"})
+              "msg": "Usage: nth_monitor.py <channel> <member_id> "
+                     "[--filter MODE | --mention-filter]"})
         sys.exit(1)
 
     channel_arg = sys.argv[1]
     member_arg = sys.argv[2]
-    mention_filter_arg = "--mention-filter" in sys.argv[3:]
+    try:
+        filter_arg = parse_filter_arg(sys.argv[3:])
+    except ValueError as e:
+        emit({"event": "error", "msg": str(e)})
+        sys.exit(1)
 
     try:
-        monitor(channel_arg, member_arg, mention_filter=mention_filter_arg)
+        monitor(channel_arg, member_arg, filter_mode=filter_arg)
     except KeyboardInterrupt:
         pass

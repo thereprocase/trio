@@ -30,13 +30,14 @@ nth is an MCP server + two sibling skills (`/trio` local, `/quartet` remote) for
 - **Repo vs install:** This repo is the source of truth. `~/.claude/skills/{trio,quartet,nth}/` are release copies. Always edit the repo, then run `setup.sh` to deploy.
 - **Heartbeat liveness:** Members are "stale" after 5 minutes without a fresh heartbeat. Under v7 the Monitor process writes heartbeats every 10s, so the 300s threshold only fires when the Monitor is genuinely down.
 - **Watermark model:** `poll` returns messages after `last_read`. Explicit `ack` advances it. Session-token clients maintain per-session watermarks; the Monitor reconciles both `members.last_read` and `sessions.last_read` on every tick so agent-side acks never cause re-notifications.
+- **`@pings` vs `#pounds` (v7.1):** Two sibling channels on every message. `@name` → `mentions` array; fires the monitor on the target's default filter. `#name` → `refs` array; never wakes the target unless they opt in with `--filter at+pound` or poll `trio_pounds` on demand. Both are server-side auto-parsed against roster names. The split gives discipline: `@` is a commitment to wake someone, `#` is a breadcrumb they can grep when they come back. Role-based monitor filter modes live in `nth_monitor.py::FILTER_MODES`.
 - **Behavioral injection:** The server appends a cadence-reminder footer to `trio_poll` responses and a Monitor-relaunch nag when heartbeat staleness is observed. SKILL.md contains the full behavioral layer.
 - **Two-tier monitoring (v7):** Tier 1: direct MCP peeks (`trio_poll(wait_seconds=0)`) between work steps. Tier 2: a single persistent `nth_monitor.py` process per session launched via Claude Code's `Monitor(persistent=True)`. Monitor is hub-only (needs local SQLite). Remote `/quartet` spokes fall back to inline poll loops; see SKILL-quartet.md.
 - **Server-side enforcement:** `send()` auto-clears sleeping keywords from `status_text`, flipping the Monitor back into active-polling mode automatically.
 
 ## DB Schema (tables used by current code)
 
-`channels` (code PK, status, pinned_message_id), `members` (id+channel PK, last_seen, last_read, status_text, status_changed_at, messenger_heartbeat, watchdog_heartbeat), `messages` (autoincrement id, channel, member_id, content, mentions), `tasks` (autoincrement id, channel, status, claimed_by, blocked_by JSON), `locks` (channel+resource PK, held_by, expires_at TTL), `sessions` (session_token, member_id, last_read, role, revoked_at, ...).
+`channels` (code PK, status, pinned_message_id), `members` (id+channel PK, last_seen, last_read, status_text, status_changed_at, messenger_heartbeat, watchdog_heartbeat), `messages` (autoincrement id, channel, member_id, content, mentions, refs), `tasks` (autoincrement id, channel, status, claimed_by, blocked_by JSON), `locks` (channel+resource PK, held_by, expires_at TTL), `sessions` (session_token, member_id, last_read, role, revoked_at, ...).
 
 ## Project State
 

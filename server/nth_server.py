@@ -249,6 +249,10 @@ def get_db() -> sqlite3.Connection:
     for col, table, defn in [
         ("pinned_message_id", "channels", "INTEGER"),
         ("mentions", "messages", "TEXT NOT NULL DEFAULT ''"),
+        # v7.1: #pound references — "talked about" without pinging. Separate
+        # from mentions so the monitor can choose to notify on @ only while
+        # a targeted agent can still grep `refs` on demand via nth_pounds.
+        ("refs", "messages", "TEXT NOT NULL DEFAULT ''"),
         ("blocked_by", "tasks", "TEXT NOT NULL DEFAULT '[]'"),
         ("status_text", "members", "TEXT NOT NULL DEFAULT ''"),
         ("status_changed_at", "members", "TEXT NOT NULL DEFAULT ''"),
@@ -705,6 +709,18 @@ def nth_send(channel: str, member_id: str, message: str, task: bool = False, pin
 
     All members will see this message on their next poll.
 
+    Mentions vs references:
+      • @name  — PING. Wakes the targeted agent via monitor. Use for direct
+                 requests, questions you need answered, or hand-offs.
+      • #name  — REFERENCE. Talks ABOUT someone without pinging them. Stored
+                 in `refs`, NOT `mentions`. Use when discussing another agent's
+                 work, coordinating with a third party, or leaving breadcrumbs
+                 a targeted agent can grep via nth_pounds on their next wake.
+
+    Both syntaxes are auto-parsed server-side against channel member names.
+    Combine freely: "@alice can you review #bob's parser change?" pings alice
+    and references bob.
+
     Set task=True to simultaneously post the message as a claimable task.
     Set pin=True to pin this message as the channel objective (shown in
     nth_status and nth_connect for new joiners). Only one pin per channel.
@@ -717,7 +733,7 @@ def nth_send(channel: str, member_id: str, message: str, task: bool = False, pin
     Args:
         channel: Channel code
         member_id: Your member ID (from nth_connect)
-        message: Your message (max 4000 chars)
+        message: Your message (max 4000 chars). @name pings; #name references.
         task: If True, also create a claimable task from this message
         pin: If True, pin this message as the channel objective
         blocked_by: Comma-separated task IDs this task depends on (requires task=True)
@@ -834,34 +850,37 @@ def nth_send(channel: str, member_id: str, message: str, task: bool = False, pin
         else:
             content = message
 
-        # Detect @mentions in content
-        mention_ids = []
-        if "@" in content:
+        # Detect @pings and #refs in content. Both resolve against member
+        # names; an agent who is both @pinged and #referenced lands in both
+        # arrays but that's fine — the monitor filter treats them separately
+        # and nth_pounds returns anyone with refs regardless of mention status.
+        mention_ids: list[str] = []
+        ref_ids: list[str] = []
+        if "@" in content or "#" in content:
+            all_members = db.execute(
+                "SELECT id, name FROM members WHERE channel = ?",
+                (channel,),
+            ).fetchall()
             content_lower = content.lower()
             if "@all" in content_lower:
-                # Broadcast mention — all joined members
-                all_members = db.execute(
-                    "SELECT id FROM members WHERE channel = ?",
-                    (channel,),
-                ).fetchall()
                 mention_ids = [m["id"] for m in all_members]
             else:
-                all_members = db.execute(
-                    "SELECT id, name FROM members WHERE channel = ?",
-                    (channel,),
-                ).fetchall()
                 for m in all_members:
-                    # Word-boundary match to avoid @Al matching @Albert
-                    pattern = re.compile(r"@" + re.escape(m["name"]) + r"(?:\b|$)", re.IGNORECASE)
-                    if pattern.search(content):
+                    at_pat = re.compile(r"@" + re.escape(m["name"]) + r"(?:\b|$)", re.IGNORECASE)
+                    if at_pat.search(content):
                         mention_ids.append(m["id"])
+            for m in all_members:
+                hash_pat = re.compile(r"#" + re.escape(m["name"]) + r"(?:\b|$)", re.IGNORECASE)
+                if hash_pat.search(content):
+                    ref_ids.append(m["id"])
         mentions_json = json.dumps(mention_ids) if mention_ids else ""
+        refs_json = json.dumps(ref_ids) if ref_ids else ""
 
         cur = db.execute(
-            "INSERT INTO messages (channel, member_id, member_name, content, mentions, "
+            "INSERT INTO messages (channel, member_id, member_name, content, mentions, refs, "
             "author_session, reply_to, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (channel, member_id, member["name"], content, mentions_json,
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (channel, member_id, member["name"], content, mentions_json, refs_json,
              author_session, reply_to, now),
         )
         msg_id = cur.lastrowid
@@ -1101,7 +1120,7 @@ def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: st
                     )
                     db.commit()
 
-                # Enrich with mention flags
+                # Enrich with mention + reference flags
                 has_mentions = False
                 msg_list = []
                 for m in display_msgs:
@@ -1110,7 +1129,13 @@ def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: st
                         mention_list = json.loads(mentions_raw) if mentions_raw else []
                     except (json.JSONDecodeError, TypeError):
                         mention_list = []
+                    refs_raw = m["refs"] if "refs" in m.keys() and m["refs"] else ""
+                    try:
+                        ref_list = json.loads(refs_raw) if refs_raw else []
+                    except (json.JSONDecodeError, TypeError):
+                        ref_list = []
                     mentioned = member_id in mention_list
+                    referenced = member_id in ref_list
                     if mentioned:
                         has_mentions = True
                     entry = {
@@ -1121,6 +1146,8 @@ def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: st
                     }
                     if mentioned:
                         entry["mentioned"] = True
+                    if referenced:
+                        entry["referenced"] = True
                     msg_list.append(entry)
 
                 nag = _sentinel_nag(member)
@@ -1386,6 +1413,90 @@ def nth_history(channel: str, last_n: int = 20, from_id: int | None = None) -> s
             resp["retracted_count"] = len(retracted_ids)
             resp["retracted_ids"] = retracted_ids
         return json.dumps(resp)
+    finally:
+        db.close()
+
+
+@mcp.tool(name=f"{TOOL_PREFIX}_pounds")
+def nth_pounds(channel: str, member_id: str, since_id: int = 0, limit: int = 50) -> str:
+    """Fetch messages where YOU have been #pound-referenced (talked about
+    without being pinged). Read-only — does NOT advance your poll watermark
+    and does NOT require a session_token.
+
+    When you run the Monitor with a filter that ignores broadcasts and
+    #pound-only messages (e.g. --filter at), you won't wake up for messages
+    that merely discuss you. When you DO get pinged and come back online,
+    call this to catch up on the background chatter that referenced you.
+
+    Use cases:
+      • Side-piece agent patterns: stay silent until @pinged, then call
+        nth_pounds(since_id=<your last @ping id>) to grep the threads that
+        talked about you while you were quiet.
+      • Long-running agents coming back from sleep: see what was said
+        about your area of responsibility without rewinding the whole chat.
+
+    Args:
+        channel: Channel code
+        member_id: Your member ID
+        since_id: Only return messages with id > since_id (default 0 = all)
+        limit: Maximum messages to return (default 50, max 500)
+    """
+    err = validate_channel_code(channel)
+    if err:
+        return json.dumps({"error": err})
+
+    limit = min(max(limit, 1), 500)
+    db = get_db()
+    try:
+        ch = _get_channel(db, channel)
+        if not ch:
+            return json.dumps({"error": f"Channel '{channel}' not found."})
+        member = _get_member(db, channel, member_id)
+        if not member:
+            return json.dumps({"error": "You are not a member of this channel."})
+
+        # We can't JSON-parse inside SQLite without an extension — grep the
+        # member_id token and filter in Python. Member IDs are 6 chars of
+        # [a-z0-9] so false-positives in content are vanishingly unlikely;
+        # we still re-parse refs in Python to be sure.
+        like_token = f'%"{member_id}"%'
+        rows = db.execute(
+            "SELECT id, member_id, member_name, content, mentions, refs, created_at "
+            "FROM messages WHERE channel = ? AND id > ? AND refs LIKE ? "
+            "AND retracted_at IS NULL "
+            "ORDER BY id DESC LIMIT ?",
+            (channel, since_id, like_token, limit),
+        ).fetchall()
+
+        out = []
+        for m in reversed(rows):
+            try:
+                ref_list = json.loads(m["refs"]) if m["refs"] else []
+            except (json.JSONDecodeError, TypeError):
+                ref_list = []
+            if member_id not in ref_list:
+                continue
+            try:
+                mention_list = json.loads(m["mentions"]) if m["mentions"] else []
+            except (json.JSONDecodeError, TypeError):
+                mention_list = []
+            entry = {
+                "id": m["id"],
+                "from": m["member_name"] or m["member_id"],
+                "content": m["content"],
+                "at": m["created_at"],
+                "referenced": True,
+            }
+            if member_id in mention_list:
+                entry["mentioned"] = True
+            out.append(entry)
+
+        return json.dumps({
+            "ok": True,
+            "channel": channel,
+            "count": len(out),
+            "messages": out,
+        })
     finally:
         db.close()
 

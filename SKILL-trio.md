@@ -28,6 +28,7 @@ Every rule in this file is load-bearing. If something here seems redundant with 
 | `trio_ack` | Advance your read watermark to a specific message id. |
 | `trio_retract` | Retract a message you authored. Renders `[RETRACTED: reason]` inline. |
 | `trio_history` | Read-only replay of recent messages. |
+| `trio_pounds` | Fetch messages where you've been `#pound`-referenced (talked about, not pinged). Side-piece pattern: silent monitor on `@` only, then grep pounds on wake. |
 | `trio_claim` / `trio_complete` / `trio_cancel` / `trio_release` | Task lifecycle. |
 | `trio_set_status` | Set your visible status text. |
 | `trio_rename` | Change your display name without disconnecting. Past messages you authored are retroactively relabeled so history stays readable. Requires `session_token`. |
@@ -37,7 +38,23 @@ Every rule in this file is load-bearing. If something here seems redundant with 
 | `trio_cull` | Remove a dead member. User permission required. |
 | `trio_cleanup` | Delete ended channels. |
 
-19 tools total. Full parameter list and return shapes in [REFERENCE.md](REFERENCE.md).
+20 tools total. Full parameter list and return shapes in [REFERENCE.md](REFERENCE.md).
+
+## `@pings` vs `#pounds` — when to use which
+
+- **`@name`** = PING. Wakes the target via their monitor. Use when you *need* a response or acknowledgement from that specific member: direct questions, hand-offs, requests, blocking dependencies.
+- **`#name`** = POUND reference. Stored in a separate `refs` field; never wakes the target on their default filter. Use when you're *talking about* a member — coordinating with someone else, discussing their work, leaving a breadcrumb they can grep on next wake. `#pound` is the pressure-release valve that prevents nuisance `@pings`.
+
+**Role guidance.** Pick your monitor filter based on your role:
+
+| Role | Filter | Rationale |
+|------|--------|-----------|
+| Primary worker claiming tasks | `--mention-filter` (= `at+broadcast`) — default | Wake on direct pings and room broadcasts. Most active agents. |
+| Side-piece agent (on-call) | `--filter at` | Silent until explicitly `@pinged`. On wake, call `trio_pounds` to catch up on any `#pound` breadcrumbs. Cheapest long-running role. |
+| Reviewer / observer | `--filter at+pound` | Wake on either direct pings or `#pound` refs about you. Skip broadcasts. |
+| Coordinator / scribe | `--filter all` (no flag) | Wake on everything, including cross-talk. Expensive but complete. |
+
+Combining `#name` freely with `@name` is fine: `"@alice can you review #bob's parser change?"` pings alice and leaves a breadcrumb that bob can find via `trio_pounds` on his next wake without fragmenting alice's attention.
 
 ## Argument parsing
 
@@ -60,7 +77,7 @@ After `trio_connect` you must launch a single background event monitor via Claud
 
 ```
 Monitor(
-    command=f"python3 ~/.claude/skills/nth/server/nth_monitor.py {channel} {member_id} --mention-filter",
+    command=f"python3 ~/.claude/skills/nth/server/nth_monitor.py {channel} {member_id} --filter at+broadcast",
     description=f"{channel} events",
     persistent=True,
     timeout_ms=3600000,
@@ -83,7 +100,20 @@ Each line of stdout becomes a separate notification. The monitor runs until the 
 | `channel_gone` | Channel row is missing from DB. | Surface an error. Monitor will exit. |
 | `error` | DB unreachable, member not found, or similar. | Surface and decide whether to reconnect. |
 
-Use `--mention-filter` (recommended) to suppress wake-ups for cross-talk targeted at other members. Without it, every new peer message fires `new_messages`.
+**Filter modes** (`--filter MODE` — pick one based on your role; see the @/# section above):
+
+| Flag | Wakes on |
+|------|---------|
+| `--filter at` | `@me` only — silent for broadcasts and `#pound` refs. Side-piece role. |
+| `--mention-filter` (= `--filter at+broadcast`) | `@me` or broadcasts. Default for primary workers. |
+| `--filter at+pound` | `@me` or `#me` refs — no broadcasts. Reviewer role. |
+| `--filter at+pound+broadcast` | Everything addressed to you or the room. |
+| `--filter pound` | `#me` only. Rare — for agents catching up on background chatter. |
+| `--filter all` (or no flag) | Every peer message. Coordinator role. |
+
+Event payload adds `has_mentions` (any `@` targets you?), `has_refs` (any `#`?), `from_names`, `preview`, `filter`. Use these to skip the `trio_poll` round-trip on low-signal wake-ups.
+
+When you wake on `@me` but the event payload says the batch also includes `#me` refs in messages you can't see under your filter, call `trio_pounds(since_id=<last_ack>)` for the backfill — lightweight and does not touch your watermark.
 
 ## Post-connect sequence — do all four, in order
 

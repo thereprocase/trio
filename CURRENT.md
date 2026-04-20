@@ -1,11 +1,13 @@
-# Current State — nth v7
+# Current State — nth v7.1
 
-**Version:** v7 (2026-04-19)
-**Prior:** v6.2 (2026-04-17), v6.1 (2026-04-09), v6.0 (2026-04-09), v5.3.1 / v5.3 / v5.2 / v5.1 (2026-04-07), v5.0 RC2 (2026-04-06)
+**Version:** v7.1 (2026-04-20)
+**Prior:** v7 (2026-04-19), v6.2 (2026-04-17), v6.1 (2026-04-09), v6.0 (2026-04-09)
 **Branch:** main
 **Remote:** `github.com:thereprocase/trio.git` (GitHub) + `gitlab.com:theReproCase/trio.git` (GitLab mirror)
 
 ## What Just Shipped
+
+**v7.1** — `#pounds` — References that don't wake their target. `@name` still pings (wakes via monitor); new `#name` syntax goes into `messages.refs` and never wakes on the default filter. New MCP tool `nth_pounds(channel, member_id, since_id?, limit?)` for on-demand backfill of #pound breadcrumbs — intended for the side-piece agent pattern (silent until `@pinged`, then grep pounds on wake). Monitor gets named filter modes via `--filter MODE`: `at`, `at+broadcast` (legacy alias), `at+pound`, `at+pound+broadcast`, `pound`, `all`. Web client gets parallel `#` autocomplete + muted-green refs bar + preview. Role table + filter table added to `SKILL-trio.md` / `SKILL-quartet.md`. Single additive `ALTER TABLE` migration (`refs TEXT NOT NULL DEFAULT ''`).
 
 **v7** — Monitor-based single-process event stream replaces the Haiku-subagent sentinel pair. Motivation: vanilla Claude Code caps Bash at 10 minutes, so the 1-hour Haiku sentinel required `BASH_MAX_TIMEOUT_MS` to be set — without it, Haiku hallucinated fabricated output (made-up message IDs, cadence values) instead of returning the real stdout. Observed in the field.
 
@@ -26,7 +28,7 @@ Migration is install-only: run `setup.sh` to replace skill docs + drop deprecate
 
 ## Architecture Snapshot
 
-- **18 MCP tools** via `nth-trio` (stdio) / `nth-qweb` (SSE) — one server codebase, transport selected by env var.
+- **20 MCP tools** via `nth-trio` (stdio) / `nth-qweb` (SSE) — one server codebase, transport selected by env var. `_pounds` added in v7.1 alongside the existing `_rename` tool.
 - **`server/nth_server.py`** — FastMCP server, coordination protocol, transport-agnostic.
 - **`server/nth_monitor.py`** — v7 persistent Monitor target. Reads `~/.claude/nth/nth.db`, emits JSON events on stdout.
 - **`server/nth_console.py`** — stdlib DB tailer for human operators. Prints full channel history on launch; terminal scrollback is the history UI.
@@ -42,7 +44,7 @@ Each session launches one persistent monitor after `trio_connect`:
 
 ```
 Monitor(
-    command=f"python3 ~/.claude/skills/nth/server/nth_monitor.py {channel} {member_id} --mention-filter",
+    command=f"python3 ~/.claude/skills/nth/server/nth_monitor.py {channel} {member_id} --filter at+broadcast",
     description=f"{channel} events",
     persistent=True,
     timeout_ms=3600000,
@@ -51,7 +53,7 @@ Monitor(
 
 | Event | Fires when | Action |
 |-------|-----------|--------|
-| `new_messages` | Peers posted since last check. Payload: `has_mentions`, `from_names`, `preview`. | `trio_poll` + `trio_ack`. |
+| `new_messages` | Peers posted since last check. Payload: `has_mentions`, `has_refs`, `from_names`, `preview`, `filter`. | `trio_poll` + `trio_ack`. Call `trio_pounds` for #pound backfill if `has_refs` under an at-only filter. |
 | `cadence` | Active mode, ≥1 claimed task, no post in >600s. Once per silence period. | Post a status update. |
 | `channel_ended` | Another member called `trio_end`. | Final-drain, monitor exits. |
 | `channel_gone` | Channel row deleted. | Surface, monitor exits. |

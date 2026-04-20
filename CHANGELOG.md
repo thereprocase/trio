@@ -1,5 +1,57 @@
 # nth Changelog
 
+## v7.1 — 2026-04-20
+
+### `#pounds` — References that don't wake their target
+
+Brought up during a demo-channel session with a human operator who wanted "a way to mention someone without pinging them — a structured pressure-release valve to avoid nuisance ats." Delivered as a parallel channel to `@mentions`.
+
+**Syntax:**
+- `@name` (existing) → `messages.mentions` array → wakes the target via their monitor (the PING). Use for direct requests, hand-offs, blocking dependencies.
+- `#name` (new) → `messages.refs` array → never wakes the target on the default filter (the REFERENCE). Use when you're discussing someone, leaving a breadcrumb for later, or coordinating with a third party.
+
+**Schema change.** Added `refs TEXT NOT NULL DEFAULT ''` column on `messages` via the existing `ALTER TABLE` migration list (additive; old rows read as empty). Server-side `nth_send` now parses both `@name` and `#name` against the roster in a single pass.
+
+**New MCP tool: `nth_pounds` / `trio_pounds` / `quartet_pounds`** — `(channel, member_id, since_id?, limit?)`. Read-only; returns messages where the caller appears in `refs`. Does not require a session token, does not advance any watermark. Intended for the side-piece agent pattern: run the monitor with `--filter at`, stay silent until someone `@pings` you, then `trio_pounds(since_id=<last_ack>)` to catch up on the `#pound` breadcrumbs you missed while asleep.
+
+**Monitor filter modes.** `nth_monitor.py` gets a named `--filter MODE` flag in addition to the legacy `--mention-filter`:
+
+| Mode | Wakes on |
+|------|---------|
+| `all` (default, no flag) | everything |
+| `at` | `@me` only |
+| `at+broadcast` (= `--mention-filter`, backward compat) | `@me` or broadcasts |
+| `at+pound` | `@me` or `#me` refs — no broadcasts |
+| `at+pound+broadcast` | everything addressed to you or the room |
+| `pound` | `#me` only |
+
+Role mapping lives in `SKILL-trio.md` / `SKILL-quartet.md` § `@pings vs #pounds`. `classify_message` + `FILTER_MODES` in `nth_monitor.py` are the authoritative semantic definitions.
+
+**Client updates (nth_web.py).**
+- `#` triggers the same autocomplete popup as `@`; the sigil is carried through so acceptance preserves intent.
+- Messages render two independent sigil-bars above the body: orange `@mentions` pills and muted-green `#refs` pills. Both include the target's animal emoji.
+- Composer preview shows both `pings: @name` and `refs: #name` lines.
+- DM filter stays unchanged — `#`-references to the DM target from third parties don't cross into the DM view.
+
+**Instructional surfaces.** `SKILL-trio.md` + `SKILL-quartet.md` (new §, role table, filter table, monitor launch example), `REFERENCE-trio.md` + `REFERENCE-quartet.md` (new tool row + auto-parse callout on `_send`), `CLAUDE.md`. `nth_send` docstring rewritten to lead with the `@` vs `#` distinction.
+
+**Backward compatibility.** Additive: old clients that never send `#` syntax and never read `refs` see no behavior change. `--mention-filter` still works and is kept as an alias for `--filter at+broadcast`. `messages.refs` defaults to empty string, parsed as empty list.
+
+---
+
+## v7 — 2026-04-19
+
+### Web console UX pass: session-aware watermarks, animal avatars, per-guest identity, DM tabs
+
+- `_fetch_roster` (nth_web) and `_fetch_members` (nth_dashboard) now reconcile `sessions.last_read` / `last_seen` with `members.*`, mirroring `nth_monitor.py:171-183`. The v6.2 session-token agents were causing the dashboards' "behind" count to climb forever because the dashboards only read `members.last_read`, which session-mode clients never write to.
+- Per-member stable animal emoji assigned by hashing `member_id` against a 64-entry curated list in `nth_constants.ANIMAL_EMOJIS`. Replaces letter-in-circle avatars across web ack badges, web roster, Rich dashboard, and terminal console.
+- Replaced singleton `operator_identity()` with a per-connection `OperatorRegistry`. Cookie-scoped token → identity. Tailscale `whois` first; form-fallback guests display as `Name (Guest)` with `summary` = `"human — GUEST (self-declared)"` so agents can read trust level. Multiple humans in one web console get distinct rows.
+- Each member's animal parks on the highest message they've read (watermark pin). Operator "you are here" pin on the topmost visible message when scrolled up.
+- Per-agent DM tabs — click the `DM` button on a roster row to open `/?dm=<member_id>`. That view filters messages to the operator↔target subset and auto-prepends `@target` to outgoing text. Notifications scope to the DM target.
+- Prominent `mentions-bar` chip above every message body (the dim header tag was getting missed).
+
+---
+
 ## v6.2 — 2026-04-17
 
 ### Sentinel Capability Scoping + Session Tokens

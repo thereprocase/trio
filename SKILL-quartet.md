@@ -28,6 +28,7 @@ Every rule in this file is load-bearing. If something here seems redundant with 
 | `quartet_ack` | Advance your read watermark to a specific message id. |
 | `quartet_retract` | Retract a message you authored. Renders `[RETRACTED: reason]` inline. |
 | `quartet_history` | Read-only replay of recent messages. |
+| `quartet_pounds` | Fetch messages where you've been `#pound`-referenced (talked about, not pinged). Side-piece pattern: silent monitor on `@` only, then grep pounds on wake. |
 | `quartet_claim` / `quartet_complete` / `quartet_cancel` / `quartet_release` | Task lifecycle. |
 | `quartet_set_status` | Set your visible status text. |
 | `quartet_rename` | Change your display name without disconnecting. Past messages you authored are retroactively relabeled so history stays readable. Requires `session_token`. |
@@ -37,7 +38,23 @@ Every rule in this file is load-bearing. If something here seems redundant with 
 | `quartet_cull` | Remove a dead member. User permission required. |
 | `quartet_cleanup` | Delete ended channels. |
 
-19 tools total. Full parameter list and return shapes in [REFERENCE.md](REFERENCE.md).
+20 tools total. Full parameter list and return shapes in [REFERENCE.md](REFERENCE.md).
+
+## `@pings` vs `#pounds` — when to use which
+
+- **`@name`** = PING. Wakes the target via their monitor. Use when you *need* a response or acknowledgement: direct questions, hand-offs, blocking dependencies.
+- **`#name`** = POUND reference. Separate `refs` field; never wakes the target on their default filter. Use when you're *talking about* a member — coordinating with someone else, discussing their work, leaving a breadcrumb they can grep on next wake.
+
+**Role guidance.** Pick your monitor filter based on your role:
+
+| Role | Filter | Rationale |
+|------|--------|-----------|
+| Primary worker claiming tasks | `--mention-filter` (= `at+broadcast`) — default | Wake on direct pings and room broadcasts. |
+| Side-piece agent (on-call) | `--filter at` | Silent until explicitly `@pinged`. On wake, call `quartet_pounds` to catch up. |
+| Reviewer / observer | `--filter at+pound` | Wake on direct pings or `#pound` refs. Skip broadcasts. |
+| Coordinator / scribe | `--filter all` (no flag) | Wake on everything. |
+
+Combining `#name` with `@name` is fine: `"@alice can you review #bob's parser change?"` pings alice and leaves a breadcrumb bob can `quartet_pounds` later without fragmenting alice's attention.
 
 ## Argument parsing
 
@@ -60,7 +77,7 @@ After `quartet_connect` you must launch a single background event monitor via Cl
 
 ```
 Monitor(
-    command=f"python3 ~/.claude/skills/nth/server/nth_monitor.py {channel} {member_id} --mention-filter",
+    command=f"python3 ~/.claude/skills/nth/server/nth_monitor.py {channel} {member_id} --filter at+broadcast",
     description=f"{channel} events",
     persistent=True,
     timeout_ms=3600000,
@@ -83,13 +100,22 @@ Event tables and failure recovery live in [PROTOCOLS.md § Monitor Events](PROTO
 
 | Event | Fires when | What to do |
 |-------|-----------|------------|
-| `new_messages` | Peers posted since last check. With `--mention-filter`, only fires for broadcasts (empty mentions) or messages mentioning you. Payload includes `has_mentions` (bool), `from_names` (senders), `preview` (80-char peek of latest). | `quartet_poll` for content (use `mentions_only=True` if you only want targeted bodies), `quartet_ack`, process. |
+| `new_messages` | Peers posted since last check. `--filter` controls which categories wake you (see filter modes below). Payload includes `has_mentions` (bool), `has_refs` (bool), `from_names` (senders), `preview` (80-char peek of latest), `filter` (active mode). | `quartet_poll` for content (use `mentions_only=True` if you only want targeted bodies), `quartet_ack`, process. If `has_refs` but you didn't wake on `#pounds`, run `quartet_pounds` to backfill. |
 | `cadence` | You're active, hold ≥1 claimed task, and haven't posted in >600s. Fires once per silence period. | Post a status update. |
 | `channel_ended` | Another member ended the channel. | Acknowledge and stop work. Monitor will exit. |
 | `channel_gone` | Channel row is missing from DB. | Surface an error. Monitor will exit. |
 | `error` | DB unreachable, member not found, or similar. | Surface and decide whether to reconnect. |
 
-Use `--mention-filter` (recommended) to suppress wake-ups for cross-talk targeted at other members.
+**Filter modes** (`--filter MODE` — pick one based on role; see the @/# section above):
+
+| Flag | Wakes on |
+|------|---------|
+| `--filter at` | `@me` only |
+| `--mention-filter` (= `--filter at+broadcast`) | `@me` or broadcasts — default primary worker |
+| `--filter at+pound` | `@me` or `#me` refs — no broadcasts |
+| `--filter at+pound+broadcast` | Everything addressed to you or the room |
+| `--filter pound` | `#me` only |
+| `--filter all` (or no flag) | Every peer message |
 
 ## Post-connect sequence — do all four, in order
 
