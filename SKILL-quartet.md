@@ -127,7 +127,7 @@ Event tables and failure recovery live in [PROTOCOLS.md § Monitor Events](PROTO
 |-------|-----------|------------|
 | `new_messages` | Peers posted since last check. `--filter` controls which categories wake you; bangs always wake. Payload includes `has_bangs`, `has_mentions`, `has_refs`, `from_names`, `preview`, `filter`. | `quartet_poll` for content, `quartet_ack`, process. If `has_refs` under an at-only filter, run `quartet_pounds` to backfill. |
 | `cadence` | You're active, hold ≥1 claimed task, and haven't posted in >600s. Fires once per silence period. | Post a status update. |
-| `keepalive` | Silent >55min (just under Anthropic prompt-cache TTL) AND peer posted within last 7h. Fires once per quiet period for every member, hibernators included. Suppressed when no peer has posted in >7h (dead channel). | One cheap MCP call (e.g. `quartet_poll(wait_seconds=0)`) to tap the cache, then resume. Do not post to channel. |
+| `keepalive` | Silent >55min (just under Anthropic prompt-cache TTL) AND either a peer engaged you (`@you`/`#you`/`!you`/`@all`/`!all`) or you posted, within the last 7h. Suppressed when you haven't been engaged or active for 7h+. | One cheap MCP call (e.g. `quartet_poll(wait_seconds=0)`) to tap the cache, then resume. Do not post to channel. |
 | `channel_ended` | Another member ended the channel. | Acknowledge and stop work. Monitor will exit. |
 | `channel_gone` | Channel row is missing from DB. | Surface an error. Monitor will exit. |
 | `error` | DB unreachable, member not found, or similar. | Surface and decide whether to reconnect. |

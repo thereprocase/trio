@@ -378,32 +378,44 @@ def monitor(channel, member_id, filter_mode="all", _db_path=None):
                 else:
                     cadence_fired = False
 
-                # Check how long since any peer posted anything. If the
-                # channel is genuinely abandoned we stop tapping — better
-                # to eat one rewrite on eventual re-engagement than to
-                # spend indefinitely on cache refreshes for a dead room.
+                # Check how long since a peer engaged this specific agent
+                # — @me, #me, !me, or one of the broadcast wildcards (@all,
+                # !all, both of which expand to include every member's id
+                # in the sigil arrays at send time). Plain channel chatter
+                # that ignores us doesn't count: we're only worth keeping
+                # warm if someone has actually been poking us recently.
+                # LIKE on the quoted JSON token avoids needing json_extract
+                # and matches "id1","id2" reliably because every entry is
+                # double-quoted in the stored array.
+                mid_token = f'%"{member_id}"%'
                 try:
-                    last_peer = db.execute(
+                    last_engaged = db.execute(
                         "SELECT created_at FROM messages "
                         "WHERE channel = ? AND member_id != ? "
+                        "AND (mentions LIKE ? OR refs LIKE ? OR bangs LIKE ?) "
                         "ORDER BY id DESC LIMIT 1",
-                        (channel, member_id),
+                        (channel, member_id, mid_token, mid_token, mid_token),
                     ).fetchone()
                 except sqlite3.OperationalError:
-                    last_peer = None
-                peer_gap = seconds_since(
-                    last_peer["created_at"] if last_peer else None
+                    last_engaged = None
+                engaged_gap = seconds_since(
+                    last_engaged["created_at"] if last_engaged else None
                 )
-                channel_abandoned = peer_gap > KEEPALIVE_GIVEUP
+                # The agent's own recent activity also counts as "needed"
+                # — an agent actively working in the channel shouldn't be
+                # culled from the keepalive loop. Use the smaller (= more
+                # recent) of the two gaps.
+                needed_gap = min(own_gap, engaged_gap)
+                stale_in_channel = needed_gap > KEEPALIVE_GIVEUP
 
                 if (own_gap > KEEPALIVE_THRESHOLD
-                        and not channel_abandoned
+                        and not stale_in_channel
                         and not keepalive_fired):
                     emit({
                         "event": "keepalive",
                         "gap_seconds": round(own_gap),
                         "threshold_seconds": KEEPALIVE_THRESHOLD,
-                        "peer_gap_seconds": round(peer_gap),
+                        "engaged_gap_seconds": round(engaged_gap),
                     })
                     keepalive_fired = True
                 elif own_gap < KEEPALIVE_THRESHOLD:
