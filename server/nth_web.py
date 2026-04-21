@@ -1144,10 +1144,10 @@ INDEX_HTML = r"""<!doctype html>
   .msg .body > *:first-child { margin-top: 0; }
   .msg .body > *:last-child { margin-bottom: 0; }
   .msg .body p { margin: 4px 0; white-space: pre-wrap; }
-  .msg .body code.mdic { background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.1);
+  #chat .msg .body code.mdic { background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.1);
                          border-radius: 3px; padding: 0 4px; font-family: ui-monospace, Menlo, Monaco, monospace;
                          font-size: 0.92em; }
-  .msg .body pre.mdcode { background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1);
+  #chat .msg .body pre.mdcode { background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1);
                           border-radius: 4px; padding: 6px 8px; margin: 4px 0;
                           font-family: ui-monospace, Menlo, Monaco, monospace; font-size: 0.9em;
                           white-space: pre-wrap; overflow-x: auto; }
@@ -1459,10 +1459,11 @@ INDEX_HTML = r"""<!doctype html>
   try {
     const saved = localStorage.getItem('trio.msgFont');
     if (saved) {
-      document.documentElement.style.setProperty('--msg-font', saved);
+      let found = false;
       for (const opt of fontPicker.options) {
-        if (opt.value === saved) { fontPicker.value = saved; break; }
+        if (opt.value === saved) { fontPicker.value = saved; found = true; break; }
       }
+      if (found) document.documentElement.style.setProperty('--msg-font', saved);
     }
   } catch (_) { /* private-mode: ignore */ }
   fontPicker.addEventListener('change', () => {
@@ -1562,6 +1563,7 @@ INDEX_HTML = r"""<!doctype html>
   // become <br>.
   function renderMarkdown(text) {
     if (!text) return '';
+    text = text.replace(/\u0000/g, '');
     // Stash fenced and inline code FIRST so their contents survive every
     // subsequent transform (including line splitting for block parsing).
     const fences = [];
@@ -1582,10 +1584,14 @@ INDEX_HTML = r"""<!doctype html>
       t = t.replace(/(^|[\s(\[])\*([^*\n]+?)\*(?=[\s.,!?;:)\]]|$)/g, '$1<em>$2</em>');
       t = t.replace(/(^|[\s(\[])_([^_\n]+?)_(?=[\s.,!?;:)\]]|$)/g, '$1<em>$2</em>');
       t = t.replace(/~~([^~\n]+?)~~/g, '<del>$1</del>');
-      t = t.replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g,
-        '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
-      t = t.replace(/(^|[\s(])(https?:\/\/[^\s<]+[^\s<.,;:!?)])/g,
-        '$1<a href="$2" target="_blank" rel="noopener noreferrer">$2</a>');
+      t = t.replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g, (_m, txt, url) => {
+        const safeUrl = url.replace(/&(?:quot|#39);/g, '');
+        return '<a href="' + safeUrl + '" target="_blank" rel="noopener noreferrer">' + txt + '</a>';
+      });
+      t = t.replace(/(^|[\s(])(https?:\/\/[^\s<]+[^\s<.,;:!?)])/g, (_m, pre, url) => {
+        const safeUrl = url.replace(/&(?:quot|#39);/g, '');
+        return pre + '<a href="' + safeUrl + '" target="_blank" rel="noopener noreferrer">' + url + '</a>';
+      });
       return t;
     }
 
@@ -1761,11 +1767,17 @@ INDEX_HTML = r"""<!doctype html>
         if (parsed) { out.push(parsed[0]); i = parsed[1]; continue; }
       }
 
+      // Fenced-code sentinel — emit directly to prevent <p><pre> nesting.
+      if (/^\u0000F\d+\u0000$/.test(line.trim())) {
+        out.push(line.trim()); i++; continue;
+      }
+
       // Paragraph — consume until a block boundary.
       const p = [];
       while (i < lines.length) {
         const ln = lines[i];
         if (!ln.trim()) break;
+        if (/^\u0000F\d+\u0000$/.test(ln)) break;
         if (/^\s{0,3}(#{1,6})\s+/.test(ln)) break;
         if (/^\s{0,3}>\s?/.test(ln)) break;
         if (/^\s{0,3}([-*_])(\s*\1){2,}\s*$/.test(ln)) break;
@@ -1827,7 +1839,7 @@ INDEX_HTML = r"""<!doctype html>
     const re = new RegExp('([@#!])(' + ids.join('|') + ')(?=\\b|$)', 'g');
     return text.replace(re, (match, sigil, id) => {
       const mem = state.members.get(id);
-      const name = mem && mem.name ? mem.name : id;
+      const name = mem && mem.name ? escapeHtml(mem.name) : id;
       return sigil + name;
     });
   }
