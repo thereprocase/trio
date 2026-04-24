@@ -1306,6 +1306,25 @@ INDEX_HTML = r"""<!doctype html>
               padding: 8px 14px; display: flex; flex-direction: column; gap: 4px; }
   #preview { font-size: 11px; color: var(--dim); min-height: 14px; }
   #preview .tgt { color: var(--mention); font-weight: 600; }
+  /* Horizontal persistent-target selector — pick 1..N claudes (or All) and
+     every send is addressed to them until toggled off. */
+  #target-bar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
+                font-size: 11px; min-height: 24px; }
+  #target-bar .tb-label { color: var(--dim); margin-right: 2px; }
+  #target-bar .tb-pill { background: var(--panel); color: var(--dim);
+                         border: 1px solid var(--border); border-radius: 12px;
+                         padding: 2px 9px; cursor: pointer; user-select: none;
+                         font-family: inherit; font-size: 11px;
+                         display: inline-flex; align-items: center; gap: 4px;
+                         transition: background 0.08s, color 0.08s, border-color 0.08s; }
+  #target-bar .tb-pill:hover { border-color: var(--accent); color: var(--fg); }
+  #target-bar .tb-pill.on { background: var(--accent); color: var(--bg);
+                            border-color: var(--accent); font-weight: 600; }
+  #target-bar .tb-pill .tb-num { opacity: 0.6; font-size: 10px; }
+  #target-bar .tb-pill.on .tb-num { opacity: 0.9; }
+  #target-bar .tb-pill.tb-all { border-style: dashed; }
+  #target-bar .tb-pill.tb-all.on { border-style: solid; }
+  body.dm-mode #target-bar { display: none; }
   #input-row { display: flex; gap: 8px; align-items: flex-end; position: relative; }
   #input { flex: 1; background: var(--bg); color: var(--fg); border: 1px solid var(--border);
            padding: 8px 10px; border-radius: 4px; font-family: inherit; font-size: 13px;
@@ -1414,6 +1433,7 @@ INDEX_HTML = r"""<!doctype html>
 
   <div id="composer">
     <div id="preview">(broadcast — all connected members receive this)</div>
+    <div id="target-bar"></div>
     <div id="input-row">
       <div id="completions"></div>
       <textarea id="input" rows="1" placeholder="Type a message. @ to mention, $task <desc> to post a claimable task. Enter to send, Shift+Enter for newline."></textarea>
@@ -1426,6 +1446,9 @@ INDEX_HTML = r"""<!doctype html>
       <kbd>Tab</kbd> accept completion
       <kbd>Esc</kbd> dismiss
       <kbd>↑/↓</kbd> navigate
+      <kbd>Alt+1..9</kbd> toggle target
+      <kbd>Alt+A</kbd> all
+      <kbd>Alt+0</kbd> clear
       <span style="margin-left:14px;color:var(--dim)">click a message to expand/collapse in compact mode</span>
     </div>
   </div>
@@ -1454,6 +1477,7 @@ INDEX_HTML = r"""<!doctype html>
   const fontPicker = document.getElementById('font-picker');
   const jumpBtn = document.getElementById('jump-btn');
   const jumpCount = document.getElementById('jump-count');
+  const targetBar = document.getElementById('target-bar');
 
   // Message-font picker — persists per-origin via localStorage.
   try {
@@ -1501,6 +1525,12 @@ INDEX_HTML = r"""<!doctype html>
     rateBins: new Map(),            // bin_epoch_10s → count
     startedAt: Date.now(),
     originalTitle: 'nth_web',
+    // Persistent target selection: set of member_ids that every send is
+    // addressed to (prepended as @name mentions). Empty = broadcast.
+    selectedTargets: new Set(),
+    // Ordered list of target ids as rendered in the bar — index → id,
+    // so Alt+1..9 maps to the Nth pill.
+    targetOrder: [],
   };
   const PALETTE = ['#62d7ef','#d070d7','#7ede7e','#e5d35e',
                    '#8eb9ff','#ff8470','#9ef0f0','#f79fea'];
@@ -2168,6 +2198,131 @@ INDEX_HTML = r"""<!doctype html>
   }
 
   // ── Roster rendering ──
+  // ── Persistent target selector (horizontal bar above the chat box) ──
+  // Treat any roster row that isn't this operator and isn't another web
+  // operator (_op_*) as a "claude" eligible for targeting.
+  function isTargetable(m) {
+    if (!m || !m.id) return false;
+    if (m.id === state.operator.id) return false;
+    if (m.id.startsWith('_op_')) return false;
+    return true;
+  }
+  function targetStorageKey() {
+    return 'trio_targets_' + (state.channel || '_');
+  }
+  function loadPersistedTargets() {
+    try {
+      const raw = localStorage.getItem(targetStorageKey());
+      if (!raw) return;
+      const ids = JSON.parse(raw);
+      if (Array.isArray(ids)) {
+        state.selectedTargets = new Set(ids.filter(x => typeof x === 'string'));
+      }
+    } catch (_) { /* ignore */ }
+  }
+  function savePersistedTargets() {
+    try {
+      localStorage.setItem(targetStorageKey(),
+        JSON.stringify([...state.selectedTargets]));
+    } catch (_) { /* ignore */ }
+  }
+  function toggleTarget(id) {
+    if (state.selectedTargets.has(id)) state.selectedTargets.delete(id);
+    else state.selectedTargets.add(id);
+    savePersistedTargets();
+    renderComposerTargets();
+    updatePreview();
+  }
+  function toggleAllTargets() {
+    const all = state.targetOrder;
+    if (all.length === 0) return;
+    const allSelected = all.every(id => state.selectedTargets.has(id));
+    if (allSelected) state.selectedTargets.clear();
+    else for (const id of all) state.selectedTargets.add(id);
+    savePersistedTargets();
+    renderComposerTargets();
+    updatePreview();
+  }
+  function renderComposerTargets() {
+    if (!targetBar) return;
+    targetBar.innerHTML = '';
+    // Build the ordered list of targetable members. Sort by active-first
+    // then name so the numbering is stable-ish across renders.
+    const order = { active: 0, idle: 1, stale: 2, dead: 3 };
+    const targetables = [...state.members.values()]
+      .filter(isTargetable)
+      .sort((a, b) => {
+        const oa = order[a.status] ?? 4;
+        const ob = order[b.status] ?? 4;
+        if (oa !== ob) return oa - ob;
+        return (a.name || '').localeCompare(b.name || '');
+      });
+    state.targetOrder = targetables.map(m => m.id);
+    // Drop stale selections for members who left the channel. Skip pruning
+    // before the first roster snapshot arrives — the Map is empty then and
+    // we'd clobber a restored-from-localStorage selection.
+    if (state.members.size > 0) {
+      let mutated = false;
+      for (const id of [...state.selectedTargets]) {
+        if (!state.members.has(id) || !isTargetable(state.members.get(id))) {
+          state.selectedTargets.delete(id);
+          mutated = true;
+        }
+      }
+      if (mutated) savePersistedTargets();
+    }
+
+    if (targetables.length === 0) {
+      const lbl = document.createElement('span');
+      lbl.className = 'tb-label';
+      lbl.textContent = 'no agents in channel yet';
+      targetBar.appendChild(lbl);
+      return;
+    }
+    const lbl = document.createElement('span');
+    lbl.className = 'tb-label';
+    lbl.textContent = 'send to:';
+    targetBar.appendChild(lbl);
+
+    targetables.forEach((m, idx) => {
+      const pill = document.createElement('button');
+      pill.type = 'button';
+      pill.className = 'tb-pill' + (state.selectedTargets.has(m.id) ? ' on' : '');
+      const a = animalFor(m);
+      pill.innerHTML = '<span class="tb-num">' + (idx + 1) + '</span>' +
+                       '<span>' + (a.emoji || '') + '</span>' +
+                       '<span>' + escapeHtml(m.name || m.id) + '</span>';
+      pill.title = 'click to toggle — Alt+' + (idx + 1) + ' keyboard shortcut';
+      pill.addEventListener('click', () => toggleTarget(m.id));
+      targetBar.appendChild(pill);
+    });
+
+    const allSelected = targetables.length > 0 &&
+      targetables.every(m => state.selectedTargets.has(m.id));
+    const allPill = document.createElement('button');
+    allPill.type = 'button';
+    allPill.className = 'tb-pill tb-all' + (allSelected ? ' on' : '');
+    allPill.innerHTML = '<span class="tb-num">A</span><span>All</span>';
+    allPill.title = 'toggle all targets — Alt+A';
+    allPill.addEventListener('click', toggleAllTargets);
+    targetBar.appendChild(allPill);
+
+    if (state.selectedTargets.size > 0) {
+      const clearPill = document.createElement('button');
+      clearPill.type = 'button';
+      clearPill.className = 'tb-pill';
+      clearPill.textContent = 'clear';
+      clearPill.title = 'clear selection (broadcast) — Alt+0';
+      clearPill.addEventListener('click', () => {
+        state.selectedTargets.clear();
+        savePersistedTargets();
+        renderComposerTargets();
+        updatePreview();
+      });
+      targetBar.appendChild(clearPill);
+    }
+  }
+
   function renderRoster(members) {
     applyRosterWatermarkDeltas(members);
     // Refresh the id→avatar cache so animalForId() resolves message
@@ -2208,6 +2363,7 @@ INDEX_HTML = r"""<!doctype html>
     for (const m of sorted) rosterEl.appendChild(renderMemberRow(m));
     rosterHeading.textContent = `Members (${members.length})`;
 
+    renderComposerTargets();
     updateAllAckBadges();
     renderWatermarkPins();
     scheduleHereUpdate();
@@ -2560,25 +2716,14 @@ INDEX_HTML = r"""<!doctype html>
     const refs  = resolveRefs(input.value);
     const bangs = resolveBangs(input.value);
     const txtL  = (input.value || '').toLowerCase();
-    const ambient = !pings.length && !refs.length && !bangs.length
-                    && !/(^|\s)@all(\b|$)/.test(txtL)
-                    && !/(^|\s)!all(\b|$)/.test(txtL);
     const parts = [];
-    if (ambient) {
-      // Count how many peers will actually hear this under their filter.
-      let unreached = 0, total = 0;
-      for (const m of state.members.values()) {
-        if (m.id === state.operator.id) continue;
-        total++;
-        if (m.filter_mode && m.filter_mode !== 'all') unreached++;
-      }
-      if (total > 0 && unreached === total) {
-        parts.push('<span style="color:#ff8470">ambient — NO ONE will hear this (every peer is filtering)</span>');
-      } else if (unreached > 0) {
-        parts.push(`ambient — ${unreached}/${total} peers won't hear this (filtered)`);
-      } else {
-        parts.push('ambient — all listeners receive this');
-      }
+    if (!state.dmTargetId && state.selectedTargets.size > 0) {
+      const tgts = [...state.selectedTargets]
+        .map(id => state.members.get(id))
+        .filter(Boolean)
+        .map(m => `<span class="tgt">@${escapeHtml(m.name)}</span>`)
+        .join(', ');
+      parts.push(`locked targets: ${tgts}`);
     }
     if (pings.length) {
       const names = pings.map(m => `<span class="tgt">@${escapeHtml(m.name)}</span>`).join(', ');
@@ -2618,6 +2763,22 @@ INDEX_HTML = r"""<!doctype html>
       if (!text.toLowerCase().startsWith(atTag.toLowerCase())) {
         text = atTag + ' ' + text;
       }
+    } else if (state.selectedTargets.size > 0) {
+      // Persistent target bar: prepend @name for each selected agent that
+      // the typed content doesn't already mention, and make sure all
+      // selected ids end up in mentionIds so the server-side wake logic
+      // fires. Selection is not cleared after send — it's sticky.
+      const tags = [];
+      for (const id of state.targetOrder) {
+        if (!state.selectedTargets.has(id)) continue;
+        if (!mentionIds.includes(id)) mentionIds.push(id);
+        const m = state.members.get(id);
+        if (!m) continue;
+        const atTag = '@' + m.name;
+        if (text.toLowerCase().includes(atTag.toLowerCase())) continue;
+        tags.push(atTag);
+      }
+      if (tags.length > 0) text = tags.join(' ') + ' ' + text;
     }
     sendBtn.disabled = true;
     try {
@@ -2662,6 +2823,25 @@ INDEX_HTML = r"""<!doctype html>
       if (e.key === 'Escape') {
         state.completion.visible = false; renderCompletions();
         e.preventDefault(); return;
+      }
+    }
+    if (e.altKey && !e.ctrlKey && !e.metaKey && !state.dmTargetId) {
+      if (e.key >= '1' && e.key <= '9') {
+        const idx = parseInt(e.key, 10) - 1;
+        const id = state.targetOrder[idx];
+        if (id) { toggleTarget(id); e.preventDefault(); return; }
+      }
+      if (e.key === '0') {
+        if (state.selectedTargets.size > 0) {
+          state.selectedTargets.clear();
+          savePersistedTargets();
+          renderComposerTargets();
+          updatePreview();
+        }
+        e.preventDefault(); return;
+      }
+      if (e.key === 'a' || e.key === 'A') {
+        toggleAllTargets(); e.preventDefault(); return;
       }
     }
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -2931,6 +3111,8 @@ INDEX_HTML = r"""<!doctype html>
       const meta = await r.json();
       state.channel = meta.channel;
       state.server_host = meta.server_host;
+      loadPersistedTargets();
+      renderComposerTargets();
       hChannel.textContent = (DM_MODE ? 'DM — trio#' : 'trio#') + meta.channel;
       state.originalTitle = (DM_MODE ? 'DM — trio#' : 'trio#') + meta.channel;
       if (DM_MODE) document.body.classList.add('dm-mode');
