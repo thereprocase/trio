@@ -1044,10 +1044,44 @@ INDEX_HTML = r"""<!doctype html>
 <title>nth_web</title>
 <style>
   :root {
+    /* ── Midnight (default dark) ── */
     --bg: #0b0f14; --bg2: #121821; --panel: #161d27; --border: #273040;
     --fg: #d8dde6; --dim: #7a8596; --dimmer: #4a5262;
-    --accent: #3ba0e6; --accent2: #59cb79; --warn: #e3c34c; --err: #e56a4a;
-    --mention: #e3c34c;
+    --accent: #3ba0e6; --accent-hi: #50b0f0; --accent2: #59cb79;
+    --warn: #e3c34c; --err: #e56a4a; --mention: #e3c34c;
+    --hover: #0f1420; --ov: 255,255,255;
+  }
+  :root[data-theme="light"] {
+    /* ── Daylight (light) ── */
+    --bg: #f6f7f9; --bg2: #eceef2; --panel: #e2e6ec; --border: #c8cfd8;
+    --fg: #1c2430; --dim: #5a6675; --dimmer: #9aa4b2;
+    --accent: #1f7fd0; --accent-hi: #2b93e6; --accent2: #2e9e52;
+    --warn: #b8860b; --err: #cc4a2c; --mention: #b8860b;
+    --hover: #dce1e8; --ov: 0,0,0;
+  }
+  :root[data-theme="nord"] {
+    /* ── Nord (dark) ── */
+    --bg: #2e3440; --bg2: #2b303b; --panel: #3b4252; --border: #434c5e;
+    --fg: #e5e9f0; --dim: #8f9bb3; --dimmer: #616e88;
+    --accent: #88c0d0; --accent-hi: #8fbcbb; --accent2: #a3be8c;
+    --warn: #ebcb8b; --err: #bf616a; --mention: #ebcb8b;
+    --hover: #353c4a; --ov: 255,255,255;
+  }
+  :root[data-theme="dracula"] {
+    /* ── Dracula (dark) ── */
+    --bg: #282a36; --bg2: #21222c; --panel: #343746; --border: #44475a;
+    --fg: #f8f8f2; --dim: #a0a3b1; --dimmer: #6272a4;
+    --accent: #bd93f9; --accent-hi: #caa9fa; --accent2: #50fa7b;
+    --warn: #f1fa8c; --err: #ff5555; --mention: #ffb86c;
+    --hover: #313442; --ov: 255,255,255;
+  }
+  :root[data-theme="solarized"] {
+    /* ── Solarized Light ── */
+    --bg: #fdf6e3; --bg2: #eee8d5; --panel: #e7e0c9; --border: #d3cbb2;
+    --fg: #073642; --dim: #657b83; --dimmer: #93a1a1;
+    --accent: #268bd2; --accent-hi: #3a9bde; --accent2: #859900;
+    --warn: #b58900; --err: #dc322f; --mention: #b58900;
+    --hover: #eee8d5; --ov: 0,0,0;
   }
   * { box-sizing: border-box; }
   :root {
@@ -1063,6 +1097,8 @@ INDEX_HTML = r"""<!doctype html>
 
   #app { display: grid; grid-template-columns: 1fr 300px; grid-template-rows: 42px 1fr auto;
          height: 100vh; }
+  #app.side-collapsed { grid-template-columns: 1fr 0; }
+  #app.side-collapsed #side { display: none; }
 
   /* ── Header ── */
   header { grid-column: 1 / 3; background: var(--bg2); border-bottom: 1px solid var(--border);
@@ -1071,30 +1107,53 @@ INDEX_HTML = r"""<!doctype html>
   header .title { color: var(--accent); }
   header .meta { color: var(--dim); font-weight: 400; font-size: 11px; }
   header .spacer { flex: 1; }
-  header .pill {
+  .pill {
     font-size: 11px; padding: 3px 8px; border-radius: 3px; cursor: pointer;
     background: var(--panel); border: 1px solid var(--border); user-select: none;
     color: var(--dim); font-weight: 500;
   }
-  header .pill:hover { border-color: var(--accent); color: var(--fg); }
-  header .pill.on { background: var(--accent); color: var(--bg); border-color: var(--accent); }
+  .pill:hover { border-color: var(--accent); color: var(--fg); }
+  .pill.on { background: var(--accent); color: var(--bg); border-color: var(--accent); }
   header .pill.conn.ok { color: var(--accent2); }
   header .pill.conn.bad { color: var(--err); }
   header #filter { background: var(--panel); color: var(--fg); border: 1px solid var(--border);
                    padding: 3px 8px; border-radius: 3px; font-family: inherit; font-size: 11px;
                    width: 160px; }
   header #filter:focus { outline: none; border-color: var(--accent); }
-  header #font-picker { background: var(--panel); color: var(--fg); border: 1px solid var(--border);
+  #font-picker, #theme-picker {
+                        background: var(--panel); color: var(--fg); border: 1px solid var(--border);
                         padding: 3px 6px; border-radius: 3px; font-family: inherit; font-size: 11px;
                         cursor: pointer; }
-  header #font-picker:focus { outline: none; border-color: var(--accent); }
+  #font-picker:focus, #theme-picker:focus { outline: none; border-color: var(--accent); }
+
+  /* ── Settings panel (drawer) ── */
+  #settings-panel {
+    position: fixed; top: 46px; right: 10px; z-index: 30;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
+    padding: 12px 14px; min-width: 250px; max-width: 320px;
+    box-shadow: 0 8px 30px rgba(0,0,0,0.4);
+    display: flex; flex-direction: column; gap: 10px;
+  }
+  #settings-panel[hidden] { display: none; }
+  #settings-panel h3 { margin: 0; font-size: 10px; text-transform: uppercase;
+                       letter-spacing: 0.6px; color: var(--dim); font-weight: 700; }
+  #settings-panel .set-row { display: flex; align-items: center;
+                             justify-content: space-between; gap: 12px;
+                             font-size: 12px; color: var(--fg); }
+  #settings-panel .set-row[hidden] { display: none; }
+  #settings-panel .set-row > span:first-child { color: var(--dim); white-space: nowrap; }
+  #settings-panel select {
+    background: var(--panel); color: var(--fg); border: 1px solid var(--border);
+    padding: 3px 6px; border-radius: 3px; font-family: inherit; font-size: 11px; cursor: pointer; }
+  #settings-panel select:focus { outline: none; border-color: var(--accent); }
+  #settings-panel input[type="range"] { width: 130px; cursor: pointer; accent-color: var(--accent); }
 
   /* ── Chat ── */
   #chat-wrap { grid-row: 2 / 3; grid-column: 1 / 2; position: relative; overflow: hidden; }
   #chat { height: 100%; overflow-y: auto; padding: 12px 16px; scroll-behavior: smooth; }
   .msg { margin-bottom: 10px; word-wrap: break-word; cursor: pointer; padding: 4px 8px 6px;
          border-radius: 3px; border-left: 3px solid transparent; margin-left: -8px; }
-  .msg:hover { background: #0f1420; }
+  .msg:hover { background: var(--hover); }
   .msg .head { font-size: 11px; color: var(--dim); margin-bottom: 2px;
                display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
   .msg .head .time { cursor: help; }
@@ -1144,10 +1203,10 @@ INDEX_HTML = r"""<!doctype html>
   .msg .body > *:first-child { margin-top: 0; }
   .msg .body > *:last-child { margin-bottom: 0; }
   .msg .body p { margin: 4px 0; white-space: pre-wrap; }
-  #chat .msg .body code.mdic { background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.1);
+  #chat .msg .body code.mdic { background: rgba(var(--ov),0.08); border: 1px solid rgba(var(--ov),0.1);
                          border-radius: 3px; padding: 0 4px; font-family: ui-monospace, Menlo, Monaco, monospace;
                          font-size: 0.92em; }
-  #chat .msg .body pre.mdcode { background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1);
+  #chat .msg .body pre.mdcode { background: rgba(var(--ov),0.05); border: 1px solid rgba(var(--ov),0.1);
                           border-radius: 4px; padding: 6px 8px; margin: 4px 0;
                           font-family: ui-monospace, Menlo, Monaco, monospace; font-size: 0.9em;
                           white-space: pre-wrap; overflow-x: auto; }
@@ -1158,8 +1217,8 @@ INDEX_HTML = r"""<!doctype html>
   .msg .body h1, .msg .body h2, .msg .body h3,
   .msg .body h4, .msg .body h5, .msg .body h6 {
     margin: 8px 0 4px; font-weight: 700; line-height: 1.25; }
-  .msg .body h1 { font-size: 1.35em; border-bottom: 1px solid rgba(255,255,255,0.15); padding-bottom: 2px; }
-  .msg .body h2 { font-size: 1.2em; border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom: 2px; }
+  .msg .body h1 { font-size: 1.35em; border-bottom: 1px solid rgba(var(--ov),0.15); padding-bottom: 2px; }
+  .msg .body h2 { font-size: 1.2em; border-bottom: 1px solid rgba(var(--ov),0.1); padding-bottom: 2px; }
   .msg .body h3 { font-size: 1.1em; }
   .msg .body h4 { font-size: 1.0em; }
   .msg .body h5 { font-size: 0.95em; opacity: 0.9; }
@@ -1171,11 +1230,11 @@ INDEX_HTML = r"""<!doctype html>
   .msg .body li.task { list-style: none; margin-left: -18px; }
   .msg .body li.task input { margin-right: 6px; vertical-align: -1px; }
   .msg .body blockquote { margin: 4px 0; padding: 2px 10px; border-left: 3px solid var(--accent2);
-                          background: rgba(255,255,255,0.03); color: rgba(255,255,255,0.85); }
-  .msg .body hr { border: 0; border-top: 1px solid rgba(255,255,255,0.18); margin: 8px 0; }
+                          background: rgba(var(--ov),0.03); color: rgba(var(--ov),0.85); }
+  .msg .body hr { border: 0; border-top: 1px solid rgba(var(--ov),0.18); margin: 8px 0; }
   .msg .body table { border-collapse: collapse; margin: 4px 0; font-size: 0.95em; }
-  .msg .body th, .msg .body td { border: 1px solid rgba(255,255,255,0.15); padding: 3px 8px; }
-  .msg .body th { background: rgba(255,255,255,0.06); font-weight: 700; text-align: left; }
+  .msg .body th, .msg .body td { border: 1px solid rgba(var(--ov),0.15); padding: 3px 8px; }
+  .msg .body th { background: rgba(var(--ov),0.06); font-weight: 700; text-align: left; }
   .msg.compact .body {
     display: -webkit-box;
     -webkit-line-clamp: 3;
@@ -1226,7 +1285,7 @@ INDEX_HTML = r"""<!doctype html>
               border-radius: 18px; cursor: pointer; font-weight: 600; font-size: 11px;
               box-shadow: 0 4px 14px rgba(0,0,0,0.5); display: none; z-index: 5; }
   #jump-btn.show { display: block; }
-  #jump-btn:hover { background: #50b0f0; }
+  #jump-btn:hover { background: var(--accent-hi); }
   #jump-btn .count { background: var(--err); color: white;
                      border-radius: 10px; padding: 1px 6px; margin-left: 4px; font-size: 10px; }
 
@@ -1240,7 +1299,7 @@ INDEX_HTML = r"""<!doctype html>
              letter-spacing: 0.08em; margin: 0 0 8px; font-weight: 600; }
 
   .member { padding: 5px 0; cursor: pointer; }
-  .member + .member { border-top: 1px solid #1d2533; }
+  .member + .member { border-top: 1px solid var(--border); }
   .member .row { display: flex; align-items: center; gap: 8px; }
   .member .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
   .member .roster-animal { font-size: 16px; line-height: 1; flex-shrink: 0;
@@ -1333,7 +1392,7 @@ INDEX_HTML = r"""<!doctype html>
   #send-btn { background: var(--accent); color: var(--bg); border: none;
               padding: 0 18px; height: 36px; border-radius: 4px; cursor: pointer;
               font-weight: 600; font-family: inherit; font-size: 13px; }
-  #send-btn:hover { background: #50b0f0; }
+  #send-btn:hover { background: var(--accent-hi); }
   #send-btn:disabled { opacity: 0.5; cursor: not-allowed; }
   #hint { font-size: 10px; color: var(--dimmer); margin-top: 2px; }
   #hint kbd { background: var(--panel); border: 1px solid var(--border); padding: 1px 5px;
@@ -1371,7 +1430,7 @@ INDEX_HTML = r"""<!doctype html>
   #guest-modal button { margin-top: 10px; padding: 8px 16px; background: var(--accent);
                         color: var(--bg); border: none; border-radius: 4px;
                         font-weight: 600; cursor: pointer; }
-  #guest-modal button:hover { background: #50b0f0; }
+  #guest-modal button:hover { background: var(--accent-hi); }
 </style>
 </head>
 <body>
@@ -1395,6 +1454,17 @@ INDEX_HTML = r"""<!doctype html>
     <span class="title" id="h-channel">trio#…</span>
     <span class="meta" id="h-meta">connecting…</span>
     <span class="spacer"></span>
+    <select id="theme-picker" title="color theme">
+      <optgroup label="Dark">
+        <option value="midnight">Midnight</option>
+        <option value="nord">Nord</option>
+        <option value="dracula">Dracula</option>
+      </optgroup>
+      <optgroup label="Light">
+        <option value="light">Daylight</option>
+        <option value="solarized">Solarized</option>
+      </optgroup>
+    </select>
     <select id="font-picker" title="message font">
       <option value='"JetBrains Mono", "Fira Code", "Cascadia Code", ui-monospace, Menlo, monospace'>JetBrains Mono (default)</option>
       <option value='"Fira Code", ui-monospace, Menlo, monospace'>Fira Code</option>
@@ -1405,13 +1475,19 @@ INDEX_HTML = r"""<!doctype html>
       <option value='Menlo, Monaco, ui-monospace, monospace'>Menlo</option>
       <option value='Monaco, Menlo, ui-monospace, monospace'>Monaco</option>
       <option value='Consolas, "Cascadia Mono", ui-monospace, monospace'>Consolas</option>
-      <option value='ui-monospace, SFMono-Regular, Menlo, Consolas, monospace'>System mono</option>
+      <option value='"SF Mono", "SFMono-Regular", ui-monospace, Menlo, monospace'>SF Mono</option>
     </select>
     <input id="filter" type="text" placeholder="filter messages…" spellcheck="false">
+    <span class="pill on" id="btn-side" title="show/hide the roster sidebar">roster</span>
     <span class="pill" id="btn-compact" title="clamp every message body to 3 lines">compact</span>
     <span class="pill" id="btn-notify" title="desktop notifications on @you">🔔 off</span>
+    <span class="pill" id="btn-sound" title="play a chime on any new message">🔊 off</span>
+    <span class="pill" id="btn-settings" title="settings">⚙ settings</span>
     <span class="pill conn bad" id="h-conn">● disconnected</span>
   </header>
+  <div id="settings-panel" hidden>
+    <h3>Settings</h3>
+  </div>
 
   <div id="chat-wrap">
     <div id="chat"></div>
@@ -1449,6 +1525,7 @@ INDEX_HTML = r"""<!doctype html>
       <kbd>Alt+1..9</kbd> toggle target
       <kbd>Alt+A</kbd> all
       <kbd>Alt+0</kbd> clear
+      <kbd>Ctrl+B</kbd> roster
       <span style="margin-left:14px;color:var(--dim)">click a message to expand/collapse in compact mode</span>
     </div>
   </div>
@@ -1474,6 +1551,7 @@ INDEX_HTML = r"""<!doctype html>
   const filterBanner = document.getElementById('filter-banner');
   const btnCompact = document.getElementById('btn-compact');
   const btnNotify = document.getElementById('btn-notify');
+  const btnSound = document.getElementById('btn-sound');
   const fontPicker = document.getElementById('font-picker');
   const jumpBtn = document.getElementById('jump-btn');
   const jumpCount = document.getElementById('jump-count');
@@ -1494,6 +1572,28 @@ INDEX_HTML = r"""<!doctype html>
     const v = fontPicker.value;
     document.documentElement.style.setProperty('--msg-font', v);
     try { localStorage.setItem('trio.msgFont', v); } catch (_) {}
+  });
+
+  // Theme picker — persists per-origin via localStorage. Unknown/missing
+  // theme falls back to 'midnight' (the base :root palette).
+  const themePicker = document.getElementById('theme-picker');
+  function applyTheme(v) {
+    document.documentElement.setAttribute('data-theme', v || 'midnight');
+  }
+  try {
+    const savedTheme = localStorage.getItem('trio.theme');
+    if (savedTheme) {
+      for (const opt of themePicker.options) {
+        if (opt.value === savedTheme) { themePicker.value = savedTheme; break; }
+      }
+      applyTheme(savedTheme);
+    } else {
+      applyTheme('midnight');
+    }
+  } catch (_) { applyTheme('midnight'); }
+  themePicker.addEventListener('change', () => {
+    applyTheme(themePicker.value);
+    try { localStorage.setItem('trio.theme', themePicker.value); } catch (_) {}
   });
 
   // ── URL params ──
@@ -1520,6 +1620,10 @@ INDEX_HTML = r"""<!doctype html>
     expandedMsgs: new Set(),        // ids with per-msg override (toggle-specific)
     expandedMembers: new Set(),     // member ids with expanded stats
     notifyEnabled: false,
+    soundEnabled: false,
+    chimeVolume: 0.33,
+    notifyScope: 'mention',   // 'mention' | 'all'
+    notifyWhen: 'hidden',     // 'hidden' | 'always'
     unreadCount: 0,                 // for tab title while hidden
     jumpUnread: 0,                  // messages arrived while user was scrolled up
     rateBins: new Map(),            // bin_epoch_10s → count
@@ -2135,9 +2239,12 @@ INDEX_HTML = r"""<!doctype html>
 
     // Desktop notification on @you while hidden (opt-in). In DM mode,
     // only fire for the DM target — don't pull focus for other channel chatter.
-    const notifyEligible = !isMine && mentionsOperator &&
-                           (!state.dmTargetId || m.member_id === state.dmTargetId);
-    if (document.hidden && notifyEligible && state.notifyEnabled &&
+    const dmOk = (!state.dmTargetId || m.member_id === state.dmTargetId);
+    const scopeOk = state.notifyScope === 'all'
+      ? (!isMine && !isSystem)
+      : (!isMine && mentionsOperator);
+    const whenOk = state.notifyWhen === 'always' ? true : document.hidden;
+    if (state.notifyEnabled && whenOk && scopeOk && dmOk &&
         'Notification' in window && Notification.permission === 'granted') {
       try {
         const n = new Notification(`@${state.operator.name} — ${m.member_name}`, {
@@ -2148,6 +2255,9 @@ INDEX_HTML = r"""<!doctype html>
         n.onclick = () => { window.focus(); n.close(); };
       } catch (e) { /* ignore */ }
     }
+
+    // In-page chime on any new message from someone else (opt-in, focus-agnostic).
+    if (state.soundEnabled && !isMine && !isSystem) playChime();
   }
 
   // Existing message names may change (rename) — update author labels + mention
@@ -2925,6 +3035,191 @@ INDEX_HTML = r"""<!doctype html>
       btnNotify.textContent = '🔔 off';
       btnNotify.classList.remove('on');
     }
+    if (typeof syncSettingVisibility === 'function') syncSettingVisibility();
+  });
+
+  // ── Chime (WebAudio, no audio asset — synthesized on the fly) ──
+  let _audioCtx = null;
+  function ensureAudio() {
+    if (_audioCtx) return _audioCtx;
+    try {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      _audioCtx = AC ? new AC() : null;
+    } catch (_) { _audioCtx = null; }
+    return _audioCtx;
+  }
+  function playChime() {
+    const ctx = ensureAudio();
+    if (!ctx) return;
+    if (ctx.state === 'suspended') { try { ctx.resume(); } catch (_) {} }
+    const vol = Math.max(0, Math.min(1, state.chimeVolume));
+    if (vol <= 0) return;
+    try {
+      const now = ctx.currentTime;
+      const gain = ctx.createGain();
+      gain.gain.setValueAtTime(0.0001, now);
+      gain.gain.exponentialRampToValueAtTime(vol, now + 0.012);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.40);
+      gain.connect(ctx.destination);
+      // two-note ping: E6 -> A6
+      [[1318.51, 0], [1760.0, 0.09]].forEach(([freq, t]) => {
+        const osc = ctx.createOscillator();
+        osc.type = 'sine';
+        osc.frequency.value = freq;
+        osc.connect(gain);
+        osc.start(now + t);
+        osc.stop(now + t + 0.28);
+      });
+    } catch (_) { /* ignore */ }
+  }
+
+  // ── Sound (chime) toggle — off by default; chimes on any new peer message ──
+  btnSound.addEventListener('click', () => {
+    state.soundEnabled = !state.soundEnabled;
+    btnSound.textContent = state.soundEnabled ? '🔊 on' : '🔊 off';
+    btnSound.classList.toggle('on', state.soundEnabled);
+    try { localStorage.setItem('trio.sound', state.soundEnabled ? '1' : '0'); } catch (_) {}
+    // The click is a user gesture — unlock the AudioContext and preview the chime.
+    if (state.soundEnabled) { ensureAudio(); playChime(); }
+    if (typeof syncSettingVisibility === 'function') syncSettingVisibility();
+  });
+  // Restore persisted preference (audio stays suspended until the first gesture).
+  try {
+    if (localStorage.getItem('trio.sound') === '1') {
+      state.soundEnabled = true;
+      btnSound.textContent = '🔊 on';
+      btnSound.classList.add('on');
+    }
+  } catch (_) {}
+
+  // ── Sidebar collapse toggle — persisted; 'on' pill state == roster visible ──
+  const btnSide = document.getElementById('btn-side');
+  const appEl = document.getElementById('app');
+  function applySidebar(collapsed) {
+    appEl.classList.toggle('side-collapsed', collapsed);
+    btnSide.classList.toggle('on', !collapsed);
+  }
+  let _sideCollapsed = false;
+  try { _sideCollapsed = localStorage.getItem('trio.sideCollapsed') === '1'; } catch (_) {}
+  applySidebar(_sideCollapsed);
+  function toggleSidebar() {
+    _sideCollapsed = !_sideCollapsed;
+    applySidebar(_sideCollapsed);
+    try { localStorage.setItem('trio.sideCollapsed', _sideCollapsed ? '1' : '0'); } catch (_) {}
+  }
+  btnSide.addEventListener('click', toggleSidebar);
+  // Keyboard shortcut: Ctrl+B toggles the roster sidebar (editor convention).
+  document.addEventListener('keydown', (e) => {
+    if (e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey &&
+        (e.key === 'b' || e.key === 'B')) {
+      e.preventDefault();
+      toggleSidebar();
+    }
+  });
+
+  // ── Settings panel: relocate controls out of the header into a ⚙ drawer ──
+  // appendChild MOVES the live elements, so every existing handler/state stays
+  // intact — no rewiring, no reproducing the font list.
+  const btnSettings = document.getElementById('btn-settings');
+  const settingsPanel = document.getElementById('settings-panel');
+  [
+    ['Theme', 'theme-picker'],
+    ['Message font', 'font-picker'],
+    ['Roster sidebar', 'btn-side'],
+    ['Compact messages', 'btn-compact'],
+    ['Desktop notifications', 'btn-notify'],
+    ['Chime on new message', 'btn-sound'],
+  ].forEach(([labelText, id]) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    const row = document.createElement('div');
+    row.className = 'set-row';
+    const lab = document.createElement('span');
+    lab.textContent = labelText;
+    row.appendChild(lab);
+    row.appendChild(el);
+    settingsPanel.appendChild(row);
+  });
+
+  // Extra settings built here (not relocated): chime volume + notify prefs.
+  function addSettingRow(labelText, controlEl) {
+    const row = document.createElement('div');
+    row.className = 'set-row';
+    const lab = document.createElement('span');
+    lab.textContent = labelText;
+    row.appendChild(lab);
+    row.appendChild(controlEl);
+    settingsPanel.appendChild(row);
+    return row;
+  }
+
+  // Chime volume slider — drives state.chimeVolume; previews on release.
+  try {
+    const sv = parseFloat(localStorage.getItem('trio.chimeVolume'));
+    if (!isNaN(sv)) state.chimeVolume = Math.max(0, Math.min(1, sv));
+  } catch (_) {}
+  const volSlider = document.createElement('input');
+  volSlider.type = 'range';
+  volSlider.min = '0'; volSlider.max = '1'; volSlider.step = '0.01';
+  volSlider.value = String(state.chimeVolume);
+  volSlider.addEventListener('input', () => {
+    state.chimeVolume = parseFloat(volSlider.value) || 0;
+    try { localStorage.setItem('trio.chimeVolume', String(state.chimeVolume)); } catch (_) {}
+  });
+  volSlider.addEventListener('change', () => { ensureAudio(); playChime(); });
+  const chimeVolRow = addSettingRow('Chime volume', volSlider);
+
+  // Notification preference dropdowns.
+  function prefSelect(options, current) {
+    const sel = document.createElement('select');
+    options.forEach(([val, label]) => {
+      const o = document.createElement('option');
+      o.value = val; o.textContent = label;
+      if (val === current) o.selected = true;
+      sel.appendChild(o);
+    });
+    return sel;
+  }
+  try {
+    const ns = localStorage.getItem('trio.notifyScope'); if (ns) state.notifyScope = ns;
+    const nw = localStorage.getItem('trio.notifyWhen'); if (nw) state.notifyWhen = nw;
+  } catch (_) {}
+  const notifyScopeSel = prefSelect(
+    [['mention', '@mentions only'], ['all', 'all messages']], state.notifyScope);
+  notifyScopeSel.addEventListener('change', () => {
+    state.notifyScope = notifyScopeSel.value;
+    try { localStorage.setItem('trio.notifyScope', state.notifyScope); } catch (_) {}
+  });
+  const notifyScopeRow = addSettingRow('Notify for', notifyScopeSel);
+  const notifyWhenSel = prefSelect(
+    [['hidden', 'tab in background'], ['always', 'always']], state.notifyWhen);
+  notifyWhenSel.addEventListener('change', () => {
+    state.notifyWhen = notifyWhenSel.value;
+    try { localStorage.setItem('trio.notifyWhen', state.notifyWhen); } catch (_) {}
+  });
+  const notifyWhenRow = addSettingRow('Notify when', notifyWhenSel);
+
+  // Sub-settings only show when their parent feature is enabled.
+  function syncSettingVisibility() {
+    if (chimeVolRow) chimeVolRow.hidden = !state.soundEnabled;
+    if (notifyScopeRow) notifyScopeRow.hidden = !state.notifyEnabled;
+    if (notifyWhenRow) notifyWhenRow.hidden = !state.notifyEnabled;
+  }
+  syncSettingVisibility();
+
+  function toggleSettings(force) {
+    const show = (force !== undefined) ? force : settingsPanel.hasAttribute('hidden');
+    if (show) { settingsPanel.removeAttribute('hidden'); btnSettings.classList.add('on'); }
+    else { settingsPanel.setAttribute('hidden', ''); btnSettings.classList.remove('on'); }
+  }
+  btnSettings.addEventListener('click', (e) => { e.stopPropagation(); toggleSettings(); });
+  document.addEventListener('click', (e) => {
+    if (settingsPanel.hasAttribute('hidden')) return;
+    if (settingsPanel.contains(e.target) || btnSettings.contains(e.target)) return;
+    toggleSettings(false);
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !settingsPanel.hasAttribute('hidden')) toggleSettings(false);
   });
 
   // ── Jump-to-latest + unread counter ──
