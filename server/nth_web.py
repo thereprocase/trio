@@ -4414,13 +4414,16 @@ INDEX_HTML = r"""<!doctype html>
     updateChanStats();
   }
 
-
+  // __TRIO_TEST_HOOK_START__
   // Test hook: when this script is loaded under the Node DOM harness
-  // (tests/dom-harness.js), expose the internal render/parse helpers for
-  // unit testing. Completely inert in the browser — globalThis.__TRIO_TEST__
-  // is only ever pre-seeded by the harness sandbox, never in production.
-  // Placed before boot() so the hooks are available even if boot() throws
-  // against the harness's minimal DOM stubs.
+  // (tests/dom-harness.js), expose the internal render/parse helpers for unit
+  // testing. This whole block (marker to marker) is STRIPPED from the served
+  // browser bundle at render time (see _strip_test_hook in the INDEX_HTML
+  // substitution below), so the internal state reference never ships to a
+  // browser at all. The runtime guard is a second line of defense in case the
+  // strip ever fails: the test global is only pre-seeded by the harness
+  // sandbox, never in production. Placed before boot() so the hooks are
+  // available even if boot() throws against the harness's minimal DOM.
   if (typeof globalThis !== 'undefined' && globalThis.__TRIO_TEST__) {
     globalThis.__TRIO_TEST__ = {
       state,
@@ -4428,6 +4431,8 @@ INDEX_HTML = r"""<!doctype html>
       formatTime,
     };
   }
+  // __TRIO_TEST_HOOK_END__
+
   boot();
 })();
 </script>
@@ -4435,9 +4440,21 @@ INDEX_HTML = r"""<!doctype html>
 </html>
 """
 
+# Strip the test-only hook block (between the sentinel markers) from the served
+# browser bundle so the internal `state` reference is never exposed on a global
+# in production. The Node DOM harness reads the raw source file directly, so it
+# still sees the block. If the markers are ever renamed the block simply stays
+# in — no worse than the runtime __TRIO_TEST__ guard that also protects it.
+def _strip_test_hook(html: str) -> str:
+    return re.sub(
+        r"\n\s*// __TRIO_TEST_HOOK_START__.*?// __TRIO_TEST_HOOK_END__",
+        "", html, flags=re.DOTALL)
+
+
 # One-shot substitution at import time — inject the emoji list into the JS
-# so server-side animal_for() and client-side animalFor() stay in sync.
-INDEX_HTML = (
+# so server-side animal_for() and client-side animalFor() stay in sync, and
+# drop the test hook from the shipped bundle.
+INDEX_HTML = _strip_test_hook(
     INDEX_HTML
     .replace("/*__ANIMAL_EMOJIS__*/", json.dumps([e for _, e in ANIMAL_EMOJIS]))
     .replace("/*__ANIMAL_NAMES__*/",  json.dumps([n for n, _ in ANIMAL_EMOJIS]))
