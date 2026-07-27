@@ -306,7 +306,9 @@ function buildScript() {
   const end = py.indexOf('</script>', start);
   if (start < 0 || end < 0) throw new Error('could not locate <script> block in nth_web.py');
   let js = py.slice(start + '<script>'.length, end);
-  const askHelpers = fs.readFileSync(ASK_JS, 'utf8');
+  // The ask-helpers module is optional: it only exists in builds that ship
+  // the multiple-choice picker. Absent it, the placeholder collapses to ''.
+  const askHelpers = fs.existsSync(ASK_JS) ? fs.readFileSync(ASK_JS, 'utf8') : '';
   // Same placeholder substitutions nth_web.py performs at serve time. The
   // animal lists only feed the guest-avatar picker; empty arrays parse fine
   // and don't affect any code path under test.
