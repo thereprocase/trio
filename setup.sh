@@ -56,7 +56,7 @@ if [ "${1:-}" = "hub-service" ] || [ "${1:-}" = "upgrade" ]; then
     echo "Deploying server files: repo -> $HUB_DIR (backups: *.bak-$STAMP)"
     for f in nth_server.py nth_monitor.py nth_spoke_monitor.py nth_console.py \
              nth_dashboard.py nth_web.py quartet_server.py nth_constants.py \
-             nth_doctor.py; do
+             nth_doctor.py codex_context_publisher.py; do
         if [ -f "$HUB_DIR/$f" ] && ! cmp -s "$SCRIPT_DIR/server/$f" "$HUB_DIR/$f"; then
             cp "$HUB_DIR/$f" "$HUB_DIR/$f.bak-$STAMP"
         fi
@@ -322,6 +322,7 @@ cp "$SCRIPT_DIR/server/quartet_server.py" "$SERVER_DIR/quartet_server.py"
 cp "$SCRIPT_DIR/server/nth_constants.py" "$SERVER_DIR/nth_constants.py"
 cp "$SCRIPT_DIR/server/nth_doctor.py" "$SERVER_DIR/nth_doctor.py"
 cp "$SCRIPT_DIR/server/nth_spoke_monitor.py" "$SERVER_DIR/nth_spoke_monitor.py"
+cp "$SCRIPT_DIR/server/codex_context_publisher.py" "$SERVER_DIR/codex_context_publisher.py"
 
 # nth-doctor launcher: stdlib-only health check, callable from anywhere.
 if [ "$PLATFORM" != "windows" ]; then
