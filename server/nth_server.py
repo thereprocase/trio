@@ -27,7 +27,7 @@ from pathlib import Path
 # Add server/ to sys.path so nth_constants can be imported when MCP spawns this
 import sys
 sys.path.insert(0, str(Path(__file__).parent))
-from nth_constants import SLEEPING_KEYWORDS
+from nth_constants import SLEEPING_KEYWORDS, NTH_VERSION
 
 from mcp.server.fastmcp import FastMCP
 
@@ -50,6 +50,11 @@ MESSAGE_FOOTER = (
 SERVER_NAME = os.environ.get("NTH_SERVER_NAME", "nth-trio")
 SERVER_HOST = os.environ.get("NTH_HOST", "127.0.0.1")
 TOOL_PREFIX = os.environ.get("NTH_TOOL_PREFIX", "trio")
+
+# How this server process reaches the DB, for the fleet view. "hub" = the
+# shared SSE process spokes connect to; "stdio" = a per-session local spawn.
+# Client-declared spoke check-ins (node_host on connect) get "spoke".
+NODE_TRANSPORT = "hub" if TOOL_PREFIX == "quartet" else "stdio"
 
 def _find_free_port(preferred: int = 8000) -> int:
     """Try preferred port, then scan for a free one."""
@@ -133,13 +138,13 @@ def _startup_banner():
     _safe_print("\033[1m", end="")
     _safe_print("  +-------------------------------------------+")
     _safe_print(f"  |  nth server - {SERVER_NAME:<27s}|")
-    _safe_print(f"  |  {f'{SERVER_HOST}:{SERVER_PORT}':<31s}|")
-    _safe_print(f"  |  tools: {TOOL_PREFIX}_* (19)                    |")
+    _safe_print(f"  |  {f'v{NTH_VERSION}  {SERVER_HOST}:{SERVER_PORT}':<41s}|")
+    _safe_print(f"  |  tools: {TOOL_PREFIX}_*                            |")
     _safe_print(f"  |  db: ~/.claude/nth/nth.db                 |")
     if connect_url:
         _safe_print("  |                                           |")
-        _safe_print(f"  |  Remote setup:                            |")
-        _safe_print(f"  |  bash setup.sh remote                    |")
+        _safe_print(f"  |  Spoke setup:                             |")
+        _safe_print(f"  |  bash setup.sh spoke                      |")
         _safe_print(f"  |    {connect_url[:39]:<39s}|")
     _safe_print("  +-------------------------------------------+")
     _safe_print("\033[0m", flush=True)
@@ -335,6 +340,21 @@ def get_db() -> sqlite3.Connection:
         CREATE INDEX IF NOT EXISTS idx_sessions_member
         ON sessions (channel, member_id)
     """)
+    # v7.3: fleet check-ins. One row per (hostname, transport) — a machine
+    # running both a stdio server and a monitor gets two rows. Spoke rows
+    # come from client-declared node_host on connect (the hub can't see a
+    # spoke's hostname server-side; SSE tool calls execute on the hub).
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS nodes (
+            hostname    TEXT NOT NULL,
+            transport   TEXT NOT NULL,
+            nth_version TEXT NOT NULL DEFAULT '',
+            python      TEXT NOT NULL DEFAULT '',
+            pid         INTEGER,
+            last_seen   TEXT NOT NULL,
+            PRIMARY KEY (hostname, transport)
+        )
+    """)
     conn.commit()
     return conn
 
@@ -460,6 +480,49 @@ def _seconds_since(iso_timestamp: str) -> float:
         return float("inf")
 
 
+def _node_python() -> str:
+    v = sys.version_info
+    return f"{v.major}.{v.minor}.{v.micro}"
+
+
+def upsert_node(db, hostname: str, transport: str,
+                nth_version: str = "", pid: int | None = None) -> None:
+    """Record a fleet check-in. Idempotent; last writer wins per (host, transport)."""
+    db.execute(
+        "INSERT INTO nodes (hostname, transport, nth_version, python, pid, last_seen) "
+        "VALUES (?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT(hostname, transport) DO UPDATE SET "
+        "nth_version = excluded.nth_version, python = excluded.python, "
+        "pid = excluded.pid, last_seen = excluded.last_seen",
+        (hostname, transport, nth_version, _node_python(), pid, now_iso()),
+    )
+
+
+# Poll runs many times a minute; refresh our own node row at most this often.
+_NODE_REFRESH_SECONDS = 60
+_node_last_refresh = 0.0
+
+
+def _checkin_self_node(db, force: bool = False) -> None:
+    """Upsert this server process's own node row, rate-limited for poll paths.
+
+    Never raises: fleet bookkeeping must not break message traffic (e.g. a
+    pre-v7.3 monitor-owned DB connection racing the ALTER-free nodes create).
+    """
+    global _node_last_refresh
+    mono = time.monotonic()
+    if not force and mono - _node_last_refresh < _NODE_REFRESH_SECONDS:
+        return
+    try:
+        import socket
+        upsert_node(db, socket.gethostname(), NODE_TRANSPORT,
+                    nth_version=NTH_VERSION, pid=os.getpid())
+        db.commit()
+        _node_last_refresh = mono
+    except sqlite3.Error:
+        pass
+
+
 def _mint_session_token(db, member_id: str, channel: str,
                         role: str = "primary", fingerprint: str = "",
                         pid: int | None = None) -> str:
@@ -528,6 +591,8 @@ def nth_connect(
     topic: str = "",
     skills: str = "",
     pin_topic: bool = False,
+    node_host: str = "",
+    node_version: str = "",
 ) -> str:
     """Join an nth channel. Creates the channel if it doesn't exist.
 
@@ -551,6 +616,11 @@ def nth_connect(
         channel: Channel code to join. If empty, generates from topic or randomly.
         topic: Used to generate a readable channel code (ignored if channel given)
         skills: Comma-separated list of your skills/capabilities
+        node_host: Hostname of the machine you are running on. Only useful for
+            remote (SSE) connections — the hub cannot see a spoke's hostname
+            server-side, so declaring it here puts your machine on the fleet view.
+        node_version: Your local nth install version (from nth_constants), so
+            the fleet view can flag version drift between hub and spokes.
     """
     if channel:
         err = validate_channel_code(channel)
@@ -689,6 +759,20 @@ def nth_connect(
             (latest_id, session_token),
         )
         db.commit()
+
+        # v7.3 fleet check-in: this process's own row, plus the caller's
+        # declared host when it names a different machine (an SSE spoke).
+        _checkin_self_node(db, force=True)
+        if node_host:
+            import socket
+            nh = node_host.strip()[:64]
+            if nh and nh != socket.gethostname():
+                try:
+                    upsert_node(db, nh, "spoke",
+                                nth_version=node_version.strip()[:32])
+                    db.commit()
+                except sqlite3.Error:
+                    pass
 
         # Fetch objective (pinned message) if any
         ch_row = _get_channel(db, channel)
@@ -1118,6 +1202,8 @@ def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: st
     wait_seconds = min(max(wait_seconds, 0), 30)
     from_name_lower = from_name.strip().lower() if from_name else ""
     db = get_db()
+    # Fleet liveness rides on poll traffic, rate-limited to one write/minute.
+    _checkin_self_node(db)
 
     # v6: resolve session_token up front. If provided, watermark lives in
     # sessions.last_read (per-session) and auto_ack defaults to False.

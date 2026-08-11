@@ -47,6 +47,8 @@ mode (no sleeping keyword in status_text) and has not posted for
 CADENCE_THRESHOLD seconds. Resets when the member posts again.
 """
 import json
+import os
+import socket
 import sqlite3
 import sys
 import time
@@ -54,7 +56,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from nth_constants import SLEEPING_KEYWORDS
+from nth_constants import SLEEPING_KEYWORDS, NTH_VERSION
 
 DB_PATH = Path.home() / ".claude" / "nth" / "nth.db"
 
@@ -258,6 +260,24 @@ def monitor(channel, member_id, filter_mode="all", _db_path=None):
                             "WHERE channel = ? AND id = ?",
                             (now_ts, now_ts, now_ts, channel, member_id),
                         )
+                    # v7.3 fleet check-in: one row per (host, "monitor").
+                    # Best-effort — the nodes table only exists once a v7.3+
+                    # server has touched this DB, and fleet bookkeeping must
+                    # never break the notification loop.
+                    try:
+                        pyv = ".".join(str(p) for p in sys.version_info[:3])
+                        db.execute(
+                            "INSERT INTO nodes (hostname, transport, nth_version, "
+                            "python, pid, last_seen) VALUES (?, 'monitor', ?, ?, ?, ?) "
+                            "ON CONFLICT(hostname, transport) DO UPDATE SET "
+                            "nth_version = excluded.nth_version, "
+                            "python = excluded.python, pid = excluded.pid, "
+                            "last_seen = excluded.last_seen",
+                            (socket.gethostname(), NTH_VERSION, pyv,
+                             os.getpid(), now_ts),
+                        )
+                    except sqlite3.OperationalError:
+                        pass
                     db.commit()
                     last_heartbeat_mono = mono
                     last_heartbeat_wall = wall

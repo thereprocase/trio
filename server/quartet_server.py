@@ -107,5 +107,130 @@ _install_thread_offload_patch()
 
 from nth_server import mcp
 
+
+def _register_health_routes():
+    """Plain-HTTP observability on the same uvicorn app that serves /sse.
+
+    GET /healthz — cheap liveness: version, db_ok, counts. 503 if DB down.
+    GET /fleet   — nodes + per-channel liveness. Counts, names, and ages
+    only — never message content. No auth by design: the exposure surface
+    (LAN + tailnet) and sensitivity match the SSE endpoint itself.
+    """
+    import anyio
+    from datetime import datetime, timezone
+    from starlette.requests import Request
+    from starlette.responses import JSONResponse
+
+    import nth_server
+    from nth_constants import NTH_VERSION
+
+    STALE_S = 300  # matches STALE_THRESHOLD_SECONDS / monitor heartbeat model
+
+    def _age_s(iso, now):
+        if not iso:
+            return None
+        try:
+            ts = datetime.fromisoformat(iso)
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            return max(0, int((now - ts).total_seconds()))
+        except ValueError:
+            return None
+
+    def _snapshot(deep):
+        now = datetime.now(timezone.utc)
+        out = {
+            "server": "nth-qweb",
+            "version": NTH_VERSION,
+            "db_ok": False,
+            "time": now.isoformat(),
+        }
+        try:
+            db = nth_server.get_db()
+        except Exception as e:
+            out["error"] = type(e).__name__
+            return out
+        try:
+            out["channels_active"] = db.execute(
+                "SELECT COUNT(*) FROM channels WHERE status = 'active'"
+            ).fetchone()[0]
+            node_rows = db.execute(
+                "SELECT hostname, transport, nth_version, python, pid, last_seen "
+                "FROM nodes ORDER BY last_seen DESC"
+            ).fetchall()
+            nodes = []
+            for r in node_rows:
+                age = _age_s(r["last_seen"], now)
+                nodes.append({
+                    "hostname": r["hostname"], "transport": r["transport"],
+                    "nth_version": r["nth_version"], "python": r["python"],
+                    "pid": r["pid"], "last_seen": r["last_seen"],
+                    "age_s": age,
+                    "live": age is not None and age < STALE_S,
+                })
+            out["nodes_total"] = len(nodes)
+            out["nodes_live"] = sum(1 for n in nodes if n["live"])
+            out["db_ok"] = True
+            if not deep:
+                return out
+
+            out["nodes"] = nodes
+            channels = []
+            for ch in db.execute(
+                "SELECT code, status FROM channels ORDER BY code"
+            ).fetchall():
+                members = db.execute(
+                    "SELECT messenger_heartbeat FROM members WHERE channel = ?",
+                    (ch["code"],),
+                ).fetchall()
+                live = sum(
+                    1 for m in members
+                    if (a := _age_s(m["messenger_heartbeat"], now)) is not None
+                    and a < STALE_S
+                )
+                msgs, last_msg = db.execute(
+                    "SELECT COUNT(*), MAX(created_at) FROM messages WHERE channel = ?",
+                    (ch["code"],),
+                ).fetchone()
+                channels.append({
+                    "code": ch["code"], "status": ch["status"],
+                    "members": len(members), "live": live, "msgs": msgs,
+                    "last_msg_age_s": _age_s(last_msg, now),
+                })
+            channels.sort(
+                key=lambda c: c["last_msg_age_s"] if c["last_msg_age_s"] is not None
+                else float("inf")
+            )
+            out["channels"] = channels
+            return out
+        except Exception as e:
+            out["error"] = type(e).__name__
+            out["db_ok"] = False
+            return out
+        finally:
+            db.close()
+
+    @mcp.custom_route("/healthz", methods=["GET"])
+    async def healthz(request: Request) -> JSONResponse:
+        data = await anyio.to_thread.run_sync(lambda: _snapshot(False))
+        return JSONResponse(data, status_code=200 if data.get("db_ok") else 503)
+
+    @mcp.custom_route("/fleet", methods=["GET"])
+    async def fleet(request: Request) -> JSONResponse:
+        data = await anyio.to_thread.run_sync(lambda: _snapshot(True))
+        return JSONResponse(data, status_code=200 if data.get("db_ok") else 503)
+
+    # Check the hub itself in at startup so /fleet shows this process
+    # before the first tool call arrives.
+    try:
+        _db = nth_server.get_db()
+        nth_server._checkin_self_node(_db, force=True)
+        _db.close()
+    except Exception:
+        pass
+
+
+_register_health_routes()
+
 if __name__ == "__main__":
     mcp.run(transport="sse")
