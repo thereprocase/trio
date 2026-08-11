@@ -93,6 +93,7 @@ class RolloutTail:
         self.session_id = ""
         self.cwd = ""
         self.model = ""
+        self.effort = ""
         self.context_window = None
         self.last_usage = None
         self.last_event_ts = ""
@@ -135,6 +136,8 @@ class RolloutTail:
             if ptype == "turn_context":
                 if payload.get("model"):
                     self.model = payload["model"]
+                if payload.get("effort"):
+                    self.effort = payload["effort"]
                 if payload.get("cwd"):
                     self.cwd = payload["cwd"]
                 changed = True
@@ -161,6 +164,7 @@ class RolloutTail:
             "used_pct": pct,
             "cw_size": self.context_window,
             "model": self.model,
+            "effort": self.effort,
             "cwd": self.cwd,
             "ts": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             "source": "codex-rollout",

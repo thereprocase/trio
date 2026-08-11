@@ -3319,11 +3319,15 @@ INDEX_HTML = r"""<!doctype html>
       const h = c.harness || {};
       const cw = h.context_window || {};
       const rl = h.rate_limits || {};
-      const cwSize = (cw.context_window_size || 0);
+      // Claude snapshots nest sizes under harness; codex publisher snapshots
+      // carry cw_size (and effort) at the top level.
+      const cwSize = (cw.context_window_size || c.cw_size || 0);
       const cwLabel = cwSize >= 1e6 ? (cwSize/1e6)+'M' : cwSize >= 1e3 ? Math.round(cwSize/1e3)+'k' : '';
       const pct = c.used_pct != null ? Math.round(c.used_pct) + '%' : '—';
       const pctClass = (c.used_pct || 0) >= 80 ? 'bad' : (c.used_pct || 0) >= 60 ? 'warn' : 'good';
-      const model = (c.model || '').replace(/^claude-/, '').split('-').slice(0, 2).join(' ') || '—';
+      const model = ((c.model || '').startsWith('claude-')
+        ? c.model.replace(/^claude-/, '').split('-').slice(0, 2).join(' ')
+        : (c.model || '')) || '—';
       const fiveH = rl.five_hour || {};
       const sevenD = rl.seven_day || {};
       const fhPct = fiveH.used_percentage != null ? Math.round(fiveH.used_percentage) + '%' : '';
@@ -3332,6 +3336,7 @@ INDEX_HTML = r"""<!doctype html>
         ['context', `${pct} of ${cwLabel}`, pctClass],
         ['model', model, ''],
       ];
+      if (c.effort) ctxRows.push(['effort', escapeHtml(c.effort), '']);
       if (fhPct) ctxRows.push(['5h limit', fhPct, (fiveH.used_percentage||0) >= 80 ? 'bad' : '']);
       if (sdPct) ctxRows.push(['7d limit', sdPct, (sevenD.used_percentage||0) >= 80 ? 'bad' : '']);
       if (c.session_name) ctxRows.push(['session', escapeHtml(c.session_name), '']);
