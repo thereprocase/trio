@@ -2850,10 +2850,14 @@ INDEX_HTML = r"""<!doctype html>
   // (where #name was meant) makes an idle agent read as busy. Neither is
   // fixable by watching the stream harder; it needs the one bit only the
   // agent has.
+  // Anchored to the start on purpose. Matching anywhere in the string reads
+  // incidental prose as a claim — this dashboard's own status ("...conversation
+  // views, split-screen panes, working indicator") lit itself up on the word
+  // "working". The convention is a leading marker: "working — <what>".
   const STATUS_WORKING_RE =
-    /\b(working|building|running|testing|flashing|deploying|compiling|drafting|investigating|reviewing|in progress|wip|on it|eta)\b/i;
+    /^\s*(working|building|running|testing|flashing|deploying|compiling|drafting|investigating|reviewing|in progress|wip|on it)\b/i;
   const STATUS_IDLE_RE =
-    /\b(idle|standing by|stand by|available|awaiting|blocked|done|complete[d]?|finished|ready for review)\b/i;
+    /^\s*(idle|standing by|stand by|available|awaiting|blocked|done|complete[d]?|finished|ready for review)\b/i;
   // A "working" status older than this is treated as forgotten rather than
   // trusted. Idle statuses never expire — they claim nothing is happening.
   const STATUS_FRESH_MS = 20 * 60 * 1000;
@@ -2906,6 +2910,20 @@ INDEX_HTML = r"""<!doctype html>
     _engTimer = setTimeout(() => { _engTimer = null; refreshEngagement(); }, 120);
   }
 
+  // Messages here are addressed by a leading "@name"; an @name buried in the
+  // body is nearly always a reference where #name was meant. Counting those
+  // as requests made idle agents look busy — Cloud lit up because App wrote
+  // "@Cloud has it non-sellable server-side" mid-sentence. The server still
+  // delivers such a mention; this only decides whether it reads as pending.
+  const ADDRESS_HEAD_CHARS = 120;
+  function addressedEarly(msg, mem) {
+    const head = (msg.content || '').slice(0, ADDRESS_HEAD_CHARS).toLowerCase();
+    if (!head) return false;
+    const name = (mem.name || '').toLowerCase();
+    if (name && head.includes('@' + name)) return true;
+    return head.includes('@' + String(mem.id || '').toLowerCase());
+  }
+
   function ingestMessageForStats(msg) {
     const s = agentState(msg.member_id);
     s.sent++;
@@ -2930,7 +2948,7 @@ INDEX_HTML = r"""<!doctype html>
         const ms = agentState(mid);
         ms.queue_depth++;
       }
-      if ((msg.mentions || []).includes(mid)) {
+      if ((msg.mentions || []).includes(mid) && addressedEarly(msg, mem)) {
         const ms = agentState(mid);
         ms.directed_received++;
         ms.pending_directed.push(msg.id);
