@@ -1969,7 +1969,7 @@ INDEX_HTML = r"""<!doctype html>
     <div id="target-bar"></div>
     <div id="input-row">
       <div id="completions"></div>
-      <textarea id="input" rows="1" placeholder="Type a message. @ to mention, $task <desc> to post a claimable task. Enter to send, Shift+Enter for newline."></textarea>
+      <textarea id="input" rows="1" placeholder="Message — @ to mention, Enter to send"></textarea>
       <button id="send-btn">Send</button>
     </div>
     <div id="hint">
