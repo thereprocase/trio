@@ -2356,9 +2356,6 @@ INDEX_HTML = r"""<!doctype html>
       .filter(s => s && /^[A-Za-z0-9_.-]+$/.test(s))
   )].slice(0, CONV_MAX);
   const CONV_MODE = CONV_IDS.length > 0;
-  // Kept as aliases so the pre-existing DM call sites keep reading naturally.
-  const DM_TARGET_ID = CONV_IDS.length === 1 ? CONV_IDS[0] : '';
-  const DM_MODE = CONV_MODE;
   // ?pane=1 marks this document as embedded in the /workspace shell. Panes
   // must not write shared localStorage keys — iframes share the top-level
   // origin's storage, so a pane persisting its view would silently redefine
@@ -2379,7 +2376,6 @@ INDEX_HTML = r"""<!doctype html>
     channel: '',
     operator: { id: '', name: '' },
     server_host: '',
-    dmTargetId: DM_TARGET_ID,      // empty string → main channel view
     // Conversation scope: member ids this view is limited to (excluding the
     // operator, who is always implicitly present). Empty → whole channel.
     convIds: new Set(CONV_IDS),
@@ -2877,7 +2873,7 @@ INDEX_HTML = r"""<!doctype html>
       badge.title = `${mem.name} (${mid}) — the ${animalName} — ${read ? 'read ✓' : 'pending…'}  · last_read: ${mem.last_read}  (click to open DM tab)`;
       badge.onclick = (e) => {
         e.stopPropagation();
-        if (!DM_MODE) window.open('/?dm=' + encodeURIComponent(mid), '_blank');
+        if (!CONV_MODE) window.open('/?dm=' + encodeURIComponent(mid), '_blank');
       };
       box.appendChild(badge);
     }
@@ -3790,7 +3786,7 @@ INDEX_HTML = r"""<!doctype html>
     const bangs = resolveBangs(input.value);
     const txtL  = (input.value || '').toLowerCase();
     const parts = [];
-    if (!state.dmTargetId && state.selectedTargets.size > 0) {
+    if (state.selectedTargets.size > 0) {
       const tgts = [...state.selectedTargets]
         .map(id => state.members.get(id))
         .filter(Boolean)
