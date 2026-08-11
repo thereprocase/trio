@@ -1293,6 +1293,8 @@ INDEX_HTML = r"""<!doctype html>
     --accent: #3ba0e6; --accent-hi: #50b0f0; --accent2: #59cb79;
     --warn: #e3c34c; --err: #e56a4a; --mention: #e3c34c;
     --hover: #0f1420; --ov: 255,255,255;
+    --card-radius: 3px; --card-shadow: none;
+    --pill-radius: 3px; --input-radius: 4px;
   }
   :root[data-theme="light"] {
     /* ── Daylight (light) ── */
@@ -1319,12 +1321,24 @@ INDEX_HTML = r"""<!doctype html>
     --hover: #313442; --ov: 255,255,255;
   }
   :root[data-theme="pve-dark"] {
-    /* ── Proxmox VE Dark ── */
+    /* ── Proxmox VE Dark (from theme-proxmox-dark.css) ── */
     --bg: #1a1a1a; --bg2: #262626; --panel: #333; --border: #404040;
     --fg: #f2f2f2; --dim: #999; --dimmer: #666;
     --accent: #4db5ff; --accent-hi: #99d5ff; --accent2: #0060a4;
     --warn: #ffae0b; --err: #ce3c3c; --mention: #ffae0b;
     --hover: #595959; --ov: 255,255,255;
+    --card-radius: 2px; --card-shadow: 0 1px 5px rgba(0,0,0,0.5);
+    --pill-radius: 2px; --input-radius: 2px;
+  }
+  :root[data-theme="pve-light"] {
+    /* ── Proxmox VE Light (from ext6-pve.css + gauge defaults) ── */
+    --bg: #f5f5f5; --bg2: #e2eff9; --panel: #fff; --border: #cfcfcf;
+    --fg: #000; --dim: #555; --dimmer: #a8a8a8;
+    --accent: #3892d4; --accent-hi: #4db5ff; --accent2: #21bf4b;
+    --warn: #cc8e00; --err: #cc1800; --mention: #cc8e00;
+    --hover: #e2eff9; --ov: 0,0,0;
+    --card-radius: 2px; --card-shadow: 0 1px 8px rgba(136,136,136,0.3);
+    --pill-radius: 2px; --input-radius: 2px;
   }
   :root[data-theme="solarized"] {
     /* ── Solarized Light ── */
@@ -1359,7 +1373,7 @@ INDEX_HTML = r"""<!doctype html>
   header .meta { color: var(--dim); font-weight: 400; font-size: 11px; }
   header .spacer { flex: 1; }
   .pill {
-    font-size: 11px; padding: 3px 8px; border-radius: 3px; cursor: pointer;
+    font-size: 11px; padding: 3px 8px; border-radius: var(--pill-radius); cursor: pointer;
     background: var(--panel); border: 1px solid var(--border); user-select: none;
     color: var(--dim); font-weight: 500;
   }
@@ -1381,9 +1395,9 @@ INDEX_HTML = r"""<!doctype html>
   /* ── Settings panel (drawer) ── */
   #settings-panel {
     position: fixed; top: 46px; right: 10px; z-index: 30;
-    background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
+    background: var(--panel); border: 1px solid var(--border); border-radius: var(--card-radius);
     padding: 12px 14px; min-width: 250px; max-width: 320px;
-    box-shadow: 0 8px 30px rgba(0,0,0,0.4);
+    box-shadow: var(--card-shadow, 0 8px 30px rgba(0,0,0,0.4));
     display: flex; flex-direction: column; gap: 10px;
   }
   #settings-panel[hidden] { display: none; }
@@ -1404,7 +1418,7 @@ INDEX_HTML = r"""<!doctype html>
   #chat-wrap { grid-row: 2 / 3; grid-column: 1 / 2; position: relative; overflow: hidden; }
   #chat { height: 100%; overflow-y: auto; padding: 12px 16px; scroll-behavior: smooth; }
   .msg { margin-bottom: 10px; word-wrap: break-word; cursor: pointer; padding: 4px 8px 6px;
-         border-radius: 3px; border-left: 3px solid transparent; margin-left: -8px; }
+         border-radius: var(--card-radius); border-left: 3px solid transparent; margin-left: -8px; }
   .msg:hover { background: var(--hover); }
   .msg .head { font-size: 11px; color: var(--dim); margin-bottom: 2px;
                display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
@@ -1657,7 +1671,7 @@ INDEX_HTML = r"""<!doctype html>
   body.dm-mode #target-bar { display: none; }
   #input-row { display: flex; gap: 8px; align-items: flex-end; position: relative; }
   #input { flex: 1; background: var(--bg); color: var(--fg); border: 1px solid var(--border);
-           padding: 8px 10px; border-radius: 4px; font-family: inherit; font-size: 13px;
+           padding: 8px 10px; border-radius: var(--input-radius); font-family: inherit; font-size: 13px;
            resize: none; min-height: 36px; max-height: 160px; }
   #input:focus { outline: none; border-color: var(--accent); }
   #send-btn { background: var(--accent); color: var(--bg); border: none;
@@ -1789,10 +1803,11 @@ INDEX_HTML = r"""<!doctype html>
         <option value="midnight">Midnight</option>
         <option value="nord">Nord</option>
         <option value="dracula">Dracula</option>
-        <option value="pve-dark">Proxmox</option>
+        <option value="pve-dark">Proxmox Dark</option>
       </optgroup>
       <optgroup label="Light">
         <option value="light">Daylight</option>
+        <option value="pve-light">Proxmox Light</option>
         <option value="solarized">Solarized</option>
       </optgroup>
     </select>
