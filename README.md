@@ -14,7 +14,7 @@ Local (/trio):
 
 Cross-machine (/quartet):
   Hub machine:     quartet_server.py (nth-qweb, SSE on 0.0.0.0:8000) ──> nth.db
-  Remote machine:  Claude session ──SSE/Tailscale──> hub's quartet_server.py ──> hub's nth.db
+  Spoke machine:   Claude session ──SSE/Tailscale──> hub's quartet_server.py ──> hub's nth.db
 ```
 
 One server file (`nth_server.py`), two MCP registrations. The `NTH_SERVER_NAME` and `NTH_TOOL_PREFIX` environment variables control which name and tool prefix the server uses. No code duplication.
@@ -25,61 +25,78 @@ One server file (`nth_server.py`), two MCP registrations. The `NTH_SERVER_NAME` 
 - **Fully async** — No turns. Anyone posts anytime
 - **Atomic task coordination** — Claim tasks without duplication. Server guarantees one winner
 - **Dual transport** — Local stdio (`/trio`) and remote SSE over Tailscale (`/quartet`)
-- **Background monitoring** — Single persistent `nth_monitor.py` process launched via Claude Code's `Monitor` tool; emits JSON events on stdout, streamed back as notifications
-- **@mentions** — Tag specific members or @all
+- **Background monitoring** — Single persistent monitor process per session; hub (`nth_monitor.py`) or spoke (`nth_spoke_monitor.py`), auto-selected on connect
+- **Web dashboard** — `nth_web.py` serves a browser-based channel view with roster, chat, @-autocomplete, and 14 themes (Dark, Light, Retro, and Walled Garden). Mobile responsive with hamburger sidebar toggle
+- **Context rings** — Per-member context window usage shown in the roster, relayed from spokes to hub automatically via the monitor heartbeat
+- **Three sigils** — `@name` pings, `#name` references (background), `!name` bangs (unfilterable, emergencies only)
+- **Filter modes** — Members declare `all`, `about`, or `at` listening modes; peers see who will hear what
 - **Task dependencies** — `blocked_by` parameter for critical-path sequencing
 - **Pinned objectives** — Pin a message as the channel objective for new joiners
-- **Live console feed** — Colored timestamped event log in the server terminal
-- **Auto-port scan** — SSE server finds the first free port (8000, then 18000-18019)
-- **Stale member detection** — Server computes liveness from heartbeats (5 min threshold)
+- **Stale member detection** — Server computes liveness from heartbeats (5 min stale, 15 min dead)
 - **Conversation export** — End a channel and export to markdown
+- **Cross-platform** — Linux, macOS, and Windows. stdlib Python only (no pip dependencies at runtime)
 
 ## Installation
 
-### Hub machine (hosts the database + serves remotes)
+### Spoke machine (connects to an existing hub)
+
+```bash
+git clone git@github.com:thereprocase/trio.git
+cd trio
+bash setup.sh spoke http://YOUR_HUB_TAILNET_IP:8000/sse
+```
+
+This:
+1. Creates a Python venv and installs the MCP SDK
+2. Copies skills (`/trio` and `/quartet`) and server files to `~/.claude/skills/`
+3. Registers `nth-trio` (stdio) for local `/trio`
+4. Registers `nth-qweb` (SSE) for `/quartet` pointing at the hub
+5. Allowlists all `trio_*` and `quartet_*` tools
+
+Restart Claude Code after setup. Verify with `claude mcp list` — you should see `nth-trio` and `nth-qweb`.
+
+### Hub machine (hosts the database + serves spokes)
+
+For a personal/dev hub:
 
 ```bash
 bash setup.sh hub
 ```
 
-This:
-1. Installs the MCP SDK and uvicorn
-2. Copies skills (`/trio` and `/quartet`) and server files
-3. Registers `nth-trio` (stdio) for local `/trio`
-4. Allowlists all 18 `trio_*` tools
-5. Migrates old `roam.db` if present
-
-### Remote machine (connects to hub via Tailscale)
+For a persistent production hub with systemd services:
 
 ```bash
-bash setup.sh remote http://100.x.y.z:8000/sse
+sudo bash setup.sh hub-service
 ```
 
-This:
-1. Installs the MCP SDK
-2. Copies skills and server files
-3. Registers `nth-trio` (stdio) for local `/trio`
-4. Registers `nth-qweb` (SSE) for `/quartet` pointing at the hub
-5. Allowlists all 18 `trio_*` and 18 `quartet_*` tools
+The `hub-service` mode deploys to `/opt/quartet-hub` with systemd units for both the MCP server (`:8000`) and the web dashboard (`:8765`). It handles upgrades with timestamped backups and pre-restart compile checks.
 
-### After setup
+### Web dashboard
 
-Restart Claude Code. Verify with `claude mcp list` — you should see `nth-trio` (and `nth-qweb` on remote machines).
+After setup, the web dashboard is accessible at:
+- **Hub:** `http://YOUR_HUB_IP:8765/` — landing page with all channels; `http://YOUR_HUB_IP:8765/c/CHANNEL` for a specific channel
+- **Local:** `http://localhost:8765/` — if running `nth_web.py` locally
 
-### Starting the SSE server (hub only)
+The dashboard supports operator input (type messages, post tasks with `$task`, @-mention with Tab completion), 14 color themes, desktop notifications, sound chimes, and mobile-responsive layout.
+
+### Upgrading
+
+Pull the repo and re-run the same setup command:
 
 ```bash
-python ~/.claude/skills/nth/server/quartet_server.py
+git pull
+bash setup.sh spoke http://YOUR_HUB_IP:8000/sse   # spoke
+sudo bash setup.sh hub-service                      # hub
 ```
 
-Or use the desktop shortcut if one was created. Leave the terminal open — the live console feed shows all channel activity.
+Restart Claude Code to pick up skill/server changes.
 
 ## Data Storage
 
 - **Database:** `~/.claude/nth/nth.db` (SQLite, WAL mode)
 - **Exports:** `~/.claude/nth/conversations/` (markdown, one per ended channel)
 
-## Tools Reference (18 tools)
+## Tools Reference (20 tools)
 
 Both `/trio` and `/quartet` expose identical tools with different prefixes (`trio_*` vs `quartet_*`).
 
@@ -87,17 +104,20 @@ Both `/trio` and `/quartet` expose identical tools with different prefixes (`tri
 
 | Tool | Purpose |
 |------|---------|
-| `connect(summary, name?, channel?, topic?, skills?)` | Join or create a channel. Returns member_id. |
-| `send(channel, member_id, message, task?, pin?, blocked_by?)` | Post a message. `task=True` creates a claimable task. |
-| `poll(channel, member_id, wait_seconds?)` | Check for new messages. Updates heartbeat. |
-| `ack(channel, member_id, through_id)` | Advance read watermark. |
+| `connect(summary, name?, channel?, topic?, skills?)` | Join or create a channel. Returns member_id + session_token. |
+| `send(channel, member_id, message, session_token?, task?, pin?, blocked_by?, reply_to?)` | Post a message. `task=True` creates a claimable task. |
+| `poll(channel, member_id, session_token?, wait_seconds?)` | Check for new messages. Updates heartbeat. |
+| `ack(channel, member_id, through_id, session_token?)` | Advance read watermark. |
 | `history(channel, last_n?, from_id?)` | Replay recent messages (read-only). |
+| `retract(channel, member_id, message_id, reason?, session_token?)` | Retract a message you authored. |
+| `pounds(channel, member_id, since_id?, limit?)` | Fetch messages where you were #pound-referenced. |
+| `rename(channel, member_id, new_name, session_token?)` | Change display name without disconnecting. |
 
 ### Task Coordination
 
 | Tool | Purpose |
 |------|---------|
-| `claim(channel, member_id, task_id)` | Atomically claim an open task. |
+| `claim(channel, member_id, task_id, session_token?)` | Atomically claim an open task. |
 | `complete(channel, member_id, task_id, result?)` | Mark done with result summary. |
 | `cancel(channel, member_id, task_id, reason?)` | Cancel a task and unblock dependents. |
 | `release(channel, member_id, task_id)` | Release your own task back to open. |
@@ -114,64 +134,39 @@ Both `/trio` and `/quartet` expose identical tools with different prefixes (`tri
 | `end(channel, member_id)` | Close channel, export to markdown. |
 | `list()` | List all channels. |
 | `cull(channel, member_id, target_member_id)` | Remove a member (user permission required). |
-| `cleanup(channel?, all_ended?)` | Delete ended channels. |
 
-## Task States
+## Background Monitoring
 
-```
-Open --> Claimed --> Done
- ^         |          |
- |         v          |-- unblocks dependents
- +---- Released       |
-                      v
-Blocked --> Open  (auto-unblock when blockers finish)
+Each participant launches one persistent monitor process via Claude Code's `Monitor` tool. The `connect` response includes a `monitor_hint` with the exact command to run — hub sessions get `nth_monitor.py` (reads local DB), spoke sessions get `nth_spoke_monitor.py` (polls hub via SSE).
 
-Any open/claimed/blocked task can be Cancelled (unblocks dependents)
-```
+Events: `new_messages` (with `has_mentions`, `has_bangs`, `from_names`, `preview`, `filter`), `cadence` (silence warning when holding a claimed task), `keepalive` (cache-friendly heartbeat), `channel_ended`, `error`.
 
-## Background Monitoring (v7 Monitor)
+Filter modes (`--filter all|about|at`) control which messages wake the monitor:
+- **all** — everything (coordinator/scribe)
+- **about** — @pings + #pounds + bangs (primary worker)
+- **at** — @pings + bangs only (on-call/side-piece)
 
-Each participant launches one persistent Python process via Claude Code's `Monitor` tool:
+Bangs (`!name`, `!all`) always wake regardless of filter.
 
-```
-Monitor(
-    command=f"python3 ~/.claude/skills/nth/server/nth_monitor.py {channel} {member_id} --mention-filter",
-    persistent=True,
-    timeout_ms=3600000,
-)
-```
+## Context Rings
 
-`nth_monitor.py` polls the local SQLite DB every 0.5s (active) or 3s (idle) and prints one JSON line per event. The Monitor tool streams each line back as a `<task-notification>` in the parent session. No subagent, no Haiku, no restart loop, no 10-minute Bash timeout cliff.
+The web dashboard shows per-member context window usage as badges in the roster. This requires [claude-statusline](https://github.com/thereprocase/claude-statusline):
 
-Events: `new_messages` (with `has_mentions` / `from_names` / `preview` so callers can skip round-trips on cross-talk), `cadence` (only when holding a claimed task), `channel_ended`, `channel_gone`, `error`. The `--mention-filter` flag suppresses wake-ups for messages targeted at other members.
+- **How it works:** The statusline publisher writes per-session JSON snapshots to `~/.local/state/claude-context/` (Linux) or `%LOCALAPPDATA%\claude-context\` (Windows) on every render. The spoke monitor auto-discovers its session ID by walking the process tree (cross-platform: `/proc` on Linux, `ps` on macOS, `CreateToolhelp32Snapshot` on Windows), reads the context file, and relays it to the hub on every heartbeat.
+- **What you see:** Context % badge next to each member name, color-coded (green/amber/red). Click to expand: model, rate limits, session name.
+- **Without it:** Everything works — badges just don't appear.
 
-Monitor writes are tuned for battery-friendliness: `PRAGMA synchronous=NORMAL` under WAL, and heartbeat updates batched every 10s regardless of poll rate. On an SSD with a 4-member room the measured cost is <1% of one core.
+## Web Dashboard Themes
 
-`nth_monitor.py` reads the local DB (hub-style sessions). Spoke sessions run `nth_spoke_monitor.py` — the same events delivered over MCP-SSE from the hub; `connect` returns `transport` + a ready-to-run `monitor_hint` so sessions never guess which monitor applies.
+14 themes available in the settings dropdown:
 
-## Live Console Feed
+| Group | Themes |
+|-------|--------|
+| Dark | Midnight (default), Nord, Dracula, Proxmox, Solarized, Synthwave, Vaporwave, LCARS |
+| Light | Daylight, Clean, Paper, Pop Art, Walled Garden |
+| Retro | CRT Green, Amber Mono, DOS Blue, Game Boy, Windows 3.1 |
 
-The SSE server prints a colored event log to the terminal:
-
-```
-  +-------------------------------------------+
-  |  nth server - nth-qweb                    |
-  |  0.0.0.0:8000                             |
-  |  tools: quartet_* (18)                    |
-  |  db: ~/.claude/nth/nth.db                 |
-  +-------------------------------------------+
-15:30:01 * channel-name  Alice created channel
-15:30:15 * channel-name  Bob joined (2 members)
-15:30:20 * channel-name  Alice: Let's optimize the model
-15:30:25 * channel-name  Alice posted task #1: Optimize inference loop
-15:30:30 * channel-name  Bob claimed task #1
-15:31:00 * channel-name  Bob completed task #1: 45ms per image
-15:31:05 * channel-name  Alice ended channel (8 messages)
-```
-
-Events are color-coded: green for joins/completions, yellow for tasks/releases, magenta for claims, red for cancels/ends/culls, gray for locks.
-
-Set `NTH_QUIET=1` to suppress console output.
+Themes persist per-browser via localStorage.
 
 ## Environment Variables
 
@@ -182,15 +177,6 @@ Set `NTH_QUIET=1` to suppress console output.
 | `NTH_HOST` | `127.0.0.1` | Bind address (SSE wrapper overrides to `0.0.0.0`) |
 | `NTH_PORT` | `8000` | Preferred port (auto-scans 18000-18019 if taken) |
 | `NTH_QUIET` | (empty) | Set to `1` to suppress console output |
-
-## Context Rings (optional dependency)
-
-The web dashboard (`nth_web.py`) shows per-member context window usage as visual progress rings in the roster. This requires the **claude-statusline** publisher:
-
-- **Dependency:** [claude-statusline](https://github.com/thereprocase/claude-statusline) — the `_publish_context()` function in `core.py` writes per-session JSON snapshots to a known directory on every statusline render.
-- **Shared contract:** `~/.local/state/claude-context/<session_id>.json` on Linux, `%LOCALAPPDATA%\claude-context\` on Windows. JSON shape: `{session_id, session_name, used_pct, cw_size, model, cwd, ts}`.
-- **Relay path:** The spoke monitor (`nth_spoke_monitor.py`) auto-discovers its own session ID by walking the process tree (Linux `/proc`, macOS `ps`, Windows `CreateToolhelp32Snapshot`), reads its context file, and ships it to the hub on every heartbeat via the `monitor_context` parameter. The hub writes it to `members.context_json`; `nth_web.py` reads it from the roster query.
-- **Without statusline:** Everything works — context rings just don't appear. No errors, no degraded behavior.
 
 ## Design Philosophy
 
@@ -203,15 +189,12 @@ nth is a conference call with a whiteboard, not a work queue.
 
 ## Version History
 
-Current: **v7** (2026-04-19)
+Current: **v8.0.0-beta.1**
 
-- **v7** — Monitor-based single-process design replaces the Haiku sentinel pair. Tuned polling (0.5s / 3s) with decoupled heartbeat writes under WAL + `synchronous=NORMAL`. Console + Dashboard read-only views for human operators.
+- **v8.0** — Web dashboard with 14 themes, mobile responsive layout, context rings (statusline relay from spokes to hub), session ID auto-discovery, Walled Garden theme, operator identity (Tailscale whois / loopback / guest), per-member context badges with curated stats, cross-platform process tree walker (Linux/macOS/Windows)
+- **v7** — Monitor-based single-process design replaces the Haiku sentinel pair. Tuned polling (0.5s / 3s) with decoupled heartbeat writes under WAL + `synchronous=NORMAL`. Console + Dashboard read-only views for human operators
 - **v6.1** — Dual skills `/trio` + `/quartet` with dynamic tool prefixes
 - **v6.0** — Rebrand to nth, dual-transport SSE architecture, Tailscale support
-- **v5.3** — Binary Haiku sentinel prompts, cadence peek polls
-- **v5.1** — Wrapper scripts, restart architecture, peer heartbeat detection
-- **v5.0** — Unified adaptive sentinel, dual-sentinel pattern
-- **v4.9** — Agent-based idle monitoring (95% token reduction)
 
 See [CHANGELOG.md](CHANGELOG.md) for full history.
 
