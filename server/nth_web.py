@@ -1910,7 +1910,10 @@ INDEX_HTML = r"""<!doctype html>
                        color: var(--dimmer); flex-shrink: 0; user-select: none; }
   .member .conv-pick:hover { color: var(--accent); }
   .member .conv-pick.on { color: var(--accent); }
-  #conv-pickbar { display: flex; flex-wrap: wrap; gap: 5px; margin: 0 0 8px; }
+  #conv-pickbar { display: flex; flex-wrap: wrap; gap: 5px; margin: 0 0 8px;
+                  align-items: center; }
+  #conv-pickbar .pick-hint { font-size: 10px; color: var(--dimmer);
+                             line-height: 1.3; }
   .ctx-card { display: flex; align-items: center; gap: 8px; padding: 4px 2px; }
   .ctx-ring { position: relative; width: 36px; height: 36px; flex: none; }
   .ctx-ring svg { width: 36px; height: 36px; transform: rotate(-90deg); }
@@ -2217,6 +2220,7 @@ INDEX_HTML = r"""<!doctype html>
       <option value='"SF Mono", "SFMono-Regular", ui-monospace, Menlo, monospace'>SF Mono</option>
     </select>
     <input id="filter" type="text" placeholder="filter messages…" spellcheck="false">
+    <span class="pill" id="btn-workspace" title="open the split-screen workspace — several conversations side by side in one tab">⊞ split</span>
     <span class="pill on" id="btn-side" title="show/hide the roster sidebar">roster</span>
     <span class="pill" id="btn-compact" title="clamp every message body to 3 lines">compact</span>
     <span class="pill" id="btn-notify" title="desktop notifications on @you">🔔 off</span>
@@ -2873,7 +2877,7 @@ INDEX_HTML = r"""<!doctype html>
       badge.title = `${mem.name} (${mid}) — the ${animalName} — ${read ? 'read ✓' : 'pending…'}  · last_read: ${mem.last_read}  (click to open DM tab)`;
       badge.onclick = (e) => {
         e.stopPropagation();
-        if (!CONV_MODE) window.open('/?dm=' + encodeURIComponent(mid), '_blank');
+        if (!CONV_MODE) location.assign(convUrlFor([mid]));
       };
       box.appendChild(badge);
     }
@@ -3301,16 +3305,47 @@ INDEX_HTML = r"""<!doctype html>
   // Opens a scoped view over the picked members. Ephemeral by design — the
   // conversation lives entirely in the URL, so it's shareable and
   // reload-survivable without any server-side saved-view state.
+  // In landing (multi-channel) mode "/" serves the fleet index rather than a
+  // dashboard, so every self-link has to carry the channel via /c/<code>.
+  function channelBase() {
+    return API_QS ? '/c/' + encodeURIComponent(state.channel) : '/';
+  }
+  function workspaceUrl(ids) {
+    const qs = (ids && ids.length)
+      ? '?p=' + encodeURIComponent(ids.join(',')) : '';
+    return (API_QS
+      ? '/c/' + encodeURIComponent(state.channel) + '/workspace'
+      : '/workspace') + qs;
+  }
   function convUrlFor(ids, opts) {
     const qs = 'dm=' + ids.map(encodeURIComponent).join(',');
-    return '/?' + qs + ((opts && opts.pane) ? '&roster=0&pane=1' : '');
+    return channelBase() + '?' + qs +
+           ((opts && opts.pane) ? '&roster=0&pane=1' : '');
+  }
+  // Repaint just the checkbox glyphs. Re-rendering the whole roster would
+  // re-run the watermark delta pass for a purely local selection change.
+  function refreshConvPickGlyphs() {
+    for (const el of rosterEl.querySelectorAll('.conv-pick')) {
+      const on = state.convPicks.has(el.dataset.mid);
+      el.classList.toggle('on', on);
+      el.textContent = on ? '☑' : '☐';
+    }
   }
   function renderRosterPickBar() {
-    if (!convPickBar) return;
+    if (!convPickBar || CONV_MODE) return;
     const ids = [...state.convPicks];
-    convPickBar.hidden = ids.length === 0;
+    convPickBar.hidden = false;
     convPickBar.innerHTML = '';
-    if (!ids.length) return;
+
+    // With nothing checked the bar explains what the checkboxes are for —
+    // otherwise the feature is invisible unless you happen to click one.
+    if (!ids.length) {
+      const hint = document.createElement('span');
+      hint.className = 'pick-hint';
+      hint.textContent = 'tick members ☐ to start a conversation';
+      convPickBar.appendChild(hint);
+      return;
+    }
 
     const open = document.createElement('button');
     open.type = 'button';
@@ -3318,7 +3353,10 @@ INDEX_HTML = r"""<!doctype html>
     open.textContent = `Start conversation (${ids.length})`;
     open.title = 'Open a view scoped to the checked members';
     open.addEventListener('click', () => {
-      window.open(convUrlFor(ids), '_blank');
+      // Navigate in place rather than spawning tabs — the ⌂ pill returns to
+      // the full channel, and stacking windows is the thing the workspace
+      // exists to avoid.
+      location.assign(convUrlFor(ids));
     });
     convPickBar.appendChild(open);
 
@@ -3328,7 +3366,7 @@ INDEX_HTML = r"""<!doctype html>
     split.textContent = 'Split screen';
     split.title = 'Open the split-screen workspace with this conversation as the first pane';
     split.addEventListener('click', () => {
-      window.open('/workspace?p=' + encodeURIComponent(ids.join(',')), '_blank');
+      location.assign(workspaceUrl(ids));
     });
     convPickBar.appendChild(split);
 
@@ -3339,7 +3377,7 @@ INDEX_HTML = r"""<!doctype html>
     clear.addEventListener('click', () => {
       state.convPicks.clear();
       renderRosterPickBar();
-      renderRoster([...state.members.values()]);
+      refreshConvPickGlyphs();
     });
     convPickBar.appendChild(clear);
   }
@@ -3485,6 +3523,7 @@ INDEX_HTML = r"""<!doctype html>
     if (!CONV_MODE && m.id !== state.operator.id && !m.id.startsWith('_op_')) {
       const pick = document.createElement('span');
       pick.className = 'conv-pick' + (state.convPicks.has(m.id) ? ' on' : '');
+      pick.dataset.mid = m.id;
       pick.textContent = state.convPicks.has(m.id) ? '☑' : '☐';
       pick.title = `Include ${m.name} in a new conversation`;
       pick.addEventListener('click', (e) => {
@@ -3503,7 +3542,7 @@ INDEX_HTML = r"""<!doctype html>
       dmBtn.title = `Open DM tab with ${m.name}`;
       dmBtn.addEventListener('click', (e) => {
         e.stopPropagation();
-        window.open('/?dm=' + encodeURIComponent(m.id), '_blank');
+        location.assign(convUrlFor([m.id]));
       });
       topRow.appendChild(dmBtn);
     }
@@ -3936,18 +3975,19 @@ INDEX_HTML = r"""<!doctype html>
     node.classList.toggle('filtered-out', !hit);
   }
   function isRelevantInDm(m) {
-    // A message belongs to this conversation when either end of it is a
-    // participant: the author is in the set, or the message is addressed to
-    // someone in the set. The operator counts as a participant, so their own
-    // posts and anything aimed at them stay visible.
+    // A message belongs to this conversation when a participant wrote it, or
+    // when it is addressed to one.
     //
-    // Deliberately looser than a strict two-party DM — with three or more
-    // participants, side remarks that don't @mention everyone are still part
-    // of the same thread, and dropping them would silently hide context.
+    // The operator is deliberately NOT a wildcard participant. Treating your
+    // own id as in-scope would pull every message you sent — and everything
+    // anyone sent to you — into every pane, so a Firmware pane would fill up
+    // with the App/Cloud thread. Your messages appear here when they @mention
+    // a participant, which the composer guarantees for anything sent from
+    // this view.
     if (!state.convIds.size) return true;
-    const inScope = (id) => !!id && (state.convIds.has(id) || id === state.operator.id);
-    if (inScope(m.member_id)) return true;
-    return (m.mentions || []).some(inScope);
+    const inConv = (id) => !!id && state.convIds.has(id);
+    if (inConv(m.member_id)) return true;
+    return (m.mentions || []).some(inConv);
   }
   function applyDmFilterToNode(node, m) {
     if (!state.convIds.size) { node.classList.remove('dm-hidden'); return; }
@@ -4047,6 +4087,21 @@ INDEX_HTML = r"""<!doctype html>
       btnSound.classList.add('on');
     }
   } catch (_) {}
+
+  // ── Split-screen entry point ──
+  // Always available, so reaching the workspace never requires hand-writing a
+  // URL. Hidden inside a pane — nesting a workspace in a pane is not useful.
+  const btnWorkspace = document.getElementById('btn-workspace');
+  if (btnWorkspace) {
+    if (PANE_MODE) {
+      btnWorkspace.hidden = true;
+    } else {
+      btnWorkspace.addEventListener('click', () => {
+        // Carry any ticked members through as the first pane.
+        location.assign(workspaceUrl([...state.convPicks]));
+      });
+    }
+  }
 
   // ── Sidebar collapse toggle — persisted; 'on' pill state == roster visible ──
   const btnSide = document.getElementById('btn-side');
@@ -4387,7 +4442,13 @@ INDEX_HTML = r"""<!doctype html>
     const srcTag = op.source === 'tailscale' ? '[tailnet]' :
                    op.source === 'loopback'  ? '[local]'   :
                    op.source === 'guest'     ? '[GUEST]'   : '';
-    hMeta.textContent = `posting as ${opAnimal.emoji} ${op.name} (${op.id}) — the ${opAnimal.name} ${srcTag}  ·  ${state.server_host}`;
+    // Short by default — the generated member id, animal name, transport and
+    // host are all diagnostics, not things worth spending header width on
+    // every second of every day. They stay one hover away.
+    hMeta.textContent = `${opAnimal.emoji} ${op.name}` +
+                        (op.source === 'guest' ? ' [GUEST]' : '');
+    hMeta.title = `posting as ${op.name} (${op.id}) — the ${opAnimal.name} ` +
+                  `${srcTag}  ·  ${state.server_host}`;
   }
 
   // ── Bootstrap ──
