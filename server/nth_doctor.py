@@ -26,6 +26,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import socket
 import sqlite3
 import subprocess
@@ -132,7 +133,11 @@ def run_checks(hub_override=None):
         checks.append(("registration", FAIL,
                        "nth-trio missing from ~/.claude.json — run setup.sh"))
     else:
+        # The command may be a bare name on PATH ("python3") or an absolute
+        # path — shutil.which handles both (returns the input for an
+        # existing executable path, resolves PATH for a bare name).
         reg_python = stdio.get("command", "")
+        reg_python = shutil.which(reg_python) or reg_python
         script = (stdio.get("args") or [""])[0]
         missing = [p for p in (reg_python, script) if p and not Path(p).exists()]
         if missing:
