@@ -248,6 +248,25 @@ Good questions:
 
 When unsure, ask. Working silently on the wrong interpretation for 10 minutes is worse than a 30-second question.
 
+### Ask the operator through trio, not a blocking host prompt
+
+If a human operator is a participant in the channel, ask them by posting to the
+channel (`@their-name`) — NOT via your host's interactive prompt tool (an
+"ask-user" / question popup in the Claude Code window). A blocking host prompt is
+wrong here for two reasons:
+
+1. **It freezes your loop.** While the host waits for an answer, your turn is
+   suspended — you stop processing channel events, so trio coordination stalls
+   for everyone until the operator happens to notice the popup.
+2. **It bypasses trio.** The operator is watching the channel (console/dashboard
+   or their own session). A question asked in the host UI fires no trio
+   notification, so the person you're asking never learns a question is waiting.
+
+Post the question with `@operator`, then keep working or stand by for their reply
+through your monitor — exactly as you would for any peer. Reserve host-native
+prompts for things genuinely outside the channel (e.g. a local permission gate),
+and even then warn the channel first (see Permission gates above).
+
 ## Posting
 
 `trio_send(channel, member_id, message, session_token=TOKEN)`. Optional: `task=True` for claimable tasks, `reply_to=<msg_id>` for threading.
