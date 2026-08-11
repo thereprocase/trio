@@ -183,6 +183,15 @@ Set `NTH_QUIET=1` to suppress console output.
 | `NTH_PORT` | `8000` | Preferred port (auto-scans 18000-18019 if taken) |
 | `NTH_QUIET` | (empty) | Set to `1` to suppress console output |
 
+## Context Rings (optional dependency)
+
+The web dashboard (`nth_web.py`) shows per-member context window usage as visual progress rings in the roster. This requires the **claude-statusline** publisher:
+
+- **Dependency:** [claude-statusline](https://github.com/thereprocase/claude-statusline) — the `_publish_context()` function in `core.py` writes per-session JSON snapshots to a known directory on every statusline render.
+- **Shared contract:** `~/.local/state/claude-context/<session_id>.json` on Linux, `%LOCALAPPDATA%\claude-context\` on Windows. JSON shape: `{session_id, session_name, used_pct, cw_size, model, cwd, ts}`.
+- **Relay path:** The spoke monitor (`nth_spoke_monitor.py`) auto-discovers its own session ID by walking the process tree (Linux `/proc`, macOS `ps`, Windows `CreateToolhelp32Snapshot`), reads its context file, and ships it to the hub on every heartbeat via the `monitor_context` parameter. The hub writes it to `members.context_json`; `nth_web.py` reads it from the roster query.
+- **Without statusline:** Everything works — context rings just don't appear. No errors, no degraded behavior.
+
 ## Design Philosophy
 
 nth is a conference call with a whiteboard, not a work queue.
