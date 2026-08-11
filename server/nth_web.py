@@ -1349,6 +1349,91 @@ INDEX_HTML = r"""<!doctype html>
     --hover: #0a4453; --ov: 255,255,255;
     --card-radius: 6px; --card-shadow: 0 1px 4px rgba(0,0,0,.4); --pill-radius: 4px;
   }
+  :root[data-theme="bluebubble"] {
+    /* ── Blue Bubble ── */
+    --bg: #fff; --bg2: #f2f2f7; --panel: #fff; --border: #e5e5ea;
+    --fg: #1c1c1e; --dim: #8e8e93; --dimmer: #c7c7cc;
+    --accent: #007aff; --accent-hi: #409cff; --accent2: #34c759;
+    --warn: #ff9500; --err: #ff3b30; --mention: #ff9500;
+    --hover: #f2f2f7; --ov: 0,0,0;
+    --card-radius: 18px; --card-shadow: none;
+    --pill-radius: 999px; --input-radius: 18px;
+    --bubble-mine: #007aff; --bubble-mine-ink: #fff;
+    --bubble-theirs: #e9e9eb; --bubble-theirs-ink: #1c1c1e;
+    --bubble-system: transparent;
+  }
+  :root[data-theme="bluebubble"] .msg {
+    max-width: 75%; border-left: none; margin-left: 0; padding: 0; margin-bottom: 4px;
+    background: none !important; border-radius: 0;
+  }
+  :root[data-theme="bluebubble"] .msg:hover { background: none !important; }
+  :root[data-theme="bluebubble"] .msg .body {
+    display: inline-block; padding: 8px 14px;
+    border-radius: 18px; line-height: 1.35;
+    background: var(--bubble-theirs); color: var(--bubble-theirs-ink);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+    font-size: 15px;
+  }
+  :root[data-theme="bluebubble"] .msg.mine { margin-left: auto; text-align: right; }
+  :root[data-theme="bluebubble"] .msg.mine .body {
+    background: var(--bubble-mine); color: var(--bubble-mine-ink);
+    border-bottom-right-radius: 4px;
+  }
+  :root[data-theme="bluebubble"] .msg:not(.mine) .body {
+    border-bottom-left-radius: 4px;
+  }
+  :root[data-theme="bluebubble"] .msg .head { font-size: 10px; color: var(--dim);
+    padding: 0 14px; }
+  :root[data-theme="bluebubble"] .msg.mine .head { text-align: right; justify-content: flex-end; }
+  :root[data-theme="bluebubble"] .msg .author { font-weight: 600; }
+  :root[data-theme="bluebubble"] .msg.mine .author { color: var(--accent); }
+  :root[data-theme="bluebubble"] .msg.system .body {
+    background: transparent; color: var(--dim); font-style: italic;
+    font-size: 13px; text-align: center;
+  }
+  :root[data-theme="bluebubble"] .msg.system { max-width: 100%; text-align: center; }
+  :root[data-theme="bluebubble"] .msg .mentions-bar .mchip {
+    background: rgba(0,122,255,0.12); border-color: rgba(0,122,255,0.25); color: var(--accent);
+  }
+  :root[data-theme="bluebubble"] .msg.mine .mentions-bar .mchip {
+    background: rgba(255,255,255,0.2); border-color: rgba(255,255,255,0.3); color: #fff;
+  }
+  :root[data-theme="bluebubble"] .msg .body code.mdic {
+    background: rgba(0,0,0,0.06); border-color: rgba(0,0,0,0.1);
+  }
+  :root[data-theme="bluebubble"] .msg.mine .body code.mdic {
+    background: rgba(255,255,255,0.2); border-color: rgba(255,255,255,0.15);
+  }
+  :root[data-theme="bluebubble"] .msg .body pre.mdcode {
+    background: rgba(0,0,0,0.05); border-color: rgba(0,0,0,0.08);
+  }
+  :root[data-theme="bluebubble"] .msg.mine .body pre.mdcode {
+    background: rgba(255,255,255,0.15); border-color: rgba(255,255,255,0.1);
+  }
+  :root[data-theme="bluebubble"] .msg .body a { color: var(--accent); }
+  :root[data-theme="bluebubble"] .msg.mine .body a { color: #fff; text-decoration: underline; }
+  :root[data-theme="bluebubble"] .msg.targeted { background: none !important;
+    border-left: none; }
+  :root[data-theme="bluebubble"] .msg.targeted .body {
+    background: #fff3cd; color: #1c1c1e;
+  }
+  :root[data-theme="bluebubble"] header {
+    background: var(--panel); border-bottom: 1px solid var(--border);
+    backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
+  }
+  :root[data-theme="bluebubble"] #side { background: var(--bg2); }
+  :root[data-theme="bluebubble"] #composer {
+    background: var(--bg2); border-top: 1px solid var(--border);
+  }
+  :root[data-theme="bluebubble"] #send-btn {
+    border-radius: 50%; width: 36px; height: 36px; padding: 0;
+    font-size: 18px; line-height: 1;
+  }
+  :root[data-theme="bluebubble"] .member .dot { width: 10px; height: 10px; }
+  :root[data-theme="bluebubble"] .acks { display: none; }
+  :root[data-theme="bluebubble"] #chat { font-family: -apple-system, BlinkMacSystemFont,
+    "SF Pro Text", "Helvetica Neue", sans-serif; }
+
   :root[data-theme="win31"] {
     /* ── Windows 3.1 (PVE Dashboard) ── */
     --bg: #008080; --bg2: #008080; --panel: #c0c0c0; --border: #808080;
@@ -1918,6 +2003,9 @@ INDEX_HTML = r"""<!doctype html>
       </optgroup>
       <optgroup label="PVE – Classic">
         <option value="win31">Windows 3.1</option>
+      </optgroup>
+      <optgroup label="Familiar">
+        <option value="bluebubble">Blue Bubble</option>
       </optgroup>
     </select>
     <select id="font-picker" title="message font">
