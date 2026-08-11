@@ -4,9 +4,74 @@
 # Single source of truth for the release version. Surfaces in the startup
 # banner, the hub's /healthz + /fleet endpoints, node check-ins, and
 # nth_doctor's local-vs-hub version match.
-NTH_VERSION = "8.0.1-beta.1"
+NTH_VERSION = "8.0.2-beta.1"
 
 SLEEPING_KEYWORDS = ("idle", "standing by", "tier 3", "agent-monitor")
+
+# ── Context snapshot projection ───────────────────────────────────────
+# Statusline/publisher snapshots carry far more than the UI renders:
+# transcript paths, working directories, project dirs and cumulative API
+# spend. Those reach unauthenticated viewers over /api/events and
+# /api/landing, and the relayed blob is caller-controlled, so both the
+# store side (nth_server) and the read side (nth_web) project onto this
+# allowlist. Add a key here only when the UI actually renders it.
+CONTEXT_ALLOWED_KEYS = (
+    "session_id", "session_name", "used_pct", "cw_size",
+    "model", "effort", "source", "ts", "last_event_ts", "data_age_s",
+    "_age_s", "_relayed_at",
+)
+# Nested under "harness": only the two subtrees the drill-down reads.
+CONTEXT_ALLOWED_HARNESS = ("context_window", "rate_limits")
+# Longest string we keep for any scalar field — a relayed snapshot is
+# untrusted input, and these all render into a narrow stats column.
+CONTEXT_MAX_STR = 200
+
+
+def project_context(ctx):
+    """Return a copy of a context snapshot with only renderable fields.
+
+    Drops unknown keys entirely (so a hostile or future-expanded payload
+    cannot ride the relay into the page), coerces scalars to short
+    strings/numbers, and keeps the two harness subtrees the UI reads.
+    Returns None if the input is not a dict.
+    """
+    if not isinstance(ctx, dict):
+        return None
+
+    def _scalar(v):
+        if v is None or isinstance(v, (bool, int, float)):
+            return v
+        return str(v)[:CONTEXT_MAX_STR]
+
+    def _clean(sub, depth):
+        """Scalars, plus one more level of dict-of-scalars.
+
+        rate_limits nests as {five_hour: {used_percentage: N}}, so a
+        scalars-only filter here silently drops the 5h/7d rows.
+        """
+        cleaned = {}
+        for k, v in sub.items():
+            if isinstance(v, (str, int, float, bool, type(None))):
+                cleaned[k] = _scalar(v)
+            elif isinstance(v, dict) and depth > 0:
+                cleaned[k] = _clean(v, depth - 1)
+        return cleaned
+
+    out = {}
+    for key in CONTEXT_ALLOWED_KEYS:
+        if key in ctx:
+            out[key] = _scalar(ctx[key])
+
+    harness = ctx.get("harness")
+    if isinstance(harness, dict):
+        keep = {}
+        for key in CONTEXT_ALLOWED_HARNESS:
+            sub = harness.get(key)
+            if isinstance(sub, dict):
+                keep[key] = _clean(sub, 1)
+        if keep:
+            out["harness"] = keep
+    return out
 
 # ── Animal emoji avatars ──────────────────────────────────────────────
 # Stable, per-member visual identity. Curated to avoid confusable pairs

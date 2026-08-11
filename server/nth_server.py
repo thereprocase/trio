@@ -27,7 +27,7 @@ from pathlib import Path
 # Add server/ to sys.path so nth_constants can be imported when MCP spawns this
 import sys
 sys.path.insert(0, str(Path(__file__).parent))
-from nth_constants import SLEEPING_KEYWORDS, NTH_VERSION
+from nth_constants import SLEEPING_KEYWORDS, NTH_VERSION, project_context
 
 from mcp.server.fastmcp import FastMCP
 
@@ -140,11 +140,11 @@ def _startup_banner():
     _safe_print(f"  |  nth server - {SERVER_NAME:<27s}|")
     _safe_print(f"  |  {f'v{NTH_VERSION}  {SERVER_HOST}:{SERVER_PORT}':<41s}|")
     _safe_print(f"  |  tools: {TOOL_PREFIX}_*                            |")
-    _safe_print(f"  |  db: ~/.claude/nth/nth.db                 |")
+    _safe_print("  |  db: ~/.claude/nth/nth.db                 |")
     if connect_url:
         _safe_print("  |                                           |")
-        _safe_print(f"  |  Spoke setup:                             |")
-        _safe_print(f"  |  bash setup.sh spoke                      |")
+        _safe_print("  |  Spoke setup:                             |")
+        _safe_print("  |  bash setup.sh spoke                      |")
         _safe_print(f"  |    {connect_url[:39]:<39s}|")
     _safe_print("  +-------------------------------------------+")
     _safe_print("\033[0m", flush=True)
@@ -397,12 +397,12 @@ def export_conversation(db: sqlite3.Connection, channel: str) -> Path | None:
 
         lines = [
             f"# nth: {channel}",
-            f"",
+            "",
             f"**Created:** {row['created_at']}",
             f"**Ended:** {row['ended_at'] or 'still active'}",
-            f"",
-            f"## Members",
-            f"",
+            "",
+            "## Members",
+            "",
         ]
         for m in members:
             status = "active" if _is_member_active(m["last_seen"]) else "stale"
@@ -424,11 +424,11 @@ def export_conversation(db: sqlite3.Connection, channel: str) -> Path | None:
         for msg in messages:
             label = msg["member_name"] or msg["member_id"]
             lines.append(f"### [{label}]")
-            lines.append(f"")
+            lines.append("")
             lines.append(msg["content"])
-            lines.append(f"")
-            lines.append(f"---")
-            lines.append(f"")
+            lines.append("")
+            lines.append("---")
+            lines.append("")
 
         log_path.write_text("\n".join(lines), encoding="utf-8")
         return log_path
@@ -1250,6 +1250,7 @@ def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: st
 
     try:
         deadline = time.time() + wait_seconds
+        _ctx_relayed = False
         while True:
             member = _get_member(db, channel, member_id)
             if not member:
@@ -1300,17 +1301,25 @@ def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: st
             # snapshot so every nth_web instance (hub included) can render
             # rings + full drill-downs for this member. Size-capped and
             # validated; never allowed to break the poll.
-            if monitor_heartbeat and monitor_context and len(monitor_context) < 16384:
+            # Only on the first iteration of this long poll: the loop below
+            # re-runs every 2s, and re-writing an unchanged blob (with a
+            # fresh _relayed_at) turned a heartbeat into ~1800 UPDATEs/hour
+            # per spoke and made _relayed_at measure "a poll was in flight"
+            # rather than "this snapshot is current".
+            if (monitor_heartbeat and monitor_context and not _ctx_relayed
+                    and isinstance(monitor_context, str)
+                    and len(monitor_context) < 16384):
+                _ctx_relayed = True
                 try:
-                    ctx = json.loads(monitor_context)
-                    if isinstance(ctx, dict):
+                    ctx = project_context(json.loads(monitor_context))
+                    if ctx is not None:
                         ctx["_relayed_at"] = now
                         db.execute(
                             "UPDATE members SET context_json = ? "
                             "WHERE id = ? AND channel = ?",
                             (json.dumps(ctx), member_id, channel),
                         )
-                except (ValueError, sqlite3.OperationalError):
+                except (ValueError, TypeError, sqlite3.OperationalError):
                     pass
             if monitor_heartbeat:
                 try:
@@ -1538,7 +1547,7 @@ def nth_ack(channel: str, member_id: str, through_id: int, session_token: str = 
         if through_id > max_msg:
             return json.dumps({"error": f"Invalid through_id {through_id} — max message ID is {max_msg}."})
         if through_id < 0:
-            return json.dumps({"error": f"through_id cannot be negative."})
+            return json.dumps({"error": "through_id cannot be negative."})
 
         if sess is not None:
             db.execute(

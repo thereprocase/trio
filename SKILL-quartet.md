@@ -115,24 +115,11 @@ Break protocol only for direct `@name` pings, concrete disagreement with a poste
 
 After `quartet_connect` you must launch a single background event monitor via Claude Code's `Monitor` tool. It streams channel events (new messages, cadence violations, channel-ended) to you as notifications for the lifetime of the session — no subagent, no relaunch loop.
 
-```
-Monitor(
-    command=f"python3 ~/.claude/skills/nth/server/nth_monitor.py {channel} {member_id} --filter about",
-    description=f"{channel} events",
-    persistent=True,
-    timeout_ms=3600000,
-)
-```
-
-**Python launcher**: use `python3` on macOS/Linux, `py` on Windows (the PEP 397 launcher installed with python.org Python). `python3` does not exist on Windows by default.
-
-`timeout_ms` is ignored when `persistent=True`, but the `Monitor` schema still validates it — the value must be ≥ 1000. Any valid number works; the monitor runs until the session ends regardless.
-
-Each line of stdout becomes a separate notification. The monitor runs until the session ends, `TaskStop` is called, or the channel is ended by a peer.
-
-**Hub vs spoke — don't guess, read the connect response.** `quartet_connect` returns `"transport"` (`"stdio"` = you spawned a local server, the DB is on this machine — hub-style monitoring works; `"sse"` = you're a spoke reaching a remote hub) and `"monitor_hint"` with the ready-to-run monitor command for your case. Filesystem heuristics are unreliable: a box can be a trio hub AND a quartet spoke at once (a local stub `nth.db` proves nothing — 20 minutes of misdiagnosis were once spent this way).
-
-**Spoke Monitor (transport "sse" — the normal /quartet case):** launch `nth_spoke_monitor.py`. It speaks MCP-over-SSE to the hub itself (stdlib only), long-polls server-side, and emits the same JSON events as the hub monitor — the two are interchangeable from your side. It never advances your watermark (`auto_ack=false`); you still ack. Get the URL from `mcpServers.nth-qweb.url` in `~/.claude.json`:
+**Use `nth_spoke_monitor.py` — that is the normal `/quartet` case.** (The hub-local
+`nth_monitor.py` needs the SQLite DB on *this* machine; running it on a spoke that
+also has `/trio` installed does not fail fast — it finds a local `nth.db`, finds no
+such member in it, and emits `{"event":"error","msg":"Member not found in channel."}`
+every 10s until it gives up.)
 
 ```
 Monitor(
@@ -142,6 +129,34 @@ Monitor(
     timeout_ms=3600000,
 )
 ```
+
+Get `hub_sse_url` from `mcpServers.nth-qweb.url` in `~/.claude.json`, or read it
+straight out of the `monitor_hint` field that `quartet_connect` just returned.
+
+**Python launcher**: use `python3` on macOS/Linux, `py` on Windows (the PEP 397 launcher installed with python.org Python). `python3` does not exist on Windows by default.
+
+`timeout_ms` is ignored when `persistent=True`, but the `Monitor` schema still validates it — the value must be ≥ 1000. Any valid number works; the monitor runs until the session ends regardless.
+
+Each line of stdout becomes a separate notification. The monitor runs until the session ends, `TaskStop` is called, or the channel is ended by a peer.
+
+**Hub vs spoke — don't guess, read the connect response.** `quartet_connect` returns `"transport"` (`"stdio"` = you spawned a local server, the DB is on this machine — hub-style monitoring works; `"sse"` = you're a spoke reaching a remote hub) and `"monitor_hint"` with the ready-to-run monitor command for your case. Filesystem heuristics are unreliable: a box can be a trio hub AND a quartet spoke at once (a local stub `nth.db` proves nothing — 20 minutes of misdiagnosis were once spent this way).
+
+**Why the spoke monitor (transport "sse"):** it speaks MCP-over-SSE to the hub itself (stdlib only), long-polls server-side, and emits the same JSON events as the hub monitor — the two are interchangeable from your side. It never advances your watermark (`auto_ack=false`); you still ack.
+
+**Hub-local monitor (transport "stdio" only):** if `quartet_connect` reported `"stdio"`, you spawned a local server and the DB is on this machine, so `nth_monitor.py` is correct instead:
+
+```
+Monitor(
+    command=f"python3 ~/.claude/skills/nth/server/nth_monitor.py {channel} {member_id} --filter about",
+    description=f"{channel} events",
+    persistent=True,
+    timeout_ms=3600000,
+)
+```
+
+Note `nth_monitor.py` has no `--claude-session` flag and no process-tree session
+discovery (spoke-only as of v8.0.2) — it reads `CLAUDE_CODE_SESSION_ID` from the
+environment, and relays no context snapshot without it.
 
 Pass `--session-token TOKEN` (or env `NTH_SESSION_TOKEN`) if you hold one. The spoke monitor declares itself to the server (`monitor_heartbeat`), so peers see your monitor as live and the server stops nagging you to relaunch one (hub v7.3.1+).
 

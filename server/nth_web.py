@@ -28,7 +28,6 @@ from __future__ import annotations
 
 import argparse
 import getpass
-import html
 import http.cookies
 import ipaddress
 import json
@@ -53,7 +52,8 @@ from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, urlparse
 
 sys.path.insert(0, str(Path(__file__).parent))
-from nth_constants import ANIMAL_EMOJIS, animal_for, animal_for_channel, NTH_VERSION
+from nth_constants import (ANIMAL_EMOJIS, animal_for, animal_for_channel,
+                           NTH_VERSION, project_context)
 
 
 # ───────── Config ─────────
@@ -61,6 +61,7 @@ DB_PATH = Path.home() / ".claude" / "nth" / "nth.db"
 DEFAULT_PORT = 8765
 DB_POLL_INTERVAL = 0.5
 HISTORY_LIMIT = 200          # messages sent to a client on /api/history
+HUB_IDLE_REAP_S = 300        # retire a channel's EventHub after this long unwatched
 SSE_HEARTBEAT_SEC = 20       # keep-alive comment interval
 STALE_SECONDS = 300          # fresh heartbeat threshold
 DEAD_SECONDS = 900           # no heartbeat this long → dead
@@ -69,13 +70,15 @@ OPERATOR_MEMBER_ID_PREFIX = "_op_"
 OPERATOR_NAME_FALLBACK = "Operator"
 OP_COOKIE = "nth_op"
 OP_COOKIE_MAX_AGE = 60 * 60 * 24 * 30   # 30 days
+OP_PENDING_TTL_S = 60 * 60              # drop un-resolved 'pending' identities
+OP_REGISTRY_MAX = 5000                  # hard cap, oldest evicted first
 IDENTITY_SOURCE_TAILSCALE = "tailscale"
 IDENTITY_SOURCE_LOOPBACK = "loopback"
 IDENTITY_SOURCE_GUEST = "guest"
 IDENTITY_SOURCE_PENDING = "pending"
 # Agents reading the roster can check the member's summary field:
-#   "human — tailnet: knelsonb"       → identity-traceable via Tailscale
-#   "human — local (user: repro)"     → connected via loopback; trust level is
+#   "human — tailnet: alice"          → identity-traceable via Tailscale
+#   "human — local (user: alice)"     → connected via loopback; trust level is
 #                                       "already has a shell on this box"
 #   "human — GUEST (self-declared)"   → untrusted self-declared identity
 # Neither replaces direct hub-console input.
@@ -148,7 +151,7 @@ class OperatorIdentity:
         if self.source == IDENTITY_SOURCE_LOOPBACK:
             return f"human — local (user: {self.login or self.name})"
         if self.source == IDENTITY_SOURCE_GUEST:
-            return f"human — GUEST (self-declared)"
+            return "human — GUEST (self-declared)"
         return "human — pending identity"
 
 
@@ -199,6 +202,30 @@ class OperatorRegistry:
     def put(self, token: str, ident: OperatorIdentity) -> None:
         with self._lock:
             self._by_token[token] = ident
+            self._evict_locked()
+
+    def _evict_locked(self) -> None:
+        """Bound the registry. Every cookie-less request mints a token and
+        stores a 'pending' identity, so without eviction an unauthenticated
+        client (or a scanner) grows this dict until the process dies.
+        Pending entries expire on a timer; resolved ones only when the hard
+        cap is hit, oldest first, since losing one just re-prompts a human.
+        """
+        now = time.time()
+        for tok, ident in list(self._by_token.items()):
+            created = getattr(ident, "created_at", None)
+            if created is None:
+                continue
+            if (ident.source == IDENTITY_SOURCE_PENDING
+                    and now - created > OP_PENDING_TTL_S):
+                del self._by_token[tok]
+        if len(self._by_token) > OP_REGISTRY_MAX:
+            oldest = sorted(
+                self._by_token.items(),
+                key=lambda kv: getattr(kv[1], "created_at", 0) or 0,
+            )
+            for tok, _ in oldest[: len(self._by_token) - OP_REGISTRY_MAX]:
+                del self._by_token[tok]
 
     def resolve_from_loopback(self, token: str, remote_ip: str) -> Optional[OperatorIdentity]:
         """If the peer came in over loopback, trust the OS account the server
@@ -513,6 +540,7 @@ class EventHub:
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._last_roster_snapshot: Optional[str] = None
+        self.idle_since: Optional[float] = None
 
     # ── subscription ──
     def subscribe(self) -> queue.Queue:
@@ -527,6 +555,14 @@ class EventHub:
         with self._lock:
             if q in self._subs:
                 self._subs.remove(q)
+            if not self._subs:
+                # Stamp the moment we went quiet; the reaper uses this to
+                # retire hubs for channels nobody is watching any more.
+                self.idle_since = time.time()
+
+    def subscriber_count(self) -> int:
+        with self._lock:
+            return len(self._subs)
 
     def _prime_subscriber(self, q: queue.Queue) -> None:
         # try/finally so queue.Full or a transient sqlite error doesn't leak
@@ -741,9 +777,12 @@ class EventHub:
                         self._broadcast({"type": "roster", "members": members})
 
                     # Context rings: cheap (few tiny local files); broadcast
-                    # only when the payload actually changed.
+                    # only when the payload actually changed. The age fields
+                    # move every tick, so they are excluded from the
+                    # comparison — hashing them made this fire ~1/s forever
+                    # to every connected browser.
                     ctx_sessions = _read_context_snapshots()
-                    ctx_snapshot = json.dumps(ctx_sessions, sort_keys=True)
+                    ctx_snapshot = _ctx_change_key(ctx_sessions)
                     if ctx_snapshot != getattr(self, "_last_context_snapshot", None):
                         self._last_context_snapshot = ctx_snapshot
                         self._broadcast({"type": "context", "sessions": ctx_sessions})
@@ -779,9 +818,25 @@ CONTEXT_USAGE_STALE_S = 60
 CONTEXT_SNAPSHOT_STALE_S = 120
 
 
+_CTX_CACHE_TTL_S = 1.0
+_ctx_cache: Dict[str, Any] = {"at": 0.0, "val": []}
+_ctx_cache_lock = threading.Lock()
+
+
 def _read_context_snapshots() -> List[Dict[str, Any]]:
     """All fresh publisher files as dicts (plus _age_s), newest first.
-    Stale >120s ignored; the UI additionally dims entries older than 30s."""
+    Stale >120s ignored; the UI additionally dims entries older than 30s.
+
+    Memoised for _CTX_CACHE_TTL_S: one EventHub tick calls this from both
+    the roster build and the ring broadcast, one thread runs per viewed
+    channel, and /api/landing calls it per request — all re-globbing and
+    re-parsing the same handful of files. The TTL is below the poll
+    interval's practical resolution, so freshness is unaffected.
+    """
+    now_c = time.monotonic()
+    with _ctx_cache_lock:
+        if now_c - _ctx_cache["at"] < _CTX_CACHE_TTL_S:
+            return list(_ctx_cache["val"])
     out: List[Dict[str, Any]] = []
     try:
         now = time.time()
@@ -790,9 +845,16 @@ def _read_context_snapshots() -> List[Dict[str, Any]]:
                 age = now - p.stat().st_mtime
                 if age > CONTEXT_SNAPSHOT_STALE_S:
                     continue
-                data = json.loads(p.read_text(encoding="utf-8"))
-                if not isinstance(data.get("session_id"), str):
+                raw = json.loads(p.read_text(encoding="utf-8"))
+                if not isinstance(raw, dict):
                     continue
+                if not isinstance(raw.get("session_id"), str):
+                    continue
+                # Project before it leaves this function: these snapshots
+                # go to /api/landing and every SSE subscriber, neither of
+                # which requires an identity. The raw statusline file
+                # carries transcript paths, cwds, project dirs and spend.
+                data = project_context(raw)
                 data["_age_s"] = int(age)
                 out.append(data)
             except (OSError, ValueError):
@@ -800,7 +862,22 @@ def _read_context_snapshots() -> List[Dict[str, Any]]:
     except OSError:
         pass
     out.sort(key=lambda d: d["_age_s"])
-    return out
+    with _ctx_cache_lock:
+        _ctx_cache["at"] = now_c
+        _ctx_cache["val"] = out
+    return list(out)
+
+
+_CTX_VOLATILE = ("_age_s", "data_age_s", "ts", "_relayed_at")
+
+
+def _ctx_change_key(sessions: List[Dict[str, Any]]) -> str:
+    """Stable digest of a context payload, ignoring fields that tick on
+    their own. Used to decide whether an SSE broadcast is warranted."""
+    return json.dumps(
+        [{k: v for k, v in s.items() if k not in _CTX_VOLATILE} for s in sessions],
+        sort_keys=True,
+    )
 
 
 def _read_context_usage() -> Dict[str, Dict[str, Any]]:
@@ -923,12 +1000,31 @@ class NthWebHandler(BaseHTTPRequestHandler):
             return self.hub
         cls = NthWebHandler
         with cls.hubs_lock:
+            cls._reap_idle_hubs_locked()
             hub = cls.hubs.get(code)
             if hub is None:
                 hub = EventHub(self.db_path, code)
                 hub.start()
                 cls.hubs[code] = hub
             return hub
+
+    @classmethod
+    def _reap_idle_hubs_locked(cls) -> None:
+        """Retire hubs nobody has watched for HUB_IDLE_REAP_S.
+
+        Caller must hold hubs_lock. Each live hub is a thread plus a
+        SQLite connection polling twice a second, so without this a
+        browsed-once channel costs 2 queries/second for the life of the
+        process.
+        """
+        now = time.time()
+        for code, hub in list(cls.hubs.items()):
+            if hub.subscriber_count() > 0:
+                continue
+            idle_since = hub.idle_since
+            if idle_since is not None and (now - idle_since) > HUB_IDLE_REAP_S:
+                hub.stop()
+                del cls.hubs[code]
 
     def _channel_exists(self, code: str) -> bool:
         try:
@@ -1059,6 +1155,13 @@ class NthWebHandler(BaseHTTPRequestHandler):
             if ch is None:
                 self._error(400, "channel query param required")
                 return
+            # Verify before spinning up a hub: each one is a permanent
+            # thread polling SQLite twice a second, so accepting any
+            # well-formed code would let an unauthenticated caller mint
+            # unbounded threads with a loop of random codes.
+            if self.landing_mode and not self._channel_exists(ch):
+                self._error(404, f"no such channel: {ch}")
+                return
             self._serve_sse(self._hub_for_channel(ch))
         else:
             self._error(404, "not found")
@@ -1128,7 +1231,13 @@ class NthWebHandler(BaseHTTPRequestHandler):
             hub.unsubscribe(q)
 
     def _read_json_body(self, max_bytes: int = 16384) -> Optional[Dict[str, Any]]:
-        length = int(self.headers.get("Content-Length", "0") or 0)
+        try:
+            length = int(self.headers.get("Content-Length", "0") or 0)
+        except ValueError:
+            # A non-numeric Content-Length is a malformed request, not a
+            # reason to dump a traceback into the hub's journal.
+            self._error(400, "invalid Content-Length")
+            return None
         if length <= 0 or length > max_bytes:
             self._error(400, "missing or oversized body")
             return None
@@ -1808,7 +1917,7 @@ INDEX_HTML = r"""<!doctype html>
   .msg.compact .body::after { content: ""; }
   .msg.system .body { color: var(--dim); font-style: italic; }
   .msg.mine .author { color: var(--accent2); }
-  .msg.targeted { background: #1a2030; border-left-color: var(--mention); }
+  .msg.targeted { background: var(--hover); border-left-color: var(--mention); }
   .msg.filtered-out { display: none; }
   .msg.dm-hidden { display: none; }
   body.dm-mode .acks { display: none; }  /* two participants; ack badges are noise */
@@ -1870,34 +1979,20 @@ INDEX_HTML = r"""<!doctype html>
   .member .roster-animal { font-size: 16px; line-height: 1; flex-shrink: 0;
                            user-select: none; }
   .member .dm-btn { font-size: 9px; padding: 2px 6px; border-radius: 3px;
-                    background: #1c2432; color: var(--dim); border: 1px solid #283242;
+                    background: var(--bg2); color: var(--dim); border: 1px solid var(--border);
                     cursor: pointer; flex-shrink: 0; user-select: none;
                     text-transform: uppercase; letter-spacing: 0.5px; }
   .member .dm-btn:hover { background: var(--accent); color: var(--bg);
                           border-color: var(--accent); }
-  .ctx-card { display: flex; align-items: center; gap: 8px; padding: 4px 2px; }
-  .ctx-ring { position: relative; width: 36px; height: 36px; flex: none; }
-  .ctx-ring svg { width: 36px; height: 36px; transform: rotate(-90deg); }
-  .ctx-ring .track { fill: none; stroke: var(--border); stroke-width: 4; }
-  .ctx-ring .fill { fill: none; stroke-width: 4; stroke-linecap: round;
-                    transition: stroke-dashoffset 0.6s ease; }
-  .ctx-ring .pct-text { position: absolute; inset: 0; display: flex;
-                        align-items: center; justify-content: center;
-                        font-size: 10px; color: var(--fg); }
-  .ctx-info { min-width: 0; }
-  .ctx-name { font-size: 11px; color: var(--fg); white-space: nowrap;
-              overflow: hidden; text-overflow: ellipsis; }
-  .ctx-meta { font-size: 10px; color: var(--dim); }
-  .ctx-empty { font-size: 11px; color: var(--dim); padding: 2px; }
   .member .ctx-pct { font-size: 9px; padding: 1px 5px; border-radius: 7px;
-                     background: #2a3340; color: #8fa5c0; margin-left: 4px; }
+                     background: var(--bg2); color: var(--dim); margin-left: 4px; }
   .member .ctx-pct.warm { background: #4a3a20; color: #e5d35e; }
   .member .ctx-pct.hot  { background: #4a2420; color: var(--bang-chip); }
   .member .fmode { font-size: 9px; padding: 1px 5px; border-radius: 3px;
                    flex-shrink: 0; user-select: none;
                    text-transform: uppercase; letter-spacing: 0.5px;
                    border: 1px solid transparent; }
-  .member .fmode.all   { color: var(--dim); background: #1c2432; border-color: #283242; }
+  .member .fmode.all   { color: var(--dim); background: var(--bg2); border-color: var(--border); }
   .member .fmode.about { color: var(--ref-chip); background: var(--ref-chip-bg);
                          border-color: var(--ref-chip-border); }
   .member .fmode.at    { color: #f0c060; background: rgba(240, 192, 96, 0.1);
@@ -1937,10 +2032,15 @@ INDEX_HTML = r"""<!doctype html>
   #chanstats .stat-val { color: var(--fg); font-weight: 600; }
   #sparkline { font-family: inherit; font-size: 14px; color: var(--accent);
                letter-spacing: -1px; padding-top: 4px; }
-  #filter-banner { padding: 4px 8px; background: #1a2030; color: var(--mention);
+  #filter-banner { padding: 4px 8px; background: var(--hover); color: var(--mention);
                    font-size: 10px; border-radius: 3px; margin-bottom: 6px;
                    display: none; cursor: pointer; }
   #filter-banner.active { display: block; }
+  /* Fatal/bootstrap errors. Deliberately outside header .meta, which the
+     mobile breakpoint hides — a failed boot has to be legible on a phone. */
+  #fatal-banner { display: none; padding: 10px 14px; background: var(--err);
+                  color: #fff; font-size: 13px; font-weight: 600;
+                  text-align: center; position: sticky; top: 0; z-index: 999; }
 
   /* ── Composer (unchanged from v1) ── */
   #composer { grid-row: 3 / 4; grid-column: 1 / 3;
@@ -2100,7 +2200,7 @@ INDEX_HTML = r"""<!doctype html>
 </div>
 <div id="app">
   <header>
-    <a class="pill" id="btn-home" href="/" title="back to the hub landing page">⌂</a>
+    <a class="pill" id="btn-home" href="/" title="back to the hub landing page">⌂ fleet</a>
     <span class="title" id="h-channel">trio#…</span>
     <span class="meta" id="h-meta">connecting…</span>
     <span class="spacer"></span>
@@ -3436,9 +3536,19 @@ INDEX_HTML = r"""<!doctype html>
       const sevenD = rl.seven_day || {};
       const fhPct = fiveH.used_percentage != null ? Math.round(fiveH.used_percentage) + '%' : '';
       const sdPct = sevenD.used_percentage != null ? Math.round(sevenD.used_percentage) + '%' : '';
+      // Codex publishers refresh their snapshot while the TUI is alive even
+      // when no new token count arrived, so a fresh file can carry an old
+      // number. data_age_s is the age of the reading itself — say so rather
+      // than presenting an hours-old figure as current.
+      const dAge = c.data_age_s;
+      const staleNote = (typeof dAge === 'number' && dAge > 300)
+        ? ` (as of ${dAge >= 3600 ? Math.round(dAge/3600)+'h' : Math.round(dAge/60)+'m'} ago)`
+        : '';
       const ctxRows = [
-        ['context', `${pct} of ${cwLabel}`, pctClass],
-        ['model', model, ''],
+        // cwLabel is '' when the window size is unknown — don't render "45% of ".
+        ['context', (cwLabel ? `${pct} of ${cwLabel}` : pct) + escapeHtml(staleNote),
+         staleNote ? '' : pctClass],
+        ['model', escapeHtml(model), ''],
       ];
       if (c.effort) ctxRows.push(['effort', escapeHtml(c.effort), '']);
       if (fhPct) ctxRows.push(['5h limit', fhPct, (fiveH.used_percentage||0) >= 80 ? 'bad' : '']);
@@ -4147,7 +4257,11 @@ INDEX_HTML = r"""<!doctype html>
         const payload = JSON.parse(ev.data);
         if (payload.type === 'message') appendMessage(payload);
         else if (payload.type === 'roster') renderRoster(payload.members);
-        else if (payload.type === 'context') renderContext(payload.sessions);
+        // 'context' frames carry the per-host session list. The channel page
+        // renders context per-member (roster badge + stats drill-down); the
+        // standalone ring sidebar was removed in b771656, so nothing here
+        // consumes them. The landing page still renders rings from its own
+        // /api/landing poll.
       } catch (e) { console.error('bad event', e); }
     };
     es.onerror = () => {
@@ -4244,81 +4358,55 @@ INDEX_HTML = r"""<!doctype html>
       state.originalTitle = (DM_MODE ? 'DM — trio#' : 'trio#') + meta.channel;
       if (DM_MODE) document.body.classList.add('dm-mode');
       updateTitle();
-      if (meta.operator.pending) {
+      if (meta.operator && meta.operator.pending) {
         // Untrusted connection — need a name before anything else
         showGuestModal();
         return;
       }
+      bootAttempts = 0;
+      clearFatal();
       applyOperator(meta.operator);
       afterBoot();
     } catch (e) {
-      hMeta.textContent = 'bootstrap failed: ' + e.message;
+      // Retry like the SSE path does. Without this a single blip while the
+      // hub restarts left a permanently dead page — and the message went
+      // into header .meta, which mobile CSS hides, so on a phone the whole
+      // app was simply blank with no explanation.
+      bootAttempts++;
+      showFatal('Could not reach the hub (' + e.message + '). Retrying…');
+      if (bootAttempts < 20) setTimeout(boot, Math.min(2000 * bootAttempts, 15000));
+      else showFatal('Could not reach the hub: ' + e.message +
+                     '. Check it is running, then reload.');
     }
   }
+  let bootAttempts = 0;
+  function showFatal(msg) {
+    let el = document.getElementById('fatal-banner');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'fatal-banner';
+      document.body.prepend(el);
+    }
+    el.textContent = msg;
+    el.style.display = 'block';
+  }
+  function clearFatal() {
+    const el = document.getElementById('fatal-banner');
+    if (el) el.style.display = 'none';
+  }
   function afterBoot() {
+    // API_QS is only set in landing mode. In single-channel mode "/" IS this
+    // page, so the home link would just reload and its tooltip would be a lie.
+    if (!API_QS) {
+      const bh = document.getElementById('btn-home');
+      if (bh) bh.style.display = 'none';
+    }
     connect();
     input.focus();
     updatePreview();
     updateChanStats();
   }
 
-  // ── Context rings ──
-  const ctxListEl = document.getElementById('ctx-list');
-  const CTX_CIRC = 2 * Math.PI * 14; // r=14 for 36px ring
-  function ctxColor(pct) {
-    if (pct >= 80) return 'var(--err)';
-    if (pct >= 60) return 'var(--warn)';
-    return 'var(--accent2)';
-  }
-  function ctxModelShort(m) {
-    if (!m) return '';
-    const p = m.replace(/^claude-/, '').split('-');
-    return p[0] || m;
-  }
-  function renderContext(sessions) {
-    if (!ctxListEl) return;
-    if (!sessions || !sessions.length) {
-      ctxListEl.innerHTML = '<div class="ctx-empty">no active sessions</div>';
-      return;
-    }
-    ctxListEl.innerHTML = '';
-    for (const s of sessions) {
-      const pct = s.used_pct || 0;
-      const color = ctxColor(pct);
-      const offset = CTX_CIRC * (1 - pct / 100);
-      const name = s.session_name || s.session_id || '?';
-      const model = ctxModelShort(s.model);
-      const cwLabel = s.cw_size >= 1000000
-        ? (s.cw_size / 1000000) + 'M'
-        : s.cw_size >= 1000 ? Math.round(s.cw_size / 1000) + 'k' : '';
-      const age = s._age_s || 0;
-      const fresh = age < 30;
-
-      const card = document.createElement('div');
-      card.className = 'ctx-card';
-      card.title = `${Math.round(pct)}% of ${cwLabel} context · ${model} · ${age}s ago`;
-      card.style.opacity = fresh ? '1' : '0.5';
-      card.innerHTML = `
-        <div class="ctx-ring">
-          <svg viewBox="0 0 36 36">
-            <circle class="track" cx="18" cy="18" r="14"/>
-            <circle class="fill" cx="18" cy="18" r="14"
-              stroke="${color}"
-              stroke-dasharray="${CTX_CIRC}"
-              stroke-dashoffset="${offset}"/>
-          </svg>
-          <div class="pct-text">${Math.round(pct)}</div>
-        </div>
-        <div class="ctx-info">
-          <div class="ctx-name">${escapeHtml(name)}</div>
-          <div class="ctx-meta">
-            <span class="ctx-model">${escapeHtml(model)}</span>
-            ${cwLabel ? ' · ' + cwLabel : ''}
-          </div>
-        </div>`;
-      ctxListEl.appendChild(card);
-    }
-  }
 
   boot();
 })();
@@ -4586,8 +4674,36 @@ def main() -> int:
 
     db_path = Path(args.db)
     if not db_path.exists():
-        sys.stderr.write(f"nth.db not found at {db_path}\n")
+        sys.stderr.write(
+            f"nth.db not found at {db_path}\n"
+            f"It's created the first time a session runs /trio. Start a Claude\n"
+            f"Code session, run /trio, then retry — or pass --db PATH.\n")
         return 1
+
+    # Typo'd channel codes used to start a normal-looking server that stayed
+    # empty forever. Landing mode already validates; single-channel didn't.
+    if args.channel:
+        try:
+            _probe = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=2)
+            try:
+                row = _probe.execute(
+                    "SELECT 1 FROM channels WHERE code = ?", (args.channel,)
+                ).fetchone()
+                if row is None:
+                    known = [r[0] for r in _probe.execute(
+                        "SELECT code FROM channels ORDER BY code LIMIT 20")]
+                    sys.stderr.write(f"no such channel: {args.channel}\n")
+                    if known:
+                        sys.stderr.write("channels in this db: "
+                                         + ", ".join(known) + "\n")
+                    else:
+                        sys.stderr.write("this db has no channels yet\n")
+                    return 1
+            finally:
+                _probe.close()
+        except sqlite3.Error as e:
+            sys.stderr.write(f"could not read {db_path}: {e}\n")
+            return 1
 
     host = args.host
     if host is None:

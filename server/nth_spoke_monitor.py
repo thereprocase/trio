@@ -50,7 +50,6 @@ import http.client
 import json
 import os
 import queue
-import socket
 import ssl
 import subprocess
 import sys
@@ -76,9 +75,10 @@ SSE_READ_TIMEOUT     = 90            # server pings ~15s; 90s silent = dead sock
 # the monitor for statuses like "rollout done, watching logs".
 try:
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from nth_constants import SLEEPING_KEYWORDS
+    from nth_constants import SLEEPING_KEYWORDS, project_context
 except ImportError:
     SLEEPING_KEYWORDS = ("idle", "standing by", "tier 3", "agent-monitor")
+    project_context = None
 
 # Own-session context file, written by the operator's statusline publisher.
 if sys.platform == "win32":
@@ -142,7 +142,11 @@ def _get_ppid(pid):
     # Linux: fast /proc read. macOS: falls through to ps.
     try:
         with open(f"/proc/{pid}/stat", encoding="utf-8") as f:
-            return int(f.read().split(")")[1].split()[1])
+            # Format: pid (comm) state ppid ...
+            # comm is unsanitised and may itself contain ')' or spaces, so
+            # split on the LAST ')' — splitting on the first one misparses
+            # any process whose name contains a paren.
+            return int(f.read().rpartition(")")[2].split()[1])
     except (OSError, ValueError, IndexError):
         pass
     # macOS (and any POSIX without /proc): ps -o ppid= -p PID
@@ -170,9 +174,17 @@ def read_own_context():
             return None
         with open(path, encoding="utf-8") as f:
             raw = f.read()
-        json.loads(raw)  # validate before shipping
+        parsed = json.loads(raw)  # validate before shipping
+        # Project here as well as server-side: the raw statusline snapshot
+        # carries transcript paths, cwds and cumulative spend, and there is
+        # no reason for any of that to cross the wire in the first place.
+        if project_context is not None:
+            projected = project_context(parsed)
+            if projected is None:
+                return None
+            return json.dumps(projected)
         return raw
-    except (OSError, ValueError):
+    except (OSError, ValueError, TypeError):
         return None
 
 

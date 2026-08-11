@@ -49,7 +49,12 @@ STALE_S = 300
 HTTP_TIMEOUT = 4
 
 OK, WARN, FAIL = "ok", "warn", "fail"
-_MARK = {OK: ("\033[32m", "+"), WARN: ("\033[33m", "!"), FAIL: ("\033[31m", "x")}
+# SKIP = "this check does not apply to this box" (e.g. hub checks on a
+# /trio-only machine). Renders neutral and never affects the exit code —
+# a supported setup must not be reported as broken.
+SKIP = "skip"
+_MARK = {OK: ("\033[32m", "+"), WARN: ("\033[33m", "!"), FAIL: ("\033[31m", "x"),
+         SKIP: ("\033[90m", "-")}
 
 
 def _color_enabled():
@@ -224,13 +229,18 @@ def run_checks(hub_override=None):
     # --- hub /healthz ---
     hub_version = None
     hub_fleet = None
+    assumed_hub = False
     if not hub_url:
         # A hub box has no nth-qweb registration; its own quartet server
         # answers on localhost.
         hub_url = "http://127.0.0.1:8000"
         hub_label = "localhost:8000 (no nth-qweb registration; assuming hub box)"
+        assumed_hub = True
     else:
         hub_label = hub_url
+    # A documented hub URL ends in /sse (the MCP endpoint); /healthz lives at
+    # the server root. Strip it rather than reporting a 404 as "unreachable".
+    hub_url = re.sub(r"/sse/?$", "", hub_url)
     health, ms, err = _http_json(f"{hub_url}/healthz")
     if health and health.get("db_ok"):
         hub_version = health.get("version")
@@ -241,8 +251,17 @@ def run_checks(hub_override=None):
     elif health:
         checks.append(("hub", FAIL,
                        f"{hub_label} answered but DB down ({err or 'db_ok false'})"))
+    elif assumed_hub:
+        # No nth-qweb registration and nothing on localhost:8000 — this is a
+        # /trio-only box, which is a supported (and documented) setup. Calling
+        # that FAIL told local-only users their healthy install was broken.
+        checks.append(("hub", SKIP,
+                       "no hub on this box and no nth-qweb registration "
+                       "— local /trio only, nothing to check"))
     else:
-        checks.append(("hub", FAIL, f"{hub_label} unreachable ({err})"))
+        checks.append(("hub", FAIL,
+                       f"{hub_label} unreachable ({err}) "
+                       f"— is the hub up and Tailscale connected?"))
 
     # --- version match ---
     if local_version and hub_version:
@@ -250,7 +269,10 @@ def run_checks(hub_override=None):
             checks.append(("version", OK, f"local {local_version} == hub {hub_version}"))
         else:
             checks.append(("version", WARN,
-                           f"drift: local {local_version} vs hub {hub_version}"))
+                           f"drift: local {local_version} vs hub {hub_version} "
+                           f"— rerun setup.sh on the older side"))
+    elif assumed_hub and not hub_version:
+        checks.append(("version", SKIP, f"local {local_version or '?'} (no hub to compare)"))
     else:
         checks.append(("version", WARN, "cannot compare (missing local or hub version)"))
 
@@ -275,9 +297,13 @@ def run_checks(hub_override=None):
     # --- fleet rows (hub view preferred, local fallback) ---
     fleet_rows = []
     if hub_fleet and hub_fleet.get("nodes") is not None:
-        fleet_rows = [(n["hostname"], n["transport"], n.get("nth_version") or "?",
+        # .get() throughout: a hub on a different version (or a malformed
+        # /fleet response) must not crash the tool whose job is diagnosing
+        # exactly that. "v?" means the node didn't report a version.
+        fleet_rows = [(n.get("hostname") or "?", n.get("transport") or "?",
+                       n.get("nth_version") or "?",
                        n.get("age_s"), n.get("live"))
-                      for n in hub_fleet["nodes"]]
+                      for n in hub_fleet["nodes"] if isinstance(n, dict)]
     elif db:
         try:
             for r in db.execute(
@@ -321,6 +347,11 @@ def render(checks, fleet_rows, color=True):
                 state = f"{sc}{state}\033[0m"
             lines.append(f"   {hostname:<14s} {transport:<8s} v{ver:<8s} "
                          f"{state} {_age_str(age)}")
+        # One host legitimately appears once per transport (a hub box runs
+        # both a hub and a monitor), and v? just means the node didn't pass
+        # node_version on connect. Both read as bugs without saying so.
+        lines.append("   (one row per host+transport; v? = node didn't"
+                     " report a version on connect)")
     return "\n".join(lines), worst
 
 

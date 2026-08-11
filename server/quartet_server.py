@@ -37,6 +37,26 @@ def _install_auto_reinit_patch():
     import mcp.server.session as _ss
     import mcp.types as _t
 
+    # These are private SDK internals under a floating `mcp<2` pin. If a
+    # point release renames one, skip the shim with a loud warning rather
+    # than raising AttributeError at import — which would fail the unit and
+    # leave systemd crash-looping the hub on a box nobody is sitting at.
+    # Tested against mcp 1.29.0.
+    if not hasattr(_ss, "ServerSession") or not hasattr(
+            getattr(_ss, "ServerSession", None), "_received_request"):
+        sys.stderr.write(
+            "[quartet] WARNING: mcp SDK changed — auto-reinit shim skipped. "
+            "Spokes may need to reconnect after a hub restart. "
+            "Pin a known-good SDK if this persists.\n")
+        sys.stderr.flush()
+        return
+    if not hasattr(_ss, "InitializationState"):
+        sys.stderr.write(
+            "[quartet] WARNING: mcp SDK changed (InitializationState missing) — "
+            "auto-reinit shim skipped.\n")
+        sys.stderr.flush()
+        return
+
     _orig = _ss.ServerSession._received_request
 
     async def _patched(self, responder):

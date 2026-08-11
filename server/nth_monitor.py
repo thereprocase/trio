@@ -56,7 +56,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from nth_constants import SLEEPING_KEYWORDS, NTH_VERSION
+from nth_constants import SLEEPING_KEYWORDS, NTH_VERSION, project_context
 
 # Own-session statusline snapshot (see nth_spoke_monitor.read_own_context).
 _CTX_DIR = Path(os.environ.get("XDG_STATE_HOME",
@@ -314,17 +314,22 @@ def monitor(channel, member_id, filter_mode="all", _db_path=None):
                     # Statusline relay for this member (best-effort; the
                     # column exists on v7.3.1+ DBs).
                     own_ctx = read_own_context()
-                    if own_ctx:
+                    # Same projection + size cap the relayed path applies in
+                    # nth_server.nth_poll — one column, one policy. A
+                    # non-dict payload used to raise TypeError straight out
+                    # of the loop and kill the monitor.
+                    if own_ctx and len(own_ctx) < 16384:
                         try:
                             import json as _json
-                            ctx = _json.loads(own_ctx)
-                            ctx["_relayed_at"] = now_ts
-                            db.execute(
-                                "UPDATE members SET context_json = ? "
-                                "WHERE channel = ? AND id = ?",
-                                (_json.dumps(ctx), channel, member_id),
-                            )
-                        except (ValueError, sqlite3.OperationalError):
+                            ctx = project_context(_json.loads(own_ctx))
+                            if ctx is not None:
+                                ctx["_relayed_at"] = now_ts
+                                db.execute(
+                                    "UPDATE members SET context_json = ? "
+                                    "WHERE channel = ? AND id = ?",
+                                    (_json.dumps(ctx), channel, member_id),
+                                )
+                        except (ValueError, TypeError, sqlite3.OperationalError):
                             pass
                     # v7.3 fleet check-in: one row per (host, "monitor").
                     # Best-effort — the nodes table only exists once a v7.3+
@@ -342,7 +347,10 @@ def monitor(channel, member_id, filter_mode="all", _db_path=None):
                             (socket.gethostname(), NTH_VERSION, pyv,
                              os.getpid(), now_ts),
                         )
-                    except sqlite3.OperationalError:
+                    except (sqlite3.OperationalError, OSError):
+                        # OSError: socket.gethostname() can fail in odd
+                        # sandboxes, and fleet bookkeeping must never be
+                        # the thing that kills the notification loop.
                         pass
                     db.commit()
                     last_heartbeat_mono = mono

@@ -2,6 +2,94 @@
 
 ## Open
 
+### De-root the hub services
+**Severity:** Medium (security) | **Since:** v8.0.2 War Council (2026-08-11)
+
+`setup.sh hub-service` writes `quartet-hub.service` and `nth-web.service` with
+no `User=`, so both run as **root**. The `Environment=HOME=${HUB_HOME}` line
+relocates paths; it does not drop privileges. Both are network-facing and
+no-auth-by-design, so any future RCE-class bug in the Python stack is root on
+the hub box. v8.0.2 added `NoNewPrivileges`/`PrivateTmp`/`ProtectSystem=full`
+and friends, which bounds the blast radius but does not fix the root cause.
+
+Not automated because re-owning a live `/var/lib/quartet-hub` mid-upgrade would
+lock the running hub out of its own database. The migration, run once by hand:
+
+1. `systemctl stop nth-web quartet-hub`
+2. `useradd --system --home /var/lib/quartet-hub --shell /usr/sbin/nologin quartet-hub`
+3. `chown -R quartet-hub:quartet-hub /var/lib/quartet-hub /opt/quartet-hub`
+4. Add `User=quartet-hub` + `Group=quartet-hub` to both units
+5. `systemctl daemon-reload && systemctl start quartet-hub nth-web`
+6. Verify `/healthz` and that the DB is writable before logging out
+
+Then make `setup.sh` emit `User=` unconditionally and detect the un-migrated
+case rather than silently reverting to root.
+
+### Shared store module (`nth_store.py`)
+**Severity:** Medium | **Since:** v8.0.2 War Council (2026-08-11)
+
+`nth_web.py` reimplements the send protocol against the DB schema: its own
+connection, `BEGIN IMMEDIATE`, inserts into `tasks`/`messages`, a *second*
+sigil parser (`_parse_sigils_against_roster`), and a hand-rolled `[task #N]`
+rewrite. The schema is now a de-facto API between two independent
+implementations of one protocol — and it has already shipped a bug from exactly
+this: CHANGELOG v7.2 records `#` and `!` from the web being silently dropped for
+a full version.
+
+Extract `send_message()`, `fetch_roster()`, `parse_sigils()`, `member_status()`,
+`ensure_member()` as pure functions over a connection; import from `nth_server`,
+`nth_web`, `nth_console`, `nth_dashboard`. Highest-value refactor in the repo.
+Post-beta work — deliberately not done during a hardening release.
+
+### Split `nth_web.py` (4.6k lines)
+**Severity:** Medium | **Since:** v8.0.2 War Council (2026-08-11)
+
+~3,050 of its lines are CSS/HTML/JS inside two `r"""` literals, templated by
+ad-hoc token replacement. Consequences today: every channel page ships ~133KB
+inline with `Cache-Control: no-store`; no JS/CSS linting or editor support
+reaches the frontend; a runtime JS error reports a line number that maps to
+nothing; and a 3,000-line string literal cannot be merged by line.
+
+**Phase 0 first — nothing else is safe until it lands:** the server file list is
+hand-maintained in two places in `setup.sh` (the `hub-service` loop and the
+literal `cp` block). Every new module multiplies that failure, and for
+`nth-web.service` a missing file is a crash loop. Replace both with a single
+manifest (`cp server/*.py`) and have `nth_doctor` verify installed-vs-repo.
+
+Then: Phase 1 assets out to `server/web/{channel,landing}.{html,css,js}` +
+`nth_web_assets.py` (mechanical, byte-verifiable, and enables ETag'd static
+serving); Phase 2 `nth_web_identity.py`, `nth_web_hub.py`, `nth_fleet.py`.
+
+### Shared monitor module (`nth_events.py`)
+**Severity:** Low-Medium | **Since:** v8.0.2 War Council (2026-08-11)
+
+`nth_monitor.py` and `nth_spoke_monitor.py` share eight top-level functions
+(two byte-identical), four duplicated constants, two spellings of the same list
+parser, and construct the `new_messages` event field-for-field twice —
+including a verbatim copy of the preview truncation and `from_names` dedup.
+
+This is not theoretical: session auto-discovery (`21d798a`) landed in the spoke
+monitor **only**, while CURRENT.md advertised it for both. The hub-local monitor
+still has no `--claude-session` flag and no process-tree discovery, so it relays
+nothing without `CLAUDE_CODE_SESSION_ID` set. Either port it, or extract the
+shared module and make the divergence structurally impossible. The
+transport-specific `monitor()` loops should stay separate.
+
+### LICENSE file
+**Severity:** Low | **Since:** v8.0.2 War Council (2026-08-11)
+
+The repo is public with no stated terms — anyone forking or reusing has nothing
+to go on. Needs an owner decision, not a default.
+
+### CI for the test suite
+**Severity:** Low | **Since:** v8.0.2 War Council (2026-08-11)
+
+`tests/run-all.sh` exists and passes; nothing runs it automatically. A minimal
+workflow (`py_compile server/*.py` + `bash tests/run-all.sh`) would catch the
+regression classes the new tests cover. **Pin every action to a full commit
+SHA** — `@v4` is not a pin under this project's supply-chain policy, which is
+why this wasn't added blind.
+
 ### Sonnet triage layer (~v8+)
 **Severity:** Medium | **Since:** v5.0 RC2 (2026-04-06) | **Branch:** `v5.1-sonnet-triage`
 

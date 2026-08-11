@@ -72,9 +72,9 @@ if [ "${1:-}" = "hub-service" ] || [ "${1:-}" = "upgrade" ]; then
         python3 -m venv "$HUB_VENV"
     fi
     if ! "$HUB_VENV/bin/python" -c "from mcp.server.fastmcp import FastMCP; import uvicorn" &>/dev/null; then
-        echo "Installing into hub venv: mcp<2 uvicorn"
+        echo "Installing into hub venv: mcp<2 uvicorn==0.52.1"
         "$HUB_VENV/bin/python" -m pip install --quiet --upgrade pip
-        "$HUB_VENV/bin/python" -m pip install --quiet --only-binary :all: "mcp<2" uvicorn
+        "$HUB_VENV/bin/python" -m pip install --quiet --only-binary :all: "mcp<2" "uvicorn==0.52.1"
     fi
     if ! "$HUB_VENV/bin/python" -c "from mcp.server.fastmcp import FastMCP; import uvicorn" &>/dev/null; then
         echo "ERROR: hub venv cannot import FastMCP + uvicorn. Hub NOT restarted."
@@ -96,14 +96,26 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-# De-rooted HOME keeps the shared DB out of /root: everything lives under
+# HOME redirection keeps the shared DB out of /root: everything lives under
 # ${HUB_HOME}/.claude/nth/ and survives reinstalls via StateDirectory.
+# NOTE: this relocates paths, it does NOT drop privileges — this unit still
+# runs as root. See TODO.md "De-root the hub services" for the User= +
+# chown migration; it is deliberately not automated because re-owning a
+# live ${HUB_HOME} mid-upgrade would lock the hub out of its own database.
 Environment=HOME=${HUB_HOME}
 StateDirectory=quartet-hub
 WorkingDirectory=${HUB_DIR}
 ExecStart=${HUB_VENV}/bin/python ${HUB_DIR}/quartet_server.py
 Restart=on-failure
 RestartSec=3
+# Blast-radius reduction for a network-facing, no-auth-by-design service.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
 
 [Install]
 WantedBy=multi-user.target
@@ -122,6 +134,15 @@ WorkingDirectory=${HUB_DIR}
 ExecStart=${HUB_VENV}/bin/python ${HUB_DIR}/nth_web.py --tailnet --port 8765
 Restart=on-failure
 RestartSec=3
+# See quartet-hub.service: still root, hardened. --tailnet binds 0.0.0.0
+# with no authentication — the host firewall / Tailscale ACL is the gate.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
 
 [Install]
 WantedBy=multi-user.target
@@ -160,10 +181,28 @@ fi
 MODE=""
 HUB_URL=""
 
+# hub/spoke install into $HOME. Under sudo that is /root, so everything —
+# skills, venv, MCP registration — lands where the user's own Claude Code
+# will never look, while setup still prints "Setup Complete". Only
+# hub-service (handled above, and already exited) legitimately needs root.
+if [ "$(id -u)" = "0" ] && [ -n "${SUDO_USER:-}" ]; then
+    echo "ERROR: don't run hub/spoke setup with sudo — it would install into"
+    echo "       /root instead of /home/${SUDO_USER}."
+    echo "       Run it as yourself:  bash setup.sh ${1:-hub}"
+    echo "       (Only 'sudo bash setup.sh hub-service' needs root.)"
+    exit 1
+fi
+
 case "${1:-}" in
     hub)          MODE="hub";   shift ;;
     spoke|remote) MODE="spoke"; shift ;;
 esac
+
+if [ -z "$MODE" ] && [ ! -t 0 ]; then
+    echo "ERROR: no mode given and stdin isn't a terminal."
+    echo "       Run: bash setup.sh hub   |   bash setup.sh spoke <hub-sse-url>"
+    exit 1
+fi
 
 if [ -z "$MODE" ]; then
     echo "Select setup mode:"
@@ -192,6 +231,40 @@ if [ "$MODE" = "spoke" ]; then
     if [ -z "$HUB_URL" ]; then
         echo "ERROR: Spoke mode requires a hub URL."
         exit 1
+    fi
+    # Catch the three mistakes that otherwise register cleanly and only
+    # fail much later as an opaque MCP error after a Claude Code restart.
+    case "$HUB_URL" in
+        http://*|https://*) ;;
+        *)
+            echo "ERROR: hub URL needs a scheme, e.g. http://${HUB_URL}"
+            exit 1
+            ;;
+    esac
+    case "$HUB_URL" in
+        *:8765*)
+            echo "ERROR: :8765 is the web dashboard, not the SSE endpoint."
+            echo "       Spokes want the hub's MCP port, usually :8000/sse"
+            exit 1
+            ;;
+    esac
+    case "$HUB_URL" in
+        */sse|*/sse/) ;;
+        *)
+            echo "WARNING: hub URL usually ends in /sse — got: $HUB_URL"
+            ;;
+    esac
+    # Probe before declaring success. /healthz lives at the server root.
+    HUB_BASE="${HUB_URL%/}"; HUB_BASE="${HUB_BASE%/sse}"
+    if command -v curl &>/dev/null; then
+        if curl -fsS -m 5 "${HUB_BASE}/healthz" >/dev/null 2>&1; then
+            echo "Hub reachable: ${HUB_BASE}/healthz OK"
+        else
+            echo "WARNING: no answer from ${HUB_BASE}/healthz"
+            echo "         Registering anyway — check the hub is running and"
+            echo "         that Tailscale is up on both machines, then run:"
+            echo "         nth-doctor"
+        fi
     fi
 fi
 
@@ -256,7 +329,7 @@ fi
 # entire server is built on, and quartet_server.py patches 1.x internals.
 VENV_PKGS=("mcp<2")
 if [ "$MODE" = "hub" ]; then
-    VENV_PKGS+=(uvicorn)
+    VENV_PKGS+=("uvicorn==0.52.1")
 fi
 
 NEED_INSTALL=0
@@ -410,8 +483,14 @@ case "$PLATFORM" in
         ;;
 esac
 
-# Tool base names (19 tools)
-TOOL_BASES=(connect send poll ack claim complete cancel release lock unlock set_status rename status roster history end list cull cleanup retract)
+# Tool base names — must match the @mcp.tool registrations in nth_server.py
+# (21 tools). Verify after adding a tool:
+#   diff <(rg -o 'def nth_(\w+)' server/nth_server.py | sed 's/def nth_//' | sort) \
+#        <(printf '%s\n' "${TOOL_BASES[@]}" | sort)
+# `pounds` was missing here through v8.0.1 while SKILL told `at`-mode agents
+# to call it on every wake, so the one routinely-called tool was the one that
+# always prompted.
+TOOL_BASES=(connect send poll ack claim complete cancel release lock unlock set_status rename status roster history end list cull cleanup retract pounds)
 
 # Build allowlist arrays
 TRIO_TOOLS=()
@@ -441,8 +520,19 @@ tools = $(printf '%s\n' "${ALL_TOOLS[@]}" | "$PYTHON_CMD" -c "import sys,json; p
 old_patterns = '$OLD_PATTERNS'.split()
 
 if os.path.exists(settings_path):
-    with open(settings_path) as f:
-        settings = json.load(f)
+    try:
+        with open(settings_path) as f:
+            settings = json.load(f)
+    except ValueError as e:
+        # Bail with instructions rather than a traceback: MCP registration
+        # has already happened by this point, so the user is mid-install.
+        print('')
+        print('WARNING: ' + settings_path + ' is not valid JSON (' + str(e) + ').')
+        print('Tools were NOT allowlisted. Fix that file and re-run setup,')
+        print('or add these under permissions.allow yourself:')
+        for t in tools:
+            print('  ' + t)
+        raise SystemExit(0)
 else:
     settings = {}
 
@@ -459,9 +549,19 @@ for tool in tools:
         allow.append(tool)
         added += 1
 
-with open(settings_path, 'w') as f:
+# Atomic replace + one backup: a crash or full disk mid-write would
+# otherwise truncate the user's global Claude settings.
+if os.path.exists(settings_path):
+    try:
+        with open(settings_path) as src, open(settings_path + '.bak', 'w') as dst:
+            dst.write(src.read())
+    except OSError:
+        pass
+tmp_path = settings_path + '.tmp'
+with open(tmp_path, 'w') as f:
     json.dump(settings, f, indent=2)
     f.write('\n')
+os.replace(tmp_path, settings_path)
 
 print(f'Permissions: {added} tool(s) allowlisted, {len(removed)} old entries removed')
 "

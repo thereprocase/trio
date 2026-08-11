@@ -1,5 +1,141 @@
 # nth Changelog
 
+## v8.0.2-beta.1 — 2026-08-11 (War Council hardening)
+
+A full LOTC War Council (12 reviewers) over the v8 diff — ~3,700 lines across
+22 files — then integration of what it found. No new features; this release is
+entirely correctness, security, and honesty fixes on top of v8.0.1-beta.1.
+
+### Security
+
+- **Stored XSS via the context relay (critical).** `renderMemberStatsHTML()`
+  interpolated the relayed `model` field into `innerHTML` unescaped, while the
+  `effort` and `session_name` rows beside it were escaped. `poll(monitor_context=…)`
+  accepts any JSON dict under 16KB from any MCP client and `member_id` is not
+  bound to the caller without a session token, so any tailnet peer could plant
+  script in any member's row, firing in the browser of whoever expanded those
+  stats. Escaped at the interpolation *and* fixed at the source (below).
+- **Context snapshots over-shared (critical).** The raw statusline snapshot
+  carries `harness.transcript_path`, `harness.cwd`, `workspace.project_dir` and
+  `cost.total_cost_usd`; all of it rode `/api/landing` and every `/api/events`
+  SSE frame, neither of which requires an identity. New
+  `nth_constants.project_context()` projects snapshots onto an allowlist of the
+  fields the UI actually renders. Applied at three points — the spoke monitor
+  (so it never crosses the wire), the hub monitor, and the server relay store.
+- **Unbounded EventHub creation (critical).** `/api/events` spun up a permanent
+  0.5s-polling thread + SQLite connection for any well-formed channel code, with
+  no existence check and no reaping — an unauthenticated loop of random codes was
+  unbounded thread growth. Now validates the channel (as the write path already
+  did) and reaps hubs idle for `HUB_IDLE_REAP_S`.
+- **Hub crash on a non-string `monitor_context`.** `json.loads()` there caught
+  `ValueError` but not `TypeError`, and `len()` on a non-string raised before it;
+  every other `json.loads` in the file catches both. Any MCP client could stop
+  the hub's poll handler.
+- **Unbounded `OperatorRegistry`.** Every cookie-less request minted a `pending`
+  identity that was never evicted. Added a TTL sweep plus a hard cap.
+- **`_read_json_body`** raised an uncaught `ValueError` on a non-numeric
+  `Content-Length`; now a 400.
+- **systemd hardening.** Both units gained `NoNewPrivileges`, `PrivateTmp`,
+  `ProtectSystem=full`, kernel/cgroup protections and `RestrictSUIDSGID`. They
+  still run as **root** — the `Environment=HOME=` line relocates paths, it does
+  not drop privileges. De-rooting needs a `chown` migration and is tracked in
+  TODO.md rather than fired at a live hub.
+- **`setup.sh` refuses `sudo`** for `hub`/`spoke` (it would install into `/root`
+  while printing "Setup Complete"), and writes `~/.claude/settings.json`
+  atomically with a `.bak`, reporting malformed JSON with instructions instead
+  of a traceback.
+- Scrubbed a real tailnet login from a comment in `server/nth_web.py` (public repo).
+
+### Correctness
+
+- **`pounds` was missing from `setup.sh`'s `TOOL_BASES`** — so `trio_pounds` /
+  `quartet_pounds`, the tool SKILL tells `at`-mode agents to call on every wake,
+  prompted for permission every single time. The list had 20 entries, the comment
+  said 19, the server registers 21 and README said 20. All four now agree.
+- **Codex publisher matched session ids by substring**, so two sessions started
+  in the same second both matched and `max(mtime)` picked one arbitrarily —
+  silently reintroducing the cross-session mixup that pinning was added to
+  prevent. Now an exact `-<id>.jsonl` suffix match, with the prefix match kept
+  only as a fallback for deliberately shortened ids.
+- **Freshness lied.** The publisher refreshes `ts` every tick while codex holds
+  the rollout open, so an idle session published an hours-old token count with a
+  current timestamp (observed: 2h17m of drift presented as live). Snapshots now
+  carry `data_age_s`, and the stats row says "as of 2h ago" instead of implying
+  the number is current.
+- **`/proc/<pid>/stat` ppid parsing** split on the first `)`; `comm` is
+  unsanitised and may contain one. Now splits on the last.
+- Monitor crash paths: non-dict context (`TypeError`) and `socket.gethostname()`
+  (`OSError`) could both kill a process whose whole job is to never die.
+- `nth_doctor` no longer reports a healthy `/trio`-only box as broken (new
+  neutral `SKIP` status that never affects the exit code), strips `/sse` before
+  probing `/healthz` (the only URL form the README shows), stops calling an
+  HTTP 404 "unreachable", and uses `.get()` on `/fleet` rows.
+- `nth_web.py CHANNEL` validates the channel exists instead of serving a
+  forever-empty dashboard for a typo, and explains how to create `nth.db`.
+- The 16KB relay cap is now applied on the local monitor path too — one column,
+  one policy.
+
+### Performance
+
+- **The `context_json` write was unconditional inside the 2s long-poll retry
+  loop** — roughly 1,800 `UPDATE`+commit cycles/hour per active spoke, each
+  carrying a JSON blob rather than the tiny timestamp the old heartbeat wrote,
+  and re-stamping `_relayed_at` so it measured "a poll was in flight" rather
+  than "this snapshot is current". Now once per poll call.
+- Publisher re-globbed the whole `sessions/**` tree (207 files / 494MB here)
+  every 5s tick and walked all ~459 PIDs in `/proc`; both are now cached
+  (`RESOLVE_INTERVAL_S`, `HAS_OPEN_CACHE_S`) with a recent-mtime fast path.
+- `nth_web` read the context-snapshot directory two to three times per tick;
+  memoised for 1s.
+- The context SSE broadcast hashed `_age_s`, which ticks every second, so it
+  fired ~1/s to every browser forever. Volatile fields now excluded from the
+  change key.
+
+### UX / docs
+
+- README: HTTPS clone URL (the SSH one fails for anyone without a key on the
+  account — it was the literal first command), a Prerequisites section, and an
+  explicit statement that `setup.sh hub` **installs without starting anything**
+  (it promised a dashboard on `:8765` that nothing was serving). Added the
+  no-auth warning next to the `hub-service` command, corrected the stdlib-only
+  claim, 14→18 themes, 20→21 tools.
+- `SKILL-quartet.md` led with `nth_monitor.py` — the hub-local monitor — as the
+  headline example in the *spoke* skill. On a spoke that also has `/trio`, that
+  doesn't fail fast: it finds a local `nth.db`, finds no such member, and emits
+  an error every 10s. The spoke monitor is now the primary example.
+- The web app retries bootstrap instead of dying permanently on one failed
+  `/api/meta`, and shows fatal errors in a visible banner — the old message went
+  into `header .meta`, which the mobile breakpoint hides, so a failed boot on a
+  phone was a blank page with no explanation.
+- Hardcoded dark hex in shared CSS (`.msg.targeted`, `.dm-btn`, `.ctx-pct`,
+  `#filter-banner`) became theme tokens; they were dark rectangles on the six
+  light themes. The `⌂` link is hidden in single-channel mode, where `/` is the
+  same page, and reads `⌂ fleet`.
+- Removed 71 lines of dead context-ring JS + CSS orphaned when the sidebar
+  section was cut in `b771656`.
+
+### Tests
+
+- `tests/test-context-projection.py` (24 checks) and
+  `tests/test-codex-rollouttail.py` (19 checks) — the projection allowlist and
+  the rollout parser's silent-failure edges: dual schema, missing model, zero
+  window, clamp, split lines, truncation, garbage lines, exact-id pinning.
+  The projection suite caught a real bug in its own fix (`rate_limits` nests one
+  level deeper and was being dropped, which would have silently killed the
+  5h/7d rows).
+- `tests/run-all.sh` — a runner, with the v5-era soak scripts excluded by name
+  rather than left to hang.
+
+### Not done (deliberately)
+
+- **De-rooting the hub services** — needs a `chown` migration of
+  `/var/lib/quartet-hub`; wrong thing to automate against a live hub.
+- **`nth_store.py` / `nth_web.py` decomposition / `nth_events.py`** — the three
+  structural refactors the architecture review called for. All are post-beta
+  work; see TODO.md.
+- **LICENSE** — the repo is public with no stated terms. Owner's choice.
+- **CI** — the supply-chain policy requires Actions pinned to full commit SHAs.
+
 ## v8.0.0-beta.1 / v8.0.1-beta.1 — 2026-08-11 (context rings + web overhaul)
 
 First tagged GitHub releases (beta, prerelease). Major-bumped because the

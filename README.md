@@ -34,14 +34,25 @@ One server file (`nth_server.py`), two MCP registrations. The `NTH_SERVER_NAME` 
 - **Pinned objectives** — Pin a message as the channel objective for new joiners
 - **Stale member detection** — Server computes liveness from heartbeats (5 min stale, 15 min dead)
 - **Conversation export** — End a channel and export to markdown
-- **Cross-platform** — Linux, macOS, and Windows. stdlib Python only (no pip dependencies at runtime)
+- **Cross-platform** — Linux, macOS, and Windows. The MCP server needs the `mcp` SDK (plus `uvicorn` on hubs); the operator tools (`nth_web.py`, `nth_console.py`, `nth_doctor.py`) are stdlib-only
 
 ## Installation
+
+### Prerequisites
+
+- **Python 3.10+**
+- **Claude Code** with the `claude` CLI on your `PATH` (setup registers the MCP servers through it)
+- **Tailscale**, up on both machines — only for `/quartet` (spoke ↔ hub). Local `/trio` needs no network.
+- Optionally **[claude-statusline](https://github.com/thereprocase/claude-statusline)** — publishes the context snapshots that drive the context rings. Without it the rings simply stay empty.
+
+Something not working? Run **`nth-doctor`** (installed by hub/spoke modes). It
+checks registration, the SDK import, the database, hub reachability, and
+version drift, and prints the fleet table. `nth-doctor --watch` follows it live.
 
 ### Spoke machine (connects to an existing hub)
 
 ```bash
-git clone git@github.com:thereprocase/trio.git
+git clone https://github.com/thereprocase/trio.git
 cd trio
 bash setup.sh spoke http://YOUR_HUB_TAILNET_IP:8000/sse
 ```
@@ -63,21 +74,35 @@ For a personal/dev hub:
 bash setup.sh hub
 ```
 
-For a persistent production hub with systemd services:
+**This installs only — it does not start anything.** You get `/trio`, the venv,
+and the tools; to actually serve spokes and the dashboard you run the two
+processes yourself:
+
+```bash
+~/.claude/nth/venv/bin/python ~/.claude/skills/nth/server/quartet_server.py   # SSE MCP, :8000
+~/.claude/nth/venv/bin/python ~/.claude/skills/nth/server/nth_web.py --tailnet # dashboard, :8765
+```
+
+For a persistent hub that survives reboots, use systemd instead:
 
 ```bash
 sudo bash setup.sh hub-service
 ```
 
-The `hub-service` mode deploys to `/opt/quartet-hub` with systemd units for both the MCP server (`:8000`) and the web dashboard (`:8765`). It handles upgrades with timestamped backups and pre-restart compile checks.
+The `hub-service` mode deploys to `/opt/quartet-hub` with systemd units for both the MCP server (`:8000`) and the web dashboard (`:8765`), **starts them**, and handles upgrades with timestamped backups and pre-restart compile checks. This is the only mode that leaves you with running services.
+
+> ⚠️ `hub-service` runs `nth_web.py --tailnet`, which binds `0.0.0.0:8765`
+> with **no authentication**. Anyone who can reach that port can read every
+> channel and post as a self-declared guest. Gate it with your Tailscale ACL
+> or host firewall. Both units currently run as root — see TODO.md.
 
 ### Web dashboard
 
-After setup, the web dashboard is accessible at:
+Once the dashboard process is running (see above), it's at:
 - **Hub:** `http://YOUR_HUB_IP:8765/` — landing page with all channels; `http://YOUR_HUB_IP:8765/c/CHANNEL` for a specific channel
 - **Local:** `http://localhost:8765/` — if running `nth_web.py` locally
 
-The dashboard supports operator input (type messages, post tasks with `$task`, @-mention with Tab completion), 14 color themes, desktop notifications, sound chimes, and mobile-responsive layout.
+The dashboard supports operator input (type messages, post tasks with `$task`, @-mention with Tab completion), 18 color themes, desktop notifications, sound chimes, and mobile-responsive layout.
 
 ### Upgrading
 
@@ -96,7 +121,7 @@ Restart Claude Code to pick up skill/server changes.
 - **Database:** `~/.claude/nth/nth.db` (SQLite, WAL mode)
 - **Exports:** `~/.claude/nth/conversations/` (markdown, one per ended channel)
 
-## Tools Reference (20 tools)
+## Tools Reference (21 tools)
 
 Both `/trio` and `/quartet` expose identical tools with different prefixes (`trio_*` vs `quartet_*`).
 
@@ -189,7 +214,7 @@ nth is a conference call with a whiteboard, not a work queue.
 
 ## Version History
 
-Current: **v8.0.0-beta.1**
+Current: **v8.0.2-beta.1**
 
 - **v8.0** — Web dashboard with 14 themes, mobile responsive layout, context rings (statusline relay from spokes to hub), session ID auto-discovery, Walled Garden theme, operator identity (Tailscale whois / loopback / guest), per-member context badges with curated stats, cross-platform process tree walker (Linux/macOS/Windows)
 - **v7** — Monitor-based single-process design replaces the Haiku sentinel pair. Tuned polling (0.5s / 3s) with decoupled heartbeat writes under WAL + `synchronous=NORMAL`. Console + Dashboard read-only views for human operators

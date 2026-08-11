@@ -1,11 +1,41 @@
-# Current State — nth v8.0.1-beta.1
+# Current State — nth v8.0.2-beta.1
 
-**Version:** v8.0.1-beta.1 (2026-08-11, GitHub release + tag)
-**Prior:** v8.0.0-beta.1 (2026-08-11), v7.3.1 (2026-08-11), v7.3 (2026-08-11), v7.2 (2026-04-20), v7.1 (2026-04-20), v7 (2026-04-19)
+**Version:** v8.0.2-beta.1 (2026-08-11, GitHub release + tag)
+**Prior:** v8.0.1-beta.1 (2026-08-11), v8.0.0-beta.1 (2026-08-11), v7.3.1 (2026-08-11), v7.3 (2026-08-11), v7.2 (2026-04-20), v7.1 (2026-04-20), v7 (2026-04-19)
 **Branch:** main
 **Remote:** `github.com:thereprocase/trio.git` (GitHub) + `gitlab.com:theReproCase/trio.git` (GitLab mirror — ⚠ not synced since pre-v8)
 
 ## What Just Shipped
+
+**v8.0.2-beta.1** — War Council hardening (2026-08-11 night). A 12-reviewer
+LOTC pass over the whole v8 diff, then integration. No new features.
+
+- **Security.** Stored XSS through the context relay (unescaped `model` into
+  `innerHTML`); the relay shipping transcript paths, cwds, project dirs and API
+  spend to unauthenticated viewers; unbounded `EventHub` thread creation on
+  `/api/events`; a hub-crashing `TypeError` on a non-string `monitor_context`;
+  an unbounded operator registry. New `project_context()` allowlist applied on
+  all three relay paths. systemd units hardened (still root — see TODO).
+- **Correctness.** `pounds` restored to `setup.sh`'s tool allowlist (it had been
+  prompting on every call since v7.1); codex session-id matching made exact
+  rather than substring; `data_age_s` published so an idle codex session stops
+  presenting an hours-old number as current; `/proc` ppid parsing fixed for
+  process names containing `)`; monitor crash paths closed.
+- **Performance.** The per-poll-iteration `context_json` write throttled to once
+  per call (~1,800 writes/hour/spoke reclaimed); publisher directory re-glob and
+  `/proc` walk cached; web context-dir reads memoised; the 1/s context broadcast
+  storm stopped.
+- **Docs/UX.** README's first command was an SSH clone that fails for strangers;
+  `setup.sh hub` promised a dashboard it never starts; the `/quartet` skill led
+  with the wrong monitor. All corrected. Web bootstrap now retries and shows
+  failures visibly on mobile.
+- **Tests.** `tests/run-all.sh` plus two new suites (43 checks) over the
+  projection allowlist and the codex rollout parser.
+
+Full detail and the deliberate non-fixes: CHANGELOG.md.
+
+## Previously
+
 
 **v8.0.1-beta.1** — context rings + web overhaul (2026-08-11 afternoon, joint
 session with a second agent doing the web/design work).

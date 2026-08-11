@@ -33,7 +33,6 @@ import argparse
 import collections
 import getpass
 import json
-import os
 import re
 import signal
 import socket
