@@ -2068,33 +2068,25 @@ INDEX_HTML = r"""<!doctype html>
         <option value="midnight">Midnight</option>
         <option value="nord">Nord</option>
         <option value="dracula">Dracula</option>
-        <option value="pve-dark">Proxmox Dark</option>
-      </optgroup>
-      <optgroup label="Light">
-        <option value="light">Daylight</option>
-        <option value="pve-light">Proxmox Light</option>
-      </optgroup>
-      <optgroup label="PVE – Dark Retro">
-        <option value="crt">CRT Green</option>
-        <option value="amber">Amber Mono</option>
-        <option value="dosblue">DOS Blue</option>
-      </optgroup>
-      <optgroup label="PVE – Dark Modern">
+        <option value="pve-dark">Proxmox</option>
+        <option value="solarized">Solarized</option>
         <option value="synthwave">Synthwave</option>
         <option value="vaporwave">Vaporwave</option>
         <option value="lcars">LCARS</option>
-        <option value="solarized">Solarized</option>
       </optgroup>
-      <optgroup label="PVE – Light">
-        <option value="paper">Paper Print</option>
-        <option value="gameboy">Game Boy</option>
+      <optgroup label="Light">
+        <option value="light">Daylight</option>
+        <option value="pve-light">Clean</option>
+        <option value="paper">Paper</option>
         <option value="popart">Pop Art</option>
-      </optgroup>
-      <optgroup label="PVE – Classic">
-        <option value="win31">Windows 3.1</option>
-      </optgroup>
-      <optgroup label="Familiar">
         <option value="bluebubble">Walled Garden</option>
+      </optgroup>
+      <optgroup label="Retro">
+        <option value="crt">CRT Green</option>
+        <option value="amber">Amber Mono</option>
+        <option value="dosblue">DOS Blue</option>
+        <option value="gameboy">Game Boy</option>
+        <option value="win31">Windows 3.1</option>
       </optgroup>
     </select>
     <select id="font-picker" title="message font">
@@ -3323,13 +3315,29 @@ INDEX_HTML = r"""<!doctype html>
       html += `<div class="snippet" title="${escapeHtml(snippet)}">${escapeHtml(snippet)}</div>`;
     }
     if (m.context) {
-      html += `<div class="stat-row"><span class="stat-label" style="color:var(--accent2)">— statusline —</span><span class="stat-val"></span></div>`;
-      for (const [k, v] of Object.entries(m.context)) {
-        if (k === 'session_id') continue;
-        const shown = (v !== null && typeof v === 'object')
-          ? JSON.stringify(v) : String(v);
-        html += `<div class="stat-row"><span class="stat-label">${escapeHtml(k)}</span>`
-             +  `<span class="stat-val" style="word-break:break-all">${escapeHtml(shown)}</span></div>`;
+      const c = m.context;
+      const h = c.harness || {};
+      const cw = h.context_window || {};
+      const rl = h.rate_limits || {};
+      const cwSize = (cw.context_window_size || 0);
+      const cwLabel = cwSize >= 1e6 ? (cwSize/1e6)+'M' : cwSize >= 1e3 ? Math.round(cwSize/1e3)+'k' : '';
+      const pct = c.used_pct != null ? Math.round(c.used_pct) + '%' : '—';
+      const pctClass = (c.used_pct || 0) >= 80 ? 'bad' : (c.used_pct || 0) >= 60 ? 'warn' : 'good';
+      const model = (c.model || '').replace(/^claude-/, '').split('-').slice(0, 2).join(' ') || '—';
+      const fiveH = rl.five_hour || {};
+      const sevenD = rl.seven_day || {};
+      const fhPct = fiveH.used_percentage != null ? Math.round(fiveH.used_percentage) + '%' : '';
+      const sdPct = sevenD.used_percentage != null ? Math.round(sevenD.used_percentage) + '%' : '';
+      const ctxRows = [
+        ['context', `${pct} of ${cwLabel}`, pctClass],
+        ['model', model, ''],
+      ];
+      if (fhPct) ctxRows.push(['5h limit', fhPct, (fiveH.used_percentage||0) >= 80 ? 'bad' : '']);
+      if (sdPct) ctxRows.push(['7d limit', sdPct, (sevenD.used_percentage||0) >= 80 ? 'bad' : '']);
+      if (c.session_name) ctxRows.push(['session', escapeHtml(c.session_name), '']);
+      for (const [k2, v2, cl] of ctxRows) {
+        html += `<div class="stat-row"><span class="stat-label">${k2}</span>`
+             +  `<span class="stat-val ${cl}">${v2}</span></div>`;
       }
     }
     return html;
