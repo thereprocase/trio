@@ -594,7 +594,8 @@ class EventHub:
                 "m.watchdog_heartbeat AS watchdog_heartbeat, "
                 "m.filter_mode AS filter_mode, "
                 "COALESCE(MAX(s.last_read), 0) AS session_last_read, "
-                "MAX(s.last_seen) AS session_last_seen "
+                "MAX(s.last_seen) AS session_last_seen, "
+                "GROUP_CONCAT(s.fingerprint) AS fingerprints "
                 "FROM members m "
                 "LEFT JOIN sessions s "
                 "  ON s.channel = m.channel AND s.member_id = m.id "
@@ -611,7 +612,8 @@ class EventHub:
                 "m.messenger_heartbeat AS messenger_heartbeat, "
                 "m.watchdog_heartbeat AS watchdog_heartbeat, "
                 "COALESCE(MAX(s.last_read), 0) AS session_last_read, "
-                "MAX(s.last_seen) AS session_last_seen "
+                "MAX(s.last_seen) AS session_last_seen, "
+                "GROUP_CONCAT(s.fingerprint) AS fingerprints "
                 "FROM members m "
                 "LEFT JOIN sessions s "
                 "  ON s.channel = m.channel AND s.member_id = m.id "
@@ -627,6 +629,7 @@ class EventHub:
         # may reshuffle affected members, which the client handles by
         # keying on the emoji/name fields we ship instead of hashing.
         avatars = animal_for_channel([r["id"] for r in rows])
+        ctx_usage = _read_context_usage()
         out = []
         for r in rows:
             effective_last_read = max(
@@ -637,6 +640,15 @@ class EventHub:
             s_ls = r["session_last_seen"] or ""
             effective_last_seen = max(m_ls, s_ls) or None
             fm = r["filter_mode"] if "filter_mode" in r.keys() else "all"
+            # Context %: match any of the member's session fingerprints
+            # (CLAUDE_SESSION_IDs) against the statusline publisher files.
+            context_pct = None
+            fps = r["fingerprints"] if "fingerprints" in r.keys() else None
+            if fps and ctx_usage:
+                for fp in str(fps).split(","):
+                    if fp in ctx_usage:
+                        context_pct = ctx_usage[fp]
+                        break
             aname, aemoji = avatars.get(r["id"], animal_for(r["id"]))
             out.append({
                 "id": r["id"],
@@ -646,6 +658,7 @@ class EventHub:
                 "last_read": effective_last_read,
                 "filter_mode": fm or "all",
                 "status": member_status(effective_last_seen, r["status_text"] or ""),
+                "context_pct": context_pct,
                 "animal_name": aname,
                 "animal_emoji": aemoji,
             })
@@ -722,6 +735,40 @@ class EventHub:
                 db.close()
             except sqlite3.Error:
                 pass
+
+
+# ───────── Per-session context usage (statusline publisher) ─────────
+# The operator's statusline tee (claude-statusline repo) writes one JSON per
+# live Claude session to this directory on every render. Sessions register
+# their CLAUDE_SESSION_ID as sessions.fingerprint on connect, which is the
+# join key. Only sessions on THIS machine appear — a hub-hosted nth_web
+# cannot see spoke-side context files (the fleet answer is status_text
+# publishing, not this).
+CONTEXT_USAGE_DIR = Path(
+    os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local" / "state"))
+) / "claude-context"
+CONTEXT_USAGE_STALE_S = 60
+
+
+def _read_context_usage() -> Dict[str, float]:
+    """{claude_session_id: used_pct} for fresh publisher files. Best-effort."""
+    out: Dict[str, float] = {}
+    try:
+        now = time.time()
+        for p in CONTEXT_USAGE_DIR.glob("*.json"):
+            try:
+                if now - p.stat().st_mtime > CONTEXT_USAGE_STALE_S:
+                    continue
+                data = json.loads(p.read_text(encoding="utf-8"))
+                sid = data.get("session_id")
+                pct = data.get("used_pct")
+                if isinstance(sid, str) and isinstance(pct, (int, float)):
+                    out[sid] = float(pct)
+            except (OSError, ValueError):
+                continue
+    except OSError:
+        pass
+    return out
 
 
 # ───────── Landing snapshot ─────────
@@ -1463,6 +1510,10 @@ INDEX_HTML = r"""<!doctype html>
                     text-transform: uppercase; letter-spacing: 0.5px; }
   .member .dm-btn:hover { background: var(--accent); color: var(--bg);
                           border-color: var(--accent); }
+  .member .ctx-pct { font-size: 9px; padding: 1px 5px; border-radius: 7px;
+                     background: #2a3340; color: #8fa5c0; margin-left: 4px; }
+  .member .ctx-pct.warm { background: #4a3a20; color: #e5d35e; }
+  .member .ctx-pct.hot  { background: #4a2420; color: #ff8470; }
   .member .fmode { font-size: 9px; padding: 1px 5px; border-radius: 3px;
                    flex-shrink: 0; user-select: none;
                    text-transform: uppercase; letter-spacing: 0.5px;
@@ -2797,6 +2848,16 @@ INDEX_HTML = r"""<!doctype html>
         ? 'Listening mode: at — only wakes on @pings. Ambient messages silent.'
         : 'Listening mode: about — wakes on @pings and #pounds. Ambient silent.';
       topRow.appendChild(fmPill);
+    }
+    // Context-window usage badge — present only for sessions on the same
+    // machine as this nth_web (fed by the statusline publisher).
+    if (m.context_pct != null) {
+      const ctxPill = document.createElement('span');
+      const pct = Math.round(m.context_pct);
+      ctxPill.className = 'ctx-pct' + (pct >= 80 ? ' hot' : pct >= 60 ? ' warm' : '');
+      ctxPill.textContent = pct + '%';
+      ctxPill.title = 'Context window used (from this machine\'s statusline publisher)';
+      topRow.appendChild(ctxPill);
     }
     // DM button — opens a filtered-view tab for this agent.
     // Hide for self, for human operator rows, and inside an existing DM tab.

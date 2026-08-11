@@ -22,6 +22,11 @@ Moved to Completed: `nth_spoke_monitor.py` (MCP-over-SSE) gives spoke sessions e
 
 `setup.sh spoke` still wants a raw hub URL (usually a Tailscale 100.x IP). The hub already knows its own MagicDNS name (`_tailscale_dns()` + the `hub-alias` file); spoke setup could default to probing `http://<magicdns>:8000/healthz` for candidate hubs, or accept a bare hostname and derive the rest. Would make spoke setup a zero-thought operation.
 
+### Context %% fleet-wide (quartet members)
+**Severity:** Low | **Since:** v7.3.1 (2026-08-11)
+
+The roster context badge (statusline publisher -> nth_web) only resolves for LOCAL stdio members: SSE spokes' sessions.fingerprint is empty (the hub process env has no CLAUDE_SESSION_ID) and their publisher files live on the spoke machine. Fleet answer: spokes declare their session id on connect (node_host pattern) AND publish used_pct periodically — cleanest via the spoke monitor's heartbeat declaration or set_status. Then hub nth_web badges everyone.
+
 ### Hub-version nag in poll footer
 **Severity:** Low | **Since:** v7.3 (2026-08-11)
 
