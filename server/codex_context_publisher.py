@@ -40,9 +40,15 @@ else:
 STALE_ROLLOUT_S = 600  # fallback liveness window when /proc is unavailable
 
 
-def newest_rollout(codex_home):
+def newest_rollout(codex_home, session_id=""):
+    """Newest rollout file, optionally restricted to one codex session.
+    With multiple codex TUIs sharing a CODEX_HOME, the bare newest-file
+    heuristic follows whichever session spoke last — pass session_id to pin
+    a publisher to its own session's rollout."""
     pattern = os.path.join(codex_home, "sessions", "*", "*", "*", "rollout-*.jsonl")
     files = glob.glob(pattern)
+    if session_id:
+        files = [p for p in files if session_id in os.path.basename(p)]
     if not files:
         return None
     return max(files, key=lambda p: os.path.getmtime(p))
@@ -189,6 +195,9 @@ def main():
                     help="snapshot file id; default codex-<name slugified>")
     ap.add_argument("--codex-home",
                     default=os.environ.get("CODEX_HOME", os.path.expanduser("~/.codex")))
+    ap.add_argument("--session-id", default="",
+                    help="pin to the rollout of this codex session id "
+                         "(required when several codex TUIs share a CODEX_HOME)")
     ap.add_argument("--interval", type=float, default=5.0)
     ap.add_argument("--once", action="store_true",
                     help="single scan+publish, then exit (for testing)")
@@ -200,7 +209,7 @@ def main():
     tail = None
     announced = False
     while True:
-        path = newest_rollout(args.codex_home)
+        path = newest_rollout(args.codex_home, args.session_id)
         if path:
             if tail is None or tail.path != path:
                 tail = RolloutTail(path)
