@@ -3310,12 +3310,18 @@ INDEX_HTML = r"""<!doctype html>
   function channelBase() {
     return API_QS ? '/c/' + encodeURIComponent(state.channel) : '/';
   }
-  function workspaceUrl(ids) {
-    const qs = (ids && ids.length)
-      ? '?p=' + encodeURIComponent(ids.join(',')) : '';
-    return (API_QS
+  // panes: array of id-arrays, one per pane ([] = whole channel).
+  // opts.pick opens the pane picker on arrival, so "split" reads as
+  // "keep what I'm looking at, now choose what goes beside it".
+  function workspaceUrl(panes, opts) {
+    const base = API_QS
       ? '/c/' + encodeURIComponent(state.channel) + '/workspace'
-      : '/workspace') + qs;
+      : '/workspace';
+    const qs = new URLSearchParams();
+    for (const ids of (panes || [])) qs.append('p', ids.join(','));
+    if (opts && opts.pick) qs.set('pick', '1');
+    const s = qs.toString();
+    return base + (s ? '?' + s : '');
   }
   function convUrlFor(ids, opts) {
     const qs = 'dm=' + ids.map(encodeURIComponent).join(',');
@@ -3366,7 +3372,7 @@ INDEX_HTML = r"""<!doctype html>
     split.textContent = 'Split screen';
     split.title = 'Open the split-screen workspace with this conversation as the first pane';
     split.addEventListener('click', () => {
-      location.assign(workspaceUrl(ids));
+      location.assign(workspaceUrl([ids], { pick: true }));
     });
     convPickBar.appendChild(split);
 
@@ -4097,8 +4103,11 @@ INDEX_HTML = r"""<!doctype html>
       btnWorkspace.hidden = true;
     } else {
       btnWorkspace.addEventListener('click', () => {
-        // Carry any ticked members through as the first pane.
-        location.assign(workspaceUrl([...state.convPicks]));
+        // Whatever you're looking at becomes the left pane: this
+        // conversation, or the members you ticked, or the whole channel.
+        // The workspace then asks who belongs beside it.
+        const first = CONV_MODE ? CONV_IDS : [...state.convPicks];
+        location.assign(workspaceUrl([first], { pick: true }));
       });
     }
   }
@@ -4601,11 +4610,13 @@ WORKSPACE_HTML = r"""<!doctype html>
   .pane { position: relative; border: 1px solid var(--border); border-radius: 4px;
           overflow: hidden; background: var(--bg2); min-height: 0; }
   .pane iframe { width: 100%; height: 100%; border: 0; display: block; }
-  .pane .close { position: absolute; top: 4px; right: 6px; z-index: 5;
-                 font-size: 12px; line-height: 1; padding: 2px 6px;
+  .pane-tools { position: absolute; top: 4px; right: 6px; z-index: 5;
+                display: flex; gap: 4px; }
+  .pane .ptool { font-size: 12px; line-height: 1; padding: 2px 6px;
                  border-radius: 3px; cursor: pointer; color: var(--dimmer);
                  background: var(--panel); border: 1px solid var(--border); }
-  .pane .close:hover { color: #fff; background: #a33; border-color: #a33; }
+  .pane .ptool:hover { color: var(--fg); border-color: var(--accent); }
+  .pane .ptool.close:hover { color: #fff; background: #a33; border-color: #a33; }
   #empty { color: var(--dimmer); padding: 24px; line-height: 1.7; }
   #empty code { color: var(--dim); }
   dialog { background: var(--bg2); color: var(--fg); border: 1px solid var(--border);
@@ -4637,7 +4648,7 @@ WORKSPACE_HTML = r"""<!doctype html>
   </div>
 
   <dialog id="picker">
-    <h3>Who is in this pane?</h3>
+    <h3 id="pick-title">Who is in this pane?</h3>
     <div id="pick-list"></div>
     <div class="dlg-actions">
       <button class="btn" id="pick-cancel">cancel</button>
@@ -4660,6 +4671,8 @@ WORKSPACE_HTML = r"""<!doctype html>
   const btnCols = document.getElementById('btn-cols');
   const picker = document.getElementById('picker');
   const pickList = document.getElementById('pick-list');
+  const pickTitle = document.getElementById('pick-title');
+  const pickOk = document.getElementById('pick-ok');
 
   let channel = '';
   let roster = [];
@@ -4731,15 +4744,27 @@ WORKSPACE_HTML = r"""<!doctype html>
       frame.src = paneSrc(ids);
       frame.title = ids.length ? ids.join(', ') : 'full channel';
       pane.appendChild(frame);
+
+      const tools = document.createElement('div');
+      tools.className = 'pane-tools';
+      // Editing a pane in place is the answer to "how do I change who is on
+      // the right" — without it the only route is close-then-re-add.
+      const edit = document.createElement('span');
+      edit.className = 'ptool';
+      edit.textContent = '✎';
+      edit.title = 'change who is in this pane';
+      edit.addEventListener('click', () => openPicker(i));
+      tools.appendChild(edit);
       const x = document.createElement('span');
-      x.className = 'close';
+      x.className = 'ptool close';
       x.textContent = '✕';
       x.title = 'close this pane';
       x.addEventListener('click', () => {
         panes.splice(i, 1);
         writeUrl(); render();
       });
-      pane.appendChild(x);
+      tools.appendChild(x);
+      pane.appendChild(tools);
       panesEl.appendChild(pane);
     });
 
@@ -4750,8 +4775,16 @@ WORKSPACE_HTML = r"""<!doctype html>
     btnCols.textContent = 'columns: ' + (cols || 'auto');
   }
 
-  // ── Add-pane picker, populated from the roster ──
-  function openPicker() {
+  // ── Pane picker — used for both "+ pane" and editing an existing pane ──
+  // editIndex === null means "append a new pane"; otherwise it replaces that
+  // pane, so changing who is in a pane never means closing and rebuilding it.
+  let editIndex = null;
+  function openPicker(index) {
+    editIndex = (typeof index === 'number') ? index : null;
+    const current = new Set(editIndex === null ? [] : panes[editIndex]);
+    pickTitle.textContent = editIndex === null
+      ? 'Who is in the new pane?'
+      : `Who is in pane ${editIndex + 1}?`;
     pickList.innerHTML = '';
     if (!roster.length) {
       const p = document.createElement('div');
@@ -4765,6 +4798,7 @@ WORKSPACE_HTML = r"""<!doctype html>
       const cb = document.createElement('input');
       cb.type = 'checkbox';
       cb.value = m.id;
+      cb.checked = current.has(m.id);
       row.appendChild(cb);
       const em = document.createElement('span');
       em.textContent = m.animal_emoji || '';
@@ -4774,18 +4808,29 @@ WORKSPACE_HTML = r"""<!doctype html>
       row.appendChild(nm);
       pickList.appendChild(row);
     }
+    const hint = document.createElement('div');
+    hint.className = 'note';
+    hint.style.marginTop = '8px';
+    hint.textContent = 'Nothing ticked shows the whole channel.';
+    pickList.appendChild(hint);
+    pickOk.textContent = editIndex === null ? 'add pane' : 'update pane';
     picker.showModal();
   }
 
-  document.getElementById('pick-ok').addEventListener('click', () => {
+  pickOk.addEventListener('click', () => {
     const ids = [...pickList.querySelectorAll('input:checked')].map(i => i.value);
     picker.close();
-    if (panes.length >= PANE_CAP) return;
-    panes.push(ids);
+    if (editIndex === null) {
+      if (panes.length >= PANE_CAP) return;
+      panes.push(ids);
+    } else {
+      panes[editIndex] = ids;
+    }
+    editIndex = null;
     writeUrl(); render();
   });
   document.getElementById('pick-cancel').addEventListener('click', () => picker.close());
-  btnAdd.addEventListener('click', openPicker);
+  btnAdd.addEventListener('click', () => openPicker(null));
   btnCols.addEventListener('click', () => {
     cols = (cols + 1) % 5;   // auto → 1 → 2 → 3 → 4 → auto
     writeUrl(); render();
@@ -4795,22 +4840,27 @@ WORKSPACE_HTML = r"""<!doctype html>
   // Uses one short-lived EventSource rather than holding a permanent one:
   // the shell only needs a single roster snapshot, and a persistent
   // connection here would burn one of the origin's scarce slots for good.
-  function loadRoster() {
-    let es;
+  function loadRoster(onReady) {
+    let es, settled = false;
     try { es = new EventSource('/api/events' + API_QS); } catch (_) { return; }
-    const done = () => { try { es.close(); } catch (_) {} };
+    const done = (ok) => {
+      try { es.close(); } catch (_) {}
+      if (settled) return;
+      settled = true;
+      if (ok && onReady) onReady();
+    };
     es.onmessage = (ev) => {
       let payload;
       try { payload = JSON.parse(ev.data); } catch (_) { return; }
       if (payload.type === 'roster') {
         roster = (payload.members || [])
           .filter(m => !String(m.id).startsWith('_op_'));
-        done();
+        done(true);
       }
     };
-    es.onerror = done;
+    es.onerror = () => done(false);
     // Hard stop regardless — never leave this open competing with panes.
-    setTimeout(done, 8000);
+    setTimeout(() => done(roster.length > 0), 8000);
   }
 
   (async function boot() {
@@ -4826,7 +4876,17 @@ WORKSPACE_HTML = r"""<!doctype html>
     }
     restore();
     render();
-    loadRoster();
+    // Arriving from "split": open the picker as soon as the roster lands so
+    // the very next thing you do is choose who sits beside the pane you came
+    // from. Without the roster the dialog would be an empty list.
+    const wantPick = new URLSearchParams(location.search).get('pick') === '1';
+    loadRoster(wantPick ? () => openPicker(null) : null);
+    if (wantPick) {
+      const p = new URLSearchParams(location.search);
+      p.delete('pick');
+      history.replaceState(null, '', location.pathname +
+        (p.toString() ? '?' + p.toString() : ''));
+    }
   })();
 })();
 </script>
