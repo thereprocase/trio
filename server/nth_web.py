@@ -1978,16 +1978,6 @@ INDEX_HTML = r"""<!doctype html>
      layers a pulsing ring over the existing dot via a pseudo-element
      instead of replacing the colour. Sized off inset so the bluebubble
      theme's larger dot scales it automatically. */
-  /* Addressed but not yet read — awake enough to be owed a reply, not yet
-     acting on it. Static so it reads as "pending", not "busy". */
-  .dot.queued { position: relative; }
-  .dot.queued::after {
-    content: ''; position: absolute; inset: -3px;
-    border-radius: 50%; border: 1.5px dashed var(--warn);
-    opacity: 0.75; pointer-events: none;
-  }
-  header .participants .pchip.queued { border-color: var(--warn); }
-
   .dot.working { position: relative;
                  animation: trio-working-core 1.2s ease-in-out infinite; }
   .dot.working::after {
@@ -2838,27 +2828,32 @@ INDEX_HTML = r"""<!doctype html>
     return state.agentStats.get(id);
   }
 
-  // ── Engagement: is this member working on something for us right now? ──
+  // ── Engagement: is this member off doing something for us? ──
   //
   // Derived from behaviour rather than declared, because a declared signal is
   // only as good as every agent's discipline — and agents here work off
   // messages, not task claims, so claims never fire. This needs nothing from
-  // them and cannot go stale:
+  // them and cannot go stale.
   //
-  //   queued  — addressed, watermark still behind the message: not awake yet
-  //   working — addressed, has read it, hasn't answered: composing a reply
-  //   (none)  — nothing outstanding
+  // One state, deliberately: addressed and hasn't answered yet. Whether the
+  // watermark has caught up ("about to") or not ("doing") is a distinction
+  // without a difference for someone scanning the roster — either way that
+  // agent owes you a reply and isn't idle.
   //
   // Replying is what clears it, so "done" needs no extra step from anyone.
   function engagementFor(mid) {
+    // Human operators have no monitor advancing their watermark — it sits at
+    // 0 forever — so they would read as permanently "queued". Their own
+    // unread state is already carried by the tab badge, the jump button and
+    // the pane border; this indicator is about the agents.
+    if (!mid || mid === state.operator.id || mid.startsWith('_op_')) return null;
     const s = state.agentStats.get(mid);
     if (!s || !s.pending_directed.length) return null;
     const mem = state.members.get(mid);
     if (!mem) return null;
     // A dead session shouldn't look busy; it's just never going to answer.
     if (mem.status === 'dead') return null;
-    const oldest = s.pending_directed[0];
-    return (mem.last_read || 0) >= oldest ? 'working' : 'queued';
+    return 'working';
   }
 
   // Repaint the engagement classes without rebuilding the roster — the state
@@ -2868,10 +2863,7 @@ INDEX_HTML = r"""<!doctype html>
       const eng = engagementFor(el.dataset.mid);
       el.classList.toggle('is-working', eng === 'working');
       const dot = el.querySelector('.dot');
-      if (dot) {
-        dot.classList.toggle('working', eng === 'working');
-        dot.classList.toggle('queued', eng === 'queued');
-      }
+      if (dot) dot.classList.toggle('working', eng === 'working');
     }
     renderParticipants();
   }
@@ -3519,8 +3511,7 @@ INDEX_HTML = r"""<!doctype html>
       const chip = document.createElement('span');
       const eng = m ? engagementFor(m.id) : null;
       const working = eng === 'working';
-      chip.className = 'pchip' + (m ? '' : ' unknown') + (working ? ' working' : '')
-                                + (eng === 'queued' ? ' queued' : '');
+      chip.className = 'pchip' + (m ? '' : ' unknown') + (working ? ' working' : '');
       if (m) {
         const a = animalFor(m);
         emojis.push(a.emoji);
@@ -3538,8 +3529,7 @@ INDEX_HTML = r"""<!doctype html>
           chip.appendChild(sp);
         }
         chip.title = `${m.name} (${m.id}) — the ${a.name}` +
-          (working ? '\nworking — read your message, no reply yet' :
-           eng === 'queued' ? '\nqueued — addressed, has not read it yet' : '');
+          (working ? '\nworking — addressed, no reply yet' : '');
       } else {
         // Roster hasn't arrived yet, or this member left the channel.
         chip.textContent = id;
@@ -3607,9 +3597,8 @@ INDEX_HTML = r"""<!doctype html>
     // State what is actually known. "Read your message, hasn't replied" is
     // observable; "the model is generating tokens" is not, and the wording
     // must not imply it.
-    const workLine =
-      eng === 'working' ? '\nworking — read your message, no reply yet' :
-      eng === 'queued'  ? '\nqueued — addressed, has not read it yet' : '';
+    const workLine = eng === 'working'
+      ? '\nworking — addressed, no reply yet' : '';
     const taskLine = m.claimed_count
       ? `\nholding ${m.claimed_count} task${m.claimed_count === 1 ? '' : 's'}`
       : '';
@@ -3618,8 +3607,7 @@ INDEX_HTML = r"""<!doctype html>
     const topRow = document.createElement('div');
     topRow.className = 'row';
     const dot = document.createElement('div');
-    dot.className = 'dot ' + m.status +
-      (eng === 'working' ? ' working' : eng === 'queued' ? ' queued' : '');
+    dot.className = 'dot ' + m.status + (eng === 'working' ? ' working' : '');
     topRow.appendChild(dot);
     const animalSpan = document.createElement('span');
     animalSpan.className = 'roster-animal';
