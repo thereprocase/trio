@@ -1698,6 +1698,27 @@ INDEX_HTML = r"""<!doctype html>
   header .participants .pchip.unknown { color: var(--dimmer); font-weight: 400;
                                         font-style: italic; }
   header .participants .pchip .pc-emoji { font-size: 13px; line-height: 1; }
+  /* A pane has no roster, so the chips are the only place its participants
+     appear — the working state has to be legible here too. */
+  header .participants .pchip.working {
+    border-color: var(--accent2);
+    animation: trio-chip-working 1.2s ease-in-out infinite;
+  }
+  @keyframes trio-chip-working {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(89, 203, 121, 0.0); }
+    50%      { box-shadow: 0 0 7px 1px rgba(89, 203, 121, 0.55); }
+  }
+  header .participants .pchip .pc-spin {
+    display: inline-block; width: 9px; height: 9px; flex-shrink: 0;
+    border-radius: 50%; border: 1.5px solid var(--accent2);
+    border-top-color: transparent;
+    animation: trio-spin 0.75s linear infinite;
+  }
+  @keyframes trio-spin { to { transform: rotate(360deg); } }
+  @media (prefers-reduced-motion: reduce) {
+    header .participants .pchip.working { animation: none; }
+    header .participants .pchip .pc-spin { animation: none; border-style: dotted; }
+  }
   .pill {
     font-size: 11px; padding: 3px 8px; border-radius: var(--pill-radius); cursor: pointer;
     background: var(--panel); border: 1px solid var(--border); user-select: none;
@@ -1957,18 +1978,24 @@ INDEX_HTML = r"""<!doctype html>
      layers a pulsing ring over the existing dot via a pseudo-element
      instead of replacing the colour. Sized off inset so the bluebubble
      theme's larger dot scales it automatically. */
-  .dot.working { position: relative; }
+  .dot.working { position: relative;
+                 animation: trio-working-core 1.2s ease-in-out infinite; }
   .dot.working::after {
-    content: ''; position: absolute; inset: -2px;
-    border-radius: 50%; border: 1.5px solid currentColor;
-    color: inherit; background: inherit;
-    animation: trio-working-pulse 1.4s ease-out infinite;
+    content: ''; position: absolute; inset: -3px;
+    border-radius: 50%; border: 2px solid var(--accent2);
+    animation: trio-working-pulse 1.2s ease-out infinite;
     pointer-events: none;
   }
+  /* The dot itself brightens as the ring expands — a ring alone was too easy
+     to miss at 8px against a busy roster. */
+  @keyframes trio-working-core {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(89, 203, 121, 0.0); }
+    50%      { box-shadow: 0 0 6px 2px rgba(89, 203, 121, 0.75); }
+  }
   @keyframes trio-working-pulse {
-    0%   { transform: scale(1);   opacity: 0.7; }
-    70%  { transform: scale(2.1); opacity: 0;   }
-    100% { transform: scale(2.1); opacity: 0;   }
+    0%   { transform: scale(1);   opacity: 0.9; }
+    70%  { transform: scale(2.6); opacity: 0;   }
+    100% { transform: scale(2.6); opacity: 0;   }
   }
   /* The name gets a slow shimmer so a busy member is findable without
      hunting for an 8px dot — the roster is scanned by name, not by dot. */
@@ -2077,7 +2104,25 @@ INDEX_HTML = r"""<!doctype html>
   .completion .cdot { width: 6px; height: 6px; border-radius: 50%; }
 
   /* Mobile roster toggle — hidden on desktop, sole sidebar opener on mobile */
-  #btn-mobile-roster { display: none; font-size: 16px; padding: 3px 10px; }
+  #btn-mobile-roster { display: none; font-size: 16px; padding: 3px 10px;
+                       flex-shrink: 0; }
+  /* A pane starts with the roster hidden and can be any width, so the
+     overlay toggle can't be gated on the mobile breakpoint the way the
+     standalone window's is — otherwise a wide pane has no route to the
+     roster at all. */
+  body.pane-mode #btn-mobile-roster { display: inline-block; order: 9; }
+  body.pane-mode header > #btn-side { display: none; }
+  /* Chips yield space before the controls do. */
+  body.pane-mode header .participants { flex-shrink: 1; min-width: 0; }
+  body.pane-mode header .pill { flex-shrink: 0; }
+  body.pane-mode #side { position: fixed; inset: 0; z-index: 20;
+                         grid-column: 1; grid-row: 2; border-left: none;
+                         overflow-y: auto; padding-top: 44px;
+                         display: none !important; }
+  body.pane-mode #app.mobile-side-open #side { display: flex !important; }
+  body.pane-mode #mobile-scrim { display: none; position: fixed; inset: 0;
+                                 z-index: 19; background: rgba(0,0,0,0.5); }
+  body.pane-mode #app.mobile-side-open #mobile-scrim { display: block; }
 
   /* ── Mobile responsive ── */
   @media (max-width: 768px) {
@@ -3400,7 +3445,8 @@ INDEX_HTML = r"""<!doctype html>
     for (const id of CONV_IDS) {
       const m = state.members.get(id);
       const chip = document.createElement('span');
-      chip.className = 'pchip' + (m ? '' : ' unknown');
+      const working = !!(m && m.claimed_count);
+      chip.className = 'pchip' + (m ? '' : ' unknown') + (working ? ' working' : '');
       if (m) {
         const a = animalFor(m);
         emojis.push(a.emoji);
@@ -3412,7 +3458,14 @@ INDEX_HTML = r"""<!doctype html>
         nm.textContent = m.name;
         nm.style.color = colorFor(m.id);
         chip.appendChild(nm);
-        chip.title = `${m.name} (${m.id}) — the ${a.name}`;
+        if (working) {
+          const sp = document.createElement('span');
+          sp.className = 'pc-spin';
+          chip.appendChild(sp);
+        }
+        chip.title = `${m.name} (${m.id}) — the ${a.name}` +
+          (working ? `\nworking — holding ${m.claimed_count} task` +
+                     `${m.claimed_count === 1 ? '' : 's'}` : '');
       } else {
         // Roster hasn't arrived yet, or this member left the channel.
         chip.textContent = id;
@@ -4475,6 +4528,7 @@ INDEX_HTML = r"""<!doctype html>
       state.originalTitle = (CONV_MODE ? '⇄ trio#' : 'trio#') + meta.channel;
       if (CONV_MODE) document.body.classList.add('dm-mode');
       if (CONV_IDS.length === 1) document.body.classList.add('conv-pair');
+      if (PANE_MODE) document.body.classList.add('pane-mode');
       renderParticipants();
       updateTitle();
       if (meta.operator.pending) {
@@ -4589,8 +4643,12 @@ WORKSPACE_HTML = r"""<!doctype html>
   :root {
     --bg: #0b0f14; --bg2: #121821; --panel: #161d27; --border: #273040;
     --fg: #d6dde8; --dim: #8b97a8; --dimmer: #5d6675; --accent: #4aa8ff;
+    /* Deliberately lighter than any pane's own background: the gutter is
+       what separates panes, so it has to read as a gap rather than as more
+       chat. */
+    --gutter: #39414f;
   }
-  html, body { margin: 0; padding: 0; height: 100%; background: var(--bg);
+  html, body { margin: 0; padding: 0; height: 100%; background: var(--gutter);
                color: var(--fg);
                font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
                font-size: 13px; }
@@ -4605,10 +4663,11 @@ WORKSPACE_HTML = r"""<!doctype html>
   .btn:hover:not(:disabled) { border-color: var(--accent); color: var(--fg); }
   .btn:disabled { opacity: 0.4; cursor: not-allowed; }
   .note { color: var(--dimmer); font-size: 11px; }
-  #panes { display: grid; gap: 6px; padding: 6px; box-sizing: border-box;
-           height: calc(100% - 38px); }
-  .pane { position: relative; border: 1px solid var(--border); border-radius: 4px;
-          overflow: hidden; background: var(--bg2); min-height: 0; }
+  #panes { display: grid; gap: 10px; padding: 10px; box-sizing: border-box;
+           height: calc(100% - 38px); background: var(--gutter); }
+  .pane { position: relative; border: 1px solid #4b5566; border-radius: 5px;
+          overflow: hidden; background: var(--bg2); min-height: 0;
+          box-shadow: 0 1px 6px rgba(0,0,0,0.45); }
   .pane iframe { width: 100%; height: 100%; border: 0; display: block; }
   .pane-tools { position: absolute; top: 4px; right: 6px; z-index: 5;
                 display: flex; gap: 4px; }
