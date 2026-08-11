@@ -1978,6 +1978,16 @@ INDEX_HTML = r"""<!doctype html>
      layers a pulsing ring over the existing dot via a pseudo-element
      instead of replacing the colour. Sized off inset so the bluebubble
      theme's larger dot scales it automatically. */
+  /* Addressed but not yet read — awake enough to be owed a reply, not yet
+     acting on it. Static so it reads as "pending", not "busy". */
+  .dot.queued { position: relative; }
+  .dot.queued::after {
+    content: ''; position: absolute; inset: -3px;
+    border-radius: 50%; border: 1.5px dashed var(--warn);
+    opacity: 0.75; pointer-events: none;
+  }
+  header .participants .pchip.queued { border-color: var(--warn); }
+
   .dot.working { position: relative;
                  animation: trio-working-core 1.2s ease-in-out infinite; }
   .dot.working::after {
@@ -2106,6 +2116,15 @@ INDEX_HTML = r"""<!doctype html>
   /* Mobile roster toggle — hidden on desktop, sole sidebar opener on mobile */
   #btn-mobile-roster { display: none; font-size: 16px; padding: 3px 10px;
                        flex-shrink: 0; }
+  /* The roster overlay covers the whole pane including the header, so the
+     button that opened it is unreachable underneath. It has to carry its
+     own way out. */
+  #side-close { display: none; position: sticky; top: 0; z-index: 2;
+                padding: 10px 12px; cursor: pointer; user-select: none;
+                background: var(--panel); color: var(--dim);
+                border-bottom: 1px solid var(--border);
+                font-size: 11px; font-weight: 600; letter-spacing: 0.04em; }
+  #side-close:hover { color: var(--fg); background: var(--bg2); }
   /* A pane starts with the roster hidden and can be any width, so the
      overlay toggle can't be gated on the mobile breakpoint the way the
      standalone window's is — otherwise a wide pane has no route to the
@@ -2117,8 +2136,9 @@ INDEX_HTML = r"""<!doctype html>
   body.pane-mode header .pill { flex-shrink: 0; }
   body.pane-mode #side { position: fixed; inset: 0; z-index: 20;
                          grid-column: 1; grid-row: 2; border-left: none;
-                         overflow-y: auto; padding-top: 44px;
+                         overflow-y: auto; padding-top: 0;
                          display: none !important; }
+  body.pane-mode #app.mobile-side-open #side-close { display: block; }
   body.pane-mode #app.mobile-side-open #side { display: flex !important; }
   body.pane-mode #mobile-scrim { display: none; position: fixed; inset: 0;
                                  z-index: 19; background: rgba(0,0,0,0.5); }
@@ -2141,8 +2161,9 @@ INDEX_HTML = r"""<!doctype html>
     /* Sidebar: hidden by default, full-overlay when toggled open */
     #side { display: none !important; position: fixed; inset: 0; z-index: 20;
             grid-column: 1; grid-row: 2; border-left: none;
-            overflow-y: auto; padding-top: 48px; }
+            overflow-y: auto; padding-top: 0; }
     #app.mobile-side-open #side { display: flex !important; }
+    #app.mobile-side-open #side-close { display: block; }
     /* Scrim behind sidebar overlay */
     #mobile-scrim { display: none; position: fixed; inset: 0; z-index: 19;
                     background: rgba(0,0,0,0.5); }
@@ -2285,6 +2306,7 @@ INDEX_HTML = r"""<!doctype html>
   </div>
 
   <aside id="side">
+    <div id="side-close" title="close the roster">✕ close roster</div>
     <section>
       <div id="filter-banner">filter active — showing matching messages only. click to clear.</div>
       <h2 id="r-heading">Members</h2>
@@ -2816,6 +2838,51 @@ INDEX_HTML = r"""<!doctype html>
     return state.agentStats.get(id);
   }
 
+  // ── Engagement: is this member working on something for us right now? ──
+  //
+  // Derived from behaviour rather than declared, because a declared signal is
+  // only as good as every agent's discipline — and agents here work off
+  // messages, not task claims, so claims never fire. This needs nothing from
+  // them and cannot go stale:
+  //
+  //   queued  — addressed, watermark still behind the message: not awake yet
+  //   working — addressed, has read it, hasn't answered: composing a reply
+  //   (none)  — nothing outstanding
+  //
+  // Replying is what clears it, so "done" needs no extra step from anyone.
+  function engagementFor(mid) {
+    const s = state.agentStats.get(mid);
+    if (!s || !s.pending_directed.length) return null;
+    const mem = state.members.get(mid);
+    if (!mem) return null;
+    // A dead session shouldn't look busy; it's just never going to answer.
+    if (mem.status === 'dead') return null;
+    const oldest = s.pending_directed[0];
+    return (mem.last_read || 0) >= oldest ? 'working' : 'queued';
+  }
+
+  // Repaint the engagement classes without rebuilding the roster — the state
+  // changes on every message, and a full re-render would fight scrolling.
+  function refreshEngagement() {
+    for (const el of rosterEl.querySelectorAll('.member[data-mid]')) {
+      const eng = engagementFor(el.dataset.mid);
+      el.classList.toggle('is-working', eng === 'working');
+      const dot = el.querySelector('.dot');
+      if (dot) {
+        dot.classList.toggle('working', eng === 'working');
+        dot.classList.toggle('queued', eng === 'queued');
+      }
+    }
+    renderParticipants();
+  }
+
+  // Coalesce: a history burst would otherwise repaint once per message.
+  let _engTimer = null;
+  function scheduleEngagementRefresh() {
+    if (_engTimer) return;
+    _engTimer = setTimeout(() => { _engTimer = null; refreshEngagement(); }, 120);
+  }
+
   function ingestMessageForStats(msg) {
     const s = agentState(msg.member_id);
     s.sent++;
@@ -2983,6 +3050,9 @@ INDEX_HTML = r"""<!doctype html>
     state.seenMsgIds.add(m.id);
     state.messages.set(m.id, m);
     ingestMessageForStats(m);
+    // Engagement changes on every message, not on roster ticks — a new ping
+    // makes someone busy, their reply clears it.
+    if (!state.initialLoad) scheduleEngagementRefresh();
 
     const isMine = m.member_id === state.operator.id;
     const isSystem = isSystemContent(m.content || '');
@@ -3079,6 +3149,8 @@ INDEX_HTML = r"""<!doctype html>
       state.unreadCount++;
       updateTitle();
     }
+    // Pane border badge — the split-screen equivalent of the tab badge.
+    if (!state.initialLoad && !isSystem) notePaneActivity(isMine);
 
     // Desktop notification on @you while hidden (opt-in). In a scoped
     // conversation, only fire for messages that view actually shows — reuse
@@ -3445,8 +3517,10 @@ INDEX_HTML = r"""<!doctype html>
     for (const id of CONV_IDS) {
       const m = state.members.get(id);
       const chip = document.createElement('span');
-      const working = !!(m && m.claimed_count);
-      chip.className = 'pchip' + (m ? '' : ' unknown') + (working ? ' working' : '');
+      const eng = m ? engagementFor(m.id) : null;
+      const working = eng === 'working';
+      chip.className = 'pchip' + (m ? '' : ' unknown') + (working ? ' working' : '')
+                                + (eng === 'queued' ? ' queued' : '');
       if (m) {
         const a = animalFor(m);
         emojis.push(a.emoji);
@@ -3464,8 +3538,8 @@ INDEX_HTML = r"""<!doctype html>
           chip.appendChild(sp);
         }
         chip.title = `${m.name} (${m.id}) — the ${a.name}` +
-          (working ? `\nworking — holding ${m.claimed_count} task` +
-                     `${m.claimed_count === 1 ? '' : 's'}` : '');
+          (working ? '\nworking — read your message, no reply yet' :
+           eng === 'queued' ? '\nqueued — addressed, has not read it yet' : '');
       } else {
         // Roster hasn't arrived yet, or this member left the channel.
         chip.textContent = id;
@@ -3526,20 +3600,26 @@ INDEX_HTML = r"""<!doctype html>
   function renderMemberRow(m) {
     const { name: animalName, emoji } = animalFor(m);
     const row = document.createElement('div');
+    const eng = engagementFor(m.id);
+    row.dataset.mid = m.id;
     row.className = 'member' + (state.expandedMembers.has(m.id) ? ' expanded' : '')
-                             + (m.claimed_count ? ' is-working' : '');
-    // The tooltip states the actual signal. "Holding a task" is what we know;
-    // whether the model is mid-token is not observable from here, and the
-    // wording should not imply otherwise.
-    const workLine = m.claimed_count
-      ? `\nworking — holding ${m.claimed_count} task${m.claimed_count === 1 ? '' : 's'}`
+                             + (eng === 'working' ? ' is-working' : '');
+    // State what is actually known. "Read your message, hasn't replied" is
+    // observable; "the model is generating tokens" is not, and the wording
+    // must not imply it.
+    const workLine =
+      eng === 'working' ? '\nworking — read your message, no reply yet' :
+      eng === 'queued'  ? '\nqueued — addressed, has not read it yet' : '';
+    const taskLine = m.claimed_count
+      ? `\nholding ${m.claimed_count} task${m.claimed_count === 1 ? '' : 's'}`
       : '';
-    row.title = `${m.name} (${m.id}) — the ${animalName}\n${m.status_text || ''}\nlast_read: ${m.last_read}${workLine}`;
+    row.title = `${m.name} (${m.id}) — the ${animalName}\n${m.status_text || ''}\nlast_read: ${m.last_read}${workLine}${taskLine}`;
 
     const topRow = document.createElement('div');
     topRow.className = 'row';
     const dot = document.createElement('div');
-    dot.className = 'dot ' + m.status + (m.claimed_count ? ' working' : '');
+    dot.className = 'dot ' + m.status +
+      (eng === 'working' ? ' working' : eng === 'queued' ? ' queued' : '');
     topRow.appendChild(dot);
     const animalSpan = document.createElement('span');
     animalSpan.className = 'roster-animal';
@@ -3788,7 +3868,8 @@ INDEX_HTML = r"""<!doctype html>
       const row = document.createElement('div');
       row.className = 'completion' + (i === state.completion.index ? ' selected' : '');
       const dot = document.createElement('div');
-      dot.className = 'cdot dot ' + m.status + (m.claimed_count ? ' working' : '');
+      dot.className = 'cdot dot ' + m.status +
+        (engagementFor(m.id) === 'working' ? ' working' : '');
       row.appendChild(dot);
       const anim = animalFor(m);
       const emoji = document.createElement('span');
@@ -4147,6 +4228,35 @@ INDEX_HTML = r"""<!doctype html>
     }
   } catch (_) {}
 
+  // ── Pane → workspace shell: unread signalling ──
+  // Every pane is visible at once, so "unread" can't mean document.hidden the
+  // way it does for a tab. A pane counts as read while it holds focus (you
+  // clicked into it); anything arriving elsewhere is unread until you do.
+  let paneUnread = 0;
+  function postUnread() {
+    if (!PANE_MODE || window.parent === window) return;
+    try {
+      window.parent.postMessage(
+        { type: 'trio-pane-unread', count: paneUnread }, location.origin);
+    } catch (_) { /* cross-origin parent — nothing to tell */ }
+  }
+  function notePaneActivity(fromSelf) {
+    if (!PANE_MODE || fromSelf) return;
+    if (document.hasFocus()) return;
+    paneUnread++;
+    postUnread();
+  }
+  function clearPaneUnread() {
+    if (!PANE_MODE || paneUnread === 0) return;
+    paneUnread = 0;
+    postUnread();
+  }
+  if (PANE_MODE) {
+    window.addEventListener('focus', clearPaneUnread);
+    document.addEventListener('click', clearPaneUnread);
+    document.addEventListener('keydown', clearPaneUnread);
+  }
+
   // ── Split-screen entry point ──
   // Always available, so reaching the workspace never requires hand-writing a
   // URL. Hidden inside a pane — nesting a workspace in a pane is not useful.
@@ -4210,6 +4320,14 @@ INDEX_HTML = r"""<!doctype html>
     if (btnMobileRoster) btnMobileRoster.classList.toggle('on', open);
   }
   if (btnMobileRoster) btnMobileRoster.addEventListener('click', toggleMobileSidebar);
+  const sideClose = document.getElementById('side-close');
+  if (sideClose) {
+    sideClose.addEventListener('click', () => {
+      appEl.classList.remove('mobile-side-open');
+      btnSide.classList.toggle('on', false);
+      if (btnMobileRoster) btnMobileRoster.classList.toggle('on', false);
+    });
+  }
   if (mobileScrim) {
     mobileScrim.addEventListener('click', () => {
       appEl.classList.remove('mobile-side-open');
@@ -4667,7 +4785,28 @@ WORKSPACE_HTML = r"""<!doctype html>
            height: calc(100% - 38px); background: var(--gutter); }
   .pane { position: relative; border: 1px solid #4b5566; border-radius: 5px;
           overflow: hidden; background: var(--bg2); min-height: 0;
-          box-shadow: 0 1px 6px rgba(0,0,0,0.45); }
+          box-shadow: 0 1px 6px rgba(0,0,0,0.45);
+          transition: border-color 0.15s, box-shadow 0.15s; }
+  /* Unread: the pane you are not looking at got a message. Bright enough to
+     catch the eye across a wide screen without being an alarm. */
+  .pane.has-unread { border-color: var(--accent); }
+  .pane.has-unread::after {
+    content: ''; position: absolute; inset: 0; border-radius: 4px;
+    pointer-events: none; box-shadow: inset 0 0 0 2px var(--accent);
+    animation: trio-unread-glow 1.6s ease-in-out infinite;
+  }
+  @keyframes trio-unread-glow {
+    0%, 100% { opacity: 0.45; }
+    50%      { opacity: 1; }
+  }
+  .pane .unread-badge {
+    position: absolute; top: 4px; left: 6px; z-index: 5;
+    background: var(--accent); color: #04121f; font-weight: 700;
+    font-size: 10px; padding: 2px 7px; border-radius: 9px;
+    pointer-events: none; }
+  @media (prefers-reduced-motion: reduce) {
+    .pane.has-unread::after { animation: none; opacity: 1; }
+  }
   .pane iframe { width: 100%; height: 100%; border: 0; display: block; }
   .pane-tools { position: absolute; top: 4px; right: 6px; z-index: 5;
                 display: flex; gap: 4px; }
@@ -4735,6 +4874,7 @@ WORKSPACE_HTML = r"""<!doctype html>
 
   let channel = '';
   let roster = [];
+  const frames = [];   // index → iframe, for matching postMessage senders
   // Each pane is an array of member ids; [] means the whole channel.
   let panes = [];
   let cols = 0;  // 0 = auto
@@ -4815,6 +4955,7 @@ WORKSPACE_HTML = r"""<!doctype html>
 
   function render() {
     panesEl.innerHTML = '';
+    frames.length = 0;
     emptyEl.hidden = panes.length > 0;
     const n = panes.length;
     applyGrid();
@@ -4826,6 +4967,7 @@ WORKSPACE_HTML = r"""<!doctype html>
       frame.src = paneSrc(ids);
       frame.title = ids.length ? ids.join(', ') : 'full channel';
       pane.appendChild(frame);
+      frames[i] = frame;
 
       const tools = document.createElement('div');
       tools.className = 'pane-tools';
@@ -4916,6 +5058,32 @@ WORKSPACE_HTML = r"""<!doctype html>
   btnCols.addEventListener('click', () => {
     cols = (cols + 1) % 5;   // auto → 1 → 2 → 3 → 4 → auto
     writeUrl(); render();
+  });
+
+  // ── Unread badges from panes ──
+  // Panes report their own unread count; the shell only paints it. Origin is
+  // checked before trusting anything off the wire.
+  window.addEventListener('message', (ev) => {
+    if (ev.origin !== location.origin) return;
+    const d = ev.data;
+    if (!d || d.type !== 'trio-pane-unread') return;
+    const idx = frames.findIndex(f => f && f.contentWindow === ev.source);
+    if (idx < 0) return;
+    const pane = panesEl.children[idx];
+    if (!pane) return;
+    const n = Math.max(0, parseInt(d.count, 10) || 0);
+    pane.classList.toggle('has-unread', n > 0);
+    let badge = pane.querySelector('.unread-badge');
+    if (n > 0) {
+      if (!badge) {
+        badge = document.createElement('span');
+        badge.className = 'unread-badge';
+        pane.appendChild(badge);
+      }
+      badge.textContent = n > 99 ? '99+' : String(n);
+    } else if (badge) {
+      badge.remove();
+    }
   });
 
   // ── Roster for the picker ──
