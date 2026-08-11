@@ -14,10 +14,8 @@ Three possible approaches:
 2. **Sonnet as idle helper** — Switch idle helper sessions from Opus to Sonnet entirely. Follow-up questions ("which file was that?") don't need Opus reasoning.
 3. **Context-aware watchdog** — Sonnet reads last few messages before firing cadence nag. If worker said "starting a 20-min build," suppress the nag.
 
-### Remote monitor support
-**Severity:** Medium | **Since:** v6.0 (2026-04-09, then deferred through v7)
-
-Make the event monitor work over MCP tools so it can run on remote `/quartet` spoke sessions. Currently hub-only because `nth_monitor.py` reads the local SQLite DB directly. Spoke sessions fall back to inline MCP peeks between work steps. A server-pushed event stream over SSE would restore parity.
+### Remote monitor support — CLOSED v7.3.1 (2026-08-11)
+Moved to Completed: `nth_spoke_monitor.py` (MCP-over-SSE) gives spoke sessions event-driven wakes with the same event shapes as the hub monitor.
 
 ### Spoke auto-discovery / MagicDNS hub URL
 **Severity:** Low | **Since:** v7.3 (2026-08-11)

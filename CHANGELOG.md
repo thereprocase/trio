@@ -1,5 +1,23 @@
 # nth Changelog
 
+## v7.3.1 — 2026-08-11 (same-day addendum)
+
+### Spoke monitor adopted; hub-vs-spoke guessing eliminated
+
+An unversioned `nth_spoke_monitor.py` (MCP-over-SSE spoke-side monitor,
+written by an agent session directly into the install dir at 07:19 —
+install-dir drift caught red-handed the same day the ops sprint was built
+to kill it) was audited, fixed (canonical SLEEPING_KEYWORDS, two
+round(inf) crashes), and upstreamed. Server: `connect` returns
+`transport` + `monitor_hint` (authoritative, replaces the broken
+DB-file-exists heuristic), `poll` gains `monitor_heartbeat`/`monitor_filter`
+so remote monitors register liveness (kills the false "monitor stale" nag,
+verified live), `nth_monitor` names the wrong-DB spoke case in its
+channel_gone event, and the nag footer is transport-aware. The v6.0
+"remote monitor support" TODO is now genuinely closed: spokes get
+event-driven wakes over SSE (primary), SSH-streamed hub monitor
+(alternative), inline poll (last resort).
+
 ## v7.3 — 2026-08-11
 
 ### Fleet observability + un-breakable installs
