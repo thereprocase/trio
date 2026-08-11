@@ -612,6 +612,7 @@ class EventHub:
         # the column rather than failing the whole roster.
         base_cols = (
             "SELECT m.id AS id, m.name AS name, m.status_text AS status_text, "
+            "m.status_changed_at AS status_changed_at, "
             "m.last_seen AS member_last_seen, m.last_read AS member_last_read, "
             "m.messenger_heartbeat AS messenger_heartbeat, "
             "m.watchdog_heartbeat AS watchdog_heartbeat, "
@@ -696,6 +697,10 @@ class EventHub:
                 "id": r["id"],
                 "name": r["name"] or r["id"],
                 "status_text": r["status_text"] or "",
+                "status_changed_at": (
+                    r["status_changed_at"]
+                    if "status_changed_at" in r.keys() else ""
+                ) or "",
                 "last_seen": effective_last_seen,
                 "last_read": effective_last_read,
                 "filter_mode": fm or "all",
@@ -2830,29 +2835,55 @@ INDEX_HTML = r"""<!doctype html>
 
   // ── Engagement: is this member off doing something for us? ──
   //
-  // Derived from behaviour rather than declared, because a declared signal is
-  // only as good as every agent's discipline — and agents here work off
-  // messages, not task claims, so claims never fire. This needs nothing from
-  // them and cannot go stale.
+  // Two sources, in priority order.
   //
-  // One state, deliberately: addressed and hasn't answered yet. Whether the
-  // watermark has caught up ("about to") or not ("doing") is a distinction
-  // without a difference for someone scanning the roster — either way that
-  // agent owes you a reply and isn't idle.
+  // 1. What the agent says about itself (status_text). Authoritative, because
+  //    nothing else can see inside a turn — but only while fresh, since a
+  //    status nobody clears is exactly the stale-forever light we already
+  //    removed once.
+  // 2. Failing that, inference: addressed and hasn't answered.
   //
-  // Replying is what clears it, so "done" needs no extra step from anyone.
+  // The inference alone is provably wrong in this room, and both directions
+  // showed up in practice. Agents here acknowledge and *then* work ("on it —
+  // running the sweep now"), so a reply marks the START of work, not the end:
+  // they read as idle while busy. And an @name used as a passing reference
+  // (where #name was meant) makes an idle agent read as busy. Neither is
+  // fixable by watching the stream harder; it needs the one bit only the
+  // agent has.
+  const STATUS_WORKING_RE =
+    /\b(working|building|running|testing|flashing|deploying|compiling|drafting|investigating|reviewing|in progress|wip|on it|eta)\b/i;
+  const STATUS_IDLE_RE =
+    /\b(idle|standing by|stand by|available|awaiting|blocked|done|complete[d]?|finished|ready for review)\b/i;
+  // A "working" status older than this is treated as forgotten rather than
+  // trusted. Idle statuses never expire — they claim nothing is happening.
+  const STATUS_FRESH_MS = 20 * 60 * 1000;
+
+  function statusEngagement(mem) {
+    const st = (mem.status_text || '').trim();
+    if (!st) return undefined;               // undefined = "no opinion"
+    if (STATUS_IDLE_RE.test(st)) return null;
+    if (!STATUS_WORKING_RE.test(st)) return undefined;
+    const ts = Date.parse(mem.status_changed_at || '');
+    if (!isNaN(ts) && (Date.now() - ts) > STATUS_FRESH_MS) return undefined;
+    return 'working';
+  }
+
   function engagementFor(mid) {
     // Human operators have no monitor advancing their watermark — it sits at
     // 0 forever — so they would read as permanently "queued". Their own
     // unread state is already carried by the tab badge, the jump button and
     // the pane border; this indicator is about the agents.
     if (!mid || mid === state.operator.id || mid.startsWith('_op_')) return null;
-    const s = state.agentStats.get(mid);
-    if (!s || !s.pending_directed.length) return null;
     const mem = state.members.get(mid);
     if (!mem) return null;
     // A dead session shouldn't look busy; it's just never going to answer.
     if (mem.status === 'dead') return null;
+
+    const declared = statusEngagement(mem);
+    if (declared !== undefined) return declared;
+
+    const s = state.agentStats.get(mid);
+    if (!s || !s.pending_directed.length) return null;
     return 'working';
   }
 
