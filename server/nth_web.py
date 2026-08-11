@@ -541,6 +541,8 @@ class EventHub:
             db.execute("PRAGMA busy_timeout=2000")
             members = self._fetch_roster(db)
             q.put_nowait(json.dumps({"type": "roster", "members": members}))
+            q.put_nowait(json.dumps(
+                {"type": "context", "sessions": _read_context_snapshots()}))
             rows = db.execute(
                 "SELECT id, member_id, member_name, content, mentions, refs, bangs, created_at "
                 "FROM messages WHERE channel = ? ORDER BY id DESC LIMIT ?",
@@ -722,6 +724,14 @@ class EventHub:
                         self._last_roster_snapshot = snapshot
                         self._broadcast({"type": "roster", "members": members})
 
+                    # Context rings: cheap (few tiny local files); broadcast
+                    # only when the payload actually changed.
+                    ctx_sessions = _read_context_snapshots()
+                    ctx_snapshot = json.dumps(ctx_sessions, sort_keys=True)
+                    if ctx_snapshot != getattr(self, "_last_context_snapshot", None):
+                        self._last_context_snapshot = ctx_snapshot
+                        self._broadcast({"type": "context", "sessions": ctx_sessions})
+
                 except sqlite3.Error as e:
                     sys.stderr.write(f"[nth_web] poll error: {e}\n")
 
@@ -750,25 +760,41 @@ CONTEXT_USAGE_DIR = Path(
 CONTEXT_USAGE_STALE_S = 60
 
 
-def _read_context_usage() -> Dict[str, float]:
-    """{claude_session_id: used_pct} for fresh publisher files. Best-effort."""
-    out: Dict[str, float] = {}
+CONTEXT_SNAPSHOT_STALE_S = 120
+
+
+def _read_context_snapshots() -> List[Dict[str, Any]]:
+    """All fresh publisher files as dicts (plus _age_s), newest first.
+    Stale >120s ignored; the UI additionally dims entries older than 30s."""
+    out: List[Dict[str, Any]] = []
     try:
         now = time.time()
         for p in CONTEXT_USAGE_DIR.glob("*.json"):
             try:
-                if now - p.stat().st_mtime > CONTEXT_USAGE_STALE_S:
+                age = now - p.stat().st_mtime
+                if age > CONTEXT_SNAPSHOT_STALE_S:
                     continue
                 data = json.loads(p.read_text(encoding="utf-8"))
-                sid = data.get("session_id")
-                pct = data.get("used_pct")
-                if isinstance(sid, str) and isinstance(pct, (int, float)):
-                    out[sid] = float(pct)
+                if not isinstance(data.get("session_id"), str):
+                    continue
+                data["_age_s"] = int(age)
+                out.append(data)
             except (OSError, ValueError):
                 continue
     except OSError:
         pass
+    out.sort(key=lambda d: d["_age_s"])
     return out
+
+
+def _read_context_usage() -> Dict[str, float]:
+    """{claude_session_id: used_pct} for fresh (<60s) publisher files."""
+    return {
+        d["session_id"]: float(d["used_pct"])
+        for d in _read_context_snapshots()
+        if d["_age_s"] <= CONTEXT_USAGE_STALE_S
+        and isinstance(d.get("used_pct"), (int, float))
+    }
 
 
 # ───────── Landing snapshot ─────────
@@ -1510,6 +1536,20 @@ INDEX_HTML = r"""<!doctype html>
                     text-transform: uppercase; letter-spacing: 0.5px; }
   .member .dm-btn:hover { background: var(--accent); color: var(--bg);
                           border-color: var(--accent); }
+  .ctx-card { display: flex; align-items: center; gap: 8px; padding: 4px 2px; }
+  .ctx-ring { position: relative; width: 36px; height: 36px; flex: none; }
+  .ctx-ring svg { width: 36px; height: 36px; transform: rotate(-90deg); }
+  .ctx-ring .track { fill: none; stroke: var(--border); stroke-width: 4; }
+  .ctx-ring .fill { fill: none; stroke-width: 4; stroke-linecap: round;
+                    transition: stroke-dashoffset 0.6s ease; }
+  .ctx-ring .pct-text { position: absolute; inset: 0; display: flex;
+                        align-items: center; justify-content: center;
+                        font-size: 10px; color: var(--fg); }
+  .ctx-info { min-width: 0; }
+  .ctx-name { font-size: 11px; color: var(--fg); white-space: nowrap;
+              overflow: hidden; text-overflow: ellipsis; }
+  .ctx-meta { font-size: 10px; color: var(--dim); }
+  .ctx-empty { font-size: 11px; color: var(--dim); padding: 2px; }
   .member .ctx-pct { font-size: 9px; padding: 1px 5px; border-radius: 7px;
                      background: #2a3340; color: #8fa5c0; margin-left: 4px; }
   .member .ctx-pct.warm { background: #4a3a20; color: #e5d35e; }
@@ -1758,6 +1798,10 @@ INDEX_HTML = r"""<!doctype html>
       <div id="filter-banner">filter active — showing matching messages only. click to clear.</div>
       <h2 id="r-heading">Members</h2>
       <div id="r-list"></div>
+    </section>
+    <section id="ctx-wrap">
+      <h2>Context</h2>
+      <div id="ctx-list"></div>
     </section>
     <section id="chanstats-wrap">
       <h2>Channel stats</h2>
@@ -3628,6 +3672,7 @@ INDEX_HTML = r"""<!doctype html>
         const payload = JSON.parse(ev.data);
         if (payload.type === 'message') appendMessage(payload);
         else if (payload.type === 'roster') renderRoster(payload.members);
+        else if (payload.type === 'context') renderContext(payload.sessions);
       } catch (e) { console.error('bad event', e); }
     };
     es.onerror = () => {
@@ -3740,6 +3785,64 @@ INDEX_HTML = r"""<!doctype html>
     input.focus();
     updatePreview();
     updateChanStats();
+  }
+
+  // ── Context rings ──
+  const ctxListEl = document.getElementById('ctx-list');
+  const CTX_CIRC = 2 * Math.PI * 14; // r=14 for 36px ring
+  function ctxColor(pct) {
+    if (pct >= 80) return 'var(--err)';
+    if (pct >= 60) return 'var(--warn)';
+    return 'var(--accent2)';
+  }
+  function ctxModelShort(m) {
+    if (!m) return '';
+    const p = m.replace(/^claude-/, '').split('-');
+    return p[0] || m;
+  }
+  function renderContext(sessions) {
+    if (!ctxListEl) return;
+    if (!sessions || !sessions.length) {
+      ctxListEl.innerHTML = '<div class="ctx-empty">no active sessions</div>';
+      return;
+    }
+    ctxListEl.innerHTML = '';
+    for (const s of sessions) {
+      const pct = s.used_pct || 0;
+      const color = ctxColor(pct);
+      const offset = CTX_CIRC * (1 - pct / 100);
+      const name = s.session_name || s.session_id || '?';
+      const model = ctxModelShort(s.model);
+      const cwLabel = s.cw_size >= 1000000
+        ? (s.cw_size / 1000000) + 'M'
+        : s.cw_size >= 1000 ? Math.round(s.cw_size / 1000) + 'k' : '';
+      const age = s._age_s || 0;
+      const fresh = age < 30;
+
+      const card = document.createElement('div');
+      card.className = 'ctx-card';
+      card.title = `${Math.round(pct)}% of ${cwLabel} context · ${model} · ${age}s ago`;
+      card.style.opacity = fresh ? '1' : '0.5';
+      card.innerHTML = `
+        <div class="ctx-ring">
+          <svg viewBox="0 0 36 36">
+            <circle class="track" cx="18" cy="18" r="14"/>
+            <circle class="fill" cx="18" cy="18" r="14"
+              stroke="${color}"
+              stroke-dasharray="${CTX_CIRC}"
+              stroke-dashoffset="${offset}"/>
+          </svg>
+          <div class="pct-text">${Math.round(pct)}</div>
+        </div>
+        <div class="ctx-info">
+          <div class="ctx-name">${escapeHtml(name)}</div>
+          <div class="ctx-meta">
+            <span class="ctx-model">${escapeHtml(model)}</span>
+            ${cwLabel ? ' · ' + cwLabel : ''}
+          </div>
+        </div>`;
+      ctxListEl.appendChild(card);
+    }
   }
 
   boot();
