@@ -2802,6 +2802,34 @@ INDEX_HTML = r"""<!doctype html>
   // agents can address-by-id for rename resilience and the UI translates
   // back to the current display name on the fly. Unknown ids are left
   // alone so stale history isn't mangled.
+  // Messages are addressed with a leading "@name @name" run, which the bars
+  // above the body already render as chips. Printing it twice wastes the
+  // first line of every message, so the leading run is dropped from the body
+  // — but only for targets that actually appear in a bar, and never the
+  // whole message. An @name further in is prose and stays put.
+  function stripLeadingAddress(m) {
+    const text = m.content || '';
+    const targets = [...(m.mentions || []), ...(m.bangs || []), ...(m.refs || [])];
+    if (!targets.length) return text;
+    // Names and raw ids are both valid sigil forms; match either.
+    const forms = [];
+    for (const id of targets) {
+      const mem = state.members.get(id);
+      if (mem && mem.name) forms.push(mem.name);
+      forms.push(id);
+    }
+    if (!forms.length) return text;
+    const esc = forms
+      .sort((a, b) => b.length - a.length)
+      .map(s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+      .join('|');
+    const re = new RegExp('^(?:\\s*[@#!](?:' + esc + ')\\b[ \\t,]*)+', 'i');
+    const stripped = text.replace(re, '');
+    // If the address WAS the whole message ("@Cloud ack"), keep the original
+    // rather than rendering an empty bubble.
+    return stripped.trim() ? stripped.replace(/^[ \t]+/, '') : text;
+  }
+
   function humanizeIdSigils(text) {
     if (!text) return text;
     if (!state.members || !state.members.size) return text;
@@ -3145,7 +3173,7 @@ INDEX_HTML = r"""<!doctype html>
       body.classList.add('plain');
       body.textContent = humanizeIdSigils(m.content || '');
     } else {
-      body.innerHTML = renderMarkdown(m.content || '');
+      body.innerHTML = renderMarkdown(stripLeadingAddress(m));
     }
     div.appendChild(body);
 
@@ -3191,7 +3219,13 @@ INDEX_HTML = r"""<!doctype html>
       updateTitle();
     }
     // Pane border badge — the split-screen equivalent of the tab badge.
-    if (!state.initialLoad && !isSystem) notePaneActivity(isMine);
+    // Only for messages this pane actually shows: every pane receives the
+    // whole channel and hides what is out of scope with CSS, so without the
+    // relevance check a Firmware pane lit up for App/Cloud traffic that was
+    // never rendered in it.
+    if (!state.initialLoad && !isSystem && isRelevantInDm(m)) {
+      notePaneActivity(isMine);
+    }
 
     // Desktop notification on @you while hidden (opt-in). In a scoped
     // conversation, only fire for messages that view actually shows — reuse
@@ -4289,9 +4323,13 @@ INDEX_HTML = r"""<!doctype html>
     postUnread();
   }
   if (PANE_MODE) {
+    // Anything that means "I am reading this pane" clears it — clicking,
+    // typing, scrolling the transcript, or the pointer resting in it.
     window.addEventListener('focus', clearPaneUnread);
     document.addEventListener('click', clearPaneUnread);
     document.addEventListener('keydown', clearPaneUnread);
+    document.addEventListener('mouseenter', clearPaneUnread);
+    chat.addEventListener('scroll', clearPaneUnread, { passive: true });
   }
 
   // ── Split-screen entry point ──
@@ -4824,25 +4862,35 @@ WORKSPACE_HTML = r"""<!doctype html>
           overflow: hidden; background: var(--bg2); min-height: 0;
           box-shadow: 0 1px 6px rgba(0,0,0,0.45);
           transition: border-color 0.15s, box-shadow 0.15s; }
-  /* Unread: the pane you are not looking at got a message. Bright enough to
-     catch the eye across a wide screen without being an alarm. */
-  .pane.has-unread { border-color: var(--accent); }
+  /* Unread: the pane you are not looking at got a message. This has to win
+     against the pane's own content at a glance across a wide screen, so it
+     is a thick inset ring plus an outer halo rather than a hairline border. */
+  .pane.has-unread {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 2px var(--accent), 0 0 18px 3px rgba(74, 168, 255, 0.55);
+  }
   .pane.has-unread::after {
     content: ''; position: absolute; inset: 0; border-radius: 4px;
-    pointer-events: none; box-shadow: inset 0 0 0 2px var(--accent);
-    animation: trio-unread-glow 1.6s ease-in-out infinite;
+    pointer-events: none; box-shadow: inset 0 0 0 3px var(--accent);
+    animation: trio-unread-glow 1.25s ease-in-out infinite;
   }
   @keyframes trio-unread-glow {
-    0%, 100% { opacity: 0.45; }
-    50%      { opacity: 1; }
+    0%, 100% { opacity: 1; }
+    50%      { opacity: 0.3; }
   }
   .pane .unread-badge {
-    position: absolute; top: 4px; left: 6px; z-index: 5;
+    position: absolute; top: 0; left: 0; right: 0; z-index: 5;
     background: var(--accent); color: #04121f; font-weight: 700;
-    font-size: 10px; padding: 2px 7px; border-radius: 9px;
-    pointer-events: none; }
+    font-size: 11px; letter-spacing: 0.03em; padding: 3px 8px;
+    text-align: center; pointer-events: none;
+    animation: trio-unread-bar 1.25s ease-in-out infinite; }
+  @keyframes trio-unread-bar {
+    0%, 100% { opacity: 1; }
+    50%      { opacity: 0.72; }
+  }
   @media (prefers-reduced-motion: reduce) {
-    .pane.has-unread::after { animation: none; opacity: 1; }
+    .pane.has-unread::after,
+    .pane .unread-badge { animation: none; opacity: 1; }
   }
   .pane iframe { width: 100%; height: 100%; border: 0; display: block; }
   .pane-tools { position: absolute; top: 4px; right: 6px; z-index: 5;
