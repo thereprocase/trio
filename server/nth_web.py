@@ -1289,25 +1289,35 @@ INDEX_HTML = r"""<!doctype html>
   :root {
     /* ── Midnight (default dark) ── */
     --bg: #0b0f14; --bg2: #121821; --panel: #161d27; --border: #273040;
-    --fg: #d8dde6; --dim: #7a8596; --dimmer: #4a5262;
+    --fg: #d8dde6; --dim: #7a8596; --dimmer: #59606f;
     --accent: #3ba0e6; --accent-hi: #50b0f0; --accent2: #59cb79;
     --warn: #e3c34c; --err: #e56a4a; --mention: #e3c34c;
     --hover: #0f1420; --ov: 255,255,255;
     --card-radius: 3px; --card-shadow: none;
     --pill-radius: 3px; --input-radius: 4px;
+    --ref-chip: #9ccf9c; --ref-chip-bg: rgba(126, 222, 126, 0.08);
+    --ref-chip-border: rgba(126, 222, 126, 0.25);
+    --bang-chip: #ff8470; --bang-chip-bg: rgba(255, 132, 112, 0.2);
+    --bang-chip-border: rgba(255, 132, 112, 0.5);
+    --bang-label-bg: rgba(255, 132, 112, 0.15);
   }
   :root[data-theme="light"] {
     /* ── Daylight (light) ── */
     --bg: #f6f7f9; --bg2: #eceef2; --panel: #e2e6ec; --border: #c8cfd8;
-    --fg: #1c2430; --dim: #5a6675; --dimmer: #9aa4b2;
+    --fg: #1c2430; --dim: #5a6675; --dimmer: #88909d;
     --accent: #1f7fd0; --accent-hi: #2b93e6; --accent2: #2e9e52;
     --warn: #b8860b; --err: #cc4a2c; --mention: #b8860b;
     --hover: #dce1e8; --ov: 0,0,0;
+    --ref-chip: #2d8a2d; --ref-chip-bg: rgba(45, 138, 45, 0.1);
+    --ref-chip-border: rgba(45, 138, 45, 0.3);
+    --bang-chip: #cc3320; --bang-chip-bg: rgba(204, 51, 32, 0.1);
+    --bang-chip-border: rgba(204, 51, 32, 0.35);
+    --bang-label-bg: rgba(204, 51, 32, 0.1);
   }
   :root[data-theme="nord"] {
     /* ── Nord (dark) ── */
     --bg: #2e3440; --bg2: #2b303b; --panel: #3b4252; --border: #434c5e;
-    --fg: #e5e9f0; --dim: #8f9bb3; --dimmer: #616e88;
+    --fg: #e5e9f0; --dim: #8f9bb3; --dimmer: #717d94;
     --accent: #88c0d0; --accent-hi: #8fbcbb; --accent2: #a3be8c;
     --warn: #ebcb8b; --err: #bf616a; --mention: #ebcb8b;
     --hover: #353c4a; --ov: 255,255,255;
@@ -1333,12 +1343,17 @@ INDEX_HTML = r"""<!doctype html>
   :root[data-theme="pve-light"] {
     /* ── Proxmox VE Light (from ext6-pve.css + gauge defaults) ── */
     --bg: #f5f5f5; --bg2: #e2eff9; --panel: #fff; --border: #cfcfcf;
-    --fg: #000; --dim: #555; --dimmer: #a8a8a8;
+    --fg: #000; --dim: #555; --dimmer: #8e8e8e;
     --accent: #3892d4; --accent-hi: #4db5ff; --accent2: #21bf4b;
-    --warn: #cc8e00; --err: #cc1800; --mention: #cc8e00;
+    --warn: #bd8300; --err: #cc1800; --mention: #bd8300;
     --hover: #e2eff9; --ov: 0,0,0;
     --card-radius: 2px; --card-shadow: 0 1px 8px rgba(136,136,136,0.3);
     --pill-radius: 2px; --input-radius: 2px;
+    --ref-chip: #2d8a2d; --ref-chip-bg: rgba(45, 138, 45, 0.1);
+    --ref-chip-border: rgba(45, 138, 45, 0.3);
+    --bang-chip: #cc3320; --bang-chip-bg: rgba(204, 51, 32, 0.1);
+    --bang-chip-border: rgba(204, 51, 32, 0.35);
+    --bang-label-bg: rgba(204, 51, 32, 0.1);
   }
   :root[data-theme="solarized"] {
     /* ── Solarized Dark (PVE Dashboard) ── */
@@ -1352,7 +1367,7 @@ INDEX_HTML = r"""<!doctype html>
   :root[data-theme="bluebubble"] {
     /* ── Walled Garden (dark, from macOS dark-mode Messages) ── */
     --bg: #1c1c1e; --bg2: #2c2c2e; --panel: #2c2c2e; --border: #3a3a3c;
-    --fg: #fff; --dim: #98989f; --dimmer: #636366;
+    --fg: #fff; --dim: #98989f; --dimmer: #6b6b6e;
     --accent: #0a84ff; --accent-hi: #409cff; --accent2: #30d158;
     --warn: #ff9f0a; --err: #ff453a; --mention: #ff9f0a;
     --hover: #3a3a3c; --ov: 255,255,255;
@@ -1365,12 +1380,13 @@ INDEX_HTML = r"""<!doctype html>
   /* ── Walled Garden: dark-mode pixel-faithful recreation ── */
   :root[data-theme="bluebubble"] .msg {
     max-width: 70%; border-left: none; margin-left: 0; margin-bottom: 2px;
-    padding: 6px 12px 8px; border-radius: 18px; position: relative;
+    padding: 8px 14px; border-radius: 18px; position: relative;
     background: var(--bubble-theirs) !important; color: var(--bubble-theirs-ink);
-    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue",
-      "Helvetica", "Arial", sans-serif;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display",
+      "Helvetica Neue", "Helvetica", "Arial", sans-serif;
     font-size: 17px; line-height: 1.28; letter-spacing: -0.01em;
   }
+  :root[data-theme="bluebubble"] .msg.sender-break { margin-top: 8px; }
   :root[data-theme="bluebubble"] .msg:hover { filter: brightness(1.08); }
   :root[data-theme="bluebubble"] .msg:not(.mine) { border-bottom-left-radius: 4px; }
   :root[data-theme="bluebubble"] .msg:not(.mine)::before {
@@ -1470,7 +1486,8 @@ INDEX_HTML = r"""<!doctype html>
   :root[data-theme="bluebubble"] #input {
     background: #2c2c2e; color: #fff; border: 0.5px solid #48484a; border-radius: 18px;
     padding: 8px 14px; font-size: 17px; line-height: 1.28;
-    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display",
+      "Helvetica Neue", "Helvetica", "Arial", sans-serif;
   }
   :root[data-theme="bluebubble"] #input:focus { border-color: #0a84ff; }
   :root[data-theme="bluebubble"] #send-btn {
@@ -1517,24 +1534,29 @@ INDEX_HTML = r"""<!doctype html>
     border-radius: 999px; background: #0a84ff; box-shadow: 0 2px 12px rgba(10,132,255,0.4);
   }
   :root[data-theme="bluebubble"] #chat {
-    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text",
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display",
       "Helvetica Neue", "Helvetica", "Arial", sans-serif;
     background: #000;
   }
 
   :root[data-theme="win31"] {
     /* ── Windows 3.1 (PVE Dashboard) ── */
-    --bg: #008080; --bg2: #008080; --panel: #c0c0c0; --border: #808080;
-    --fg: #000; --dim: #404040; --dimmer: #808080;
-    --accent: #E57000; --accent-hi: #ff8c3a; --accent2: #008000;
-    --warn: #808000; --err: #800000; --mention: #808000;
-    --hover: #d0d0d0; --ov: 0,0,0;
+    --bg: #c0c0c0; --bg2: #008080; --panel: #c0c0c0; --border: #808080;
+    --fg: #000; --dim: #404040; --dimmer: #606060;
+    --accent: #a85000; --accent-hi: #904500; --accent2: #006400;
+    --warn: #5c5c00; --err: #800000; --mention: #5c5c00;
+    --hover: #d4d4d4; --ov: 0,0,0;
     --card-radius: 0; --card-shadow: none; --pill-radius: 0;
+    --ref-chip: #3d6b3d; --ref-chip-bg: rgba(61, 107, 61, 0.12);
+    --ref-chip-border: rgba(61, 107, 61, 0.3);
+    --bang-chip: #b82e1f; --bang-chip-bg: rgba(184, 46, 31, 0.12);
+    --bang-chip-border: rgba(184, 46, 31, 0.35);
+    --bang-label-bg: rgba(184, 46, 31, 0.1);
   }
   :root[data-theme="crt"] {
     /* ── CRT Green (PVE Dashboard) ── */
     --bg: #020a02; --bg2: #031003; --panel: #031603; --border: rgba(51,255,102,.28);
-    --fg: #33ff66; --dim: #1f9941; --dimmer: #145a28;
+    --fg: #33ff66; --dim: #1f9941; --dimmer: #29693c;
     --accent: #7dff9c; --accent-hi: #a0ffb8; --accent2: #33ff66;
     --warn: #c6ff00; --err: #ff5544; --mention: #c6ff00;
     --hover: #041d04; --ov: 255,255,255;
@@ -1543,7 +1565,7 @@ INDEX_HTML = r"""<!doctype html>
   :root[data-theme="amber"] {
     /* ── Amber Mono (PVE Dashboard) ── */
     --bg: #0d0700; --bg2: #140a00; --panel: #1a0e00; --border: rgba(255,176,0,.25);
-    --fg: #ffb000; --dim: #b87900; --dimmer: #7a5200;
+    --fg: #ffb000; --dim: #b87900; --dimmer: #845a0a;
     --accent: #ffcb52; --accent-hi: #ffe080; --accent2: #ffb000;
     --warn: #ffd700; --err: #ff5e2e; --mention: #ffd700;
     --hover: #1f1100; --ov: 255,255,255;
@@ -1552,11 +1574,16 @@ INDEX_HTML = r"""<!doctype html>
   :root[data-theme="paper"] {
     /* ── Paper Print (PVE Dashboard) ── */
     --bg: #f4f1ea; --bg2: #efeae0; --panel: #fffdf8; --border: #d8d2c4;
-    --fg: #1c1b18; --dim: #6b675e; --dimmer: #9a968a;
+    --fg: #1c1b18; --dim: #6b675e; --dimmer: #8f8b80;
     --accent: #9a3b2e; --accent-hi: #b8503e; --accent2: #3a6b2e;
     --warn: #9a7b1a; --err: #a32a22; --mention: #9a7b1a;
     --hover: #f5f0e6; --ov: 0,0,0;
     --card-radius: 2px; --card-shadow: 0 1px 0 #d8d2c4; --pill-radius: 2px;
+    --ref-chip: #2d8a2d; --ref-chip-bg: rgba(45, 138, 45, 0.1);
+    --ref-chip-border: rgba(45, 138, 45, 0.3);
+    --bang-chip: #cc3320; --bang-chip-bg: rgba(204, 51, 32, 0.1);
+    --bang-chip-border: rgba(204, 51, 32, 0.35);
+    --bang-label-bg: rgba(204, 51, 32, 0.1);
   }
   :root[data-theme="vaporwave"] {
     /* ── Vaporwave (PVE Dashboard) ── */
@@ -1579,11 +1606,16 @@ INDEX_HTML = r"""<!doctype html>
   :root[data-theme="gameboy"] {
     /* ── Game Boy (PVE Dashboard) ── */
     --bg: #9bbc0f; --bg2: #9bbc0f; --panel: #8bac0f; --border: #306230;
-    --fg: #0f380f; --dim: #306230; --dimmer: #5a8a5a;
+    --fg: #0f380f; --dim: #285528; --dimmer: #426542;
     --accent: #0f380f; --accent-hi: #1a4a1a; --accent2: #0f380f;
     --warn: #306230; --err: #0f380f; --mention: #306230;
     --hover: #98b80e; --ov: 0,0,0;
     --card-radius: 0; --card-shadow: 3px 3px 0 #0f380f; --pill-radius: 0;
+    --ref-chip: #1e5a1e; --ref-chip-bg: rgba(30, 90, 30, 0.15);
+    --ref-chip-border: rgba(30, 90, 30, 0.35);
+    --bang-chip: #a52a1a; --bang-chip-bg: rgba(165, 42, 26, 0.15);
+    --bang-chip-border: rgba(165, 42, 26, 0.35);
+    --bang-label-bg: rgba(165, 42, 26, 0.12);
   }
   :root[data-theme="dosblue"] {
     /* ── DOS Blue (PVE Dashboard) ── */
@@ -1631,7 +1663,7 @@ INDEX_HTML = r"""<!doctype html>
 
   /* ── Header ── */
   header { grid-column: 1 / 3; background: var(--bg2); border-bottom: 1px solid var(--border);
-           display: flex; align-items: center; padding: 0 16px; gap: 14px;
+           display: flex; align-items: center; padding: 0 16px; gap: 12px;
            font-weight: 600; }
   header .title { color: var(--accent); }
   header .meta { color: var(--dim); font-weight: 400; font-size: 11px; }
@@ -1655,12 +1687,14 @@ INDEX_HTML = r"""<!doctype html>
                         padding: 3px 6px; border-radius: 3px; font-family: inherit; font-size: 11px;
                         cursor: pointer; }
   #font-picker:focus, #theme-picker:focus { outline: none; border-color: var(--accent); }
+  #font-picker option:disabled { color: var(--dimmer); }
+  #font-picker.wg-locked { opacity: 0.7; }
 
   /* ── Settings panel (drawer) ── */
   #settings-panel {
     position: fixed; top: 46px; right: 10px; z-index: 30;
     background: var(--panel); border: 1px solid var(--border); border-radius: var(--card-radius);
-    padding: 12px 14px; min-width: 250px; max-width: 320px;
+    padding: 14px; min-width: 250px; max-width: 320px;
     box-shadow: var(--card-shadow, 0 8px 30px rgba(0,0,0,0.4));
     display: flex; flex-direction: column; gap: 10px;
   }
@@ -1680,7 +1714,7 @@ INDEX_HTML = r"""<!doctype html>
 
   /* ── Chat ── */
   #chat-wrap { grid-row: 2 / 3; grid-column: 1 / 2; position: relative; overflow: hidden; }
-  #chat { height: 100%; overflow-y: auto; padding: 14px 18px; scroll-behavior: smooth; }
+  #chat { height: 100%; overflow-y: auto; padding: 14px 16px; scroll-behavior: smooth; }
   .msg { margin-bottom: 12px; word-wrap: break-word; cursor: pointer; padding: 6px 10px 8px;
          border-radius: var(--card-radius); border-left: 3px solid transparent; margin-left: -10px; }
   .msg:hover { background: var(--hover); }
@@ -1708,24 +1742,24 @@ INDEX_HTML = r"""<!doctype html>
                               margin-right: 2px; }
   .msg .refs-bar .mchip { display: inline-flex; align-items: center; gap: 3px;
                           padding: 1px 7px 1px 5px; border-radius: 10px;
-                          background: rgba(126, 222, 126, 0.08);
-                          color: #9ccf9c;
-                          border: 1px solid rgba(126, 222, 126, 0.25);
+                          background: var(--ref-chip-bg);
+                          color: var(--ref-chip);
+                          border: 1px solid var(--ref-chip-border);
                           font-weight: 500; }
   .msg .refs-bar .mchip .manimal { font-size: 13px; line-height: 1; }
   /* !bangs bar — UNFILTERABLE. Loudest visual; rendered above @mentions. */
   .msg .bangs-bar { font-size: 12px; margin: 2px 0 4px;
                     display: flex; gap: 4px; flex-wrap: wrap; align-items: center; }
-  .msg .bangs-bar .to-label { color: #ff8470; font-size: 10px; font-weight: 700;
+  .msg .bangs-bar .to-label { color: var(--bang-chip); font-size: 10px; font-weight: 700;
                                text-transform: uppercase; letter-spacing: 1px;
                                margin-right: 2px;
                                padding: 1px 5px; border-radius: 3px;
-                               background: rgba(255, 132, 112, 0.15); }
+                               background: var(--bang-label-bg); }
   .msg .bangs-bar .mchip { display: inline-flex; align-items: center; gap: 3px;
                            padding: 1px 7px 1px 5px; border-radius: 10px;
-                           background: rgba(255, 132, 112, 0.2);
-                           color: #ff8470;
-                           border: 1px solid rgba(255, 132, 112, 0.5);
+                           background: var(--bang-chip-bg);
+                           color: var(--bang-chip);
+                           border: 1px solid var(--bang-chip-border);
                            font-weight: 700; }
   .msg .bangs-bar .mchip .manimal { font-size: 13px; line-height: 1; }
   .msg .body { word-wrap: break-word; overflow-wrap: break-word; }
@@ -1763,7 +1797,7 @@ INDEX_HTML = r"""<!doctype html>
                           background: rgba(var(--ov),0.03); color: rgba(var(--ov),0.85); }
   .msg .body hr { border: 0; border-top: 1px solid rgba(var(--ov),0.18); margin: 8px 0; }
   .msg .body table { border-collapse: collapse; margin: 4px 0; font-size: 0.95em; }
-  .msg .body th, .msg .body td { border: 1px solid rgba(var(--ov),0.15); padding: 3px 8px; }
+  .msg .body th, .msg .body td { border: 1px solid rgba(var(--ov),0.15); padding: 4px 8px; }
   .msg .body th { background: rgba(var(--ov),0.06); font-weight: 700; text-align: left; }
   .msg.compact .body {
     display: -webkit-box;
@@ -1824,7 +1858,7 @@ INDEX_HTML = r"""<!doctype html>
   #side { grid-row: 2 / 3; grid-column: 2 / 3;
           background: var(--panel); border-left: 1px solid var(--border);
           overflow-y: auto; display: flex; flex-direction: column; }
-  #side section { padding: 14px 14px; border-bottom: 1px solid var(--border); }
+  #side section { padding: 14px; border-bottom: 1px solid var(--border); }
   #side section:last-child { border-bottom: none; }
   #side h2 { font-size: 10px; text-transform: uppercase; color: var(--dim);
              letter-spacing: 0.08em; margin: 0 0 10px; font-weight: 600; }
@@ -1835,7 +1869,7 @@ INDEX_HTML = r"""<!doctype html>
   .member .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
   .member .roster-animal { font-size: 16px; line-height: 1; flex-shrink: 0;
                            user-select: none; }
-  .member .dm-btn { font-size: 9px; padding: 2px 5px; border-radius: 3px;
+  .member .dm-btn { font-size: 9px; padding: 2px 6px; border-radius: 3px;
                     background: #1c2432; color: var(--dim); border: 1px solid #283242;
                     cursor: pointer; flex-shrink: 0; user-select: none;
                     text-transform: uppercase; letter-spacing: 0.5px; }
@@ -1858,14 +1892,14 @@ INDEX_HTML = r"""<!doctype html>
   .member .ctx-pct { font-size: 9px; padding: 1px 5px; border-radius: 7px;
                      background: #2a3340; color: #8fa5c0; margin-left: 4px; }
   .member .ctx-pct.warm { background: #4a3a20; color: #e5d35e; }
-  .member .ctx-pct.hot  { background: #4a2420; color: #ff8470; }
+  .member .ctx-pct.hot  { background: #4a2420; color: var(--bang-chip); }
   .member .fmode { font-size: 9px; padding: 1px 5px; border-radius: 3px;
                    flex-shrink: 0; user-select: none;
                    text-transform: uppercase; letter-spacing: 0.5px;
                    border: 1px solid transparent; }
   .member .fmode.all   { color: var(--dim); background: #1c2432; border-color: #283242; }
-  .member .fmode.about { color: #9ccf9c; background: rgba(126, 222, 126, 0.08);
-                         border-color: rgba(126, 222, 126, 0.25); }
+  .member .fmode.about { color: var(--ref-chip); background: var(--ref-chip-bg);
+                         border-color: var(--ref-chip-border); }
   .member .fmode.at    { color: #f0c060; background: rgba(240, 192, 96, 0.1);
                          border-color: rgba(240, 192, 96, 0.3); }
   .member .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -1884,7 +1918,7 @@ INDEX_HTML = r"""<!doctype html>
   .member .stats { display: none; padding: 10px 0 4px 16px;
                    font-size: 10px; color: var(--dim); }
   .member.expanded .stats { display: block; }
-  .stats .stat-row { display: flex; justify-content: space-between; padding: 3px 0; gap: 12px; }
+  .stats .stat-row { display: flex; justify-content: space-between; padding: 4px 0; gap: 12px; }
   .stats .stat-label { color: var(--dim); }
   .stats .stat-val { color: var(--fg); font-weight: 600; text-align: right;
                      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -1921,7 +1955,7 @@ INDEX_HTML = r"""<!doctype html>
   #target-bar .tb-label { color: var(--dim); margin-right: 2px; }
   #target-bar .tb-pill { background: var(--panel); color: var(--dim);
                          border: 1px solid var(--border); border-radius: 12px;
-                         padding: 2px 9px; cursor: pointer; user-select: none;
+                         padding: 2px 8px; cursor: pointer; user-select: none;
                          font-family: inherit; font-size: 11px;
                          display: inline-flex; align-items: center; gap: 4px;
                          transition: background 0.08s, color 0.08s, border-color 0.08s; }
@@ -2021,7 +2055,7 @@ INDEX_HTML = r"""<!doctype html>
     .msg .head { font-size: 10px; }
     .msg .mentions-bar .mchip, .msg .refs-bar .mchip,
     .msg .bangs-bar .mchip { font-size: 10px; padding: 1px 5px; }
-    #target-bar .tb-pill { padding: 3px 7px; font-size: 11px; }
+    #target-bar .tb-pill { padding: 3px 8px; font-size: 11px; }
   }
 
   /* Guest identify modal */
@@ -2029,7 +2063,7 @@ INDEX_HTML = r"""<!doctype html>
                  display: flex; align-items: center; justify-content: center;
                  z-index: 1000; }
   #guest-modal .guest-card { background: var(--panel); border: 1px solid #2a3342;
-                             border-radius: 8px; padding: 22px 26px; width: min(460px, 90vw);
+                             border-radius: 8px; padding: 24px; width: min(460px, 90vw);
                              box-shadow: 0 10px 40px rgba(0,0,0,0.6); }
   #guest-modal h2 { margin: 0 0 10px 0; font-size: 16px; }
   #guest-modal p { margin: 8px 0; font-size: 13px; line-height: 1.4; color: var(--fg); }
@@ -2040,7 +2074,7 @@ INDEX_HTML = r"""<!doctype html>
                        color: var(--fg); border: 1px solid #2a3342; border-radius: 4px;
                        font-size: 14px; box-sizing: border-box; }
   #guest-modal input:focus { outline: none; border-color: var(--accent); }
-  #guest-modal .guest-err { color: #ff8470; font-size: 12px; min-height: 16px;
+  #guest-modal .guest-err { color: var(--err); font-size: 12px; min-height: 16px;
                              margin-top: 6px; }
   #guest-modal button { margin-top: 10px; padding: 8px 16px; background: var(--accent);
                         color: var(--bg); border: none; border-radius: 4px;
@@ -2107,6 +2141,7 @@ INDEX_HTML = r"""<!doctype html>
       <option value='Monaco, Menlo, ui-monospace, monospace'>Monaco</option>
       <option value='Consolas, "Cascadia Mono", ui-monospace, monospace'>Consolas</option>
       <option value='"SF Mono", "SFMono-Regular", ui-monospace, Menlo, monospace'>SF Mono</option>
+      <option value='-apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "Helvetica Neue", "Helvetica", "Arial", sans-serif' disabled>Walled Garden</option>
     </select>
     <input id="filter" type="text" placeholder="filter messages…" spellcheck="false">
     <span class="pill on" id="btn-side" title="show/hide the roster sidebar">roster</span>
@@ -2211,8 +2246,63 @@ INDEX_HTML = r"""<!doctype html>
   // Theme picker — persists per-origin via localStorage. Unknown/missing
   // theme falls back to 'midnight' (the base :root palette).
   const themePicker = document.getElementById('theme-picker');
+  const WG_FONT = '-apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "Helvetica Neue", "Helvetica", "Arial", sans-serif';
+  let _savedFontBeforeWG = null;   // stash the user's font choice while WG is active
+
+  function setFontPickerLocked(locked) {
+    if (locked) {
+      fontPicker.classList.add('wg-locked');
+      for (const opt of fontPicker.options) {
+        if (opt.value === WG_FONT) { opt.disabled = false; }
+        else { opt.disabled = true; }
+      }
+      fontPicker.value = WG_FONT;
+      document.documentElement.style.setProperty('--msg-font', WG_FONT);
+    } else {
+      fontPicker.classList.remove('wg-locked');
+      for (const opt of fontPicker.options) {
+        if (opt.value === WG_FONT) { opt.disabled = true; }
+        else { opt.disabled = false; }
+      }
+      // Restore the user's previous font choice
+      if (_savedFontBeforeWG) {
+        let found = false;
+        for (const opt of fontPicker.options) {
+          if (opt.value === _savedFontBeforeWG && !opt.disabled) {
+            fontPicker.value = _savedFontBeforeWG; found = true; break;
+          }
+        }
+        if (found) document.documentElement.style.setProperty('--msg-font', _savedFontBeforeWG);
+        _savedFontBeforeWG = null;
+      } else {
+        // Fall back to saved font or default
+        try {
+          const s = localStorage.getItem('trio.msgFont');
+          if (s) {
+            for (const opt of fontPicker.options) {
+              if (opt.value === s && !opt.disabled) {
+                fontPicker.value = s;
+                document.documentElement.style.setProperty('--msg-font', s);
+                break;
+              }
+            }
+          }
+        } catch (_) {}
+      }
+    }
+  }
+
   function applyTheme(v) {
-    document.documentElement.setAttribute('data-theme', v || 'midnight');
+    const prev = document.documentElement.getAttribute('data-theme') || 'midnight';
+    const next = v || 'midnight';
+    document.documentElement.setAttribute('data-theme', next);
+    // Walled Garden font lock: entering or leaving bluebubble
+    if (next === 'bluebubble' && prev !== 'bluebubble') {
+      _savedFontBeforeWG = fontPicker.value;
+      setFontPickerLocked(true);
+    } else if (next !== 'bluebubble' && prev === 'bluebubble') {
+      setFontPickerLocked(false);
+    }
   }
   try {
     const savedTheme = localStorage.getItem('trio.theme');
@@ -2807,6 +2897,7 @@ INDEX_HTML = r"""<!doctype html>
     div.className = 'msg' + (isMine ? ' mine' : '') + (isSystem ? ' system' : '')
                   + (mentionsOperator ? ' targeted' : '');
     div.dataset.msgId = String(m.id);
+    div.dataset.sender = m.member_id || '';
     div.dataset.search = (m.content || '').toLowerCase() + ' '
                        + humanizeIdSigils(m.content || '').toLowerCase() + ' '
                        + (m.member_name || '').toLowerCase();
@@ -2870,6 +2961,11 @@ INDEX_HTML = r"""<!doctype html>
     applyFilterToNode(div);
     applyDmFilterToNode(div, m);
 
+    // Mark sender-change boundaries for bluebubble inter-bubble spacing
+    const prevMsg = chat.lastElementChild;
+    if (prevMsg && prevMsg.dataset.sender !== div.dataset.sender) {
+      div.classList.add('sender-break');
+    }
     const nearBottom = chat.scrollHeight - chat.clientHeight - chat.scrollTop < 80;
     chat.appendChild(div);
     state.messageDomById.set(m.id, div);
@@ -3551,13 +3647,13 @@ INDEX_HTML = r"""<!doctype html>
       parts.push(`pings: ${names}`);
     }
     if (refs.length) {
-      const n = refs.map(m => `<span class="tgt" style="color:#9ccf9c">#${escapeHtml(m.name)}</span>`).join(', ');
+      const n = refs.map(m => `<span class="tgt" style="color:var(--ref-chip)">#${escapeHtml(m.name)}</span>`).join(', ');
       parts.push(`refs: ${n}`);
     }
     if (bangs.length || /(^|\s)!all(\b|$)/.test(txtL)) {
-      const n = bangs.map(m => `<span class="tgt" style="color:#ff8470">!${escapeHtml(m.name)}</span>`).join(', ');
-      const allTag = /(^|\s)!all(\b|$)/.test(txtL) ? '<span class="tgt" style="color:#ff8470">!all</span>' : '';
-      parts.push(`<b style="color:#ff8470">BANGS (unfilterable)</b>: ${[allTag, n].filter(Boolean).join(', ')}`);
+      const n = bangs.map(m => `<span class="tgt" style="color:var(--bang-chip)">!${escapeHtml(m.name)}</span>`).join(', ');
+      const allTag = /(^|\s)!all(\b|$)/.test(txtL) ? '<span class="tgt" style="color:var(--bang-chip)">!all</span>' : '';
+      parts.push(`<b style="color:var(--bang-chip)">BANGS (unfilterable)</b>: ${[allTag, n].filter(Boolean).join(', ')}`);
     }
     preview.innerHTML = parts.join('  ·  ');
   }
