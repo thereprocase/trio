@@ -595,6 +595,7 @@ class EventHub:
                 "m.messenger_heartbeat AS messenger_heartbeat, "
                 "m.watchdog_heartbeat AS watchdog_heartbeat, "
                 "m.filter_mode AS filter_mode, "
+                "m.context_json AS context_json, "
                 "COALESCE(MAX(s.last_read), 0) AS session_last_read, "
                 "MAX(s.last_seen) AS session_last_seen, "
                 "GROUP_CONCAT(s.fingerprint) AS fingerprints "
@@ -646,8 +647,20 @@ class EventHub:
             # (CLAUDE_SESSION_IDs) against the statusline publisher files.
             context_pct = None
             context_full = None
+            raw_ctx = r["context_json"] if "context_json" in r.keys() else None
+            if raw_ctx:
+                try:
+                    cand = json.loads(raw_ctx)
+                    relayed = cand.get("_relayed_at")
+                    if relayed and (datetime.now(timezone.utc)
+                                    - datetime.fromisoformat(relayed)
+                                    ).total_seconds() < 120                             and isinstance(cand.get("used_pct"), (int, float)):
+                        context_full = cand
+                        context_pct = float(cand["used_pct"])
+                except (ValueError, TypeError):
+                    pass
             fps = r["fingerprints"] if "fingerprints" in r.keys() else None
-            if fps and ctx_usage:
+            if context_full is None and fps and ctx_usage:
                 for fp in str(fps).split(","):
                     if fp in ctx_usage:
                         context_full = ctx_usage[fp]

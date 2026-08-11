@@ -58,6 +58,25 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 from nth_constants import SLEEPING_KEYWORDS, NTH_VERSION
 
+# Own-session statusline snapshot (see nth_spoke_monitor.read_own_context).
+_CTX_DIR = Path(os.environ.get("XDG_STATE_HOME",
+                               str(Path.home() / ".local" / "state"))) / "claude-context"
+_OWN_SESSION_ID = os.environ.get("CLAUDE_SESSION_ID", "")
+
+
+def read_own_context():
+    if not _OWN_SESSION_ID:
+        return None
+    path = _CTX_DIR / (_OWN_SESSION_ID + ".json")
+    try:
+        if time.time() - path.stat().st_mtime > 120:
+            return None
+        raw = path.read_text(encoding="utf-8")
+        json.loads(raw)
+        return raw
+    except (OSError, ValueError):
+        return None
+
 DB_PATH = Path.home() / ".claude" / "nth" / "nth.db"
 
 ACTIVE_INTERVAL = 0.5
@@ -291,6 +310,21 @@ def monitor(channel, member_id, filter_mode="all", _db_path=None):
                             "WHERE channel = ? AND id = ?",
                             (now_ts, now_ts, now_ts, channel, member_id),
                         )
+                    # Statusline relay for this member (best-effort; the
+                    # column exists on v7.3.1+ DBs).
+                    own_ctx = read_own_context()
+                    if own_ctx:
+                        try:
+                            import json as _json
+                            ctx = _json.loads(own_ctx)
+                            ctx["_relayed_at"] = now_ts
+                            db.execute(
+                                "UPDATE members SET context_json = ? "
+                                "WHERE channel = ? AND id = ?",
+                                (_json.dumps(ctx), channel, member_id),
+                            )
+                        except (ValueError, sqlite3.OperationalError):
+                            pass
                     # v7.3 fleet check-in: one row per (host, "monitor").
                     # Best-effort — the nodes table only exists once a v7.3+
                     # server has touched this DB, and fleet bookkeeping must

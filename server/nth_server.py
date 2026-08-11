@@ -298,6 +298,9 @@ def get_db() -> sqlite3.Connection:
         # ambient message will actually be heard before spending the tokens
         # to post it. Not security — agents can lie. Etiquette signal only.
         ("filter_mode", "members", "TEXT NOT NULL DEFAULT 'all'"),
+        # v7.3.1: full statusline snapshot relayed by the member's monitor
+        # (JSON: used_pct, model, cwd, harness payload, _relayed_at).
+        ("context_json", "members", "TEXT"),
         ("blocked_by", "tasks", "TEXT NOT NULL DEFAULT '[]'"),
         ("status_text", "members", "TEXT NOT NULL DEFAULT ''"),
         ("status_changed_at", "members", "TEXT NOT NULL DEFAULT ''"),
@@ -1187,7 +1190,7 @@ def nth_send(channel: str, member_id: str, message: str, task: bool = False, pin
 
 
 @mcp.tool(name=f"{TOOL_PREFIX}_poll")
-def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: str = "", session_token: str = "", auto_ack: bool = True, mentions_only: bool = False, monitor_heartbeat: bool = False, monitor_filter: str = "") -> str:
+def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: str = "", session_token: str = "", auto_ack: bool = True, mentions_only: bool = False, monitor_heartbeat: bool = False, monitor_filter: str = "", monitor_context: str = "") -> str:
     """Check for new messages since your last read. Blocks up to wait_seconds.
 
     Returns all unread messages, or "no_new" if nothing arrived.
@@ -1289,6 +1292,22 @@ def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: st
             # too — otherwise _sentinel_nag() keeps prescribing a monitor
             # relaunch to a member whose monitor is alive but remote.
             now = now_iso()
+            # Statusline relay: the monitor ships its session's context
+            # snapshot so every nth_web instance (hub included) can render
+            # rings + full drill-downs for this member. Size-capped and
+            # validated; never allowed to break the poll.
+            if monitor_heartbeat and monitor_context and len(monitor_context) < 16384:
+                try:
+                    ctx = json.loads(monitor_context)
+                    if isinstance(ctx, dict):
+                        ctx["_relayed_at"] = now
+                        db.execute(
+                            "UPDATE members SET context_json = ? "
+                            "WHERE id = ? AND channel = ?",
+                            (json.dumps(ctx), member_id, channel),
+                        )
+                except (ValueError, sqlite3.OperationalError):
+                    pass
             if monitor_heartbeat:
                 try:
                     if monitor_filter in ("all", "about", "at"):

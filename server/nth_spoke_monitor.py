@@ -79,6 +79,36 @@ try:
 except ImportError:
     SLEEPING_KEYWORDS = ("idle", "standing by", "tier 3", "agent-monitor")
 
+# Own-session context file, written by the operator's statusline publisher.
+# CLAUDE_SESSION_ID is inherited from the Claude session that launched this
+# monitor, so the file we relay is exactly our member's statusline.
+if sys.platform == "win32":
+    _CTX_DIR = os.path.join(os.environ.get("LOCALAPPDATA",
+                                           os.path.expanduser("~")), "claude-context")
+else:
+    _CTX_DIR = os.path.join(os.environ.get("XDG_STATE_HOME",
+                                           os.path.expanduser("~/.local/state")),
+                            "claude-context")
+_OWN_SESSION_ID = os.environ.get("CLAUDE_SESSION_ID", "")
+
+
+def read_own_context():
+    """This session's statusline snapshot as a JSON string, or None.
+    Stale (>120s) or unreadable files are skipped silently."""
+    if not _OWN_SESSION_ID:
+        return None
+    path = os.path.join(_CTX_DIR, _OWN_SESSION_ID + ".json")
+    try:
+        if time.time() - os.stat(path).st_mtime > 120:
+            return None
+        with open(path, encoding="utf-8") as f:
+            raw = f.read()
+        json.loads(raw)  # validate before shipping
+        return raw
+    except (OSError, ValueError):
+        return None
+
+
 FILTER_MODES = ("all", "about", "at")
 LEGACY_FILTER_MAP = {
     "at+broadcast":       "about",
@@ -523,6 +553,9 @@ def monitor(client, channel, member_id, filter_mode, session_token,
             }
             args["monitor_heartbeat"] = True
             args["monitor_filter"] = filter_mode
+            own_ctx = read_own_context()
+            if own_ctx:
+                args["monitor_context"] = own_ctx
             if session_token:
                 args["session_token"] = session_token
             poll = client.call_tool("quartet_poll", args,
