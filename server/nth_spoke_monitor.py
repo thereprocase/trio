@@ -80,8 +80,6 @@ except ImportError:
     SLEEPING_KEYWORDS = ("idle", "standing by", "tier 3", "agent-monitor")
 
 # Own-session context file, written by the operator's statusline publisher.
-# CLAUDE_SESSION_ID is inherited from the Claude session that launched this
-# monitor, so the file we relay is exactly our member's statusline.
 if sys.platform == "win32":
     _CTX_DIR = os.path.join(os.environ.get("LOCALAPPDATA",
                                            os.path.expanduser("~")), "claude-context")
@@ -89,8 +87,67 @@ else:
     _CTX_DIR = os.path.join(os.environ.get("XDG_STATE_HOME",
                                            os.path.expanduser("~/.local/state")),
                             "claude-context")
-_OWN_SESSION_ID = (os.environ.get("CLAUDE_CODE_SESSION_ID")
-                   or os.environ.get("CLAUDE_SESSION_ID", ""))
+
+
+def _discover_session_id():
+    """Find our Claude Code session ID without requiring an env var.
+    Walk the process tree to find the Claude Code parent, then read its
+    session file (~/.claude/sessions/<pid>.json) for the sessionId."""
+    explicit = (os.environ.get("CLAUDE_CODE_SESSION_ID")
+                or os.environ.get("CLAUDE_SESSION_ID", ""))
+    if explicit:
+        return explicit
+    sessions_dir = os.path.join(os.path.expanduser("~"), ".claude", "sessions")
+    try:
+        pid = os.getpid()
+        for _ in range(10):
+            pid = _get_ppid(pid)
+            if pid <= 1:
+                break
+            sf = os.path.join(sessions_dir, f"{pid}.json")
+            if os.path.isfile(sf):
+                with open(sf, encoding="utf-8") as f:
+                    return json.loads(f.read()).get("sessionId", "")
+    except Exception:
+        pass
+    return ""
+
+
+def _get_ppid(pid):
+    """Cross-platform parent PID lookup."""
+    if sys.platform == "win32":
+        import ctypes
+        # Windows: use CreateToolhelp32Snapshot (stdlib-only)
+        import ctypes.wintypes as w
+        TH32CS_SNAPPROCESS = 0x2
+        class PE32(ctypes.Structure):
+            _fields_ = [("dwSize", w.DWORD), ("cntUsage", w.DWORD),
+                        ("th32ProcessID", w.DWORD), ("th32DefaultHeapID", ctypes.POINTER(ctypes.c_ulong)),
+                        ("th32ModuleID", w.DWORD), ("cntThreads", w.DWORD),
+                        ("th32ParentProcessID", w.DWORD), ("pcPriClassBase", ctypes.c_long),
+                        ("dwFlags", w.DWORD), ("szExeFile", ctypes.c_char * 260)]
+        k32 = ctypes.windll.kernel32
+        snap = k32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+        pe = PE32(); pe.dwSize = ctypes.sizeof(PE32)
+        try:
+            if k32.Process32First(snap, ctypes.byref(pe)):
+                while True:
+                    if pe.th32ProcessID == pid:
+                        return pe.th32ParentProcessID
+                    if not k32.Process32Next(snap, ctypes.byref(pe)):
+                        break
+        finally:
+            k32.CloseHandle(snap)
+        return 0
+    else:
+        try:
+            with open(f"/proc/{pid}/stat", encoding="utf-8") as f:
+                return int(f.read().split(")")[1].split()[1])
+        except Exception:
+            return 0
+
+
+_OWN_SESSION_ID = _discover_session_id()
 
 
 def read_own_context():
