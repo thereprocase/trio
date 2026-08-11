@@ -1,5 +1,33 @@
 # nth Changelog
 
+## v8.0.0-beta.1 / v8.0.1-beta.1 — 2026-08-11 (context rings + web overhaul)
+
+First tagged GitHub releases (beta, prerelease). Major-bumped because the
+web dashboard, relay pipeline, and monitor discovery are all new surface.
+
+- **Context relay**: statusline publisher (claude-statusline v1.4.0-beta.1)
+  → `~/.local/state/claude-context/<session_id>.json` → monitor relays via
+  `poll(monitor_context=…)` → `members.context_json` (16KB cap,
+  `_relayed_at` stamp) → rings + curated stats on every nth_web page.
+  Fixed the session-id env name (`CLAUDE_CODE_SESSION_ID`); the old
+  `CLAUDE_SESSION_ID` never existed, so session fingerprints had been
+  empty since v6.2.
+- **Session auto-discovery** (spoke monitor): walk ppid chain to Claude
+  Code's PID, read `~/.claude/sessions/<pid>.json` for `sessionId`.
+  Cross-platform (/proc, ps, CreateToolhelp32Snapshot). Env var and
+  `--claude-session` still override.
+- **Codex support**: `codex_context_publisher.py` mirrors Codex rollout
+  token math into the same snapshot schema (context %, model, effort);
+  `--session-id` pins per-TUI. Operational pattern for codex members:
+  monitor as a systemd user unit + codex-native monitor tailing its log
+  (codex's auto-approve sandbox sets network_access=false for spawned
+  processes — see reports/drop-log.md 2026-08-11).
+- **Web**: mobile responsive, 14 themes (PVE set, Walled Garden dark),
+  WCAG contrast pass, 4px grid, `⌂` home nav, curated member stats,
+  README rewritten for v8.
+- **Monitor hardening**: 90s SSE read timeout + force_reconnect for
+  no-FIN hub deaths; error debounce (first failure silent).
+
 ## v7.3.1 — 2026-08-11 (same-day addendum)
 
 ### Spoke monitor adopted; hub-vs-spoke guessing eliminated

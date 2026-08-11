@@ -1,11 +1,42 @@
-# Current State — nth v7.3
+# Current State — nth v8.0.1-beta.1
 
-**Version:** v7.3 (2026-08-11)
-**Prior:** v7.2 (2026-04-20), v7.1 (2026-04-20), v7 (2026-04-19), v6.2 (2026-04-17), v6.1 (2026-04-09), v6.0 (2026-04-09)
+**Version:** v8.0.1-beta.1 (2026-08-11, GitHub release + tag)
+**Prior:** v8.0.0-beta.1 (2026-08-11), v7.3.1 (2026-08-11), v7.3 (2026-08-11), v7.2 (2026-04-20), v7.1 (2026-04-20), v7 (2026-04-19)
 **Branch:** main
-**Remote:** `github.com:thereprocase/trio.git` (GitHub) + `gitlab.com:theReproCase/trio.git` (GitLab mirror)
+**Remote:** `github.com:thereprocase/trio.git` (GitHub) + `gitlab.com:theReproCase/trio.git` (GitLab mirror — ⚠ not synced since pre-v8)
 
 ## What Just Shipped
+
+**v8.0.1-beta.1** — context rings + web overhaul (2026-08-11 afternoon, joint
+session with a second agent doing the web/design work).
+
+- **Context relay pipeline.** claude-statusline (v1.4.0-beta.1) publishes
+  per-session context snapshots to `~/.local/state/claude-context/`;
+  monitors relay their own session's snapshot via `poll(monitor_context=…)`
+  into `members.context_json`; nth_web renders rings + curated stats drill-down
+  on every page, hub or local. Session-id env bug fixed on the way
+  (`CLAUDE_CODE_SESSION_ID` — fingerprints had been silently empty since v6.2).
+- **Session auto-discovery.** Monitors find their Claude session by walking the
+  process tree to Claude Code's PID (`~/.claude/sessions/<pid>.json`) —
+  no env vars. Linux `/proc`, macOS `ps`, Windows toolhelp.
+- **Codex context publisher.** `server/codex_context_publisher.py` tails a
+  Codex TUI's rollout JSONL and publishes the same snapshot schema (context %,
+  model, effort); `--session-id` pins one publisher per codex session. Codex
+  monitors run as systemd user units (codex sandbox blocks spawned-process
+  network under its auto-approve profile) with the codex-native monitor tool
+  tailing the unit's log file for wakes.
+- **Web overhaul.** Mobile-responsive UI (slide-in sidebar, three dismiss
+  paths), 14 themes incl. the PVE dashboard set + Walled Garden dark mode,
+  WCAG contrast pass (12 fixes), 4px-grid padding, channel→landing `⌂` nav,
+  curated member stats, full README rewrite.
+- **Reconnect hardening.** Spoke monitor: 90s SSE read timeout +
+  `force_reconnect()` on wedged sockets (hub restarts without FIN no longer
+  strand monitors). `reports/drop-log.md` tracks observed connection blinks.
+
+Releases: [trio v8.0.1-beta.1](https://github.com/thereprocase/trio/releases/tag/v8.0.1-beta.1),
+[claude-statusline v1.4.0-beta.1](https://github.com/thereprocase/claude-statusline/releases/tag/v1.4.0-beta.1).
+
+## Prior: v7.3 ops day (same morning)
 
 **v7.3** — Fleet observability + un-breakable installs (the 2026-08-11 ops day).
 
