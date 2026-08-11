@@ -40,6 +40,11 @@ from pathlib import Path
 CLAUDE_JSON = Path.home() / ".claude.json"
 DB_PATH = Path.home() / ".claude" / "nth" / "nth.db"
 INSTALL_DIR = Path.home() / ".claude" / "skills" / "nth" / "server"
+# setup.sh hub-service footprint. A box with this install but no local
+# Claude spoke (e.g. the PVE hub) is diagnosed against these paths instead
+# of failing every spoke-shaped check.
+HUB_INSTALL_DIR = Path("/opt/quartet-hub")
+HUB_DB_PATH = Path("/var/lib/quartet-hub/.claude/nth/nth.db")
 STALE_S = 300
 HTTP_TIMEOUT = 4
 
@@ -92,14 +97,18 @@ def _read_registration():
 
 
 def _installed_version():
-    """Parse NTH_VERSION out of the installed constants file (no import —
-    avoids executing install-dir code just to read one string)."""
-    try:
-        text = (INSTALL_DIR / "nth_constants.py").read_text()
-    except OSError:
-        return None
-    m = re.search(r'^NTH_VERSION\s*=\s*["\']([^"\']+)["\']', text, re.M)
-    return m.group(1) if m else None
+    """Parse NTH_VERSION out of an installed constants file (no import —
+    avoids executing install-dir code just to read one string). Returns
+    (version, install_dir); spoke install wins over hub-service install."""
+    for base in (INSTALL_DIR, HUB_INSTALL_DIR):
+        try:
+            text = (base / "nth_constants.py").read_text()
+        except OSError:
+            continue
+        m = re.search(r'^NTH_VERSION\s*=\s*["\']([^"\']+)["\']', text, re.M)
+        if m:
+            return m.group(1), base
+    return None, None
 
 
 def _http_json(url):
@@ -127,11 +136,21 @@ def run_checks(hub_override=None):
     if hub_override:
         hub_url = hub_override.rstrip("/")
 
+    # A hub-service box (setup.sh hub-service) legitimately has no local
+    # Claude spoke: no nth-trio registration, no ~/.claude install. Diagnose
+    # it against the hub footprint instead of failing every spoke check.
+    hub_box = (HUB_INSTALL_DIR / "quartet_server.py").exists()
+
     # --- registration ---
     reg_python = None
     if not stdio:
-        checks.append(("registration", FAIL,
-                       "nth-trio missing from ~/.claude.json — run setup.sh"))
+        if hub_box:
+            checks.append(("registration", WARN,
+                           "no local spoke (hub-service box; agents here can "
+                           "use nth-qweb via localhost)"))
+        else:
+            checks.append(("registration", FAIL,
+                           "nth-trio missing from ~/.claude.json — run setup.sh"))
     else:
         # The command may be a bare name on PATH ("python3") or an absolute
         # path — shutil.which handles both (returns the input for an
@@ -149,6 +168,12 @@ def run_checks(hub_override=None):
             checks.append(("registration", OK, f"nth-trio -> {reg_python}{venv_tag}"))
 
     # --- mcp import with the registered interpreter ---
+    # On a hub box with no spoke registration, the interpreter that matters
+    # is the hub venv's — it's what quartet-hub.service runs.
+    if reg_python is None and not stdio and hub_box:
+        hub_py = HUB_INSTALL_DIR / "venv" / "bin" / "python"
+        if hub_py.exists():
+            reg_python = str(hub_py)
     if reg_python:
         try:
             proc = subprocess.run(
@@ -168,25 +193,28 @@ def run_checks(hub_override=None):
         checks.append(("mcp import", FAIL, "no usable registration to test"))
 
     # --- installed files + version ---
-    local_version = _installed_version()
-    if not (INSTALL_DIR / "nth_server.py").exists():
+    local_version, install_base = _installed_version()
+    if not (INSTALL_DIR / "nth_server.py").exists() and not hub_box:
         checks.append(("install", FAIL, f"{INSTALL_DIR} missing — run setup.sh"))
     elif not local_version:
         checks.append(("install", WARN,
                        "server files present but no NTH_VERSION (pre-7.3 install)"))
     else:
-        checks.append(("install", OK, f"v{local_version} at {INSTALL_DIR}"))
+        checks.append(("install", OK, f"v{local_version} at {install_base}"))
 
     # --- local database ---
+    # Hub-service boxes keep the DB under the service's de-rooted HOME.
+    db_path = DB_PATH if DB_PATH.exists() else (
+        HUB_DB_PATH if hub_box and HUB_DB_PATH.exists() else DB_PATH)
     db = None
-    if DB_PATH.exists():
+    if db_path.exists():
         try:
-            db = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True, timeout=2)
+            db = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=2)
             db.row_factory = sqlite3.Row
             nch, = db.execute("SELECT COUNT(*) FROM channels").fetchone()
             nmsg, = db.execute("SELECT COUNT(*) FROM messages").fetchone()
             checks.append(("database", OK,
-                           f"{DB_PATH.name}: {nch} channels, {nmsg} msgs"))
+                           f"{db_path}: {nch} channels, {nmsg} msgs"))
         except sqlite3.Error as e:
             checks.append(("database", FAIL, f"{type(e).__name__}: {e}"))
             db = None
