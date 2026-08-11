@@ -499,6 +499,26 @@ def ensure_operator_row(db: sqlite3.Connection, channel: str, ident: OperatorIde
     return ident.member_id, ident.display_name
 
 
+# How many tasks a member currently holds — the roster's "working" signal.
+#
+# A correlated subquery rather than a second LEFT JOIN on purpose: the roster
+# query already aggregates over the sessions join, and a second one-to-many
+# join would fan out the rows and duplicate every entry in
+# GROUP_CONCAT(s.fingerprint), silently breaking the context-ring match.
+#
+# The lease guard matters because lease_expires_at is set once at claim time
+# and never renewed, and the sweeper only reaps well after expiry — without it
+# a crashed agent would show as "working" forever. The IS NULL arm keeps
+# non-session claims (which carry no lease) visible.
+CLAIMED_COUNT_SQL = (
+    "(SELECT COUNT(*) FROM tasks t "
+    " WHERE t.channel = m.channel AND t.claimed_by = m.id "
+    "   AND t.status = 'claimed' "
+    "   AND (t.lease_expires_at IS NULL OR t.lease_expires_at > ?)"
+    ") AS claimed_count "
+)
+
+
 # ───────── EventHub: polls DB, fans out SSE events ─────────
 class EventHub:
     """Single background thread watches the DB and pushes JSON events to any
@@ -588,44 +608,49 @@ class EventHub:
         # and never touch members.*. Reconcile like nth_monitor.py:171-183
         # so the web console sees real watermark + liveness movement.
         # filter_mode (v7.2) is best-effort; older schemas fall back to 'all'.
-        try:
-            rows = db.execute(
-                "SELECT m.id AS id, m.name AS name, m.status_text AS status_text, "
-                "m.last_seen AS member_last_seen, m.last_read AS member_last_read, "
-                "m.messenger_heartbeat AS messenger_heartbeat, "
-                "m.watchdog_heartbeat AS watchdog_heartbeat, "
-                "m.filter_mode AS filter_mode, "
-                "m.context_json AS context_json, "
-                "COALESCE(MAX(s.last_read), 0) AS session_last_read, "
-                "MAX(s.last_seen) AS session_last_seen, "
-                "GROUP_CONCAT(s.fingerprint) AS fingerprints "
-                "FROM members m "
-                "LEFT JOIN sessions s "
-                "  ON s.channel = m.channel AND s.member_id = m.id "
-                "  AND s.revoked_at IS NULL "
-                "WHERE m.channel = ? "
-                "GROUP BY m.id, m.channel "
-                "ORDER BY m.joined_at",
-                (self.channel,),
-            ).fetchall()
-        except sqlite3.OperationalError:
-            rows = db.execute(
-                "SELECT m.id AS id, m.name AS name, m.status_text AS status_text, "
-                "m.last_seen AS member_last_seen, m.last_read AS member_last_read, "
-                "m.messenger_heartbeat AS messenger_heartbeat, "
-                "m.watchdog_heartbeat AS watchdog_heartbeat, "
-                "COALESCE(MAX(s.last_read), 0) AS session_last_read, "
-                "MAX(s.last_seen) AS session_last_seen, "
-                "GROUP_CONCAT(s.fingerprint) AS fingerprints "
-                "FROM members m "
-                "LEFT JOIN sessions s "
-                "  ON s.channel = m.channel AND s.member_id = m.id "
-                "  AND s.revoked_at IS NULL "
-                "WHERE m.channel = ? "
-                "GROUP BY m.id, m.channel "
-                "ORDER BY m.joined_at",
-                (self.channel,),
-            ).fetchall()
+        # claimed_count (v8) likewise: a schema predating task leases drops
+        # the column rather than failing the whole roster.
+        base_cols = (
+            "SELECT m.id AS id, m.name AS name, m.status_text AS status_text, "
+            "m.last_seen AS member_last_seen, m.last_read AS member_last_read, "
+            "m.messenger_heartbeat AS messenger_heartbeat, "
+            "m.watchdog_heartbeat AS watchdog_heartbeat, "
+        )
+        modern_cols = "m.filter_mode AS filter_mode, m.context_json AS context_json, "
+        tail_cols = (
+            "COALESCE(MAX(s.last_read), 0) AS session_last_read, "
+            "MAX(s.last_seen) AS session_last_seen, "
+            "GROUP_CONCAT(s.fingerprint) AS fingerprints "
+        )
+        body = (
+            "FROM members m "
+            "LEFT JOIN sessions s "
+            "  ON s.channel = m.channel AND s.member_id = m.id "
+            "  AND s.revoked_at IS NULL "
+            "WHERE m.channel = ? "
+            "GROUP BY m.id, m.channel "
+            "ORDER BY m.joined_at"
+        )
+
+        def _try(cols: str, with_claims: bool):
+            sql = cols + ((", " + CLAIMED_COUNT_SQL) if with_claims else "") + body
+            args = (now_iso(), self.channel) if with_claims else (self.channel,)
+            return db.execute(sql, args).fetchall()
+
+        rows = None
+        for cols, with_claims in (
+            (base_cols + modern_cols + tail_cols, True),
+            (base_cols + modern_cols + tail_cols, False),
+            (base_cols + tail_cols, True),
+            (base_cols + tail_cols, False),
+        ):
+            try:
+                rows = _try(cols, with_claims)
+                break
+            except sqlite3.OperationalError:
+                continue
+        if rows is None:
+            return []
         # Collision-free avatars per channel. Sorted-id assignment in
         # animal_for_channel() makes the mapping stable across roster
         # refreshes as long as the member set is fixed; joins/leaves
@@ -679,6 +704,14 @@ class EventHub:
                 "context": context_full,
                 "animal_name": aname,
                 "animal_emoji": aemoji,
+                # Tasks held right now. Presence and busy-ness are separate
+                # axes: an agent can be active-but-waiting or stale-but-still-
+                # holding-a-claim, so the client layers this over the dot
+                # colour rather than folding it into the status bucket.
+                "claimed_count": (
+                    int(r["claimed_count"] or 0)
+                    if "claimed_count" in r.keys() else 0
+                ),
             })
         return out
 
@@ -1902,6 +1935,49 @@ INDEX_HTML = r"""<!doctype html>
   .dot.idle { background: var(--dimmer); }
   .dot.stale { background: var(--warn); }
   .dot.dead { background: var(--err); }
+
+  /* ── "Working" indicator ──
+     Presence (the dot colour) answers "is this session alive"; working
+     answers "does it hold a task right now". They're independent, so this
+     layers a pulsing ring over the existing dot via a pseudo-element
+     instead of replacing the colour. Sized off inset so the bluebubble
+     theme's larger dot scales it automatically. */
+  .dot.working { position: relative; }
+  .dot.working::after {
+    content: ''; position: absolute; inset: -2px;
+    border-radius: 50%; border: 1.5px solid currentColor;
+    color: inherit; background: inherit;
+    animation: trio-working-pulse 1.4s ease-out infinite;
+    pointer-events: none;
+  }
+  @keyframes trio-working-pulse {
+    0%   { transform: scale(1);   opacity: 0.7; }
+    70%  { transform: scale(2.1); opacity: 0;   }
+    100% { transform: scale(2.1); opacity: 0;   }
+  }
+  /* The name gets a slow shimmer so a busy member is findable without
+     hunting for an 8px dot — the roster is scanned by name, not by dot. */
+  .member.is-working .name {
+    background: linear-gradient(90deg,
+      currentColor 0%, currentColor 35%,
+      var(--accent) 50%,
+      currentColor 65%, currentColor 100%);
+    background-size: 220% 100%;
+    -webkit-background-clip: text; background-clip: text;
+    -webkit-text-fill-color: transparent;
+    animation: trio-working-shimmer 2.6s linear infinite;
+  }
+  @keyframes trio-working-shimmer {
+    0%   { background-position: 120% 0; }
+    100% { background-position: -120% 0; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .dot.working::after { animation: none; opacity: 0.45; transform: scale(1.6); }
+    .member.is-working .name {
+      animation: none; background: none;
+      -webkit-text-fill-color: currentColor; font-style: italic;
+    }
+  }
   .member .stext { font-size: 10px; color: var(--dim); margin-top: 4px;
                    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
                    padding-left: 16px; line-height: 1.4; }
@@ -3345,13 +3421,20 @@ INDEX_HTML = r"""<!doctype html>
   function renderMemberRow(m) {
     const { name: animalName, emoji } = animalFor(m);
     const row = document.createElement('div');
-    row.className = 'member' + (state.expandedMembers.has(m.id) ? ' expanded' : '');
-    row.title = `${m.name} (${m.id}) — the ${animalName}\n${m.status_text || ''}\nlast_read: ${m.last_read}`;
+    row.className = 'member' + (state.expandedMembers.has(m.id) ? ' expanded' : '')
+                             + (m.claimed_count ? ' is-working' : '');
+    // The tooltip states the actual signal. "Holding a task" is what we know;
+    // whether the model is mid-token is not observable from here, and the
+    // wording should not imply otherwise.
+    const workLine = m.claimed_count
+      ? `\nworking — holding ${m.claimed_count} task${m.claimed_count === 1 ? '' : 's'}`
+      : '';
+    row.title = `${m.name} (${m.id}) — the ${animalName}\n${m.status_text || ''}\nlast_read: ${m.last_read}${workLine}`;
 
     const topRow = document.createElement('div');
     topRow.className = 'row';
     const dot = document.createElement('div');
-    dot.className = 'dot ' + m.status;
+    dot.className = 'dot ' + m.status + (m.claimed_count ? ' working' : '');
     topRow.appendChild(dot);
     const animalSpan = document.createElement('span');
     animalSpan.className = 'roster-animal';
@@ -3599,7 +3682,7 @@ INDEX_HTML = r"""<!doctype html>
       const row = document.createElement('div');
       row.className = 'completion' + (i === state.completion.index ? ' selected' : '');
       const dot = document.createElement('div');
-      dot.className = 'cdot dot ' + m.status;
+      dot.className = 'cdot dot ' + m.status + (m.claimed_count ? ' working' : '');
       row.appendChild(dot);
       const anim = animalFor(m);
       const emoji = document.createElement('span');
