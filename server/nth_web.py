@@ -1341,12 +1341,103 @@ INDEX_HTML = r"""<!doctype html>
     --pill-radius: 2px; --input-radius: 2px;
   }
   :root[data-theme="solarized"] {
-    /* ── Solarized Light ── */
-    --bg: #fdf6e3; --bg2: #eee8d5; --panel: #e7e0c9; --border: #d3cbb2;
-    --fg: #073642; --dim: #657b83; --dimmer: #93a1a1;
+    /* ── Solarized Dark (PVE Dashboard) ── */
+    --bg: #002b36; --bg2: #00212b; --panel: #073642; --border: rgba(147,161,161,.2);
+    --fg: #eee8d5; --dim: #93a1a1; --dimmer: #6c7c7c;
     --accent: #268bd2; --accent-hi: #3a9bde; --accent2: #859900;
     --warn: #b58900; --err: #dc322f; --mention: #b58900;
-    --hover: #eee8d5; --ov: 0,0,0;
+    --hover: #0a4453; --ov: 255,255,255;
+    --card-radius: 6px; --card-shadow: 0 1px 4px rgba(0,0,0,.4); --pill-radius: 4px;
+  }
+  :root[data-theme="win31"] {
+    /* ── Windows 3.1 (PVE Dashboard) ── */
+    --bg: #008080; --bg2: #008080; --panel: #c0c0c0; --border: #808080;
+    --fg: #000; --dim: #404040; --dimmer: #808080;
+    --accent: #E57000; --accent-hi: #ff8c3a; --accent2: #008000;
+    --warn: #808000; --err: #800000; --mention: #808000;
+    --hover: #d0d0d0; --ov: 0,0,0;
+    --card-radius: 0; --card-shadow: none; --pill-radius: 0;
+  }
+  :root[data-theme="crt"] {
+    /* ── CRT Green (PVE Dashboard) ── */
+    --bg: #020a02; --bg2: #031003; --panel: #031603; --border: rgba(51,255,102,.28);
+    --fg: #33ff66; --dim: #1f9941; --dimmer: #145a28;
+    --accent: #7dff9c; --accent-hi: #a0ffb8; --accent2: #33ff66;
+    --warn: #c6ff00; --err: #ff5544; --mention: #c6ff00;
+    --hover: #041d04; --ov: 255,255,255;
+    --card-radius: 2px; --card-shadow: 0 0 10px rgba(51,255,102,.12); --pill-radius: 2px;
+  }
+  :root[data-theme="amber"] {
+    /* ── Amber Mono (PVE Dashboard) ── */
+    --bg: #0d0700; --bg2: #140a00; --panel: #1a0e00; --border: rgba(255,176,0,.25);
+    --fg: #ffb000; --dim: #b87900; --dimmer: #7a5200;
+    --accent: #ffcb52; --accent-hi: #ffe080; --accent2: #ffb000;
+    --warn: #ffd700; --err: #ff5e2e; --mention: #ffd700;
+    --hover: #1f1100; --ov: 255,255,255;
+    --card-radius: 2px; --card-shadow: 0 0 10px rgba(255,176,0,.1); --pill-radius: 2px;
+  }
+  :root[data-theme="paper"] {
+    /* ── Paper Print (PVE Dashboard) ── */
+    --bg: #f4f1ea; --bg2: #efeae0; --panel: #fffdf8; --border: #d8d2c4;
+    --fg: #1c1b18; --dim: #6b675e; --dimmer: #9a968a;
+    --accent: #9a3b2e; --accent-hi: #b8503e; --accent2: #3a6b2e;
+    --warn: #9a7b1a; --err: #a32a22; --mention: #9a7b1a;
+    --hover: #f5f0e6; --ov: 0,0,0;
+    --card-radius: 2px; --card-shadow: 0 1px 0 #d8d2c4; --pill-radius: 2px;
+  }
+  :root[data-theme="vaporwave"] {
+    /* ── Vaporwave (PVE Dashboard) ── */
+    --bg: #2b0f54; --bg2: #1b1145; --panel: #3a1f6e; --border: rgba(255,134,200,.3);
+    --fg: #ffe6ff; --dim: #c7a6ff; --dimmer: #8a6ac0;
+    --accent: #7af9ff; --accent-hi: #a0fcff; --accent2: #9bffb0;
+    --warn: #ffe66d; --err: #ff6b8b; --mention: #ffe66d;
+    --hover: #4a2f80; --ov: 255,255,255;
+    --card-radius: 16px; --card-shadow: 0 8px 24px rgba(255,134,200,.25); --pill-radius: 999px;
+  }
+  :root[data-theme="synthwave"] {
+    /* ── Synthwave (PVE Dashboard) ── */
+    --bg: #120024; --bg2: #06000f; --panel: #1c0636; --border: rgba(5,217,232,.3);
+    --fg: #ffd9ff; --dim: #b07adb; --dimmer: #7a50a0;
+    --accent: #05d9e8; --accent-hi: #40e8f0; --accent2: #39ff14;
+    --warn: #f9c80e; --err: #ff2a6d; --mention: #f9c80e;
+    --hover: #2a1048; --ov: 255,255,255;
+    --card-radius: 4px; --card-shadow: 0 0 18px rgba(255,42,109,.3); --pill-radius: 3px;
+  }
+  :root[data-theme="gameboy"] {
+    /* ── Game Boy (PVE Dashboard) ── */
+    --bg: #9bbc0f; --bg2: #9bbc0f; --panel: #8bac0f; --border: #306230;
+    --fg: #0f380f; --dim: #306230; --dimmer: #5a8a5a;
+    --accent: #0f380f; --accent-hi: #1a4a1a; --accent2: #0f380f;
+    --warn: #306230; --err: #0f380f; --mention: #306230;
+    --hover: #98b80e; --ov: 0,0,0;
+    --card-radius: 0; --card-shadow: 3px 3px 0 #0f380f; --pill-radius: 0;
+  }
+  :root[data-theme="dosblue"] {
+    /* ── DOS Blue (PVE Dashboard) ── */
+    --bg: #0000aa; --bg2: #0000aa; --panel: #0000aa; --border: #5555ff;
+    --fg: #fff; --dim: #55ffff; --dimmer: #3a9a9a;
+    --accent: #ffff55; --accent-hi: #ffffaa; --accent2: #55ff55;
+    --warn: #ffff55; --err: #ff5555; --mention: #ffff55;
+    --hover: #000080; --ov: 255,255,255;
+    --card-radius: 0; --card-shadow: none; --pill-radius: 0;
+  }
+  :root[data-theme="popart"] {
+    /* ── Pop Art (PVE Dashboard) ── */
+    --bg: #0a0014; --bg2: #1a0033; --panel: #15041f; --border: #3a0d5e;
+    --fg: #fff5e1; --dim: #b89cff; --dimmer: #7a60c0;
+    --accent: #00f5ff; --accent-hi: #60faff; --accent2: #39ff14;
+    --warn: #ffbe0b; --err: #ff206e; --mention: #ffbe0b;
+    --hover: #200840; --ov: 255,255,255;
+    --card-radius: 0; --card-shadow: 5px 5px 0 #ff006e; --pill-radius: 0;
+  }
+  :root[data-theme="lcars"] {
+    /* ── LCARS (PVE Dashboard) ── */
+    --bg: #000; --bg2: #000; --panel: #140d06; --border: #3a2a14;
+    --fg: #FFCC99; --dim: #C9A98C; --dimmer: #8a6a50;
+    --accent: #FF9900; --accent-hi: #FFCC66; --accent2: #66CC66;
+    --warn: #FFCC66; --err: #CC6666; --mention: #FFCC66;
+    --hover: #1f1508; --ov: 255,255,255;
+    --card-radius: 14px; --card-shadow: none; --pill-radius: 999px;
   }
   * { box-sizing: border-box; }
   :root {
@@ -1808,7 +1899,25 @@ INDEX_HTML = r"""<!doctype html>
       <optgroup label="Light">
         <option value="light">Daylight</option>
         <option value="pve-light">Proxmox Light</option>
+      </optgroup>
+      <optgroup label="PVE – Dark Retro">
+        <option value="crt">CRT Green</option>
+        <option value="amber">Amber Mono</option>
+        <option value="dosblue">DOS Blue</option>
+      </optgroup>
+      <optgroup label="PVE – Dark Modern">
+        <option value="synthwave">Synthwave</option>
+        <option value="vaporwave">Vaporwave</option>
+        <option value="lcars">LCARS</option>
         <option value="solarized">Solarized</option>
+      </optgroup>
+      <optgroup label="PVE – Light">
+        <option value="paper">Paper Print</option>
+        <option value="gameboy">Game Boy</option>
+        <option value="popart">Pop Art</option>
+      </optgroup>
+      <optgroup label="PVE – Classic">
+        <option value="win31">Windows 3.1</option>
       </optgroup>
     </select>
     <select id="font-picker" title="message font">
