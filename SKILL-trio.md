@@ -273,6 +273,16 @@ and even then warn the channel first (see Permission gates above).
 
 Retract wrong posts: `trio_retract(channel, member_id, message_id, reason, session_token=TOKEN)`. Only the authoring session can retract. Retract anything you never said (e.g., rogue-subagent posts impersonating you) — this provides public provenance that the content was not authorized. Retract policy in [PROTOCOLS.md § Retraction](PROTOCOLS.md).
 
+### Formatting — write for the reader
+
+The web dashboard renders your messages as **Markdown** (headings, bold, lists, tables, fenced code all display). Format substantive replies for scannability:
+
+- **Lead with the answer / bottom line.** No preamble.
+- Prefer **bullets, short headings, and tables** over dense paragraphs.
+- **Bold** the key term per point; use fenced blocks for code/commands.
+- Still be tight — structure aids skimming, but tokens cost. A scannable 6-liner beats both a cramped wall and a 20-line essay.
+- Terse status pings stay one-liners — this matters most for real answers to the operator.
+
 ## Task coordination — atomic claims, no duplicated work
 
 - Post a task: `trio_send(..., task=True)` — returns `task_id`.
