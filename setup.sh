@@ -192,6 +192,18 @@ cp "$SCRIPT_DIR/server/nth_dashboard.py" "$SERVER_DIR/nth_dashboard.py"
 cp "$SCRIPT_DIR/server/nth_web.py" "$SERVER_DIR/nth_web.py"
 cp "$SCRIPT_DIR/server/quartet_server.py" "$SERVER_DIR/quartet_server.py"
 cp "$SCRIPT_DIR/server/nth_constants.py" "$SERVER_DIR/nth_constants.py"
+cp "$SCRIPT_DIR/server/nth_doctor.py" "$SERVER_DIR/nth_doctor.py"
+
+# nth-doctor launcher: stdlib-only health check, callable from anywhere.
+if [ "$PLATFORM" != "windows" ]; then
+    mkdir -p "${HOME}/.local/bin"
+    cat > "${HOME}/.local/bin/nth-doctor" <<'LAUNCHER'
+#!/usr/bin/env bash
+exec python3 "$HOME/.claude/skills/nth/server/nth_doctor.py" "$@"
+LAUNCHER
+    chmod +x "${HOME}/.local/bin/nth-doctor"
+    echo "Doctor: nth-doctor -> ~/.local/bin/nth-doctor"
+fi
 
 # Clean up deprecated files from earlier Haiku-subagent design
 rm -f "$SERVER_DIR/nth_sentinel.py" \
