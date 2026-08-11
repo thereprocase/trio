@@ -27,6 +27,133 @@ VENV_DIR="${DB_DIR}/venv"
 echo "=== Claude nth Setup ==="
 echo ""
 
+# ---------- hub-service mode (root + systemd; the persistent hub box) ----------
+# bash setup.sh hub-service     first install AND upgrade (alias: upgrade)
+#
+# Owns the whole hub deployment so it can never drift from the repo again:
+# repo -> /opt/quartet-hub (with .bak-YYYYMMDD backups), a dedicated venv,
+# and canonical systemd units for quartet-hub (SSE MCP, :8000) and nth-web
+# (landing page + channel dashboards, :8765). Compile + import checks run
+# BEFORE the restart so a bad deploy never takes the hub down.
+
+if [ "${1:-}" = "hub-service" ] || [ "${1:-}" = "upgrade" ]; then
+    HUB_DIR="/opt/quartet-hub"
+    HUB_HOME="/var/lib/quartet-hub"
+    STAMP="$(date +%Y%m%d)"
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+    if [ "$(id -u)" != "0" ]; then
+        echo "ERROR: hub-service mode must run as root (owns /opt + systemd units)."
+        exit 1
+    fi
+    if ! command -v systemctl &>/dev/null; then
+        echo "ERROR: hub-service mode requires systemd."
+        exit 1
+    fi
+
+    mkdir -p "$HUB_DIR" "$HUB_HOME"
+
+    echo "Deploying server files: repo -> $HUB_DIR (backups: *.bak-$STAMP)"
+    for f in nth_server.py nth_monitor.py nth_console.py nth_dashboard.py \
+             nth_web.py quartet_server.py nth_constants.py nth_doctor.py; do
+        if [ -f "$HUB_DIR/$f" ] && ! cmp -s "$SCRIPT_DIR/server/$f" "$HUB_DIR/$f"; then
+            cp "$HUB_DIR/$f" "$HUB_DIR/$f.bak-$STAMP"
+        fi
+        cp "$SCRIPT_DIR/server/$f" "$HUB_DIR/$f"
+    done
+
+    # Dedicated venv — same rationale and pin as spoke mode (mcp 2.0 removed
+    # FastMCP; OS python upgrades orphan site-packages). Wheels only.
+    HUB_VENV="$HUB_DIR/venv"
+    if ! "$HUB_VENV/bin/python" -c "import sys" &>/dev/null; then
+        echo "Creating hub venv: $HUB_VENV"
+        rm -rf "$HUB_VENV"
+        python3 -m venv "$HUB_VENV"
+    fi
+    if ! "$HUB_VENV/bin/python" -c "from mcp.server.fastmcp import FastMCP; import uvicorn" &>/dev/null; then
+        echo "Installing into hub venv: mcp<2 uvicorn"
+        "$HUB_VENV/bin/python" -m pip install --quiet --upgrade pip
+        "$HUB_VENV/bin/python" -m pip install --quiet --only-binary :all: "mcp<2" uvicorn
+    fi
+    if ! "$HUB_VENV/bin/python" -c "from mcp.server.fastmcp import FastMCP; import uvicorn" &>/dev/null; then
+        echo "ERROR: hub venv cannot import FastMCP + uvicorn. Hub NOT restarted."
+        exit 1
+    fi
+
+    echo "Compile check..."
+    if ! "$HUB_VENV/bin/python" -m py_compile "$HUB_DIR"/*.py; then
+        echo "ERROR: py_compile failed. Hub NOT restarted (old process still serving)."
+        exit 1
+    fi
+
+    cat > /etc/systemd/system/quartet-hub.service <<UNIT
+# Managed by trio/setup.sh hub-service — edit the repo, not this file.
+[Unit]
+Description=nth quartet hub (SSE MCP server for /quartet spokes)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# De-rooted HOME keeps the shared DB out of /root: everything lives under
+# ${HUB_HOME}/.claude/nth/ and survives reinstalls via StateDirectory.
+Environment=HOME=${HUB_HOME}
+StateDirectory=quartet-hub
+WorkingDirectory=${HUB_DIR}
+ExecStart=${HUB_VENV}/bin/python ${HUB_DIR}/quartet_server.py
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+    cat > /etc/systemd/system/nth-web.service <<UNIT
+# Managed by trio/setup.sh hub-service — edit the repo, not this file.
+[Unit]
+Description=nth web landing page (fleet health + channel dashboards)
+After=network-online.target quartet-hub.service
+
+[Service]
+Type=simple
+Environment=HOME=${HUB_HOME}
+WorkingDirectory=${HUB_DIR}
+ExecStart=${HUB_VENV}/bin/python ${HUB_DIR}/nth_web.py --tailnet --port 8765
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+    # The unit files written above are canonical now — retire drop-ins from
+    # the hand-managed era so there is exactly one source of ExecStart truth.
+    rm -rf /etc/systemd/system/quartet-hub.service.d
+
+    systemctl daemon-reload
+    systemctl enable quartet-hub.service nth-web.service >/dev/null 2>&1 || true
+    echo "Restarting services..."
+    systemctl restart quartet-hub.service
+    systemctl restart nth-web.service
+
+    sleep 2
+    echo ""
+    if curl -fsS -m 5 http://127.0.0.1:8000/healthz; then
+        echo ""
+        echo "quartet-hub: /healthz OK"
+    else
+        echo "WARNING: /healthz not answering yet — check: journalctl -u quartet-hub -n 30"
+    fi
+    if curl -fsS -m 5 -o /dev/null http://127.0.0.1:8765/; then
+        echo "nth-web:     landing page OK (port 8765)"
+    else
+        echo "WARNING: nth-web not answering — check: journalctl -u nth-web -n 30"
+    fi
+    echo ""
+    echo "=== Hub service deploy complete ==="
+    exit 0
+fi
+
 # ---------- 0. Mode selection ----------
 
 MODE=""
