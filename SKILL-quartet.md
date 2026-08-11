@@ -22,7 +22,7 @@ Every rule in this file is load-bearing. If something here seems redundant with 
 
 | Tool | What it does |
 |------|--------------|
-| `quartet_connect` | Join or create a channel. Returns `member_id` AND `session_token` — keep both. |
+| `quartet_connect` | Join or create a channel. Returns `member_id` AND `session_token` — keep both. Pass `node_host=<your hostname>` (and `node_version` if known) so your machine appears on the hub's fleet view — the hub cannot see a spoke's hostname over SSE. |
 | `quartet_send` | Post a message. Pass `session_token` for authorship provenance. |
 | `quartet_poll` | Check for new messages. With `session_token`, does NOT auto-advance — call `quartet_ack` after. |
 | `quartet_ack` | Advance your read watermark to a specific message id. |

@@ -19,10 +19,15 @@ Three possible approaches:
 
 Make the event monitor work over MCP tools so it can run on remote `/quartet` spoke sessions. Currently hub-only because `nth_monitor.py` reads the local SQLite DB directly. Spoke sessions fall back to inline MCP peeks between work steps. A server-pushed event stream over SSE would restore parity.
 
-### SSE server watchdog
-**Severity:** Medium | **Since:** v6.0 (2026-04-09)
+### Spoke auto-discovery / MagicDNS hub URL
+**Severity:** Low | **Since:** v7.3 (2026-08-11)
 
-Auto-restart `quartet_server.py` if it crashes. Currently manual restart. Could be a systemd unit, a wrapper script with restart loop, or a process supervisor.
+`setup.sh spoke` still wants a raw hub URL (usually a Tailscale 100.x IP). The hub already knows its own MagicDNS name (`_tailscale_dns()` + the `hub-alias` file); spoke setup could default to probing `http://<magicdns>:8000/healthz` for candidate hubs, or accept a bare hostname and derive the rest. Would make spoke setup a zero-thought operation.
+
+### Hub-version nag in poll footer
+**Severity:** Low | **Since:** v7.3 (2026-08-11)
+
+The server footer already nags about stale monitors. With `NTH_VERSION` + node check-ins in place, the hub can see when a spoke's declared `node_version` trails its own and append a one-line "your install is vX, hub is vY — rerun setup.sh" nag to poll responses for that member. Cheap, self-healing fleet hygiene.
 
 ### UserPromptSubmit hook as monitor complement (~v10)
 **Severity:** Low / Idea | **Since:** v5.1 (2026-04-07)
@@ -49,6 +54,15 @@ The markdown export (`nth_end`) is functional but minimal. Task state changes ar
 **Severity:** Low | **Since:** v7 dashboard (2026-04-19)
 
 The dashboard's `Model` column is a placeholder dash — trio doesn't know which Claude model each member is running as. Agents could self-report on `trio_connect` via a new `model` field. Makes the dashboard meaningfully tier-aware (opus/sonnet/haiku), which matters when deciding who to expect fast vs slow responses from.
+
+## Completed (v7.3 — fleet ops day, 2026-08-11)
+
+- [x] **SSE server watchdog** (open since v6.0) — `setup.sh hub-service` writes a canonical `quartet-hub.service` with `Restart=on-failure`; the hub now survives crashes and reboots without manual restarts.
+- [x] **Venv registration** — `nth-trio` registered against `~/.claude/nth/venv/bin/python`; OS python upgrades can no longer orphan the SDK. `mcp<2` pinned (SDK 2.0.0 removed FastMCP).
+- [x] **Fleet check-ins + `/healthz` + `/fleet`** — nodes table, hub HTTP observability, spoke self-declaration on connect.
+- [x] **`nth doctor`** — one-shot + `--watch` stdlib health check, installed to `~/.local/bin`.
+- [x] **nth_web landing page** — fleet + channel index at `/`, per-channel dashboards multiplexed at `/c/<code>`; permanent `nth-web.service` on the hub (:8765).
+- [x] **Hub drift eliminated** — repo-owned deploy path (`setup.sh hub-service`), thread-offload patch upstreamed, second `round(inf)` cadence crash fixed.
 
 ## Completed (v7 — Monitor architecture, 2026-04-19)
 

@@ -1,11 +1,56 @@
-# Current State — nth v7.2
+# Current State — nth v7.3
 
-**Version:** v7.2 (2026-04-20)
-**Prior:** v7.1 (2026-04-20), v7 (2026-04-19), v6.2 (2026-04-17), v6.1 (2026-04-09), v6.0 (2026-04-09)
+**Version:** v7.3 (2026-08-11)
+**Prior:** v7.2 (2026-04-20), v7.1 (2026-04-20), v7 (2026-04-19), v6.2 (2026-04-17), v6.1 (2026-04-09), v6.0 (2026-04-09)
 **Branch:** main
 **Remote:** `github.com:thereprocase/trio.git` (GitHub) + `gitlab.com:theReproCase/trio.git` (GitLab mirror)
 
 ## What Just Shipped
+
+**v7.3** — Fleet observability + un-breakable installs (the 2026-08-11 ops day).
+
+Driven by two real failures found the same morning: the cachy5540 spoke's stdio
+registration died silently when Arch bumped Python 3.12→3.14 (user-site `mcp`
+orphaned), and the PVE hub had drifted two months from the repo (hand-patched
+`quartet_server.py`, unit/drop-in ExecStart mismatch). Everything below ships
+in service of "that can never happen silently again."
+
+- **Venv installs.** `setup.sh` creates `~/.claude/nth/venv` and registers
+  `nth-trio` against it — OS python upgrades can no longer orphan the SDK.
+  Auto-rebuilds a broken venv. Pins `mcp<2` (SDK 2.0.0 removed FastMCP).
+  `remote` mode renamed `spoke` (old name still aliases).
+- **Fleet check-ins.** New `nodes` table, one row per (hostname, transport).
+  Server processes check in on connect/poll (rate-limited), the Monitor
+  piggybacks on its 10s heartbeat, and SSE spokes self-declare via new
+  optional `connect` args `node_host` / `node_version`. `NTH_VERSION` in
+  `nth_constants.py` is the single version source.
+- **Hub observability endpoints.** `quartet_server.py` now also serves plain
+  HTTP `GET /healthz` (cheap liveness, 503 when DB down) and `GET /fleet`
+  (nodes + per-channel liveness). Counts/names/ages only, never content.
+- **`nth doctor`.** `server/nth_doctor.py` (stdlib, installed as
+  `~/.local/bin/nth-doctor`): registration, registered-interpreter mcp
+  import, install version, DB, hub reachability, hub↔local version drift,
+  monitor freshness, fleet table. `--watch` = 5s ANSI repaint. Exit 1 on red.
+- **nth_web landing page.** Bare `nth_web.py` (no channel arg) serves a
+  fleet/channel index at `/`; every channel's full dashboard is multiplexed
+  at `/c/<code>` from the same process (lazy per-channel EventHubs).
+  Single-channel mode unchanged.
+- **Repo-owned hub deployment.** `setup.sh hub-service` (alias `upgrade`)
+  deploys repo→`/opt/quartet-hub` with dated backups, its own venv, and
+  canonical systemd units: `quartet-hub.service` (SSE :8000, de-rooted
+  HOME=/var/lib/quartet-hub, Restart=on-failure) + new `nth-web.service`
+  (landing page, `--tailnet`, :8765). py_compile + import gates run before
+  restart so a bad deploy leaves the old hub serving.
+- **PR sweep.** Five external PRs audited + merged (#4 auto-reinit shim,
+  #5 web sound/notify settings, #6 web resilience, #8 monitor inf-overflow
+  fix + regression test, #9/#7 docs), plus the hub's live thread-offload
+  patch upstreamed and a second `round(inf)` crash fixed at the cadence
+  emit. `tests/test-nodes-upsert.py` added (11 checks).
+
+Deployed 2026-08-11 to both machines: PVE hub on the new units (verified
+`/healthz` 200 v7.3.0, landing :8765, dashboard card reads `/fleet`), spoke
+registration on venv python (doctor exit 0). Round-trip message + spoke
+check-in verified through the restarted hub.
 
 **v7.2** — Three-sigil model + simplified filter modes + filter awareness.
 
@@ -42,7 +87,8 @@ Migration is install-only: run `setup.sh` to replace skill docs + drop deprecate
 - **`server/nth_monitor.py`** — v7 persistent Monitor target. Reads `~/.claude/nth/nth.db`, emits JSON events on stdout.
 - **`server/nth_console.py`** — stdlib DB tailer for human operators. Prints full channel history on launch; terminal scrollback is the history UI.
 - **`server/nth_dashboard.py`** — Rich-based per-agent engagement dashboard (read-latency, queue depth, @-reply rate). For rooms of 3-8 agents.
-- **`server/quartet_server.py`** — SSE wrapper for remote `/quartet` sessions over Tailscale.
+- **`server/quartet_server.py`** — SSE wrapper for remote `/quartet` sessions over Tailscale. Also serves `GET /healthz` + `GET /fleet` (v7.3).
+- **`server/nth_doctor.py`** — stdlib health check (`nth-doctor`, `--watch`). Registration, mcp import, DB, hub reachability, version drift, fleet table.
 - **SKILL-trio.md / SKILL-quartet.md** — behavioral layer. Tells agents how to launch the Monitor, how to handle each event, the 3-call cadence, the untrusted-peer-content rule.
 - **PROTOCOLS-trio.md / PROTOCOLS-quartet.md** — event tables, task lifecycle, retraction policy, watermark recovery.
 - **DESIGN.md** — design rationale. v7 header note flags the sentinel-era content as historical.
@@ -84,12 +130,14 @@ Monitor reads the local DB, so it's **hub-only**. Remote `/quartet` spoke sessio
 
 ## Install State
 
-- Repo: `F:/claude/claude-tools/trio/` (dev) → pushed to GitHub `thereprocase/trio`.
+- Repo: `~/code/trio/` on cachy5540 (dev) → GitHub `thereprocase/trio`; PVE hub pulls `/opt/trio`.
 - Skill install: `~/.claude/skills/trio/` + `~/.claude/skills/quartet/` (canonical layout; legacy `~/.claude/skills/nth/SKILL-*.md` is removed by `setup.sh`).
 - Server install: `~/.claude/skills/nth/server/` (shared by trio + quartet).
-- MCP registrations: `~/.claude.json` — `nth-trio` (stdio) and/or `nth-qweb` (SSE).
-- Permissions: `~/.claude/settings.json` — 18 tools allowlisted as `trio_*` and/or `quartet_*`.
+- Venv (v7.3): `~/.claude/nth/venv` — the registered interpreter; `mcp<2` (+ `uvicorn` on hubs), wheels only.
+- MCP registrations: `~/.claude.json` — `nth-trio` (stdio, venv python) and/or `nth-qweb` (SSE).
+- Permissions: `~/.claude/settings.json` — tools allowlisted as `trio_*` and/or `quartet_*`.
 - Database: `~/.claude/nth/nth.db` (one per OS user; WSL and Windows do not share a DB).
+- Hub service install (v7.3): `/opt/quartet-hub/` + `/opt/quartet-hub/venv`, DB at `/var/lib/quartet-hub/.claude/nth/nth.db`, units `quartet-hub.service` (:8000) + `nth-web.service` (:8765), managed by `setup.sh hub-service`. Live on PVE (`pve.home.arpa`).
 
 ## Operator Tooling
 
@@ -101,6 +149,14 @@ python3 ~/.claude/skills/nth/server/nth_console.py -c MYCHAN
 
 # Per-agent engagement dashboard (3-8 agent rooms)
 python3 ~/.claude/skills/nth/server/nth_dashboard.py MYCHAN
+
+# Health check — is my install / the hub / the fleet OK? (v7.3)
+nth-doctor            # one-shot, exit 0 = green
+nth-doctor --watch    # live 5s repaint
+
+# Fleet + channel index in a browser (v7.3) — permanent on the hub at :8765
+python3 ~/.claude/skills/nth/server/nth_web.py            # landing page
+python3 ~/.claude/skills/nth/server/nth_web.py MYCHAN     # one channel (as before)
 ```
 
 Windows: substitute `py` for `python3`. Dashboard requires `pip install rich`.

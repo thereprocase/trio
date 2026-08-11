@@ -1,5 +1,71 @@
 # nth Changelog
 
+## v7.3 — 2026-08-11
+
+### Fleet observability + un-breakable installs
+
+One-day ops sprint driven by two real failures discovered the same morning
+during a five-PR merge sweep:
+
+1. **The spoke died silently.** Arch bumped Python 3.12→3.14; the user-site
+   `mcp` package was orphaned and the `nth-trio` stdio registration (pointed
+   at the system `python3`) failed on import — for weeks, with nothing
+   reporting it. Separately, the MCP SDK released 2.0.0, which removes
+   `mcp.server.fastmcp` entirely, so even a fresh unpinned install of the
+   SDK now breaks the server.
+2. **The hub drifted.** The PVE hub had two months of hand-patches
+   (`quartet_server.py` thread-offload, a `safe_round` hotfix) not in the
+   repo, plus a unit-file/drop-in ExecStart mismatch.
+
+The theme of every change: failures of this class must be **visible in one
+glance and hard to cause**.
+
+**Installs.** `setup.sh` builds a dedicated venv at `~/.claude/nth/venv`
+(auto-rebuilt if its interpreter breaks), installs `mcp<2` (+ `uvicorn` for
+hubs) wheels-only, and registers `nth-trio` against the venv python. `remote`
+mode renamed `spoke` (alias kept).
+
+**Fleet check-ins.** New `nodes` table keyed (hostname, transport):
+`hub`/`stdio` server processes check in on connect (always) and poll
+(≤1/min), monitors piggyback a row on their 10s heartbeat, and SSE spokes
+self-declare with new optional `connect` args `node_host`/`node_version`
+(the hub cannot see a spoke's hostname server-side). All check-in failures
+are swallowed — fleet bookkeeping never breaks message traffic.
+`nth_constants.NTH_VERSION` (7.3.0) is the single version source.
+
+**Hub endpoints.** `quartet_server.py` gains plain-HTTP `GET /healthz`
+(version, db_ok, counts; 503 on DB failure) and `GET /fleet` (nodes +
+per-channel liveness) on the same uvicorn app as `/sse`. Counts, names, and
+ages only — message content never crosses these endpoints.
+
+**`nth doctor`.** New stdlib `server/nth_doctor.py`, installed as
+`~/.local/bin/nth-doctor`. Checks: registration present + registered
+interpreter actually imports FastMCP (exactly the orphaned-site-packages
+failure), installed version, DB opens, hub `/healthz` + version drift,
+monitor heartbeat freshness, fleet table (hub view, local fallback).
+`--watch` repaints every 5s. Exit 1 on any red.
+
+**Landing page.** Bare `nth_web.py` serves a fleet/channel index at `/` —
+DB health strip, node table, channel list with member/live/msg counts —
+and multiplexes every channel's full dashboard at `/c/<code>` via lazy
+per-channel EventHubs and a server-injected `?channel=` API query string.
+Single-channel invocation is byte-for-byte unchanged behavior.
+
+**Repo-owned hub.** `setup.sh hub-service` (alias `upgrade`) owns the whole
+hub machine footprint: repo → `/opt/quartet-hub` with `.bak-YYYYMMDD`
+backups, `/opt/quartet-hub/venv`, canonical `quartet-hub.service` +
+`nth-web.service` unit files (drop-ins from the hand-managed era removed),
+and py_compile + import gates that run **before** the restart. The old
+hand-deployed hub was replaced by exactly this path on 2026-08-11.
+
+**PR sweep (same day).** Merged #4 (SSE auto-reinit shim), #5 (web
+sound/notification settings), #6 (web dashboard resilience), #8 (monitor
+`round(inf)` keepalive crash + regression test), #9/#7 (docs). Upstreamed
+the hub's live FastMCP thread-offload patch (sync handlers to anyio worker
+threads — kills head-of-line blocking across sessions). Fixed a second
+`round(inf)` at the monitor's cadence emit that #8 missed.
+`tests/test-nodes-upsert.py` added (11 checks).
+
 ## v7.2 — 2026-04-20
 
 ### Three-sigil model, simplified filters, filter awareness, security fix
