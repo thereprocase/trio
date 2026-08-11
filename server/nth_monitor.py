@@ -95,6 +95,33 @@ def seconds_since(iso_timestamp):
         return float("inf")
 
 
+def gap_for_emit(gap):
+    """JSON-safe rounding for a gap-seconds diagnostic field.
+
+    seconds_since() returns float("inf") as the "never happened" sentinel
+    (e.g. a member who was never sigil-engaged). inf compares correctly in
+    min()/> but round(inf) raises OverflowError, so guard the emit side:
+    inf -> None ("never"), otherwise the rounded integer seconds.
+    """
+    return None if gap == float("inf") else round(gap)
+
+
+def build_keepalive_event(own_gap, engaged_gap):
+    """Construct the keepalive event dict emitted by monitor().
+
+    Kept as a module-level helper (rather than inline in the loop) so the
+    regression test can exercise the exact production construction — both
+    gap fields are routed through gap_for_emit(), so an inf engaged_gap
+    serializes as null instead of raising OverflowError on round(inf).
+    """
+    return {
+        "event": "keepalive",
+        "gap_seconds": gap_for_emit(own_gap),
+        "threshold_seconds": KEEPALIVE_THRESHOLD,
+        "engaged_gap_seconds": gap_for_emit(engaged_gap),
+    }
+
+
 def is_sleeping(status_text):
     if not status_text:
         return False
@@ -411,12 +438,7 @@ def monitor(channel, member_id, filter_mode="all", _db_path=None):
                 if (own_gap > KEEPALIVE_THRESHOLD
                         and not stale_in_channel
                         and not keepalive_fired):
-                    emit({
-                        "event": "keepalive",
-                        "gap_seconds": round(own_gap),
-                        "threshold_seconds": KEEPALIVE_THRESHOLD,
-                        "engaged_gap_seconds": round(engaged_gap),
-                    })
+                    emit(build_keepalive_event(own_gap, engaged_gap))
                     keepalive_fired = True
                 elif own_gap < KEEPALIVE_THRESHOLD:
                     keepalive_fired = False
