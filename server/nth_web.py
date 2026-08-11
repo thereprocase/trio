@@ -1562,6 +1562,60 @@ INDEX_HTML = r"""<!doctype html>
   .completion .cid { color: var(--dimmer); font-size: 10px; }
   .completion .cdot { width: 6px; height: 6px; border-radius: 50%; }
 
+  /* ── Mobile responsive ── */
+  @media (max-width: 768px) {
+    #app { grid-template-columns: 1fr !important; grid-template-rows: auto 1fr auto; }
+    header { flex-wrap: wrap; gap: 4px; padding: 6px 10px; height: auto; min-height: 42px; }
+    header .spacer { display: none; }
+    /* Keep only: title, meta, settings gear, connection status */
+    header > #filter, header > #font-picker, header > #theme-picker,
+    header > #btn-compact, header > #btn-notify,
+    header > #btn-sound { display: none !important; }
+    /* #btn-side stays visible: it is the only way to open the overlay. */
+    #btn-settings { order: 10; }
+    #h-conn { order: 11; }
+
+    /* Sidebar: hidden by default, full-overlay when toggled open */
+    #side { display: none !important; position: fixed; inset: 0; z-index: 20;
+            grid-column: 1; grid-row: 2; border-left: none;
+            overflow-y: auto; padding-top: 48px; }
+    #app.mobile-side-open #side { display: flex !important; }
+    /* Scrim behind sidebar overlay */
+    #mobile-scrim { display: none; position: fixed; inset: 0; z-index: 19;
+                    background: rgba(0,0,0,0.5); }
+    #app.mobile-side-open #mobile-scrim { display: block; }
+
+    /* Settings panel: full-width on mobile */
+    #settings-panel { right: 0; left: 0; max-width: 100%; border-radius: 0;
+                      top: auto; position: fixed; }
+
+    /* Composer: touch-friendly */
+    #composer { padding: 6px 8px; }
+    #input { font-size: 16px; min-height: 40px; }  /* ≥16px prevents iOS zoom */
+    #send-btn { height: 40px; padding: 0 14px; }
+    #hint { display: none; }
+    #target-bar { gap: 4px; }
+    #target-bar .tb-pill { padding: 4px 10px; font-size: 12px; }
+
+    /* Chat: tighter padding */
+    #chat { padding: 8px 10px; }
+    .msg { margin-left: -4px; padding: 4px 4px 6px; }
+
+    /* Completions: full-width */
+    #completions { left: 0; right: 0; min-width: auto; }
+
+    /* Jump button: centered */
+    #jump-btn { right: 50%; transform: translateX(50%); }
+  }
+
+  @media (max-width: 480px) {
+    header .meta { display: none; }
+    .msg .head { font-size: 10px; }
+    .msg .mentions-bar .mchip, .msg .refs-bar .mchip,
+    .msg .bangs-bar .mchip { font-size: 10px; padding: 1px 5px; }
+    #target-bar .tb-pill { padding: 3px 7px; font-size: 11px; }
+  }
+
   /* Guest identify modal */
   #guest-modal { position: fixed; inset: 0; background: rgba(0,0,0,0.75);
                  display: flex; align-items: center; justify-content: center;
@@ -1642,6 +1696,7 @@ INDEX_HTML = r"""<!doctype html>
     <h3>Settings</h3>
   </div>
 
+  <div id="mobile-scrim"></div>
   <div id="chat-wrap">
     <div id="chat"></div>
     <button id="jump-btn">↓ latest<span class="count" id="jump-count" style="display:none">0</span></button>
@@ -3284,15 +3339,34 @@ INDEX_HTML = r"""<!doctype html>
     applySidebar(_sideCollapsed);
     try { localStorage.setItem('trio.sideCollapsed', _sideCollapsed ? '1' : '0'); } catch (_) {}
   }
-  btnSide.addEventListener('click', toggleSidebar);
+  btnSide.addEventListener('click', () => {
+    if (window.innerWidth <= 768) { toggleMobileSidebar(); } else { toggleSidebar(); }
+  });
   // Keyboard shortcut: Ctrl+B toggles the roster sidebar (editor convention).
   document.addEventListener('keydown', (e) => {
     if (e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey &&
         (e.key === 'b' || e.key === 'B')) {
       e.preventDefault();
-      toggleSidebar();
+      if (window.innerWidth <= 768) { toggleMobileSidebar(); } else { toggleSidebar(); }
     }
   });
+
+  // ── Mobile sidebar: overlay with scrim ──
+  const mobileScrim = document.getElementById('mobile-scrim');
+  function toggleMobileSidebar() {
+    appEl.classList.toggle('mobile-side-open');
+    btnSide.classList.toggle('on', appEl.classList.contains('mobile-side-open'));
+  }
+  if (mobileScrim) {
+    mobileScrim.addEventListener('click', () => {
+      appEl.classList.remove('mobile-side-open');
+      btnSide.classList.toggle('on', false);
+    });
+  }
+  // Auto-collapse sidebar on narrow viewports at load
+  if (window.innerWidth <= 768) {
+    applySidebar(true);
+  }
 
   // ── Settings panel: relocate controls out of the header into a ⚙ drawer ──
   // appendChild MOVES the live elements, so every existing handler/state stays
