@@ -396,7 +396,7 @@ def monitor(channel, member_id, filter_mode="all", _db_path=None):
 
                     if claimed_count > 0:
                         if own_gap > CADENCE_THRESHOLD and not cadence_fired:
-                            emit({"event": "cadence", "gap_seconds": round(own_gap), "claimed_tasks": claimed_count})
+                            emit({"event": "cadence", "gap_seconds": gap_for_emit(own_gap), "claimed_tasks": claimed_count})
                             cadence_fired = True
                         elif own_gap < CADENCE_THRESHOLD:
                             cadence_fired = False
