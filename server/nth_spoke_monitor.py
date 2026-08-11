@@ -52,6 +52,7 @@ import os
 import queue
 import socket
 import ssl
+import subprocess
 import sys
 import threading
 import time
@@ -114,10 +115,9 @@ def _discover_session_id():
 
 
 def _get_ppid(pid):
-    """Cross-platform parent PID lookup."""
+    """Cross-platform parent PID lookup (Linux, macOS, Windows)."""
     if sys.platform == "win32":
         import ctypes
-        # Windows: use CreateToolhelp32Snapshot (stdlib-only)
         import ctypes.wintypes as w
         TH32CS_SNAPPROCESS = 0x2
         class PE32(ctypes.Structure):
@@ -139,12 +139,21 @@ def _get_ppid(pid):
         finally:
             k32.CloseHandle(snap)
         return 0
-    else:
-        try:
-            with open(f"/proc/{pid}/stat", encoding="utf-8") as f:
-                return int(f.read().split(")")[1].split()[1])
-        except Exception:
-            return 0
+    # Linux: fast /proc read. macOS: falls through to ps.
+    try:
+        with open(f"/proc/{pid}/stat", encoding="utf-8") as f:
+            return int(f.read().split(")")[1].split()[1])
+    except (OSError, ValueError, IndexError):
+        pass
+    # macOS (and any POSIX without /proc): ps -o ppid= -p PID
+    try:
+        out = subprocess.check_output(
+            ["ps", "-o", "ppid=", "-p", str(pid)],
+            timeout=2, stderr=subprocess.DEVNULL,
+        )
+        return int(out.decode().strip())
+    except Exception:
+        return 0
 
 
 _OWN_SESSION_ID = _discover_session_id()
