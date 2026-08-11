@@ -4,12 +4,13 @@
 # Works on Linux, macOS, and Windows (Git Bash / MSYS2 / WSL).
 #
 # Modes:
-#   hub    — Full install. /trio (local stdio) + /quartet (SSE for remotes).
-#            Registers nth-trio (stdio) + nth-qweb (SSE). Runs quartet_server.py.
-#   remote — Remote install. /trio (local stdio) + /quartet (SSE to hub).
-#            Registers nth-trio (stdio) + nth-qweb (SSE pointing at hub).
+#   hub   — Full install. /trio (local stdio) + /quartet (SSE for spokes).
+#           Registers nth-trio (stdio) + serves nth-qweb. Runs quartet_server.py.
+#   spoke — Spoke install (formerly "remote"; that name still works as an alias).
+#           /trio (local stdio) + /quartet (SSE to hub).
+#           Registers nth-trio (stdio) + nth-qweb (SSE pointing at hub).
 #
-# Both modes get /trio for local use. Hub also serves /quartet for remotes.
+# Both modes get /trio for local use. Hub also serves /quartet for spokes.
 #
 # After setup: restart Claude Code, then /trio and /quartet work.
 
@@ -21,6 +22,7 @@ QUARTET_SKILL_DIR="${CLAUDE_DIR}/skills/quartet"
 SERVER_DIR="${CLAUDE_DIR}/skills/nth/server"
 DB_DIR="${CLAUDE_DIR}/nth"
 OLD_DB_DIR="${CLAUDE_DIR}/roam"
+VENV_DIR="${DB_DIR}/venv"
 
 echo "=== Claude nth Setup ==="
 echo ""
@@ -30,26 +32,28 @@ echo ""
 MODE=""
 HUB_URL=""
 
-if [ "${1:-}" = "hub" ] || [ "${1:-}" = "remote" ]; then
-    MODE="$1"
-    shift
-else
+case "${1:-}" in
+    hub)          MODE="hub";   shift ;;
+    spoke|remote) MODE="spoke"; shift ;;
+esac
+
+if [ -z "$MODE" ]; then
     echo "Select setup mode:"
-    echo "  1) hub    — This machine hosts the DB + serves remotes via Tailscale."
-    echo "  2) remote — This machine connects to a hub via Tailscale."
+    echo "  1) hub   — This machine hosts the DB + serves spokes via Tailscale."
+    echo "  2) spoke — This machine connects to a hub via Tailscale."
     echo ""
     read -rp "Mode [1/2]: " mode_choice
     case "$mode_choice" in
-        1|hub)    MODE="hub" ;;
-        2|remote) MODE="remote" ;;
+        1|hub)          MODE="hub" ;;
+        2|spoke|remote) MODE="spoke" ;;
         *)
-            echo "ERROR: Invalid choice. Run: bash setup.sh hub  OR  bash setup.sh remote"
+            echo "ERROR: Invalid choice. Run: bash setup.sh hub  OR  bash setup.sh spoke"
             exit 1
             ;;
     esac
 fi
 
-if [ "$MODE" = "remote" ]; then
+if [ "$MODE" = "spoke" ]; then
     if [ -n "${1:-}" ]; then
         HUB_URL="$1"
         shift
@@ -58,7 +62,7 @@ if [ "$MODE" = "remote" ]; then
         read -rp "Hub SSE URL (e.g. http://100.x.y.z:8000/sse): " HUB_URL
     fi
     if [ -z "$HUB_URL" ]; then
-        echo "ERROR: Remote mode requires a hub URL."
+        echo "ERROR: Spoke mode requires a hub URL."
         exit 1
     fi
 fi
@@ -66,7 +70,7 @@ fi
 echo "Mode: $MODE"
 echo ""
 
-# ---------- 1. Python ----------
+# ---------- 1. Python + platform ----------
 
 PYTHON_CMD=""
 for cmd in python3 python; do
@@ -84,23 +88,72 @@ fi
 PYTHON_VERSION=$("$PYTHON_CMD" --version 2>&1)
 echo "Python: $PYTHON_VERSION ($PYTHON_CMD)"
 
-# ---------- 2. MCP SDK ----------
+PLATFORM="unknown"
+case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) PLATFORM="windows" ;;
+    Darwin*)              PLATFORM="macos" ;;
+    Linux*)               PLATFORM="linux" ;;
+esac
+echo "Platform: $PLATFORM"
 
-if ! "$PYTHON_CMD" -c "from mcp.server.fastmcp import FastMCP" 2>/dev/null; then
-    echo "Installing MCP SDK..."
-    "$PYTHON_CMD" -m pip install mcp --quiet
-    if ! "$PYTHON_CMD" -c "from mcp.server.fastmcp import FastMCP" 2>/dev/null; then
-        echo "ERROR: Failed to install MCP SDK. Run: $PYTHON_CMD -m pip install mcp"
-        exit 1
-    fi
+# ---------- 2. Dedicated venv (MCP SDK) ----------
+# The server runs from its own venv, NOT the OS python. Rationale: an OS
+# python minor-version bump orphans user-site packages (Arch 3.12 -> 3.14
+# silently killed a spoke's stdio registration this way), and PEP 668
+# blocks bare `pip install` into system pythons on modern distros anyway.
+# The venv is keyed to the DB dir so one machine has exactly one of them.
+# Wheels only — no sdist build steps, no lifecycle scripts.
+
+if [ "$PLATFORM" = "windows" ]; then
+    VENV_PY="$VENV_DIR/Scripts/python.exe"
+else
+    VENV_PY="$VENV_DIR/bin/python"
 fi
-echo "MCP SDK: OK"
 
-# Hub mode needs uvicorn for SSE transport
+mkdir -p "$DB_DIR"
+
+# Rebuild the venv if its interpreter is missing OR broken (a dangling
+# symlink to a removed OS python is exactly the failure this fixes).
+if ! "$VENV_PY" -c "import sys" &>/dev/null; then
+    if [ -d "$VENV_DIR" ]; then
+        echo "venv interpreter broken (OS python upgrade?) — rebuilding $VENV_DIR"
+        rm -rf "$VENV_DIR"
+    else
+        echo "Creating venv: $VENV_DIR"
+    fi
+    "$PYTHON_CMD" -m venv "$VENV_DIR"
+fi
+
+# Pin mcp to 1.x: SDK 2.0.0 removed mcp.server.fastmcp (FastMCP), which the
+# entire server is built on, and quartet_server.py patches 1.x internals.
+VENV_PKGS=("mcp<2")
 if [ "$MODE" = "hub" ]; then
-    if ! "$PYTHON_CMD" -c "import uvicorn" 2>/dev/null; then
-        echo "Installing uvicorn (SSE transport)..."
-        "$PYTHON_CMD" -m pip install uvicorn --quiet
+    VENV_PKGS+=(uvicorn)
+fi
+
+NEED_INSTALL=0
+"$VENV_PY" -c "from mcp.server.fastmcp import FastMCP" &>/dev/null || NEED_INSTALL=1
+if [ "$MODE" = "hub" ]; then
+    "$VENV_PY" -c "import uvicorn" &>/dev/null || NEED_INSTALL=1
+fi
+
+if [ "$NEED_INSTALL" = "1" ]; then
+    echo "Installing into venv: ${VENV_PKGS[*]}"
+    "$VENV_PY" -m pip install --quiet --upgrade pip
+    "$VENV_PY" -m pip install --quiet --only-binary :all: "${VENV_PKGS[@]}"
+fi
+
+if ! "$VENV_PY" -c "from mcp.server.fastmcp import FastMCP" &>/dev/null; then
+    echo "ERROR: venv python cannot import FastMCP after install."
+    echo "Debug: $VENV_PY -m pip install mcp"
+    exit 1
+fi
+echo "MCP SDK: OK ($VENV_PY)"
+
+if [ "$MODE" = "hub" ]; then
+    if ! "$VENV_PY" -c "import uvicorn" &>/dev/null; then
+        echo "ERROR: venv python cannot import uvicorn (needed for SSE transport)."
+        exit 1
     fi
     echo "uvicorn: OK"
 fi
@@ -156,29 +209,21 @@ if [ -f "$OLD_DB_DIR/roam.db" ] && [ ! -f "$DB_DIR/nth.db" ]; then
     echo "Migrated database: roam.db -> nth.db"
 fi
 
-# ---------- 5. Resolve native path ----------
+# ---------- 5. Resolve native paths ----------
 
 SERVER_SCRIPT="$SERVER_DIR/nth_server.py"
 NATIVE_PATH="$SERVER_SCRIPT"
+NATIVE_VENV_PY="$VENV_PY"
 
-PLATFORM="unknown"
-case "$(uname -s)" in
-    MINGW*|MSYS*|CYGWIN*)
-        PLATFORM="windows"
-        if command -v cygpath &>/dev/null; then
-            NATIVE_PATH=$(cygpath -w "$SERVER_SCRIPT")
-        else
-            NATIVE_PATH=$(echo "$SERVER_SCRIPT" | sed 's|^/\([a-zA-Z]\)/|\1:\\|' | sed 's|/|\\|g')
-        fi
-        ;;
-    Darwin*)
-        PLATFORM="macos"
-        ;;
-    Linux*)
-        PLATFORM="linux"
-        ;;
-esac
-echo "Platform: $PLATFORM"
+if [ "$PLATFORM" = "windows" ]; then
+    if command -v cygpath &>/dev/null; then
+        NATIVE_PATH=$(cygpath -w "$SERVER_SCRIPT")
+        NATIVE_VENV_PY=$(cygpath -w "$VENV_PY")
+    else
+        NATIVE_PATH=$(echo "$SERVER_SCRIPT" | sed 's|^/\([a-zA-Z]\)/|\1:\\|' | sed 's|/|\\|g')
+        NATIVE_VENV_PY=$(echo "$VENV_PY" | sed 's|^/\([a-zA-Z]\)/|\1:\\|' | sed 's|/|\\|g')
+    fi
+fi
 
 # ---------- 6. Register MCP servers ----------
 
@@ -190,12 +235,13 @@ if command -v claude &>/dev/null; then
     claude mcp remove nth-trio -s user 2>/dev/null || true
     claude mcp remove nth-qweb -s user 2>/dev/null || true
 
-    # Both modes: register nth-trio (local stdio) — /trio always works
-    claude mcp add nth-trio -s user -- "$PYTHON_CMD" "$NATIVE_PATH" 2>&1
-    echo "MCP server: nth-trio registered (stdio, /trio)"
+    # Both modes: register nth-trio (local stdio) against the VENV python —
+    # /trio always works and survives OS python upgrades.
+    claude mcp add nth-trio -s user -- "$NATIVE_VENV_PY" "$NATIVE_PATH" 2>&1
+    echo "MCP server: nth-trio registered (stdio, /trio, venv python)"
 
-    # Remote mode: also register nth-qweb (SSE to hub) — /quartet connects to hub
-    if [ "$MODE" = "remote" ]; then
+    # Spoke mode: also register nth-qweb (SSE to hub) — /quartet connects to hub
+    if [ "$MODE" = "spoke" ]; then
         claude mcp add --transport sse -s user nth-qweb "$HUB_URL" 2>&1
         echo "MCP server: nth-qweb registered (SSE -> $HUB_URL, /quartet)"
     fi
@@ -203,8 +249,8 @@ else
     echo ""
     echo "WARNING: 'claude' CLI not found in PATH."
     echo "Register manually:"
-    echo "  claude mcp add nth-trio -s user -- $PYTHON_CMD \"$NATIVE_PATH\""
-    if [ "$MODE" = "remote" ]; then
+    echo "  claude mcp add nth-trio -s user -- \"$NATIVE_VENV_PY\" \"$NATIVE_PATH\""
+    if [ "$MODE" = "spoke" ]; then
         echo "  claude mcp add --transport sse -s user nth-qweb \"$HUB_URL\""
     fi
 fi
@@ -238,7 +284,7 @@ if [ "$MODE" = "hub" ]; then
     # Hub: allowlist trio tools only (quartet served, not consumed locally)
     ALL_TOOLS=("${TRIO_TOOLS[@]}")
 else
-    # Remote: allowlist both trio (local) and quartet (to hub)
+    # Spoke: allowlist both trio (local) and quartet (to hub)
     ALL_TOOLS=("${TRIO_TOOLS[@]}" "${QUARTET_TOOLS[@]}")
 fi
 
@@ -285,16 +331,18 @@ echo "=== Setup Complete ($MODE mode) ==="
 echo ""
 echo "  /trio:    nth-trio (local stdio, always works)"
 if [ "$MODE" = "hub" ]; then
-    echo "  /quartet: Start quartet_server.py to serve remotes"
+    echo "  /quartet: Start quartet_server.py to serve spokes"
     echo ""
     echo "  Server:   $NATIVE_PATH"
+    echo "  Python:   $NATIVE_VENV_PY (dedicated venv)"
     echo "  Database: $DB_DIR/nth.db (created on first use)"
     echo ""
-    echo "  To serve remote /quartet sessions:"
-    echo "    python $SERVER_DIR/quartet_server.py"
+    echo "  To serve spoke /quartet sessions:"
+    echo "    $VENV_PY $SERVER_DIR/quartet_server.py"
     echo "  (SSE on 0.0.0.0:8000 — accessible via Tailscale)"
 else
     echo "  /quartet: nth-qweb (SSE -> $HUB_URL)"
+    echo "  Python:   $NATIVE_VENV_PY (dedicated venv)"
 fi
 echo ""
 echo "  Config: ~/.claude.json (via claude mcp add)"
