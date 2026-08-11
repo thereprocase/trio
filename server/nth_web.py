@@ -1350,89 +1350,178 @@ INDEX_HTML = r"""<!doctype html>
     --card-radius: 6px; --card-shadow: 0 1px 4px rgba(0,0,0,.4); --pill-radius: 4px;
   }
   :root[data-theme="bluebubble"] {
-    /* ── Blue Bubble ── */
-    --bg: #fff; --bg2: #f2f2f7; --panel: #fff; --border: #e5e5ea;
+    /* ── Walled Garden (light) ── */
+    --bg: #fff; --bg2: #f2f2f7; --panel: #fff; --border: #c6c6c8;
     --fg: #1c1c1e; --dim: #8e8e93; --dimmer: #c7c7cc;
     --accent: #007aff; --accent-hi: #409cff; --accent2: #34c759;
     --warn: #ff9500; --err: #ff3b30; --mention: #ff9500;
-    --hover: #f2f2f7; --ov: 0,0,0;
+    --hover: #e5e5ea; --ov: 0,0,0;
     --card-radius: 18px; --card-shadow: none;
     --pill-radius: 999px; --input-radius: 18px;
     --bubble-mine: #007aff; --bubble-mine-ink: #fff;
-    --bubble-theirs: #e9e9eb; --bubble-theirs-ink: #1c1c1e;
+    --bubble-theirs: #e5e5ea; --bubble-theirs-ink: #000;
     --bubble-system: transparent;
   }
+  /* ── Walled Garden: pixel-faithful recreation ── */
   :root[data-theme="bluebubble"] .msg {
-    max-width: 75%; border-left: none; margin-left: 0; padding: 0; margin-bottom: 4px;
-    background: none !important; border-radius: 0;
+    max-width: 70%; border-left: none; margin-left: 0; margin-bottom: 2px;
+    padding: 6px 12px 8px; border-radius: 18px; position: relative;
+    background: var(--bubble-theirs) !important; color: var(--bubble-theirs-ink);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue",
+      "Helvetica", "Arial", sans-serif;
+    font-size: 17px; line-height: 1.28; letter-spacing: -0.01em;
   }
-  :root[data-theme="bluebubble"] .msg:hover { background: none !important; }
-  :root[data-theme="bluebubble"] .msg .body {
-    display: inline-block; padding: 8px 14px;
-    border-radius: 18px; line-height: 1.35;
-    background: var(--bubble-theirs); color: var(--bubble-theirs-ink);
-    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
-    font-size: 15px;
+  :root[data-theme="bluebubble"] .msg:hover { filter: brightness(0.97); }
+  :root[data-theme="bluebubble"] .msg:not(.mine) { border-bottom-left-radius: 4px; }
+  /* Tail — CSS triangle on the last bubble in a run */
+  :root[data-theme="bluebubble"] .msg:not(.mine)::before {
+    content: ""; position: absolute; bottom: 0; left: -6px;
+    width: 12px; height: 16px;
+    background: radial-gradient(ellipse at top right, var(--bubble-theirs) 55%, transparent 56%);
   }
-  :root[data-theme="bluebubble"] .msg.mine { margin-left: auto; text-align: right; }
-  :root[data-theme="bluebubble"] .msg.mine .body {
-    background: var(--bubble-mine); color: var(--bubble-mine-ink);
-    border-bottom-right-radius: 4px;
+  :root[data-theme="bluebubble"] .msg.mine::before {
+    content: ""; position: absolute; bottom: 0; right: -6px; left: auto;
+    width: 12px; height: 16px;
+    background: radial-gradient(ellipse at top left, var(--bubble-mine) 55%, transparent 56%);
   }
-  :root[data-theme="bluebubble"] .msg:not(.mine) .body {
-    border-bottom-left-radius: 4px;
+  :root[data-theme="bluebubble"] .msg .head {
+    font-size: 11px; color: #86868b; margin-bottom: 1px;
+    font-weight: 400;
   }
-  :root[data-theme="bluebubble"] .msg .head { font-size: 10px; color: var(--dim);
-    padding: 0 14px; }
-  :root[data-theme="bluebubble"] .msg.mine .head { text-align: right; justify-content: flex-end; }
-  :root[data-theme="bluebubble"] .msg .author { font-weight: 600; }
-  :root[data-theme="bluebubble"] .msg.mine .author { color: var(--accent); }
-  :root[data-theme="bluebubble"] .msg.system .body {
-    background: transparent; color: var(--dim); font-style: italic;
-    font-size: 13px; text-align: center;
+  :root[data-theme="bluebubble"] .msg .head .time { color: #86868b; }
+  :root[data-theme="bluebubble"] .msg .author { font-weight: 600; color: #1c1c1e; font-size: 13px; }
+  :root[data-theme="bluebubble"] .msg .body { color: inherit; }
+  :root[data-theme="bluebubble"] .msg .body.plain { white-space: pre-wrap; }
+  :root[data-theme="bluebubble"] .msg.mine {
+    margin-left: auto; background: var(--bubble-mine) !important;
+    color: var(--bubble-mine-ink); border-bottom-right-radius: 4px;
+    border-bottom-left-radius: 18px;
   }
-  :root[data-theme="bluebubble"] .msg.system { max-width: 100%; text-align: center; }
-  :root[data-theme="bluebubble"] .msg .mentions-bar .mchip {
-    background: rgba(0,122,255,0.12); border-color: rgba(0,122,255,0.25); color: var(--accent);
+  :root[data-theme="bluebubble"] .msg.mine .head { color: rgba(255,255,255,0.65); }
+  :root[data-theme="bluebubble"] .msg.mine .head .time { color: rgba(255,255,255,0.5); }
+  :root[data-theme="bluebubble"] .msg.mine .author { color: rgba(255,255,255,0.85); }
+  :root[data-theme="bluebubble"] .msg.system {
+    max-width: 100%; text-align: center; border-radius: 10px;
+    background: transparent !important; color: #86868b; font-style: normal;
+    font-size: 13px; padding: 4px 14px; font-weight: 400;
   }
-  :root[data-theme="bluebubble"] .msg.mine .mentions-bar .mchip {
-    background: rgba(255,255,255,0.2); border-color: rgba(255,255,255,0.3); color: #fff;
+  :root[data-theme="bluebubble"] .msg.system::before { display: none; }
+  :root[data-theme="bluebubble"] .msg .mentions-bar .mchip,
+  :root[data-theme="bluebubble"] .msg .refs-bar .mchip {
+    background: rgba(0,0,0,0.07); border: none; color: #007aff;
+    font-weight: 500; border-radius: 10px; font-size: 13px;
+  }
+  :root[data-theme="bluebubble"] .msg.mine .mentions-bar .mchip,
+  :root[data-theme="bluebubble"] .msg.mine .refs-bar .mchip {
+    background: rgba(255,255,255,0.2); border: none; color: #fff;
+  }
+  :root[data-theme="bluebubble"] .msg .bangs-bar .mchip {
+    background: rgba(255,59,48,0.12); border: none; color: #ff3b30;
   }
   :root[data-theme="bluebubble"] .msg .body code.mdic {
-    background: rgba(0,0,0,0.06); border-color: rgba(0,0,0,0.1);
+    background: rgba(0,0,0,0.06); border: none; border-radius: 4px;
+    font-size: 0.9em;
   }
   :root[data-theme="bluebubble"] .msg.mine .body code.mdic {
-    background: rgba(255,255,255,0.2); border-color: rgba(255,255,255,0.15);
+    background: rgba(255,255,255,0.18); border: none;
   }
   :root[data-theme="bluebubble"] .msg .body pre.mdcode {
-    background: rgba(0,0,0,0.05); border-color: rgba(0,0,0,0.08);
+    background: rgba(0,0,0,0.04); border: none; border-radius: 10px;
+    padding: 8px 12px;
   }
   :root[data-theme="bluebubble"] .msg.mine .body pre.mdcode {
-    background: rgba(255,255,255,0.15); border-color: rgba(255,255,255,0.1);
+    background: rgba(255,255,255,0.12); border: none;
   }
-  :root[data-theme="bluebubble"] .msg .body a { color: var(--accent); }
+  :root[data-theme="bluebubble"] .msg .body a { color: #007aff; text-decoration: none; }
   :root[data-theme="bluebubble"] .msg.mine .body a { color: #fff; text-decoration: underline; }
-  :root[data-theme="bluebubble"] .msg.targeted { background: none !important;
-    border-left: none; }
-  :root[data-theme="bluebubble"] .msg.targeted .body {
-    background: #fff3cd; color: #1c1c1e;
+  :root[data-theme="bluebubble"] .msg.targeted {
+    border-left: none; box-shadow: 0 0 0 2px rgba(255,149,0,0.4);
+    border-radius: 18px;
   }
+  /* Header — frosted glass nav bar */
   :root[data-theme="bluebubble"] header {
-    background: var(--panel); border-bottom: 1px solid var(--border);
-    backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
+    background: rgba(249,249,249,0.94); border-bottom: 0.5px solid rgba(0,0,0,0.12);
+    backdrop-filter: saturate(180%) blur(20px); -webkit-backdrop-filter: saturate(180%) blur(20px);
   }
-  :root[data-theme="bluebubble"] #side { background: var(--bg2); }
-  :root[data-theme="bluebubble"] #composer {
-    background: var(--bg2); border-top: 1px solid var(--border);
+  :root[data-theme="bluebubble"] header .title { color: #007aff; font-size: 17px; }
+  :root[data-theme="bluebubble"] header .meta { color: #86868b; }
+  :root[data-theme="bluebubble"] header .pill { border: none;
+    background: rgba(0,122,255,0.12); color: #007aff; font-weight: 500; }
+  :root[data-theme="bluebubble"] header .pill:hover { background: rgba(0,122,255,0.2); }
+  :root[data-theme="bluebubble"] header .pill.on { background: #007aff; color: #fff; }
+  :root[data-theme="bluebubble"] header .pill.conn.ok { color: #34c759; background: rgba(52,199,89,0.12); }
+  :root[data-theme="bluebubble"] header .pill.conn.bad { color: #ff3b30; background: rgba(255,59,48,0.12); }
+  /* Sidebar */
+  :root[data-theme="bluebubble"] #side {
+    background: #f2f2f7; border-left: 0.5px solid rgba(0,0,0,0.12);
   }
-  :root[data-theme="bluebubble"] #send-btn {
-    border-radius: 50%; width: 36px; height: 36px; padding: 0;
-    font-size: 18px; line-height: 1;
-  }
+  :root[data-theme="bluebubble"] #side h2 { color: #86868b; font-size: 13px;
+    text-transform: uppercase; letter-spacing: 0.02em; }
+  :root[data-theme="bluebubble"] .member .name { font-size: 15px; }
+  :root[data-theme="bluebubble"] .member .stext { font-size: 13px; color: #86868b; }
   :root[data-theme="bluebubble"] .member .dot { width: 10px; height: 10px; }
+  :root[data-theme="bluebubble"] .member + .member { border-top: 0.5px solid rgba(0,0,0,0.1); }
+  :root[data-theme="bluebubble"] .member .dm-btn {
+    background: rgba(0,122,255,0.12); color: #007aff; border: none; border-radius: 14px;
+  }
+  /* Composer — iOS keyboard area feel */
+  :root[data-theme="bluebubble"] #composer {
+    background: #f2f2f7; border-top: 0.5px solid rgba(0,0,0,0.12); padding: 8px 10px;
+  }
+  :root[data-theme="bluebubble"] #input {
+    background: #fff; border: 0.5px solid #c6c6c8; border-radius: 18px;
+    padding: 8px 14px; font-size: 17px; line-height: 1.28;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+  }
+  :root[data-theme="bluebubble"] #input:focus { border-color: #007aff; }
+  :root[data-theme="bluebubble"] #send-btn {
+    border-radius: 50%; width: 34px; height: 34px; padding: 0;
+    font-size: 0; background: #007aff; position: relative;
+  }
+  :root[data-theme="bluebubble"] #send-btn::after {
+    content: "\2191"; font-size: 20px; font-weight: 700; color: #fff;
+  }
+  :root[data-theme="bluebubble"] #send-btn:disabled { background: #c7c7cc; }
+  :root[data-theme="bluebubble"] #hint { display: none; }
+  :root[data-theme="bluebubble"] #preview { font-size: 13px; color: #86868b; }
+  :root[data-theme="bluebubble"] #target-bar .tb-pill {
+    border: none; background: rgba(0,122,255,0.1); color: #007aff;
+    border-radius: 14px; font-weight: 500;
+  }
+  :root[data-theme="bluebubble"] #target-bar .tb-pill.on {
+    background: #007aff; color: #fff;
+  }
+  /* Completions dropdown */
+  :root[data-theme="bluebubble"] #completions {
+    border-radius: 14px; border: none; box-shadow: 0 4px 24px rgba(0,0,0,0.15);
+    background: rgba(255,255,255,0.98); backdrop-filter: blur(20px);
+  }
+  :root[data-theme="bluebubble"] .completion:hover,
+  :root[data-theme="bluebubble"] .completion.selected { background: #e5e5ea; }
+  /* Settings panel */
+  :root[data-theme="bluebubble"] #settings-panel {
+    border-radius: 14px; border: none; box-shadow: 0 4px 24px rgba(0,0,0,0.15);
+    background: rgba(255,255,255,0.98); backdrop-filter: blur(20px);
+  }
+  /* Guest modal */
+  :root[data-theme="bluebubble"] #guest-modal .guest-card {
+    border-radius: 14px; border: none; box-shadow: 0 4px 30px rgba(0,0,0,0.2);
+    background: #fff;
+  }
+  :root[data-theme="bluebubble"] #guest-modal button {
+    border-radius: 14px; background: #007aff; font-weight: 600;
+  }
+  /* Hide noise — clean like the garden */
   :root[data-theme="bluebubble"] .acks { display: none; }
-  :root[data-theme="bluebubble"] #chat { font-family: -apple-system, BlinkMacSystemFont,
-    "SF Pro Text", "Helvetica Neue", sans-serif; }
+  :root[data-theme="bluebubble"] .watermark-pins { display: none; }
+  :root[data-theme="bluebubble"] #jump-btn {
+    border-radius: 999px; background: #007aff; box-shadow: 0 2px 12px rgba(0,122,255,0.3);
+  }
+  :root[data-theme="bluebubble"] #chat {
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text",
+      "Helvetica Neue", "Helvetica", "Arial", sans-serif;
+    background: #fff;
+  }
 
   :root[data-theme="win31"] {
     /* ── Windows 3.1 (PVE Dashboard) ── */
