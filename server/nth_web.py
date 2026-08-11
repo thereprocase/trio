@@ -4313,7 +4313,9 @@ INDEX_HTML = r"""<!doctype html>
   }
   function notePaneActivity(fromSelf) {
     if (!PANE_MODE || fromSelf) return;
-    if (document.hasFocus()) return;
+    // Composer focused means this is the pane you're in — you're watching it
+    // arrive, so there is nothing to flag.
+    if (document.activeElement === input) return;
     paneUnread++;
     postUnread();
   }
@@ -4323,13 +4325,13 @@ INDEX_HTML = r"""<!doctype html>
     postUnread();
   }
   if (PANE_MODE) {
-    // Anything that means "I am reading this pane" clears it — clicking,
-    // typing, scrolling the transcript, or the pointer resting in it.
-    window.addEventListener('focus', clearPaneUnread);
-    document.addEventListener('click', clearPaneUnread);
-    document.addEventListener('keydown', clearPaneUnread);
-    document.addEventListener('mouseenter', clearPaneUnread);
-    chat.addEventListener('scroll', clearPaneUnread, { passive: true });
+    // Clearing is deliberately narrow: only committing to this pane by
+    // clicking into its composer counts. Passive signals — the pointer
+    // crossing it, a scroll, the window regaining focus — dismissed the
+    // badge while walking past, which is how you miss the message it was
+    // there to tell you about.
+    input.addEventListener('focus', clearPaneUnread);
+    input.addEventListener('click', clearPaneUnread);
   }
 
   // ── Split-screen entry point ──
