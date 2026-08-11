@@ -2005,7 +2005,7 @@ INDEX_HTML = r"""<!doctype html>
         <option value="win31">Windows 3.1</option>
       </optgroup>
       <optgroup label="Familiar">
-        <option value="bluebubble">Blue Bubble</option>
+        <option value="bluebubble">Walled Garden</option>
       </optgroup>
     </select>
     <select id="font-picker" title="message font">
