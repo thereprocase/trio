@@ -89,7 +89,8 @@ else:
     _CTX_DIR = os.path.join(os.environ.get("XDG_STATE_HOME",
                                            os.path.expanduser("~/.local/state")),
                             "claude-context")
-_OWN_SESSION_ID = os.environ.get("CLAUDE_SESSION_ID", "")
+_OWN_SESSION_ID = (os.environ.get("CLAUDE_CODE_SESSION_ID")
+                   or os.environ.get("CLAUDE_SESSION_ID", ""))
 
 
 def read_own_context():
@@ -762,6 +763,9 @@ def main():
                     help=f"long-poll seconds (default {DEFAULT_POLL_WAIT})")
     ap.add_argument("--status-interval", type=int, default=DEFAULT_STATUS_EVERY,
                     help=f"cadence/keepalive cadence (default {DEFAULT_STATUS_EVERY}s)")
+    ap.add_argument("--claude-session", default="",
+                    help="Claude session id override for the statusline relay "
+                         "(autodetected from CLAUDE_CODE_SESSION_ID)")
     ap.add_argument("--debug", action="store_true",
                     help="stderr trace of SSE + JSON-RPC frames")
     args = ap.parse_args()
@@ -781,6 +785,9 @@ def main():
     )
     sys.stderr.flush()
 
+    if args.claude_session:
+        global _OWN_SESSION_ID
+        _OWN_SESSION_ID = args.claude_session
     client = MCPSSEClient(args.url, debug=args.debug)
     try:
         client.connect()

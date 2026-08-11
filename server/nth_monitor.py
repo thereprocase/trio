@@ -61,7 +61,8 @@ from nth_constants import SLEEPING_KEYWORDS, NTH_VERSION
 # Own-session statusline snapshot (see nth_spoke_monitor.read_own_context).
 _CTX_DIR = Path(os.environ.get("XDG_STATE_HOME",
                                str(Path.home() / ".local" / "state"))) / "claude-context"
-_OWN_SESSION_ID = os.environ.get("CLAUDE_SESSION_ID", "")
+_OWN_SESSION_ID = (os.environ.get("CLAUDE_CODE_SESSION_ID")
+                   or os.environ.get("CLAUDE_SESSION_ID", ""))
 
 
 def read_own_context():

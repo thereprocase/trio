@@ -756,7 +756,11 @@ def nth_connect(
             session_pid = int(os.environ.get("CLAUDE_PID") or os.getpid())
         except (TypeError, ValueError):
             session_pid = None
-        session_fingerprint = os.environ.get("CLAUDE_SESSION_ID", "")[:64]
+        # CLAUDE_CODE_SESSION_ID is what Claude Code actually exports to
+        # spawned processes; the old CLAUDE_SESSION_ID name never existed,
+        # so fingerprints were silently empty since v6.2.
+        session_fingerprint = (os.environ.get("CLAUDE_CODE_SESSION_ID")
+                               or os.environ.get("CLAUDE_SESSION_ID", ""))[:64]
         session_token = _mint_session_token(
             db, member_id, channel,
             role="primary", fingerprint=session_fingerprint, pid=session_pid,
