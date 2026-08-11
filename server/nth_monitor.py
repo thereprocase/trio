@@ -168,6 +168,7 @@ def should_wake(member_id, mentions_raw, refs_raw, bangs_raw, filter_mode):
 
 def monitor(channel, member_id, filter_mode="all", _db_path=None):
     local_hwm = None
+    member_missing_streak = 0
     cadence_fired = False
     keepalive_fired = False
     last_heartbeat_mono = 0.0
@@ -200,9 +201,26 @@ def monitor(channel, member_id, filter_mode="all", _db_path=None):
                 ).fetchone()
 
                 if not member:
+                    # A missing member usually means the WRONG DB, not a race:
+                    # a quartet spoke pointed the hub-style monitor at its
+                    # local (often stub) DB. Exit with a pointer instead of
+                    # waking the agent every 10s forever.
+                    member_missing_streak += 1
+                    if member_missing_streak >= 3:
+                        emit({
+                            "event": "error",
+                            "msg": (
+                                "Member not found after 3 checks — this DB "
+                                "likely never had the channel (quartet "
+                                "spokes: use nth_spoke_monitor.py --url "
+                                "<hub sse url>). Exiting."
+                            ),
+                        })
+                        sys.exit(1)
                     emit({"event": "error", "msg": "Member not found in channel."})
                     time.sleep(10)
                     continue
+                member_missing_streak = 0
 
                 ch = db.execute(
                     "SELECT status, ended_by FROM channels WHERE code = ?",

@@ -514,8 +514,12 @@ def monitor(client, channel, member_id, filter_mode, session_token,
             consecutive_poll_errors = 0
         except Exception as e:
             consecutive_poll_errors += 1
-            emit({"event": "error",
-                  "msg": f"poll failed ({consecutive_poll_errors}): {e}"})
+            # First failure stays silent: the SSE client self-heals on retry
+            # (hub restarts, transient EOFs) and every error event wakes the
+            # subscribing agent. Only sustained failure is worth a turn.
+            if consecutive_poll_errors >= 2:
+                emit({"event": "error",
+                      "msg": f"poll failed ({consecutive_poll_errors}): {e}"})
             time.sleep(min(2 * consecutive_poll_errors, 30))
             continue
 
@@ -585,8 +589,9 @@ def monitor(client, channel, member_id, filter_mode, session_token,
             consecutive_status_errors = 0
         except Exception as e:
             consecutive_status_errors += 1
-            emit({"event": "error",
-                  "msg": f"status failed ({consecutive_status_errors}): {e}"})
+            if consecutive_status_errors >= 2:
+                emit({"event": "error",
+                      "msg": f"status failed ({consecutive_status_errors}): {e}"})
             continue
 
         if not isinstance(status, dict):
