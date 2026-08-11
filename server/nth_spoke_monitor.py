@@ -66,6 +66,7 @@ CADENCE_THRESHOLD    = 600           # 10 min
 KEEPALIVE_THRESHOLD  = 55 * 60       # 55 min
 KEEPALIVE_GIVEUP    = 7 * 3600      # 7 h
 RECONNECT_BACKOFF    = [1, 2, 5, 10, 30, 60]
+SSE_READ_TIMEOUT     = 90            # server pings ~15s; 90s silent = dead socket
 
 # Sleeping-mode keywords: import the canonical set when the script runs from
 # the installed server dir (its normal home), fall back to a verbatim copy so
@@ -199,6 +200,7 @@ class MCPSSEClient:
         self._id_lock = threading.Lock()
         self._stop = threading.Event()
         self._sse_thread = None
+        self._active_conn = None
         self._initialized = threading.Event()
         self._init_lock = threading.Lock()
 
@@ -233,6 +235,17 @@ class MCPSSEClient:
 
     def close(self):
         self._stop.set()
+        self.force_reconnect()
+
+    def force_reconnect(self):
+        """Close the live SSE socket so the reader thread unblocks and runs
+        its normal reconnect path. Safe to call from any thread."""
+        conn = self._active_conn
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
     # ---- SSE reader thread ---------------------------------------------
     def _sse_loop(self):
@@ -279,7 +292,9 @@ class MCPSSEClient:
                 time.sleep(0.5)
 
     def _open_sse(self):
-        conn = self._make_conn(timeout=None)
+        # A read timeout is the ONLY reliable dead-hub detector: a restart
+        # that skips the FIN leaves readline() blocking forever otherwise.
+        conn = self._make_conn(timeout=SSE_READ_TIMEOUT)
         try:
             conn.request("GET", self.sse_path, headers={
                 "Accept": "text/event-stream",
@@ -297,6 +312,7 @@ class MCPSSEClient:
             raise RuntimeError(f"SSE GET {self.sse_path}: HTTP {resp.status} {body!r}")
         # Store response on conn so caller can close later
         conn._sse_resp = resp
+        self._active_conn = conn
         return conn
 
     def _read_sse(self, conn):
@@ -520,6 +536,10 @@ def monitor(client, channel, member_id, filter_mode, session_token,
             if consecutive_poll_errors >= 2:
                 emit({"event": "error",
                       "msg": f"poll failed ({consecutive_poll_errors}): {e}"})
+            if "Not connected" in str(e) and consecutive_poll_errors >= 2:
+                # The reader thread is wedged (dead socket, no EOF). Kick it:
+                # closing the socket forces its reconnect path to run.
+                client.force_reconnect()
             time.sleep(min(2 * consecutive_poll_errors, 30))
             continue
 
