@@ -645,11 +645,13 @@ class EventHub:
             # Context %: match any of the member's session fingerprints
             # (CLAUDE_SESSION_IDs) against the statusline publisher files.
             context_pct = None
+            context_full = None
             fps = r["fingerprints"] if "fingerprints" in r.keys() else None
             if fps and ctx_usage:
                 for fp in str(fps).split(","):
                     if fp in ctx_usage:
-                        context_pct = ctx_usage[fp]
+                        context_full = ctx_usage[fp]
+                        context_pct = float(context_full["used_pct"])
                         break
             aname, aemoji = avatars.get(r["id"], animal_for(r["id"]))
             out.append({
@@ -661,6 +663,7 @@ class EventHub:
                 "filter_mode": fm or "all",
                 "status": member_status(effective_last_seen, r["status_text"] or ""),
                 "context_pct": context_pct,
+                "context": context_full,
                 "animal_name": aname,
                 "animal_emoji": aemoji,
             })
@@ -787,10 +790,10 @@ def _read_context_snapshots() -> List[Dict[str, Any]]:
     return out
 
 
-def _read_context_usage() -> Dict[str, float]:
-    """{claude_session_id: used_pct} for fresh (<60s) publisher files."""
+def _read_context_usage() -> Dict[str, Dict[str, Any]]:
+    """{claude_session_id: full snapshot dict} for fresh (<60s) files."""
     return {
-        d["session_id"]: float(d["used_pct"])
+        d["session_id"]: d
         for d in _read_context_snapshots()
         if d["_age_s"] <= CONTEXT_USAGE_STALE_S
         and isinstance(d.get("used_pct"), (int, float))
@@ -859,6 +862,7 @@ def _landing_snapshot(db_path: Path) -> Dict[str, Any]:
                 "members": len(hbs), "live": live, "msgs": msgs,
                 "last_msg_age_s": age_s(last_msg),
             })
+        out["context_sessions"] = _read_context_snapshots()
         out["channels"].sort(
             key=lambda c: (c["status"] != "active",
                            c["last_msg_age_s"] if c["last_msg_age_s"] is not None
@@ -1499,6 +1503,7 @@ INDEX_HTML = r"""<!doctype html>
                    transition: transform 0.35s ease;
                    text-shadow: 0 0 2px var(--bg), 0 0 2px var(--bg); }
   .watermark-pin.self { filter: drop-shadow(0 0 3px var(--accent)); }
+  .watermark-pin.ctx-ringed { border-radius: 50%; padding: 2px; }
   .watermark-pin.here { animation: here-pulse 1.8s ease-in-out infinite; }
   @keyframes here-pulse {
     0%, 100% { transform: translateX(0); opacity: 0.95; }
@@ -1799,14 +1804,14 @@ INDEX_HTML = r"""<!doctype html>
   </div>
 
   <aside id="side">
+    <section id="ctx-wrap">
+      <h2>Context</h2>
+      <div id="ctx-list"></div>
+    </section>
     <section>
       <div id="filter-banner">filter active — showing matching messages only. click to clear.</div>
       <h2 id="r-heading">Members</h2>
       <div id="r-list"></div>
-    </section>
-    <section id="ctx-wrap">
-      <h2>Context</h2>
-      <div id="ctx-list"></div>
     </section>
     <section id="chanstats-wrap">
       <h2>Channel stats</h2>
@@ -2772,6 +2777,10 @@ INDEX_HTML = r"""<!doctype html>
     // before any render path that looks up avatars by id.
     rememberAvatars(members);
 
+    // Per-member context (fingerprint-joined server-side): drives the
+    // ring on each member's watermark pin.
+    state.contextByMember = new Map(
+      members.filter(m => m.context_pct != null).map(m => [m.id, m.context_pct]));
     // Reconcile state.members — and detect name changes so the chat can
     // retroactively re-label past messages from the renamed member.
     const rename_from = new Map();  // id → old member_name for messages
@@ -2857,6 +2866,14 @@ INDEX_HTML = r"""<!doctype html>
       pin.className = 'watermark-pin' + (mid === state.operator.id ? ' self' : '');
       pin.textContent = a.emoji;
       pin.title = `${mem.name} — the ${a.name} — read through #${lr}`;
+      const cpct = state.contextByMember && state.contextByMember.get(mid);
+      if (cpct != null) {
+        const cc = cpct >= 80 ? 'var(--err)' : cpct >= 60 ? 'var(--warn)' : 'var(--accent2)';
+        pin.classList.add('ctx-ringed');
+        pin.style.background =
+          `conic-gradient(${cc} ${Math.round(cpct)}%, var(--border) 0)`;
+        pin.title += ` — context ${Math.round(cpct)}%`;
+      }
       c.appendChild(pin);
     }
   }
@@ -2983,6 +3000,16 @@ INDEX_HTML = r"""<!doctype html>
     }
     if (snippet) {
       html += `<div class="snippet" title="${escapeHtml(snippet)}">${escapeHtml(snippet)}</div>`;
+    }
+    if (m.context) {
+      html += `<div class="stat-row"><span class="stat-label" style="color:var(--accent2)">— statusline —</span><span class="stat-val"></span></div>`;
+      for (const [k, v] of Object.entries(m.context)) {
+        if (k === 'session_id') continue;
+        const shown = (v !== null && typeof v === 'object')
+          ? JSON.stringify(v) : String(v);
+        html += `<div class="stat-row"><span class="stat-label">${escapeHtml(k)}</span>`
+             +  `<span class="stat-val" style="word-break:break-all">${escapeHtml(shown)}</span></div>`;
+      }
     }
     return html;
   }
@@ -3921,6 +3948,17 @@ LANDING_HTML = r"""<!doctype html>
   tr.ended td { color: var(--dim); }
   #err { color: var(--bad); margin-top: 1rem; display: none; }
   footer { color: var(--dim); font-size: .72rem; margin-top: 2rem; }
+  #ctx-strip { display: flex; flex-wrap: wrap; gap: .9rem; }
+  .ctxs { display: flex; align-items: center; gap: .5rem;
+          background: var(--panel); border: 1px solid var(--border);
+          border-radius: 8px; padding: .35rem .6rem; }
+  .ctxs svg { width: 34px; height: 34px; transform: rotate(-90deg); flex: none; }
+  .ctxs .track { fill: none; stroke: var(--border); stroke-width: 4; }
+  .ctxs .arc { fill: none; stroke-width: 4; stroke-linecap: round; }
+  .ctxs .who { font-size: .8rem; }
+  .ctxs .sub { font-size: .68rem; color: var(--dim); }
+  .ctxs.stale { opacity: .45; }
+  #ctx-strip .none { color: var(--dim); font-size: .8rem; }
 </style>
 </head>
 <body>
@@ -3929,6 +3967,8 @@ LANDING_HTML = r"""<!doctype html>
 </header>
 <div id="strip"></div>
 <div id="err"></div>
+<h2>Sessions <span class="dim" style="font-size:.65rem">(this host)</span></h2>
+<div id="ctx-strip"></div>
 <h2>Nodes</h2>
 <table id="nodes"><thead><tr>
   <th>host</th><th>transport</th><th>version</th><th>python</th><th class="num">seen</th>
@@ -3984,6 +4024,46 @@ LANDING_HTML = r"""<!doctype html>
       pill('nodes ' + liveNodes + '/' + d.nodes.length + ' live',
            liveNodes ? 'ok' : 'warn'),
     );
+
+    const ctxStrip = document.getElementById('ctx-strip');
+    const CIRC = 2 * Math.PI * 14;
+    const sessions = d.context_sessions || [];
+    if (!sessions.length) {
+      const none = document.createElement('span');
+      none.className = 'none';
+      none.textContent = 'no publishing sessions on this host';
+      ctxStrip.replaceChildren(none);
+    } else {
+      ctxStrip.replaceChildren(...sessions.map(s => {
+        const pct = Math.round(s.used_pct || 0);
+        const card = document.createElement('div');
+        card.className = 'ctxs' + ((s._age_s || 0) > 30 ? ' stale' : '');
+        const svgNS = 'http://www.w3.org/2000/svg';
+        const svg = document.createElementNS(svgNS, 'svg');
+        svg.setAttribute('viewBox', '0 0 36 36');
+        const track = document.createElementNS(svgNS, 'circle');
+        track.setAttribute('class', 'track');
+        ['cx','cy','r'].forEach((a,i)=>track.setAttribute(a,[18,18,14][i]));
+        const arc = document.createElementNS(svgNS, 'circle');
+        arc.setAttribute('class', 'arc');
+        ['cx','cy','r'].forEach((a,i)=>arc.setAttribute(a,[18,18,14][i]));
+        arc.setAttribute('stroke', pct >= 80 ? 'var(--bad)' : pct >= 60 ? 'var(--warn)' : 'var(--ok)');
+        arc.setAttribute('stroke-dasharray', String(CIRC));
+        arc.setAttribute('stroke-dashoffset', String(CIRC * (1 - pct / 100)));
+        svg.append(track, arc);
+        const info = document.createElement('div');
+        const who = document.createElement('div');
+        who.className = 'who';
+        who.textContent = (s.session_name || s.session_id || '?') + ' · ' + pct + '%';
+        const sub = document.createElement('div');
+        sub.className = 'sub';
+        const cw = s.cw_size >= 1e6 ? (s.cw_size/1e6) + 'M' : Math.round((s.cw_size||0)/1e3) + 'k';
+        sub.textContent = (s.model || '').replace(/^claude-/, '') + ' · ' + cw;
+        info.append(who, sub);
+        card.append(svg, info);
+        return card;
+      }));
+    }
 
     const ntb = document.querySelector('#nodes tbody');
     ntb.replaceChildren(...d.nodes.map(n => {
