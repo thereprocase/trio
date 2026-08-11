@@ -53,7 +53,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, urlparse
 
 sys.path.insert(0, str(Path(__file__).parent))
-from nth_constants import ANIMAL_EMOJIS, animal_for, animal_for_channel
+from nth_constants import ANIMAL_EMOJIS, animal_for, animal_for_channel, NTH_VERSION
 
 
 # ───────── Config ─────────
@@ -724,12 +724,133 @@ class EventHub:
                 pass
 
 
+# ───────── Landing snapshot ─────────
+def _landing_snapshot(db_path: Path) -> Dict[str, Any]:
+    """Everything the landing page needs in one JSON read: DB health, node
+    check-ins, per-channel liveness. Counts, names, and ages only — the
+    landing page never ships message content."""
+    now = datetime.now(timezone.utc)
+
+    def age_s(iso: Optional[str]) -> Optional[int]:
+        if not iso:
+            return None
+        try:
+            ts = datetime.fromisoformat(iso)
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            return max(0, int((now - ts).total_seconds()))
+        except ValueError:
+            return None
+
+    out: Dict[str, Any] = {
+        "version": NTH_VERSION,
+        "host": socket.gethostname(),
+        "db": str(db_path),
+        "db_ok": False,
+        "time": now.isoformat(),
+        "nodes": [],
+        "channels": [],
+    }
+    try:
+        db = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=2)
+        db.row_factory = sqlite3.Row
+    except sqlite3.Error as e:
+        out["error"] = type(e).__name__
+        return out
+    try:
+        try:
+            for r in db.execute(
+                    "SELECT hostname, transport, nth_version, python, last_seen "
+                    "FROM nodes ORDER BY last_seen DESC"):
+                a = age_s(r["last_seen"])
+                out["nodes"].append({
+                    "hostname": r["hostname"], "transport": r["transport"],
+                    "nth_version": r["nth_version"], "python": r["python"],
+                    "age_s": a, "live": a is not None and a < STALE_SECONDS,
+                })
+        except sqlite3.OperationalError:
+            pass  # pre-v7.3 DB: no nodes table yet
+
+        for ch in db.execute(
+                "SELECT code, status FROM channels ORDER BY code").fetchall():
+            hbs = [m["messenger_heartbeat"] for m in db.execute(
+                "SELECT messenger_heartbeat FROM members WHERE channel = ?",
+                (ch["code"],)).fetchall()]
+            live = sum(1 for hb in hbs
+                       if (a := age_s(hb)) is not None and a < STALE_SECONDS)
+            msgs, last_msg = db.execute(
+                "SELECT COUNT(*), MAX(created_at) FROM messages WHERE channel = ?",
+                (ch["code"],)).fetchone()
+            out["channels"].append({
+                "code": ch["code"], "status": ch["status"],
+                "members": len(hbs), "live": live, "msgs": msgs,
+                "last_msg_age_s": age_s(last_msg),
+            })
+        out["channels"].sort(
+            key=lambda c: (c["status"] != "active",
+                           c["last_msg_age_s"] if c["last_msg_age_s"] is not None
+                           else float("inf")))
+        out["db_ok"] = True
+    except sqlite3.Error as e:
+        out["error"] = type(e).__name__
+    finally:
+        try:
+            db.close()
+        except sqlite3.Error:
+            pass
+    return out
+
+
 # ───────── HTTP handler ─────────
+CHANNEL_CODE_RE = re.compile(r"^[a-z0-9][a-z0-9\-]{0,31}$")
+
+
 class NthWebHandler(BaseHTTPRequestHandler):
     # Populated in main()
     hub: Optional[EventHub] = None
     channel: str = ""
     db_path: Path = DB_PATH
+    # Landing mode (no channel argument): / serves the fleet/channel index,
+    # /c/<code> serves the per-channel app, and API requests carry their
+    # channel in a ?channel= query param. EventHubs are created lazily, one
+    # per channel viewed, and poll for the life of the process.
+    landing_mode: bool = False
+    hubs: Dict[str, EventHub] = {}
+    hubs_lock = threading.Lock()
+
+    def _channel_for_request(self, parsed) -> Optional[str]:
+        """Channel an API request addresses. None = missing/invalid."""
+        if not self.landing_mode:
+            return self.channel
+        code = (parse_qs(parsed.query).get("channel") or [""])[0]
+        if not CHANNEL_CODE_RE.match(code or ""):
+            return None
+        return code
+
+    def _hub_for_channel(self, code: str) -> EventHub:
+        if not self.landing_mode:
+            assert self.hub is not None
+            return self.hub
+        cls = NthWebHandler
+        with cls.hubs_lock:
+            hub = cls.hubs.get(code)
+            if hub is None:
+                hub = EventHub(self.db_path, code)
+                hub.start()
+                cls.hubs[code] = hub
+            return hub
+
+    def _channel_exists(self, code: str) -> bool:
+        try:
+            db = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True, timeout=2)
+            try:
+                return db.execute(
+                    "SELECT 1 FROM channels WHERE code = ?", (code,)
+                ).fetchone() is not None
+            finally:
+                db.close()
+        except sqlite3.Error:
+            return False
 
     # Suppress default noisy logging
     def log_message(self, fmt: str, *args) -> None:
@@ -809,11 +930,32 @@ class NthWebHandler(BaseHTTPRequestHandler):
         if path == "/" or path == "/index.html":
             # Mint a cookie on first visit so /api/meta + /api/events carry it.
             token, _ident, is_new = self._resolve_identity()
-            self._serve_html(INDEX_HTML, set_cookie_token=token if is_new else None)
+            body = LANDING_HTML if self.landing_mode else INDEX_HTML
+            self._serve_html(body, set_cookie_token=token if is_new else None)
+        elif self.landing_mode and path.startswith("/c/"):
+            code = path[3:].rstrip("/")
+            if not CHANNEL_CODE_RE.match(code):
+                self._error(404, "bad channel code")
+                return
+            if not self._channel_exists(code):
+                self._error(404, f"no such channel: {code}")
+                return
+            token, _ident, is_new = self._resolve_identity()
+            # The channel code passed CHANNEL_CODE_RE, so this substitution
+            # cannot inject into the script context.
+            body = INDEX_HTML.replace(
+                "/*__API_QS__*/''", json.dumps(f"?channel={code}"))
+            self._serve_html(body, set_cookie_token=token if is_new else None)
+        elif self.landing_mode and path == "/api/landing":
+            self._json(_landing_snapshot(self.db_path))
         elif path == "/api/meta":
+            ch = self._channel_for_request(parsed)
+            if ch is None:
+                self._error(400, "channel query param required")
+                return
             token, ident, is_new = self._resolve_identity()
             self._json({
-                "channel": self.channel,
+                "channel": ch,
                 "operator": {
                     "id": ident.member_id,
                     "name": ident.display_name,
@@ -823,7 +965,11 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 "server_host": socket.gethostname(),
             }, set_cookie_token=token if is_new else None)
         elif path == "/api/events":
-            self._serve_sse()
+            ch = self._channel_for_request(parsed)
+            if ch is None:
+                self._error(400, "channel query param required")
+                return
+            self._serve_sse(self._hub_for_channel(ch))
         else:
             self._error(404, "not found")
 
@@ -862,8 +1008,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
     def _error(self, status: int, msg: str) -> None:
         self._json({"error": msg}, status=status)
 
-    def _serve_sse(self) -> None:
-        assert self.hub is not None
+    def _serve_sse(self, hub: EventHub) -> None:
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-store")
@@ -871,7 +1016,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
         self.send_header("X-Accel-Buffering", "no")
         self.end_headers()
 
-        q = self.hub.subscribe()
+        q = hub.subscribe()
         try:
             last_heartbeat = time.monotonic()
             while True:
@@ -890,7 +1035,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError, OSError):
             pass
         finally:
-            self.hub.unsubscribe(q)
+            hub.unsubscribe(q)
 
     def _read_json_body(self, max_bytes: int = 16384) -> Optional[Dict[str, Any]]:
         length = int(self.headers.get("Content-Length", "0") or 0)
@@ -933,6 +1078,13 @@ class NthWebHandler(BaseHTTPRequestHandler):
         }, set_cookie_token=token)
 
     def _handle_send(self) -> None:
+        send_channel = self._channel_for_request(urlparse(self.path))
+        if send_channel is None:
+            self._error(400, "channel query param required")
+            return
+        if self.landing_mode and not self._channel_exists(send_channel):
+            self._error(404, f"no such channel: {send_channel}")
+            return
         body = self._read_json_body()
         if body is None:
             return
@@ -965,7 +1117,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
             db.execute("PRAGMA busy_timeout=5000")
             db.execute("BEGIN IMMEDIATE")
             try:
-                op_id, op_name = ensure_operator_row(db, self.channel, ident)
+                op_id, op_name = ensure_operator_row(db, send_channel, ident)
                 now = now_iso()
 
                 # Leading "$task " marks this as a claimable task — same
@@ -990,7 +1142,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
                         "INSERT INTO tasks (channel, posted_by, status, description, "
                         " blocked_by, created_at, updated_at) "
                         "VALUES (?, ?, 'open', ?, '[]', ?, ?)",
-                        (self.channel, op_id, task_body, now, now),
+                        (send_channel, op_id, task_body, now, now),
                     )
                     task_id = tcur.lastrowid
                     posted_content = f"[task #{task_id}] {task_body}"
@@ -999,14 +1151,14 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 # matching nth_send's behavior so web-operator posts carry the
                 # same wake semantics as MCP-agent posts.
                 mention_ids, ref_ids, bang_ids = _parse_sigils_against_roster(
-                    db, self.channel, posted_content
+                    db, send_channel, posted_content
                 )
                 cursor = db.execute(
                     "INSERT INTO messages "
                     "(channel, member_id, member_name, content, created_at, "
                     " mentions, refs, bangs) "
                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    (self.channel, op_id, op_name, posted_content, now,
+                    (send_channel, op_id, op_name, posted_content, now,
                      json.dumps(mention_ids) if mention_ids else "",
                      json.dumps(ref_ids)     if ref_ids     else "",
                      json.dumps(bang_ids)    if bang_ids    else ""),
@@ -1014,7 +1166,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 msg_id = cursor.lastrowid
                 db.execute(
                     "UPDATE members SET last_seen = ? WHERE channel = ? AND id = ?",
-                    (now, self.channel, op_id),
+                    (now, send_channel, op_id),
                 )
                 db.execute("COMMIT")
             except sqlite3.Error:
@@ -1601,6 +1753,11 @@ INDEX_HTML = r"""<!doctype html>
   const URL_PARAMS = new URLSearchParams(location.search);
   const DM_TARGET_ID = URL_PARAMS.get('dm') || '';
   const DM_MODE = !!DM_TARGET_ID;
+  // Landing-mode multiplexing: when this page is served at /c/<code>, the
+  // server substitutes a "?channel=<code>" query string here so every API
+  // call names its channel. Single-channel mode leaves it '' (the server
+  // already knows its one channel) — the token below is valid JS as-is.
+  const API_QS = /*__API_QS__*/'';
 
   // ── State ──
   const state = {
@@ -2912,7 +3069,7 @@ INDEX_HTML = r"""<!doctype html>
     }
     sendBtn.disabled = true;
     try {
-      const r = await fetch('/api/send', {
+      const r = await fetch('/api/send' + API_QS, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ content: text, mentions: mentionIds }),
@@ -3325,7 +3482,7 @@ INDEX_HTML = r"""<!doctype html>
   let reconnectTimer = null;
   function connect() {
     if (es) try { es.close(); } catch (e) {}
-    es = new EventSource('/api/events');
+    es = new EventSource('/api/events' + API_QS);
     es.onopen = () => {
       hConn.textContent = '● connected';
       hConn.classList.remove('bad');
@@ -3382,7 +3539,7 @@ INDEX_HTML = r"""<!doctype html>
     const name = (field.value || '').trim();
     if (!name) { err.textContent = 'Name is required.'; return null; }
     try {
-      const r = await fetch('/api/identify', {
+      const r = await fetch('/api/identify' + API_QS, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name }),
@@ -3422,7 +3579,7 @@ INDEX_HTML = r"""<!doctype html>
   // ── Bootstrap ──
   async function boot() {
     try {
-      const r = await fetch('/api/meta');
+      const r = await fetch('/api/meta' + API_QS);
       const meta = await r.json();
       state.channel = meta.channel;
       state.server_host = meta.server_host;
@@ -3466,6 +3623,169 @@ INDEX_HTML = (
 )
 
 
+# ───────── Landing page (served as / in landing mode) ─────────
+# Fleet strip + node check-ins + channel index. Renders exclusively through
+# DOM APIs (textContent) — channel codes and hostnames are DB strings and
+# must never hit innerHTML.
+LANDING_HTML = r"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>nth — fleet</title>
+<style>
+  :root {
+    --bg: #101318; --panel: #171b22; --border: #262c37;
+    --fg: #d7dde6; --dim: #79839a; --accent: #62d7ef;
+    --ok: #7ede7e; --warn: #e5d35e; --bad: #ff8470;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 14px/1.45 ui-monospace, "JetBrains Mono", Menlo, Consolas, monospace;
+    padding: 1.2rem; max-width: 900px; margin-inline: auto;
+  }
+  h1 { font-size: 1.05rem; margin: 0; letter-spacing: .04em; }
+  h1 .v { color: var(--dim); font-weight: normal; font-size: .85rem; }
+  h2 { font-size: .8rem; color: var(--dim); text-transform: uppercase;
+       letter-spacing: .12em; margin: 1.6rem 0 .5rem; }
+  header { display: flex; align-items: baseline; gap: .8rem; flex-wrap: wrap; }
+  #strip { display: flex; gap: .5rem; flex-wrap: wrap; margin-top: .9rem; }
+  .pill { background: var(--panel); border: 1px solid var(--border);
+          border-radius: 999px; padding: .15rem .7rem; font-size: .8rem; }
+  .pill b { font-weight: 600; }
+  .ok   { color: var(--ok); }
+  .warn { color: var(--warn); }
+  .bad  { color: var(--bad); }
+  .dim  { color: var(--dim); }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: .3rem .6rem; font-size: .85rem;
+           border-bottom: 1px solid var(--border); }
+  th { color: var(--dim); font-weight: normal; font-size: .72rem;
+       text-transform: uppercase; letter-spacing: .1em; }
+  td.num, th.num { text-align: right; }
+  .dot { display: inline-block; width: .55em; height: .55em;
+         border-radius: 50%; margin-right: .45em; vertical-align: baseline; }
+  .dot.live  { background: var(--ok); }
+  .dot.idle  { background: var(--dim); }
+  .dot.ended { background: transparent; border: 1px solid var(--dim); }
+  a.chan { color: var(--accent); text-decoration: none; }
+  a.chan:hover { text-decoration: underline; }
+  tr.ended td { color: var(--dim); }
+  #err { color: var(--bad); margin-top: 1rem; display: none; }
+  footer { color: var(--dim); font-size: .72rem; margin-top: 2rem; }
+</style>
+</head>
+<body>
+<header>
+  <h1>nth <span class="dim">//</span> fleet <span class="v" id="hdr-host"></span></h1>
+</header>
+<div id="strip"></div>
+<div id="err"></div>
+<h2>Nodes</h2>
+<table id="nodes"><thead><tr>
+  <th>host</th><th>transport</th><th>version</th><th>python</th><th class="num">seen</th>
+</tr></thead><tbody></tbody></table>
+<h2>Channels</h2>
+<table id="channels"><thead><tr>
+  <th>channel</th><th class="num">members</th><th class="num">live</th>
+  <th class="num">msgs</th><th class="num">activity</th>
+</tr></thead><tbody></tbody></table>
+<footer id="foot"></footer>
+<script>
+  function ageStr(s) {
+    if (s === null || s === undefined) return 'never';
+    if (s < 90) return s + 's';
+    if (s < 5400) return Math.floor(s / 60) + 'm';
+    if (s < 172800) return (s / 3600).toFixed(1) + 'h';
+    return (s / 86400).toFixed(1) + 'd';
+  }
+  function pill(html_free_text, cls) {
+    const el = document.createElement('span');
+    el.className = 'pill' + (cls ? ' ' + cls : '');
+    el.textContent = html_free_text;
+    return el;
+  }
+  function td(text, cls) {
+    const el = document.createElement('td');
+    if (cls) el.className = cls;
+    el.textContent = text;
+    return el;
+  }
+  async function refresh() {
+    let d;
+    try {
+      const r = await fetch('/api/landing');
+      d = await r.json();
+    } catch (e) {
+      document.getElementById('err').style.display = 'block';
+      document.getElementById('err').textContent = 'landing fetch failed: ' + e;
+      return;
+    }
+    document.getElementById('err').style.display = 'none';
+    document.getElementById('hdr-host').textContent =
+      d.host + ' · v' + d.version;
+
+    const liveMembers = d.channels.reduce((a, c) => a + c.live, 0);
+    const liveNodes = d.nodes.filter(n => n.live).length;
+    const activeCh = d.channels.filter(c => c.status === 'active').length;
+    const strip = document.getElementById('strip');
+    strip.replaceChildren(
+      pill(d.db_ok ? 'db ok' : 'DB DOWN', d.db_ok ? 'ok' : 'bad'),
+      pill(activeCh + ' active channels'),
+      pill(liveMembers + ' live members', liveMembers ? 'ok' : ''),
+      pill('nodes ' + liveNodes + '/' + d.nodes.length + ' live',
+           liveNodes ? 'ok' : 'warn'),
+    );
+
+    const ntb = document.querySelector('#nodes tbody');
+    ntb.replaceChildren(...d.nodes.map(n => {
+      const tr = document.createElement('tr');
+      const hostCell = td('');
+      const dot = document.createElement('span');
+      dot.className = 'dot ' + (n.live ? 'live' : 'idle');
+      hostCell.append(dot, document.createTextNode(n.hostname));
+      tr.append(hostCell, td(n.transport),
+                td(n.nth_version ? 'v' + n.nth_version : '?'),
+                td(n.python || '?'),
+                td(ageStr(n.age_s), 'num ' + (n.live ? 'ok' : 'dim')));
+      return tr;
+    }));
+
+    const ctb = document.querySelector('#channels tbody');
+    ctb.replaceChildren(...d.channels.map(c => {
+      const tr = document.createElement('tr');
+      if (c.status === 'ended') tr.className = 'ended';
+      const cCell = td('');
+      const dot = document.createElement('span');
+      dot.className = 'dot ' +
+        (c.status === 'ended' ? 'ended' : (c.live > 0 ? 'live' : 'idle'));
+      const a = document.createElement('a');
+      a.className = 'chan';
+      a.href = '/c/' + encodeURIComponent(c.code);
+      a.textContent = c.code;
+      cCell.append(dot, a);
+      if (c.status === 'ended') {
+        cCell.append(document.createTextNode(' (ended)'));
+      }
+      tr.append(cCell, td(String(c.members), 'num'),
+                td(String(c.live), 'num ' + (c.live ? 'ok' : 'dim')),
+                td(String(c.msgs), 'num'),
+                td(ageStr(c.last_msg_age_s), 'num'));
+      return tr;
+    }));
+
+    document.getElementById('foot').textContent =
+      'db: ' + d.db + ' · refreshed ' + new Date().toLocaleTimeString();
+  }
+  refresh();
+  setInterval(refresh, 5000);
+</script>
+</body>
+</html>
+"""
+
+
 # ───────── Entry ─────────
 class QuietThreadingHTTPServer(ThreadingHTTPServer):
     """Ignore expected disconnects from tab closes, refreshes, and SSE retries."""
@@ -3482,7 +3802,10 @@ class QuietThreadingHTTPServer(ThreadingHTTPServer):
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Web dashboard for a trio channel.")
-    ap.add_argument("channel", help="Channel code to observe.")
+    ap.add_argument("channel", nargs="?", default=None,
+                    help="Channel code to observe. Omit to serve the landing "
+                         "page instead: fleet health + channel index at /, "
+                         "with every channel's dashboard at /c/<code>.")
     ap.add_argument("--host", default=None,
                     help="Interface to bind. Default 127.0.0.1. "
                          "Use --tailnet to bind 0.0.0.0 instead.")
@@ -3504,12 +3827,16 @@ def main() -> int:
     if host is None:
         host = "0.0.0.0" if args.tailnet else "127.0.0.1"
 
-    # Spin up the event hub before serving.
-    hub = EventHub(db_path, args.channel)
-    hub.start()
-
-    NthWebHandler.hub = hub
-    NthWebHandler.channel = args.channel
+    # Single-channel mode spins up its one event hub before serving.
+    # Landing mode creates hubs lazily, one per channel actually viewed.
+    hub = None
+    if args.channel:
+        hub = EventHub(db_path, args.channel)
+        hub.start()
+        NthWebHandler.hub = hub
+        NthWebHandler.channel = args.channel
+    else:
+        NthWebHandler.landing_mode = True
     NthWebHandler.db_path = db_path
 
     # Let multiple channel dashboards start without manual port coordination.
@@ -3533,8 +3860,15 @@ def main() -> int:
     # keep the process alive on Ctrl-C.
     server.daemon_threads = True
 
+    def stop_hubs():
+        if hub is not None:
+            hub.stop()
+        with NthWebHandler.hubs_lock:
+            for h in NthWebHandler.hubs.values():
+                h.stop()
+
     def shutdown(_sig=None, _frm=None):
-        hub.stop()
+        stop_hubs()
         threading.Thread(target=server.shutdown, daemon=True).start()
 
     signal.signal(signal.SIGINT, shutdown)
@@ -3542,7 +3876,7 @@ def main() -> int:
     # Banner
     ts_ip = get_tailscale_ip()
     print("nth_web serving:")
-    print(f"  channel:     {args.channel}")
+    print(f"  channel:     {args.channel or '(landing page — all channels at /c/<code>)'}")
     print(f"  db:          {db_path}")
     if port != requested_port:
         print(f"  note:        port {requested_port} was busy — using {port} instead")
@@ -3560,7 +3894,7 @@ def main() -> int:
     except KeyboardInterrupt:
         pass
     finally:
-        hub.stop()
+        stop_hubs()
 
     return 0
 
