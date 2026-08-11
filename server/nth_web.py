@@ -1632,7 +1632,7 @@ INDEX_HTML = r"""<!doctype html>
 
   /* ── Header ── */
   header { grid-column: 1 / 3; background: var(--bg2); border-bottom: 1px solid var(--border);
-           display: flex; align-items: center; padding: 0 14px; gap: 12px;
+           display: flex; align-items: center; padding: 0 16px; gap: 14px;
            font-weight: 600; }
   header .title { color: var(--accent); }
   header .meta { color: var(--dim); font-weight: 400; font-size: 11px; }
@@ -1681,12 +1681,12 @@ INDEX_HTML = r"""<!doctype html>
 
   /* ── Chat ── */
   #chat-wrap { grid-row: 2 / 3; grid-column: 1 / 2; position: relative; overflow: hidden; }
-  #chat { height: 100%; overflow-y: auto; padding: 12px 16px; scroll-behavior: smooth; }
-  .msg { margin-bottom: 10px; word-wrap: break-word; cursor: pointer; padding: 4px 8px 6px;
-         border-radius: var(--card-radius); border-left: 3px solid transparent; margin-left: -8px; }
+  #chat { height: 100%; overflow-y: auto; padding: 14px 18px; scroll-behavior: smooth; }
+  .msg { margin-bottom: 12px; word-wrap: break-word; cursor: pointer; padding: 6px 10px 8px;
+         border-radius: var(--card-radius); border-left: 3px solid transparent; margin-left: -10px; }
   .msg:hover { background: var(--hover); }
-  .msg .head { font-size: 11px; color: var(--dim); margin-bottom: 2px;
-               display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  .msg .head { font-size: 11px; color: var(--dim); margin-bottom: 4px;
+               display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
   .msg .head .time { cursor: help; }
   .msg .author { font-weight: 600; }
   .msg .mentions-bar { font-size: 11px; margin: 2px 0 4px;
@@ -1825,12 +1825,12 @@ INDEX_HTML = r"""<!doctype html>
   #side { grid-row: 2 / 3; grid-column: 2 / 3;
           background: var(--panel); border-left: 1px solid var(--border);
           overflow-y: auto; display: flex; flex-direction: column; }
-  #side section { padding: 10px 12px; border-bottom: 1px solid var(--border); }
+  #side section { padding: 14px 14px; border-bottom: 1px solid var(--border); }
   #side section:last-child { border-bottom: none; }
   #side h2 { font-size: 10px; text-transform: uppercase; color: var(--dim);
-             letter-spacing: 0.08em; margin: 0 0 8px; font-weight: 600; }
+             letter-spacing: 0.08em; margin: 0 0 10px; font-weight: 600; }
 
-  .member { padding: 5px 0; cursor: pointer; }
+  .member { padding: 8px 0; cursor: pointer; }
   .member + .member { border-top: 1px solid var(--border); }
   .member .row { display: flex; align-items: center; gap: 8px; }
   .member .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
@@ -1878,14 +1878,14 @@ INDEX_HTML = r"""<!doctype html>
   .dot.idle { background: var(--dimmer); }
   .dot.stale { background: var(--warn); }
   .dot.dead { background: var(--err); }
-  .member .stext { font-size: 10px; color: var(--dim); margin-top: 2px;
+  .member .stext { font-size: 10px; color: var(--dim); margin-top: 4px;
                    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-                   padding-left: 16px; }
+                   padding-left: 16px; line-height: 1.4; }
 
-  .member .stats { display: none; padding: 8px 0 2px 16px;
+  .member .stats { display: none; padding: 10px 0 4px 16px;
                    font-size: 10px; color: var(--dim); }
   .member.expanded .stats { display: block; }
-  .stats .stat-row { display: flex; justify-content: space-between; padding: 2px 0; gap: 10px; }
+  .stats .stat-row { display: flex; justify-content: space-between; padding: 3px 0; gap: 12px; }
   .stats .stat-label { color: var(--dim); }
   .stats .stat-val { color: var(--fg); font-weight: 600; text-align: right;
                      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -1898,7 +1898,7 @@ INDEX_HTML = r"""<!doctype html>
                     max-height: 54px; overflow: hidden; }
 
   /* Channel stats block */
-  #chanstats .stat-row { display: flex; justify-content: space-between; padding: 3px 0;
+  #chanstats .stat-row { display: flex; justify-content: space-between; padding: 4px 0;
                          font-size: 11px; }
   #chanstats .stat-label { color: var(--dim); }
   #chanstats .stat-val { color: var(--fg); font-weight: 600; }
@@ -1912,7 +1912,7 @@ INDEX_HTML = r"""<!doctype html>
   /* ── Composer (unchanged from v1) ── */
   #composer { grid-row: 3 / 4; grid-column: 1 / 3;
               background: var(--bg2); border-top: 1px solid var(--border);
-              padding: 8px 14px; display: flex; flex-direction: column; gap: 4px; }
+              padding: 10px 16px; display: flex; flex-direction: column; gap: 6px; }
   #preview { font-size: 11px; color: var(--dim); min-height: 14px; }
   #preview .tgt { color: var(--mention); font-weight: 600; }
   /* Horizontal persistent-target selector — pick 1..N claudes (or All) and
