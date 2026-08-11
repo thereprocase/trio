@@ -1318,6 +1318,14 @@ INDEX_HTML = r"""<!doctype html>
     --warn: #f1fa8c; --err: #ff5555; --mention: #ffb86c;
     --hover: #313442; --ov: 255,255,255;
   }
+  :root[data-theme="pve-dark"] {
+    /* ── Proxmox VE Dark ── */
+    --bg: #1a1a1a; --bg2: #262626; --panel: #333; --border: #404040;
+    --fg: #f2f2f2; --dim: #999; --dimmer: #666;
+    --accent: #4db5ff; --accent-hi: #99d5ff; --accent2: #0060a4;
+    --warn: #ffae0b; --err: #ce3c3c; --mention: #ffae0b;
+    --hover: #595959; --ov: 255,255,255;
+  }
   :root[data-theme="solarized"] {
     /* ── Solarized Light ── */
     --bg: #fdf6e3; --bg2: #eee8d5; --panel: #e7e0c9; --border: #d3cbb2;
@@ -1356,6 +1364,7 @@ INDEX_HTML = r"""<!doctype html>
     color: var(--dim); font-weight: 500;
   }
   .pill:hover { border-color: var(--accent); color: var(--fg); }
+  a.pill { text-decoration: none; }
   .pill.on { background: var(--accent); color: var(--bg); border-color: var(--accent); }
   header .pill.conn.ok { color: var(--accent2); }
   header .pill.conn.bad { color: var(--err); }
@@ -1771,6 +1780,7 @@ INDEX_HTML = r"""<!doctype html>
 </div>
 <div id="app">
   <header>
+    <a class="pill" id="btn-home" href="/" title="back to the hub landing page">⌂</a>
     <span class="title" id="h-channel">trio#…</span>
     <span class="meta" id="h-meta">connecting…</span>
     <span class="spacer"></span>
@@ -1779,6 +1789,7 @@ INDEX_HTML = r"""<!doctype html>
         <option value="midnight">Midnight</option>
         <option value="nord">Nord</option>
         <option value="dracula">Dracula</option>
+        <option value="pve-dark">Proxmox</option>
       </optgroup>
       <optgroup label="Light">
         <option value="light">Daylight</option>
@@ -1817,10 +1828,6 @@ INDEX_HTML = r"""<!doctype html>
   </div>
 
   <aside id="side">
-    <section id="ctx-wrap">
-      <h2>Context</h2>
-      <div id="ctx-list"></div>
-    </section>
     <section>
       <div id="filter-banner">filter active — showing matching messages only. click to clear.</div>
       <h2 id="r-heading">Members</h2>
