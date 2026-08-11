@@ -1976,11 +1976,19 @@ INDEX_HTML = r"""<!doctype html>
     #btn-settings { order: 10; font-size: 14px; padding: 3px 8px; }
     #h-conn { order: 11; font-size: 10px; padding: 2px 6px; }
 
-    /* Sidebar: hidden by default, full-overlay when toggled open */
-    #side { display: none !important; position: fixed; inset: 0; z-index: 20;
-            grid-column: 1; grid-row: 2; border-left: none;
+    /* Sidebar: hidden by default, slide-in overlay leaving 60px scrim tap zone */
+    #side { display: none !important; position: fixed; top: 0; bottom: 0; right: 0;
+            width: calc(100vw - 60px); max-width: 320px; z-index: 20;
+            grid-column: 1; grid-row: 2; border-left: 1px solid var(--border);
             overflow-y: auto; padding-top: 48px; }
     #app.mobile-side-open #side { display: flex !important; }
+    /* Close button inside the sidebar on mobile */
+    #mobile-side-close { display: none; position: absolute; top: 10px; right: 10px;
+                         z-index: 21; background: var(--panel); border: 1px solid var(--border);
+                         color: var(--fg); font-size: 18px; width: 32px; height: 32px;
+                         border-radius: 50%; cursor: pointer; line-height: 1;
+                         display: flex; align-items: center; justify-content: center; }
+    #app.mobile-side-open #mobile-side-close { display: flex; }
     /* Scrim behind sidebar overlay */
     #mobile-scrim { display: none; position: fixed; inset: 0; z-index: 19;
                     background: rgba(0,0,0,0.5); }
@@ -2121,6 +2129,7 @@ INDEX_HTML = r"""<!doctype html>
   </div>
 
   <aside id="side">
+    <button id="mobile-side-close" aria-label="Close sidebar">✕</button>
     <section>
       <div id="filter-banner">filter active — showing matching messages only. click to clear.</div>
       <h2 id="r-heading">Members</h2>
@@ -3825,19 +3834,20 @@ INDEX_HTML = r"""<!doctype html>
   // ── Mobile sidebar: overlay with scrim ──
   const mobileScrim = document.getElementById('mobile-scrim');
   const btnMobileRoster = document.getElementById('btn-mobile-roster');
+  const btnMobileClose = document.getElementById('mobile-side-close');
+  function closeMobileSidebar() {
+    appEl.classList.remove('mobile-side-open');
+    btnSide.classList.toggle('on', false);
+    if (btnMobileRoster) btnMobileRoster.classList.toggle('on', false);
+  }
   function toggleMobileSidebar() {
     const open = appEl.classList.toggle('mobile-side-open');
     btnSide.classList.toggle('on', open);
     if (btnMobileRoster) btnMobileRoster.classList.toggle('on', open);
   }
   if (btnMobileRoster) btnMobileRoster.addEventListener('click', toggleMobileSidebar);
-  if (mobileScrim) {
-    mobileScrim.addEventListener('click', () => {
-      appEl.classList.remove('mobile-side-open');
-      btnSide.classList.toggle('on', false);
-      if (btnMobileRoster) btnMobileRoster.classList.toggle('on', false);
-    });
-  }
+  if (btnMobileClose) btnMobileClose.addEventListener('click', closeMobileSidebar);
+  if (mobileScrim) mobileScrim.addEventListener('click', closeMobileSidebar);
   // Auto-collapse sidebar on narrow viewports at load
   if (window.innerWidth <= 768) {
     applySidebar(true);
