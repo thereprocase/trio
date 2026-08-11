@@ -232,5 +232,35 @@ def _register_health_routes():
 
 _register_health_routes()
 
+
+def _run_dual_transport():
+    """Serve BOTH MCP transports on one port.
+
+    - /sse + /messages — legacy SSE (Claude Code registrations, nth_spoke_monitor)
+    - /mcp            — streamable HTTP (modern clients: Codex's rmcp POSTs
+                        here; POSTing to /sse gets 405, which is how this
+                        gap was found)
+
+    Custom routes (/healthz, /fleet) ride along on the SSE app's route table.
+    The streamable app's lifespan must drive the composite: it starts the
+    session manager task group; the SSE app's lifespan is a no-op default.
+    """
+    import uvicorn
+    from starlette.applications import Starlette
+
+    sse_app = mcp.sse_app()
+    http_app = mcp.streamable_http_app()
+    composite = Starlette(
+        routes=[*http_app.routes, *sse_app.routes],
+        lifespan=http_app.router.lifespan_context,
+    )
+    uvicorn.run(
+        composite,
+        host=mcp.settings.host,
+        port=mcp.settings.port,
+        log_level=mcp.settings.log_level.lower(),
+    )
+
+
 if __name__ == "__main__":
-    mcp.run(transport="sse")
+    _run_dual_transport()
