@@ -484,6 +484,12 @@ if [ "$MODE" = "hub" ]; then
 else
     echo "  /quartet: nth-qweb (SSE -> $HUB_URL)"
     echo "  Python:   $NATIVE_VENV_PY (dedicated venv)"
+    echo ""
+    echo "  Spoke sessions get event-driven wakes (no polling): after"
+    echo "  quartet_connect, launch the command from its monitor_hint field —"
+    echo "  nth_spoke_monitor.py speaking MCP-over-SSE to the hub:"
+    echo "    python3 $SERVER_DIR/nth_spoke_monitor.py CHAN MEMBER_ID --filter about \\"
+    echo "      --url $HUB_URL"
 fi
 echo ""
 echo "  Config: ~/.claude.json (via claude mcp add)"

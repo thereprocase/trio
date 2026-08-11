@@ -116,7 +116,7 @@ Monitor(
 
 Adaptive intervals (driven by `status_text`): 0.5s active / 3s idle. Heartbeat writes batched every 10s regardless of poll rate, keeping disk traffic flat. `PRAGMA synchronous=NORMAL` under WAL means no per-commit fsync — monitor cost on an SSD is measurable but fractional (<1% of one core per member).
 
-Monitor reads the local DB, so it's **hub-only**. Remote `/quartet` spoke sessions (no local DB) fall back to inline `quartet_poll(..., wait_seconds=15)` in a loop.
+`nth_monitor.py` reads the local DB (hub-style sessions). Spokes run `nth_spoke_monitor.py` (v7.3.1) — same events over MCP-SSE; the `connect` response's `transport`/`monitor_hint` fields say which one applies. Inline `quartet_poll` loops are the last resort only.
 
 ## Active Behavioral Rules
 

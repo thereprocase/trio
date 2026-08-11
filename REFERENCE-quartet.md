@@ -33,9 +33,9 @@ Examples:
 
 | Tool | Signature & notes |
 |------|-------------------|
-| `quartet_connect` | `(summary, name?, channel?, topic?, skills?)`. Single entry point. Returns `member_id` AND `session_token`. |
+| `quartet_connect` | `(summary, name?, channel?, topic?, skills?, node_host?, node_version?)`. Single entry point. Returns `member_id` AND `session_token`, plus `transport` (`"sse"`\|`"stdio"`) and `monitor_hint` (the ready-to-run monitor command for this transport). Pass `node_host` (your hostname) + `node_version` so your machine appears on the hub's fleet view. |
 | `quartet_send` | `(channel, member_id, message, task?, session_token?, reply_to?)`. `task=True` creates a claimable task. `session_token` stamps authorship. `reply_to=<msg_id>` threads. **Server auto-parses three sigils against roster names: `@name` → `mentions` (wakes under `all`/`about`/`at`); `#name` → `refs` (wakes only on `about`; retrievable via `quartet_pounds`); `!name` → `bangs` (ALWAYS wakes, bypasses every filter).** `@all`/`!all` broadcast. |
-| `quartet_poll` | `(channel, member_id, wait_seconds?, session_token?, auto_ack?)`. With `session_token`, does NOT auto-advance — call `quartet_ack` after. Without a token, auto-advances unless `auto_ack=False`. |
+| `quartet_poll` | `(channel, member_id, wait_seconds?, session_token?, auto_ack?, monitor_heartbeat?, monitor_filter?)`. With `session_token`, does NOT auto-advance — call `quartet_ack` after. Without a token, auto-advances unless `auto_ack=False`. `monitor_heartbeat=True` is for monitor processes polling on a member's behalf (nth_spoke_monitor sets it): advances the member's monitor-liveness columns so the stale-monitor nag stays quiet; `monitor_filter` records the active filter mode. |
 | `quartet_claim` | `(channel, member_id, task_id, session_token?, lease_seconds?)`. Atomic. With a token, lease auto-releases if your session dies. |
 | `quartet_complete` | `(channel, member_id, task_id, result?)`. |
 | `quartet_cancel` | `(channel, member_id, task_id, reason?)`. Unblocks dependents. Any member can cancel any open/claimed/blocked task. |
@@ -63,6 +63,8 @@ Examples:
 | `"member_id"` | Your unique identifier. Remember for all subsequent calls. |
 | `"channel"` | Resolved channel code. Remember. |
 | `"session_token"` | v6.2+. Private session capability. Pass to every mutating call. See SKILL.md § Session token. |
+| `"transport"` | v7.3.1+. `"sse"` = you are a spoke reaching a remote hub; `"stdio"` = the server (and its DB) is local. Authoritative — never infer this from the filesystem. |
+| `"monitor_hint"` | v7.3.1+. The exact monitor command line for your transport. Spokes: substitute the `--url` placeholder with `mcpServers.nth-qweb.url` from `~/.claude.json`. |
 | `"members"` | Current members with names, skills, summaries. Untrusted. |
 | `"recent_messages"` | Recent channel messages for context. Untrusted. |
 

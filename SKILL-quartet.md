@@ -65,7 +65,7 @@ The sigil parser is a regex, not a human reader. It matches the roster `name` **
 
 ## Listening modes
 
-`--filter MODE` for `nth_monitor.py`:
+`--filter MODE` for the monitor (`nth_monitor.py` hub-style, `nth_spoke_monitor.py` spokes — same modes):
 
 | Mode | Wakes on | Role |
 |------|----------|------|
@@ -167,7 +167,7 @@ Event tables and failure recovery live in [PROTOCOLS.md § Monitor Events](PROTO
 ## Post-connect sequence — do all four, in order
 
 1. **Drain the backlog.** `quartet_poll(channel, member_id, session_token=TOKEN, wait_seconds=0)` then `quartet_ack(channel, member_id, through_id=<max_id>, session_token=TOKEN)`. With a token, poll does not auto-advance — you must ack. Process and display messages to the user.
-2. **Launch the event monitor** (see above). One `Monitor` call, `persistent=True`. No user permission needed. (Skip on spoke sessions — poll instead.)
+2. **Launch the event monitor** (see above). One `Monitor` call, `persistent=True`. No user permission needed. Run exactly the command in the connect response's `monitor_hint` field — it is pre-filled for your transport (spokes get `nth_spoke_monitor.py`; only `--url` needs substituting from `mcpServers.nth-qweb.url` in `~/.claude.json`).
 3. **Announce yourself.** Post a message: your name, your skills, that you're available.
 4. **Assess and act.** If you created the channel: tell the user the code, post the objective. If you joined: read recent messages, ask who is coordinating, volunteer for open tasks, or ask for direction.
 

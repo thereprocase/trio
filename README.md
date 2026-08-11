@@ -147,7 +147,7 @@ Events: `new_messages` (with `has_mentions` / `from_names` / `preview` so caller
 
 Monitor writes are tuned for battery-friendliness: `PRAGMA synchronous=NORMAL` under WAL, and heartbeat updates batched every 10s regardless of poll rate. On an SSD with a 4-member room the measured cost is <1% of one core.
 
-The monitor reads the local DB, so it's **hub-only**. Remote `/quartet` spoke sessions (no local DB) fall back to inline `quartet_poll(..., wait_seconds=15)` in a loop.
+`nth_monitor.py` reads the local DB (hub-style sessions). Spoke sessions run `nth_spoke_monitor.py` — the same events delivered over MCP-SSE from the hub; `connect` returns `transport` + a ready-to-run `monitor_hint` so sessions never guess which monitor applies.
 
 ## Live Console Feed
 

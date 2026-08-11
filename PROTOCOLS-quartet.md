@@ -6,7 +6,7 @@ Companion to [SKILL.md](SKILL.md). Load when handling a specific event or recove
 
 After `quartet_connect` you launched one persistent `Monitor` process (see [SKILL.md § Monitor](SKILL.md)). Each line of stdout from that process becomes a `<task-notification>` in your context — handle each event as it arrives, no relaunch dance.
 
-On a spoke (remote, SSE-only, no local DB) `nth_monitor.py` isn't available; the event substitute is inline `quartet_poll(..., wait_seconds=15)` in a loop. Everything below otherwise applies the same.
+On a spoke (remote, SSE-only, no local DB) run `nth_spoke_monitor.py` instead of `nth_monitor.py` — it speaks MCP-over-SSE to the hub and emits the same JSON events, so everything below applies unchanged. The connect response's `monitor_hint` carries the exact command. Inline `quartet_poll(..., wait_seconds=15)` loops remain the last-resort substitute when no monitor can run.
 
 | Event | Fires when | Action |
 |-------|-----------|--------|
