@@ -42,6 +42,7 @@ import sqlite3
 import subprocess
 import sys
 import threading
+import errno
 import time
 import unicodedata
 from dataclasses import dataclass
@@ -1520,6 +1521,7 @@ INDEX_HTML = r"""<!doctype html>
     expandedMsgs: new Set(),        // ids with per-msg override (toggle-specific)
     expandedMembers: new Set(),     // member ids with expanded stats
     notifyEnabled: false,
+    initialLoad: true,              // pin to newest until the history burst settles
     unreadCount: 0,                 // for tab title while hidden
     jumpUnread: 0,                  // messages arrived while user was scrolled up
     rateBins: new Map(),            // bin_epoch_10s → count
@@ -2036,6 +2038,19 @@ INDEX_HTML = r"""<!doctype html>
     else node.classList.remove('compact');
   }
 
+  // After the initial history burst goes quiet, snap once more to the bottom
+  // (markdown/fonts reflow taller after the synchronous appends) and switch to
+  // normal "follow only if near bottom" behavior for live messages.
+  let _initialSettleTimer = null;
+  function scheduleInitialSettle() {
+    if (_initialSettleTimer) clearTimeout(_initialSettleTimer);
+    _initialSettleTimer = setTimeout(() => {
+      _initialSettleTimer = null;
+      state.initialLoad = false;
+      requestAnimationFrame(() => { chat.scrollTop = chat.scrollHeight; });
+    }, 250);
+  }
+
   function appendMessage(m) {
     if (state.seenMsgIds.has(m.id)) return;
     state.seenMsgIds.add(m.id);
@@ -2120,7 +2135,12 @@ INDEX_HTML = r"""<!doctype html>
     renderWatermarkPins();
     scheduleHereUpdate();
 
-    if (nearBottom) {
+    if (state.initialLoad) {
+      // Fresh page load: keep pinned to the newest message through the whole
+      // history burst, then do one final settle after layout reflows.
+      chat.scrollTop = chat.scrollHeight;
+      scheduleInitialSettle();
+    } else if (nearBottom) {
       chat.scrollTop = chat.scrollHeight;
     } else {
       state.jumpUnread++;
@@ -3152,6 +3172,19 @@ INDEX_HTML = (
 
 
 # ───────── Entry ─────────
+class QuietThreadingHTTPServer(ThreadingHTTPServer):
+    """Ignore expected disconnects from tab closes, refreshes, and SSE retries."""
+
+    daemon_threads = True
+
+    def handle_error(self, request, client_address):
+        exc = sys.exc_info()[1]
+        if isinstance(exc, (ConnectionResetError, BrokenPipeError,
+                            ConnectionAbortedError)):
+            return
+        super().handle_error(request, client_address)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Web dashboard for a trio channel.")
     ap.add_argument("channel", help="Channel code to observe.")
@@ -3184,7 +3217,23 @@ def main() -> int:
     NthWebHandler.channel = args.channel
     NthWebHandler.db_path = db_path
 
-    server = ThreadingHTTPServer((host, args.port), NthWebHandler)
+    # Let multiple channel dashboards start without manual port coordination.
+    requested_port = args.port
+    port = requested_port
+    server = None
+    for _ in range(50):
+        try:
+            server = QuietThreadingHTTPServer((host, port), NthWebHandler)
+            break
+        except OSError as exc:
+            if exc.errno == errno.EADDRINUSE:
+                port += 1
+                continue
+            raise
+    if server is None:
+        sys.stderr.write(
+            f"No free port found in {requested_port}..{requested_port + 49}\n")
+        return 1
     # Threaded server handles one SSE connection per thread; don't let them
     # keep the process alive on Ctrl-C.
     server.daemon_threads = True
@@ -3200,10 +3249,12 @@ def main() -> int:
     print("nth_web serving:")
     print(f"  channel:     {args.channel}")
     print(f"  db:          {db_path}")
-    print(f"  bound on:    http://{host}:{args.port}/")
-    print(f"  localhost:   http://127.0.0.1:{args.port}/")
+    if port != requested_port:
+        print(f"  note:        port {requested_port} was busy — using {port} instead")
+    print(f"  bound on:    http://{host}:{port}/")
+    print(f"  localhost:   http://127.0.0.1:{port}/")
     if ts_ip and host in ("0.0.0.0",):
-        print(f"  tailnet:     http://{ts_ip}:{args.port}/   (visible to tailnet peers)")
+        print(f"  tailnet:     http://{ts_ip}:{port}/   (visible to tailnet peers)")
     elif ts_ip:
         print(f"  tailnet IP:  {ts_ip}   (pass --tailnet to bind)")
     print("  Ctrl-C to stop.")
