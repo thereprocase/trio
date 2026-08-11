@@ -67,14 +67,16 @@ KEEPALIVE_THRESHOLD  = 55 * 60       # 55 min
 KEEPALIVE_GIVEUP    = 7 * 3600      # 7 h
 RECONNECT_BACKOFF    = [1, 2, 5, 10, 30, 60]
 
-# Sentinel keywords for "sleeping" mode (idle/standing-by). Mirror
-# nth_constants.SLEEPING_KEYWORDS - kept inline so this script remains
-# importable without the rest of the skill.
-SLEEPING_KEYWORDS = (
-    "idle", "sleeping", "asleep", "afk", "away", "out",
-    "standing by", "stand by", "done", "task done",
-    "back later", "brb", "off", "offline",
-)
+# Sleeping-mode keywords: import the canonical set when the script runs from
+# the installed server dir (its normal home), fall back to a verbatim copy so
+# it still works standalone. The original inline set here had drifted much
+# broader than canon ("done", "out", "off"...) — broad matching wrongly idles
+# the monitor for statuses like "rollout done, watching logs".
+try:
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from nth_constants import SLEEPING_KEYWORDS
+except ImportError:
+    SLEEPING_KEYWORDS = ("idle", "standing by", "tier 3", "agent-monitor")
 
 FILTER_MODES = ("all", "about", "at")
 LEGACY_FILTER_MAP = {
@@ -100,6 +102,12 @@ def seconds_since(iso_ts):
         return (datetime.now(timezone.utc) - ts).total_seconds()
     except (ValueError, TypeError):
         return float("inf")
+
+
+def gap_for_emit(gap):
+    """JSON-safe gap: None when unknown (inf). round(inf) raises OverflowError
+    — the exact crash class fixed in nth_monitor.py (2026-08-11)."""
+    return None if gap == float("inf") else round(gap)
 
 
 def is_sleeping(status_text):
@@ -497,6 +505,8 @@ def monitor(client, channel, member_id, filter_mode, session_token,
                 # modes we want every message so client-side filter has data.
                 "mentions_only": (filter_mode == "at"),
             }
+            args["monitor_heartbeat"] = True
+            args["monitor_filter"] = filter_mode
             if session_token:
                 args["session_token"] = session_token
             poll = client.call_tool("quartet_poll", args,
@@ -628,7 +638,7 @@ def monitor(client, channel, member_id, filter_mode, session_token,
         if not sleeping and claimed > 0:
             if own_gap > CADENCE_THRESHOLD and not cadence_fired:
                 emit({"event": "cadence",
-                      "gap_seconds": round(own_gap),
+                      "gap_seconds": gap_for_emit(own_gap),
                       "claimed_tasks": claimed})
                 cadence_fired = True
             elif own_gap < CADENCE_THRESHOLD:
@@ -657,9 +667,9 @@ def monitor(client, channel, member_id, filter_mode, session_token,
                 and not keepalive_fired):
             emit({
                 "event": "keepalive",
-                "gap_seconds": round(own_gap),
+                "gap_seconds": gap_for_emit(own_gap),
                 "threshold_seconds": KEEPALIVE_THRESHOLD,
-                "engaged_gap_seconds": round(engaged_gap),
+                "engaged_gap_seconds": gap_for_emit(engaged_gap),
             })
             keepalive_fired = True
         elif own_gap < KEEPALIVE_THRESHOLD:

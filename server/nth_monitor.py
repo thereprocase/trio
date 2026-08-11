@@ -210,7 +210,20 @@ def monitor(channel, member_id, filter_mode="all", _db_path=None):
                 ).fetchone()
 
                 if not ch:
-                    emit({"event": "channel_gone"})
+                    # Name the likely real cause: this monitor read a DB that
+                    # never had the channel. That happens when a quartet SPOKE
+                    # launches the hub-style monitor against its local (often
+                    # stub) DB — the channel lives in the hub's DB, reachable
+                    # only over SSE.
+                    emit({
+                        "event": "channel_gone",
+                        "hint": (
+                            "channel not present in this DB. If this session "
+                            "reaches the channel via an SSE MCP server "
+                            "(nth-qweb), you are a spoke: use "
+                            "nth_spoke_monitor.py --url <hub sse url> instead."
+                        ),
+                    })
                     return
 
                 if ch["status"] == "ended":

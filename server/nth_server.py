@@ -577,6 +577,10 @@ def _sentinel_nag(member) -> str:
             (bool(whb) and _seconds_since(whb) < 300)
     if fresh:
         return ""
+    if TOOL_PREFIX == "quartet":
+        return ("[server] Monitor heartbeat stale. Spokes: launch "
+                "nth_spoke_monitor.py (see SKILL.md 'Monitor'); hub sessions: "
+                "re-issue the nth_monitor.py Monitor(...) block.")
     return "[server] Monitor heartbeat stale. Re-issue your Monitor(...) block from SKILL.md."
 
 
@@ -785,6 +789,18 @@ def nth_connect(
             if pin_msg:
                 objective = pin_msg["content"]
 
+        # The server knows its own transport; the agent should never have to
+        # guess hub-vs-spoke from filesystem heuristics (a box can be a trio
+        # hub and a quartet spoke at once — hub-ness is per-server).
+        is_sse = TOOL_PREFIX == "quartet"
+        monitor_hint = (
+            f"python3 ~/.claude/skills/nth/server/nth_spoke_monitor.py "
+            f"{channel} {member_id} --filter about "
+            f"--url <mcpServers.nth-qweb.url from ~/.claude.json>"
+            if is_sse else
+            f"python3 ~/.claude/skills/nth/server/nth_monitor.py "
+            f"{channel} {member_id} --filter about"
+        )
         resp = {
             "ok": True,
             "channel": channel,
@@ -792,6 +808,8 @@ def nth_connect(
             "session_token": session_token,
             "name": name,
             "action": action,
+            "transport": "sse" if is_sse else "stdio",
+            "monitor_hint": monitor_hint,
             "members": [
                 {"id": m["id"], "name": m["name"], "summary": m["summary"],
                  "skills": m["skills"], "active": _is_member_active(m["last_seen"]),
@@ -1168,7 +1186,7 @@ def nth_send(channel: str, member_id: str, message: str, task: bool = False, pin
 
 
 @mcp.tool(name=f"{TOOL_PREFIX}_poll")
-def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: str = "", session_token: str = "", auto_ack: bool = True, mentions_only: bool = False) -> str:
+def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: str = "", session_token: str = "", auto_ack: bool = True, mentions_only: bool = False, monitor_heartbeat: bool = False, monitor_filter: str = "") -> str:
     """Check for new messages since your last read. Blocks up to wait_seconds.
 
     Returns all unread messages, or "no_new" if nothing arrived.
@@ -1264,12 +1282,37 @@ def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: st
                     ],
                 })
 
-            # Update heartbeat
+            # Update heartbeat. A monitor process polling on the member's
+            # behalf (nth_spoke_monitor.py over SSE) declares itself with
+            # monitor_heartbeat=True so the monitor-liveness columns advance
+            # too — otherwise _sentinel_nag() keeps prescribing a monitor
+            # relaunch to a member whose monitor is alive but remote.
             now = now_iso()
-            db.execute(
-                "UPDATE members SET last_seen = ? WHERE id = ? AND channel = ?",
-                (now, member_id, channel),
-            )
+            if monitor_heartbeat:
+                try:
+                    if monitor_filter in ("all", "about", "at"):
+                        db.execute(
+                            "UPDATE members SET last_seen = ?, messenger_heartbeat = ?, "
+                            "watchdog_heartbeat = ?, filter_mode = ? "
+                            "WHERE id = ? AND channel = ?",
+                            (now, now, now, monitor_filter, member_id, channel),
+                        )
+                    else:
+                        db.execute(
+                            "UPDATE members SET last_seen = ?, messenger_heartbeat = ?, "
+                            "watchdog_heartbeat = ? WHERE id = ? AND channel = ?",
+                            (now, now, now, member_id, channel),
+                        )
+                except sqlite3.OperationalError:
+                    db.execute(
+                        "UPDATE members SET last_seen = ? WHERE id = ? AND channel = ?",
+                        (now, member_id, channel),
+                    )
+            else:
+                db.execute(
+                    "UPDATE members SET last_seen = ? WHERE id = ? AND channel = ?",
+                    (now, member_id, channel),
+                )
             db.commit()
 
             # Check for unread messages (from other members). Pull refs + bangs

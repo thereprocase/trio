@@ -130,22 +130,24 @@ Monitor(
 
 Each line of stdout becomes a separate notification. The monitor runs until the session ends, `TaskStop` is called, or the channel is ended by a peer.
 
-**Hub vs spoke — how to tell:** check whether `~/.claude/nth/nth.db` exists on your host. If yes, you're on the hub (DB is local, launch the Monitor as above). If no, you're on a spoke (you reach the DB over SSE via `nth-qweb`, no local file). A one-line Bash check is enough: `[ -f ~/.claude/nth/nth.db ] && echo hub || echo spoke`. When in doubt, ask the user which machine this session is on.
+**Hub vs spoke — don't guess, read the connect response.** `quartet_connect` returns `"transport"` (`"stdio"` = you spawned a local server, the DB is on this machine — hub-style monitoring works; `"sse"` = you're a spoke reaching a remote hub) and `"monitor_hint"` with the ready-to-run monitor command for your case. Filesystem heuristics are unreliable: a box can be a trio hub AND a quartet spoke at once (a local stub `nth.db` proves nothing — 20 minutes of misdiagnosis were once spent this way).
 
-**Spoke Monitor over SSH (v7.3 — preferred when you have SSH to the hub):** the monitor only needs to run *where the DB lives*; its stdout can travel. If your spoke can SSH to the hub machine, launch the hub's own monitor remotely and every event line streams back through the SSH pipe into your session exactly like a local monitor:
+**Spoke Monitor (transport "sse" — the normal /quartet case):** launch `nth_spoke_monitor.py`. It speaks MCP-over-SSE to the hub itself (stdlib only), long-polls server-side, and emits the same JSON events as the hub monitor — the two are interchangeable from your side. It never advances your watermark (`auto_ack=false`); you still ack. Get the URL from `mcpServers.nth-qweb.url` in `~/.claude.json`:
 
 ```
 Monitor(
-    command=f"ssh root@YOUR_HUB 'HOME=/var/lib/quartet-hub python3 /opt/quartet-hub/nth_monitor.py {channel} {member_id} --filter about'",
-    description=f"{channel} events (via hub)",
+    command=f"python3 ~/.claude/skills/nth/server/nth_spoke_monitor.py {channel} {member_id} --filter about --url {hub_sse_url}",
+    description=f"{channel} events (spoke)",
     persistent=True,
     timeout_ms=3600000,
 )
 ```
 
-Adjust host and paths to your hub (`HOME` must point at the hub service's state dir — the DB lives under `$HOME/.claude/nth/`; on a user-level hub install just omit the HOME override). Heartbeats work too: the monitor writes them hub-side, so peers see you live. `TaskStop` kills the SSH client, which ends the remote monitor with it.
+Pass `--session-token TOKEN` (or env `NTH_SESSION_TOKEN`) if you hold one. The spoke monitor declares itself to the server (`monitor_heartbeat`), so peers see your monitor as live and the server stops nagging you to relaunch one (hub v7.3.1+).
 
-**Spoke fallback (no local DB, no SSH to hub):** skip the `Monitor(...)` launch. Instead, use long-poll as your event substitute: `quartet_poll(channel, member_id, session_token=TOKEN, wait_seconds=15)` in a loop. That call blocks server-side for up to 15s waiting for new messages, returns immediately when any arrive, and updates your heartbeat as a side-effect. Between long-polls, still do the normal **3-call cadence** peeks (`wait_seconds=0`) — they're free and keep the cadence rule honest. The two patterns are complementary: long-poll is the event stream, peeks are the status checkpoint.
+**Spoke Monitor over SSH (alternative when you have SSH to the hub):** the hub's own `nth_monitor.py` run remotely, events streaming home through the SSH pipe: `Monitor(command=f"ssh root@HUB 'HOME=<hub state dir> python3 /opt/quartet-hub/nth_monitor.py {channel} {member_id} --filter about'", ...)`. Equivalent semantics; needs SSH where the SSE monitor only needs the URL you already have.
+
+**Spoke fallback (nothing else available):** inline long-poll as your event substitute: `quartet_poll(channel, member_id, session_token=TOKEN, wait_seconds=15)` in a loop, plus the normal **3-call cadence** peeks (`wait_seconds=0`) between work steps.
 
 Event tables and failure recovery live in [PROTOCOLS.md § Monitor Events](PROTOCOLS.md).
 
