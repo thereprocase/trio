@@ -4729,13 +4729,36 @@ WORKSPACE_HTML = r"""<!doctype html>
     return channelBase() + '?' + qs + 'roster=0&pane=1';
   }
 
+  // Fit as many panes across as stay usable — a chat column much under this
+  // starts wrapping its own header and composer.
+  const MIN_PANE_W = 420;
+
+  function autoCols(n) {
+    if (n <= 1) return 1;
+    const avail = panesEl.clientWidth || window.innerWidth || MIN_PANE_W;
+    const fits = Math.max(1, Math.floor(avail / MIN_PANE_W));
+    let c = Math.min(n, fits);
+    // 4 panes across 3 columns leaves a lone pane on row 2; an even 2x2 reads
+    // better than a ragged row. (3-across for 3 panes is even, so it stands.)
+    if (n === 4 && c === 3) c = 2;
+    return Math.max(1, c);
+  }
+
+  // Column count only — never touches the DOM, so it is safe to call on
+  // resize. render() rebuilds the iframes, which would reload every pane.
+  function applyGrid() {
+    const c = cols || autoCols(panes.length);
+    panesEl.style.gridTemplateColumns = `repeat(${c}, minmax(0, 1fr))`;
+    panesEl.style.gridAutoRows = 'minmax(0, 1fr)';
+    btnCols.textContent = 'columns: ' + (cols || 'auto ' + c);
+  }
+  window.addEventListener('resize', applyGrid);
+
   function render() {
     panesEl.innerHTML = '';
     emptyEl.hidden = panes.length > 0;
     const n = panes.length;
-    const c = cols || (n <= 1 ? 1 : n <= 4 ? 2 : 3);
-    panesEl.style.gridTemplateColumns = `repeat(${c}, minmax(0, 1fr))`;
-    panesEl.style.gridAutoRows = 'minmax(0, 1fr)';
+    applyGrid();
 
     panes.forEach((ids, i) => {
       const pane = document.createElement('div');
@@ -4772,7 +4795,7 @@ WORKSPACE_HTML = r"""<!doctype html>
     capNote.textContent = n >= PANE_CAP
       ? `${PANE_CAP}-pane max — each holds a live connection`
       : '';
-    btnCols.textContent = 'columns: ' + (cols || 'auto');
+    applyGrid();
   }
 
   // ── Pane picker — used for both "+ pane" and editing an existing pane ──
