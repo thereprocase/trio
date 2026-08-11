@@ -64,6 +64,47 @@ def _install_auto_reinit_patch():
 
 _install_auto_reinit_patch()
 
+
+def _install_thread_offload_patch():
+    # FastMCP runs SYNC tool handlers directly on the asyncio event loop
+    # (func_metadata.call_fn_with_arg_validation: `return fn(**args)`), so any
+    # blocking handler — notably nth_poll's up-to-30s time.sleep long-poll —
+    # freezes the ENTIRE server: every other session's request stalls behind it
+    # (head-of-line blocking -> multi-second TTFB for everyone).
+    #
+    # Fix: offload sync handlers to anyio's worker-thread pool so the event loop
+    # stays free and all handlers run in parallel. Each handler opens its own
+    # sqlite connection (get_db) used within a single call, so threading is safe.
+    import anyio
+    import mcp.server.fastmcp.utilities.func_metadata as _fmod
+
+    _orig = _fmod.FuncMetadata.call_fn_with_arg_validation
+    _state = {"limiter_raised": False}
+
+    async def _patched(self, fn, fn_is_async, arguments_to_validate,
+                       arguments_to_pass_directly):
+        if fn_is_async:
+            return await _orig(self, fn, fn_is_async, arguments_to_validate,
+                               arguments_to_pass_directly)
+
+        async def _threaded(**kwargs):
+            if not _state["limiter_raised"]:
+                try:
+                    anyio.to_thread.current_default_thread_limiter().total_tokens = 256
+                except Exception:
+                    pass
+                _state["limiter_raised"] = True
+            return await anyio.to_thread.run_sync(lambda: fn(**kwargs))
+
+        # Reuse the original parsing/validation; only the fn() call moves to a thread.
+        return await _orig(self, _threaded, True, arguments_to_validate,
+                           arguments_to_pass_directly)
+
+    _fmod.FuncMetadata.call_fn_with_arg_validation = _patched
+
+
+_install_thread_offload_patch()
+
 from nth_server import mcp
 
 if __name__ == "__main__":
