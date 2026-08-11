@@ -42,6 +42,7 @@ import sqlite3
 import subprocess
 import sys
 import threading
+import errno
 import time
 import unicodedata
 from dataclasses import dataclass
@@ -52,7 +53,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qs, urlparse
 
 sys.path.insert(0, str(Path(__file__).parent))
-from nth_constants import ANIMAL_EMOJIS, animal_for, animal_for_channel
+from nth_constants import ANIMAL_EMOJIS, animal_for, animal_for_channel, NTH_VERSION
 
 
 # ───────── Config ─────────
@@ -540,6 +541,8 @@ class EventHub:
             db.execute("PRAGMA busy_timeout=2000")
             members = self._fetch_roster(db)
             q.put_nowait(json.dumps({"type": "roster", "members": members}))
+            q.put_nowait(json.dumps(
+                {"type": "context", "sessions": _read_context_snapshots()}))
             rows = db.execute(
                 "SELECT id, member_id, member_name, content, mentions, refs, bangs, created_at "
                 "FROM messages WHERE channel = ? ORDER BY id DESC LIMIT ?",
@@ -592,8 +595,10 @@ class EventHub:
                 "m.messenger_heartbeat AS messenger_heartbeat, "
                 "m.watchdog_heartbeat AS watchdog_heartbeat, "
                 "m.filter_mode AS filter_mode, "
+                "m.context_json AS context_json, "
                 "COALESCE(MAX(s.last_read), 0) AS session_last_read, "
-                "MAX(s.last_seen) AS session_last_seen "
+                "MAX(s.last_seen) AS session_last_seen, "
+                "GROUP_CONCAT(s.fingerprint) AS fingerprints "
                 "FROM members m "
                 "LEFT JOIN sessions s "
                 "  ON s.channel = m.channel AND s.member_id = m.id "
@@ -610,7 +615,8 @@ class EventHub:
                 "m.messenger_heartbeat AS messenger_heartbeat, "
                 "m.watchdog_heartbeat AS watchdog_heartbeat, "
                 "COALESCE(MAX(s.last_read), 0) AS session_last_read, "
-                "MAX(s.last_seen) AS session_last_seen "
+                "MAX(s.last_seen) AS session_last_seen, "
+                "GROUP_CONCAT(s.fingerprint) AS fingerprints "
                 "FROM members m "
                 "LEFT JOIN sessions s "
                 "  ON s.channel = m.channel AND s.member_id = m.id "
@@ -626,6 +632,7 @@ class EventHub:
         # may reshuffle affected members, which the client handles by
         # keying on the emoji/name fields we ship instead of hashing.
         avatars = animal_for_channel([r["id"] for r in rows])
+        ctx_usage = _read_context_usage()
         out = []
         for r in rows:
             effective_last_read = max(
@@ -636,6 +643,29 @@ class EventHub:
             s_ls = r["session_last_seen"] or ""
             effective_last_seen = max(m_ls, s_ls) or None
             fm = r["filter_mode"] if "filter_mode" in r.keys() else "all"
+            # Context %: match any of the member's session fingerprints
+            # (CLAUDE_SESSION_IDs) against the statusline publisher files.
+            context_pct = None
+            context_full = None
+            raw_ctx = r["context_json"] if "context_json" in r.keys() else None
+            if raw_ctx:
+                try:
+                    cand = json.loads(raw_ctx)
+                    relayed = cand.get("_relayed_at")
+                    if relayed and (datetime.now(timezone.utc)
+                                    - datetime.fromisoformat(relayed)
+                                    ).total_seconds() < 120                             and isinstance(cand.get("used_pct"), (int, float)):
+                        context_full = cand
+                        context_pct = float(cand["used_pct"])
+                except (ValueError, TypeError):
+                    pass
+            fps = r["fingerprints"] if "fingerprints" in r.keys() else None
+            if context_full is None and fps and ctx_usage:
+                for fp in str(fps).split(","):
+                    if fp in ctx_usage:
+                        context_full = ctx_usage[fp]
+                        context_pct = float(context_full["used_pct"])
+                        break
             aname, aemoji = avatars.get(r["id"], animal_for(r["id"]))
             out.append({
                 "id": r["id"],
@@ -645,6 +675,8 @@ class EventHub:
                 "last_read": effective_last_read,
                 "filter_mode": fm or "all",
                 "status": member_status(effective_last_seen, r["status_text"] or ""),
+                "context_pct": context_pct,
+                "context": context_full,
                 "animal_name": aname,
                 "animal_emoji": aemoji,
             })
@@ -708,6 +740,14 @@ class EventHub:
                         self._last_roster_snapshot = snapshot
                         self._broadcast({"type": "roster", "members": members})
 
+                    # Context rings: cheap (few tiny local files); broadcast
+                    # only when the payload actually changed.
+                    ctx_sessions = _read_context_snapshots()
+                    ctx_snapshot = json.dumps(ctx_sessions, sort_keys=True)
+                    if ctx_snapshot != getattr(self, "_last_context_snapshot", None):
+                        self._last_context_snapshot = ctx_snapshot
+                        self._broadcast({"type": "context", "sessions": ctx_sessions})
+
                 except sqlite3.Error as e:
                     sys.stderr.write(f"[nth_web] poll error: {e}\n")
 
@@ -723,12 +763,184 @@ class EventHub:
                 pass
 
 
+# ───────── Per-session context usage (statusline publisher) ─────────
+# The operator's statusline tee (claude-statusline repo) writes one JSON per
+# live Claude session to this directory on every render. Sessions register
+# their CLAUDE_SESSION_ID as sessions.fingerprint on connect, which is the
+# join key. Only sessions on THIS machine appear — a hub-hosted nth_web
+# cannot see spoke-side context files (the fleet answer is status_text
+# publishing, not this).
+CONTEXT_USAGE_DIR = Path(
+    os.environ.get("XDG_STATE_HOME", str(Path.home() / ".local" / "state"))
+) / "claude-context"
+CONTEXT_USAGE_STALE_S = 60
+
+
+CONTEXT_SNAPSHOT_STALE_S = 120
+
+
+def _read_context_snapshots() -> List[Dict[str, Any]]:
+    """All fresh publisher files as dicts (plus _age_s), newest first.
+    Stale >120s ignored; the UI additionally dims entries older than 30s."""
+    out: List[Dict[str, Any]] = []
+    try:
+        now = time.time()
+        for p in CONTEXT_USAGE_DIR.glob("*.json"):
+            try:
+                age = now - p.stat().st_mtime
+                if age > CONTEXT_SNAPSHOT_STALE_S:
+                    continue
+                data = json.loads(p.read_text(encoding="utf-8"))
+                if not isinstance(data.get("session_id"), str):
+                    continue
+                data["_age_s"] = int(age)
+                out.append(data)
+            except (OSError, ValueError):
+                continue
+    except OSError:
+        pass
+    out.sort(key=lambda d: d["_age_s"])
+    return out
+
+
+def _read_context_usage() -> Dict[str, Dict[str, Any]]:
+    """{claude_session_id: full snapshot dict} for fresh (<60s) files."""
+    return {
+        d["session_id"]: d
+        for d in _read_context_snapshots()
+        if d["_age_s"] <= CONTEXT_USAGE_STALE_S
+        and isinstance(d.get("used_pct"), (int, float))
+    }
+
+
+# ───────── Landing snapshot ─────────
+def _landing_snapshot(db_path: Path) -> Dict[str, Any]:
+    """Everything the landing page needs in one JSON read: DB health, node
+    check-ins, per-channel liveness. Counts, names, and ages only — the
+    landing page never ships message content."""
+    now = datetime.now(timezone.utc)
+
+    def age_s(iso: Optional[str]) -> Optional[int]:
+        if not iso:
+            return None
+        try:
+            ts = datetime.fromisoformat(iso)
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            return max(0, int((now - ts).total_seconds()))
+        except ValueError:
+            return None
+
+    out: Dict[str, Any] = {
+        "version": NTH_VERSION,
+        "host": socket.gethostname(),
+        "db": str(db_path),
+        "db_ok": False,
+        "time": now.isoformat(),
+        "nodes": [],
+        "channels": [],
+    }
+    try:
+        db = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=2)
+        db.row_factory = sqlite3.Row
+    except sqlite3.Error as e:
+        out["error"] = type(e).__name__
+        return out
+    try:
+        try:
+            for r in db.execute(
+                    "SELECT hostname, transport, nth_version, python, last_seen "
+                    "FROM nodes ORDER BY last_seen DESC"):
+                a = age_s(r["last_seen"])
+                out["nodes"].append({
+                    "hostname": r["hostname"], "transport": r["transport"],
+                    "nth_version": r["nth_version"], "python": r["python"],
+                    "age_s": a, "live": a is not None and a < STALE_SECONDS,
+                })
+        except sqlite3.OperationalError:
+            pass  # pre-v7.3 DB: no nodes table yet
+
+        for ch in db.execute(
+                "SELECT code, status FROM channels ORDER BY code").fetchall():
+            hbs = [m["messenger_heartbeat"] for m in db.execute(
+                "SELECT messenger_heartbeat FROM members WHERE channel = ?",
+                (ch["code"],)).fetchall()]
+            live = sum(1 for hb in hbs
+                       if (a := age_s(hb)) is not None and a < STALE_SECONDS)
+            msgs, last_msg = db.execute(
+                "SELECT COUNT(*), MAX(created_at) FROM messages WHERE channel = ?",
+                (ch["code"],)).fetchone()
+            out["channels"].append({
+                "code": ch["code"], "status": ch["status"],
+                "members": len(hbs), "live": live, "msgs": msgs,
+                "last_msg_age_s": age_s(last_msg),
+            })
+        out["context_sessions"] = _read_context_snapshots()
+        out["channels"].sort(
+            key=lambda c: (c["status"] != "active",
+                           c["last_msg_age_s"] if c["last_msg_age_s"] is not None
+                           else float("inf")))
+        out["db_ok"] = True
+    except sqlite3.Error as e:
+        out["error"] = type(e).__name__
+    finally:
+        try:
+            db.close()
+        except sqlite3.Error:
+            pass
+    return out
+
+
 # ───────── HTTP handler ─────────
+CHANNEL_CODE_RE = re.compile(r"^[a-z0-9][a-z0-9\-]{0,31}$")
+
+
 class NthWebHandler(BaseHTTPRequestHandler):
     # Populated in main()
     hub: Optional[EventHub] = None
     channel: str = ""
     db_path: Path = DB_PATH
+    # Landing mode (no channel argument): / serves the fleet/channel index,
+    # /c/<code> serves the per-channel app, and API requests carry their
+    # channel in a ?channel= query param. EventHubs are created lazily, one
+    # per channel viewed, and poll for the life of the process.
+    landing_mode: bool = False
+    hubs: Dict[str, EventHub] = {}
+    hubs_lock = threading.Lock()
+
+    def _channel_for_request(self, parsed) -> Optional[str]:
+        """Channel an API request addresses. None = missing/invalid."""
+        if not self.landing_mode:
+            return self.channel
+        code = (parse_qs(parsed.query).get("channel") or [""])[0]
+        if not CHANNEL_CODE_RE.match(code or ""):
+            return None
+        return code
+
+    def _hub_for_channel(self, code: str) -> EventHub:
+        if not self.landing_mode:
+            assert self.hub is not None
+            return self.hub
+        cls = NthWebHandler
+        with cls.hubs_lock:
+            hub = cls.hubs.get(code)
+            if hub is None:
+                hub = EventHub(self.db_path, code)
+                hub.start()
+                cls.hubs[code] = hub
+            return hub
+
+    def _channel_exists(self, code: str) -> bool:
+        try:
+            db = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True, timeout=2)
+            try:
+                return db.execute(
+                    "SELECT 1 FROM channels WHERE code = ?", (code,)
+                ).fetchone() is not None
+            finally:
+                db.close()
+        except sqlite3.Error:
+            return False
 
     # Suppress default noisy logging
     def log_message(self, fmt: str, *args) -> None:
@@ -808,11 +1020,32 @@ class NthWebHandler(BaseHTTPRequestHandler):
         if path == "/" or path == "/index.html":
             # Mint a cookie on first visit so /api/meta + /api/events carry it.
             token, _ident, is_new = self._resolve_identity()
-            self._serve_html(INDEX_HTML, set_cookie_token=token if is_new else None)
+            body = LANDING_HTML if self.landing_mode else INDEX_HTML
+            self._serve_html(body, set_cookie_token=token if is_new else None)
+        elif self.landing_mode and path.startswith("/c/"):
+            code = path[3:].rstrip("/")
+            if not CHANNEL_CODE_RE.match(code):
+                self._error(404, "bad channel code")
+                return
+            if not self._channel_exists(code):
+                self._error(404, f"no such channel: {code}")
+                return
+            token, _ident, is_new = self._resolve_identity()
+            # The channel code passed CHANNEL_CODE_RE, so this substitution
+            # cannot inject into the script context.
+            body = INDEX_HTML.replace(
+                "/*__API_QS__*/''", json.dumps(f"?channel={code}"))
+            self._serve_html(body, set_cookie_token=token if is_new else None)
+        elif self.landing_mode and path == "/api/landing":
+            self._json(_landing_snapshot(self.db_path))
         elif path == "/api/meta":
+            ch = self._channel_for_request(parsed)
+            if ch is None:
+                self._error(400, "channel query param required")
+                return
             token, ident, is_new = self._resolve_identity()
             self._json({
-                "channel": self.channel,
+                "channel": ch,
                 "operator": {
                     "id": ident.member_id,
                     "name": ident.display_name,
@@ -822,7 +1055,11 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 "server_host": socket.gethostname(),
             }, set_cookie_token=token if is_new else None)
         elif path == "/api/events":
-            self._serve_sse()
+            ch = self._channel_for_request(parsed)
+            if ch is None:
+                self._error(400, "channel query param required")
+                return
+            self._serve_sse(self._hub_for_channel(ch))
         else:
             self._error(404, "not found")
 
@@ -861,8 +1098,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
     def _error(self, status: int, msg: str) -> None:
         self._json({"error": msg}, status=status)
 
-    def _serve_sse(self) -> None:
-        assert self.hub is not None
+    def _serve_sse(self, hub: EventHub) -> None:
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-store")
@@ -870,7 +1106,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
         self.send_header("X-Accel-Buffering", "no")
         self.end_headers()
 
-        q = self.hub.subscribe()
+        q = hub.subscribe()
         try:
             last_heartbeat = time.monotonic()
             while True:
@@ -889,7 +1125,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError, OSError):
             pass
         finally:
-            self.hub.unsubscribe(q)
+            hub.unsubscribe(q)
 
     def _read_json_body(self, max_bytes: int = 16384) -> Optional[Dict[str, Any]]:
         length = int(self.headers.get("Content-Length", "0") or 0)
@@ -932,6 +1168,13 @@ class NthWebHandler(BaseHTTPRequestHandler):
         }, set_cookie_token=token)
 
     def _handle_send(self) -> None:
+        send_channel = self._channel_for_request(urlparse(self.path))
+        if send_channel is None:
+            self._error(400, "channel query param required")
+            return
+        if self.landing_mode and not self._channel_exists(send_channel):
+            self._error(404, f"no such channel: {send_channel}")
+            return
         body = self._read_json_body()
         if body is None:
             return
@@ -964,7 +1207,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
             db.execute("PRAGMA busy_timeout=5000")
             db.execute("BEGIN IMMEDIATE")
             try:
-                op_id, op_name = ensure_operator_row(db, self.channel, ident)
+                op_id, op_name = ensure_operator_row(db, send_channel, ident)
                 now = now_iso()
 
                 # Leading "$task " marks this as a claimable task — same
@@ -989,7 +1232,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
                         "INSERT INTO tasks (channel, posted_by, status, description, "
                         " blocked_by, created_at, updated_at) "
                         "VALUES (?, ?, 'open', ?, '[]', ?, ?)",
-                        (self.channel, op_id, task_body, now, now),
+                        (send_channel, op_id, task_body, now, now),
                     )
                     task_id = tcur.lastrowid
                     posted_content = f"[task #{task_id}] {task_body}"
@@ -998,14 +1241,14 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 # matching nth_send's behavior so web-operator posts carry the
                 # same wake semantics as MCP-agent posts.
                 mention_ids, ref_ids, bang_ids = _parse_sigils_against_roster(
-                    db, self.channel, posted_content
+                    db, send_channel, posted_content
                 )
                 cursor = db.execute(
                     "INSERT INTO messages "
                     "(channel, member_id, member_name, content, created_at, "
                     " mentions, refs, bangs) "
                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    (self.channel, op_id, op_name, posted_content, now,
+                    (send_channel, op_id, op_name, posted_content, now,
                      json.dumps(mention_ids) if mention_ids else "",
                      json.dumps(ref_ids)     if ref_ids     else "",
                      json.dumps(bang_ids)    if bang_ids    else ""),
@@ -1013,7 +1256,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 msg_id = cursor.lastrowid
                 db.execute(
                     "UPDATE members SET last_seen = ? WHERE channel = ? AND id = ?",
-                    (now, self.channel, op_id),
+                    (now, send_channel, op_id),
                 )
                 db.execute("COMMIT")
             except sqlite3.Error:
@@ -1044,10 +1287,331 @@ INDEX_HTML = r"""<!doctype html>
 <title>nth_web</title>
 <style>
   :root {
+    /* ── Midnight (default dark) ── */
     --bg: #0b0f14; --bg2: #121821; --panel: #161d27; --border: #273040;
     --fg: #d8dde6; --dim: #7a8596; --dimmer: #4a5262;
-    --accent: #3ba0e6; --accent2: #59cb79; --warn: #e3c34c; --err: #e56a4a;
-    --mention: #e3c34c;
+    --accent: #3ba0e6; --accent-hi: #50b0f0; --accent2: #59cb79;
+    --warn: #e3c34c; --err: #e56a4a; --mention: #e3c34c;
+    --hover: #0f1420; --ov: 255,255,255;
+    --card-radius: 3px; --card-shadow: none;
+    --pill-radius: 3px; --input-radius: 4px;
+  }
+  :root[data-theme="light"] {
+    /* ── Daylight (light) ── */
+    --bg: #f6f7f9; --bg2: #eceef2; --panel: #e2e6ec; --border: #c8cfd8;
+    --fg: #1c2430; --dim: #5a6675; --dimmer: #9aa4b2;
+    --accent: #1f7fd0; --accent-hi: #2b93e6; --accent2: #2e9e52;
+    --warn: #b8860b; --err: #cc4a2c; --mention: #b8860b;
+    --hover: #dce1e8; --ov: 0,0,0;
+  }
+  :root[data-theme="nord"] {
+    /* ── Nord (dark) ── */
+    --bg: #2e3440; --bg2: #2b303b; --panel: #3b4252; --border: #434c5e;
+    --fg: #e5e9f0; --dim: #8f9bb3; --dimmer: #616e88;
+    --accent: #88c0d0; --accent-hi: #8fbcbb; --accent2: #a3be8c;
+    --warn: #ebcb8b; --err: #bf616a; --mention: #ebcb8b;
+    --hover: #353c4a; --ov: 255,255,255;
+  }
+  :root[data-theme="dracula"] {
+    /* ── Dracula (dark) ── */
+    --bg: #282a36; --bg2: #21222c; --panel: #343746; --border: #44475a;
+    --fg: #f8f8f2; --dim: #a0a3b1; --dimmer: #6272a4;
+    --accent: #bd93f9; --accent-hi: #caa9fa; --accent2: #50fa7b;
+    --warn: #f1fa8c; --err: #ff5555; --mention: #ffb86c;
+    --hover: #313442; --ov: 255,255,255;
+  }
+  :root[data-theme="pve-dark"] {
+    /* ── Proxmox VE Dark (from theme-proxmox-dark.css) ── */
+    --bg: #1a1a1a; --bg2: #262626; --panel: #333; --border: #404040;
+    --fg: #f2f2f2; --dim: #999; --dimmer: #666;
+    --accent: #4db5ff; --accent-hi: #99d5ff; --accent2: #0060a4;
+    --warn: #ffae0b; --err: #ce3c3c; --mention: #ffae0b;
+    --hover: #595959; --ov: 255,255,255;
+    --card-radius: 2px; --card-shadow: 0 1px 5px rgba(0,0,0,0.5);
+    --pill-radius: 2px; --input-radius: 2px;
+  }
+  :root[data-theme="pve-light"] {
+    /* ── Proxmox VE Light (from ext6-pve.css + gauge defaults) ── */
+    --bg: #f5f5f5; --bg2: #e2eff9; --panel: #fff; --border: #cfcfcf;
+    --fg: #000; --dim: #555; --dimmer: #a8a8a8;
+    --accent: #3892d4; --accent-hi: #4db5ff; --accent2: #21bf4b;
+    --warn: #cc8e00; --err: #cc1800; --mention: #cc8e00;
+    --hover: #e2eff9; --ov: 0,0,0;
+    --card-radius: 2px; --card-shadow: 0 1px 8px rgba(136,136,136,0.3);
+    --pill-radius: 2px; --input-radius: 2px;
+  }
+  :root[data-theme="solarized"] {
+    /* ── Solarized Dark (PVE Dashboard) ── */
+    --bg: #002b36; --bg2: #00212b; --panel: #073642; --border: rgba(147,161,161,.2);
+    --fg: #eee8d5; --dim: #93a1a1; --dimmer: #6c7c7c;
+    --accent: #268bd2; --accent-hi: #3a9bde; --accent2: #859900;
+    --warn: #b58900; --err: #dc322f; --mention: #b58900;
+    --hover: #0a4453; --ov: 255,255,255;
+    --card-radius: 6px; --card-shadow: 0 1px 4px rgba(0,0,0,.4); --pill-radius: 4px;
+  }
+  :root[data-theme="bluebubble"] {
+    /* ── Walled Garden (light) ── */
+    --bg: #fff; --bg2: #f2f2f7; --panel: #fff; --border: #c6c6c8;
+    --fg: #1c1c1e; --dim: #8e8e93; --dimmer: #c7c7cc;
+    --accent: #007aff; --accent-hi: #409cff; --accent2: #34c759;
+    --warn: #ff9500; --err: #ff3b30; --mention: #ff9500;
+    --hover: #e5e5ea; --ov: 0,0,0;
+    --card-radius: 18px; --card-shadow: none;
+    --pill-radius: 999px; --input-radius: 18px;
+    --bubble-mine: #007aff; --bubble-mine-ink: #fff;
+    --bubble-theirs: #e5e5ea; --bubble-theirs-ink: #000;
+    --bubble-system: transparent;
+  }
+  /* ── Walled Garden: pixel-faithful recreation ── */
+  :root[data-theme="bluebubble"] .msg {
+    max-width: 70%; border-left: none; margin-left: 0; margin-bottom: 2px;
+    padding: 6px 12px 8px; border-radius: 18px; position: relative;
+    background: var(--bubble-theirs) !important; color: var(--bubble-theirs-ink);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue",
+      "Helvetica", "Arial", sans-serif;
+    font-size: 17px; line-height: 1.28; letter-spacing: -0.01em;
+  }
+  :root[data-theme="bluebubble"] .msg:hover { filter: brightness(0.97); }
+  :root[data-theme="bluebubble"] .msg:not(.mine) { border-bottom-left-radius: 4px; }
+  /* Tail — CSS triangle on the last bubble in a run */
+  :root[data-theme="bluebubble"] .msg:not(.mine)::before {
+    content: ""; position: absolute; bottom: 0; left: -6px;
+    width: 12px; height: 16px;
+    background: radial-gradient(ellipse at top right, var(--bubble-theirs) 55%, transparent 56%);
+  }
+  :root[data-theme="bluebubble"] .msg.mine::before {
+    content: ""; position: absolute; bottom: 0; right: -6px; left: auto;
+    width: 12px; height: 16px;
+    background: radial-gradient(ellipse at top left, var(--bubble-mine) 55%, transparent 56%);
+  }
+  :root[data-theme="bluebubble"] .msg .head {
+    font-size: 11px; color: #86868b; margin-bottom: 1px;
+    font-weight: 400;
+  }
+  :root[data-theme="bluebubble"] .msg .head .time { color: #86868b; }
+  :root[data-theme="bluebubble"] .msg .author { font-weight: 600; color: #1c1c1e; font-size: 13px; }
+  :root[data-theme="bluebubble"] .msg .body { color: inherit; }
+  :root[data-theme="bluebubble"] .msg .body.plain { white-space: pre-wrap; }
+  :root[data-theme="bluebubble"] .msg.mine {
+    margin-left: auto; background: var(--bubble-mine) !important;
+    color: var(--bubble-mine-ink); border-bottom-right-radius: 4px;
+    border-bottom-left-radius: 18px;
+  }
+  :root[data-theme="bluebubble"] .msg.mine .head { color: rgba(255,255,255,0.65); }
+  :root[data-theme="bluebubble"] .msg.mine .head .time { color: rgba(255,255,255,0.5); }
+  :root[data-theme="bluebubble"] .msg.mine .author { color: rgba(255,255,255,0.85); }
+  :root[data-theme="bluebubble"] .msg.system {
+    max-width: 100%; text-align: center; border-radius: 10px;
+    background: transparent !important; color: #86868b; font-style: normal;
+    font-size: 13px; padding: 4px 14px; font-weight: 400;
+  }
+  :root[data-theme="bluebubble"] .msg.system::before { display: none; }
+  :root[data-theme="bluebubble"] .msg .mentions-bar .mchip,
+  :root[data-theme="bluebubble"] .msg .refs-bar .mchip {
+    background: rgba(0,0,0,0.07); border: none; color: #007aff;
+    font-weight: 500; border-radius: 10px; font-size: 13px;
+  }
+  :root[data-theme="bluebubble"] .msg.mine .mentions-bar .mchip,
+  :root[data-theme="bluebubble"] .msg.mine .refs-bar .mchip {
+    background: rgba(255,255,255,0.2); border: none; color: #fff;
+  }
+  :root[data-theme="bluebubble"] .msg .bangs-bar .mchip {
+    background: rgba(255,59,48,0.12); border: none; color: #ff3b30;
+  }
+  :root[data-theme="bluebubble"] .msg .body code.mdic {
+    background: rgba(0,0,0,0.06); border: none; border-radius: 4px;
+    font-size: 0.9em;
+  }
+  :root[data-theme="bluebubble"] .msg.mine .body code.mdic {
+    background: rgba(255,255,255,0.18); border: none;
+  }
+  :root[data-theme="bluebubble"] .msg .body pre.mdcode {
+    background: rgba(0,0,0,0.04); border: none; border-radius: 10px;
+    padding: 8px 12px;
+  }
+  :root[data-theme="bluebubble"] .msg.mine .body pre.mdcode {
+    background: rgba(255,255,255,0.12); border: none;
+  }
+  :root[data-theme="bluebubble"] .msg .body a { color: #007aff; text-decoration: none; }
+  :root[data-theme="bluebubble"] .msg.mine .body a { color: #fff; text-decoration: underline; }
+  :root[data-theme="bluebubble"] .msg.targeted {
+    border-left: none; box-shadow: 0 0 0 2px rgba(255,149,0,0.4);
+    border-radius: 18px;
+  }
+  /* Header — frosted glass nav bar */
+  :root[data-theme="bluebubble"] header {
+    background: rgba(249,249,249,0.94); border-bottom: 0.5px solid rgba(0,0,0,0.12);
+    backdrop-filter: saturate(180%) blur(20px); -webkit-backdrop-filter: saturate(180%) blur(20px);
+  }
+  :root[data-theme="bluebubble"] header .title { color: #007aff; font-size: 17px; }
+  :root[data-theme="bluebubble"] header .meta { color: #86868b; }
+  :root[data-theme="bluebubble"] header .pill { border: none;
+    background: rgba(0,122,255,0.12); color: #007aff; font-weight: 500; }
+  :root[data-theme="bluebubble"] header .pill:hover { background: rgba(0,122,255,0.2); }
+  :root[data-theme="bluebubble"] header .pill.on { background: #007aff; color: #fff; }
+  :root[data-theme="bluebubble"] header .pill.conn.ok { color: #34c759; background: rgba(52,199,89,0.12); }
+  :root[data-theme="bluebubble"] header .pill.conn.bad { color: #ff3b30; background: rgba(255,59,48,0.12); }
+  /* Sidebar */
+  :root[data-theme="bluebubble"] #side {
+    background: #f2f2f7; border-left: 0.5px solid rgba(0,0,0,0.12);
+  }
+  :root[data-theme="bluebubble"] #side h2 { color: #86868b; font-size: 13px;
+    text-transform: uppercase; letter-spacing: 0.02em; }
+  :root[data-theme="bluebubble"] .member .name { font-size: 15px; }
+  :root[data-theme="bluebubble"] .member .stext { font-size: 13px; color: #86868b; }
+  :root[data-theme="bluebubble"] .member .dot { width: 10px; height: 10px; }
+  :root[data-theme="bluebubble"] .member + .member { border-top: 0.5px solid rgba(0,0,0,0.1); }
+  :root[data-theme="bluebubble"] .member .dm-btn {
+    background: rgba(0,122,255,0.12); color: #007aff; border: none; border-radius: 14px;
+  }
+  /* Composer — iOS keyboard area feel */
+  :root[data-theme="bluebubble"] #composer {
+    background: #f2f2f7; border-top: 0.5px solid rgba(0,0,0,0.12); padding: 8px 10px;
+  }
+  :root[data-theme="bluebubble"] #input {
+    background: #fff; border: 0.5px solid #c6c6c8; border-radius: 18px;
+    padding: 8px 14px; font-size: 17px; line-height: 1.28;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+  }
+  :root[data-theme="bluebubble"] #input:focus { border-color: #007aff; }
+  :root[data-theme="bluebubble"] #send-btn {
+    border-radius: 50%; width: 34px; height: 34px; padding: 0;
+    font-size: 0; background: #007aff; position: relative;
+  }
+  :root[data-theme="bluebubble"] #send-btn::after {
+    content: "\2191"; font-size: 20px; font-weight: 700; color: #fff;
+  }
+  :root[data-theme="bluebubble"] #send-btn:disabled { background: #c7c7cc; }
+  :root[data-theme="bluebubble"] #hint { display: none; }
+  :root[data-theme="bluebubble"] #preview { font-size: 13px; color: #86868b; }
+  :root[data-theme="bluebubble"] #target-bar .tb-pill {
+    border: none; background: rgba(0,122,255,0.1); color: #007aff;
+    border-radius: 14px; font-weight: 500;
+  }
+  :root[data-theme="bluebubble"] #target-bar .tb-pill.on {
+    background: #007aff; color: #fff;
+  }
+  /* Completions dropdown */
+  :root[data-theme="bluebubble"] #completions {
+    border-radius: 14px; border: none; box-shadow: 0 4px 24px rgba(0,0,0,0.15);
+    background: rgba(255,255,255,0.98); backdrop-filter: blur(20px);
+  }
+  :root[data-theme="bluebubble"] .completion:hover,
+  :root[data-theme="bluebubble"] .completion.selected { background: #e5e5ea; }
+  /* Settings panel */
+  :root[data-theme="bluebubble"] #settings-panel {
+    border-radius: 14px; border: none; box-shadow: 0 4px 24px rgba(0,0,0,0.15);
+    background: rgba(255,255,255,0.98); backdrop-filter: blur(20px);
+  }
+  /* Guest modal */
+  :root[data-theme="bluebubble"] #guest-modal .guest-card {
+    border-radius: 14px; border: none; box-shadow: 0 4px 30px rgba(0,0,0,0.2);
+    background: #fff;
+  }
+  :root[data-theme="bluebubble"] #guest-modal button {
+    border-radius: 14px; background: #007aff; font-weight: 600;
+  }
+  /* Hide noise — clean like the garden */
+  :root[data-theme="bluebubble"] .acks { display: none; }
+  :root[data-theme="bluebubble"] .watermark-pins { display: none; }
+  :root[data-theme="bluebubble"] #jump-btn {
+    border-radius: 999px; background: #007aff; box-shadow: 0 2px 12px rgba(0,122,255,0.3);
+  }
+  :root[data-theme="bluebubble"] #chat {
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text",
+      "Helvetica Neue", "Helvetica", "Arial", sans-serif;
+    background: #fff;
+  }
+
+  :root[data-theme="win31"] {
+    /* ── Windows 3.1 (PVE Dashboard) ── */
+    --bg: #008080; --bg2: #008080; --panel: #c0c0c0; --border: #808080;
+    --fg: #000; --dim: #404040; --dimmer: #808080;
+    --accent: #E57000; --accent-hi: #ff8c3a; --accent2: #008000;
+    --warn: #808000; --err: #800000; --mention: #808000;
+    --hover: #d0d0d0; --ov: 0,0,0;
+    --card-radius: 0; --card-shadow: none; --pill-radius: 0;
+  }
+  :root[data-theme="crt"] {
+    /* ── CRT Green (PVE Dashboard) ── */
+    --bg: #020a02; --bg2: #031003; --panel: #031603; --border: rgba(51,255,102,.28);
+    --fg: #33ff66; --dim: #1f9941; --dimmer: #145a28;
+    --accent: #7dff9c; --accent-hi: #a0ffb8; --accent2: #33ff66;
+    --warn: #c6ff00; --err: #ff5544; --mention: #c6ff00;
+    --hover: #041d04; --ov: 255,255,255;
+    --card-radius: 2px; --card-shadow: 0 0 10px rgba(51,255,102,.12); --pill-radius: 2px;
+  }
+  :root[data-theme="amber"] {
+    /* ── Amber Mono (PVE Dashboard) ── */
+    --bg: #0d0700; --bg2: #140a00; --panel: #1a0e00; --border: rgba(255,176,0,.25);
+    --fg: #ffb000; --dim: #b87900; --dimmer: #7a5200;
+    --accent: #ffcb52; --accent-hi: #ffe080; --accent2: #ffb000;
+    --warn: #ffd700; --err: #ff5e2e; --mention: #ffd700;
+    --hover: #1f1100; --ov: 255,255,255;
+    --card-radius: 2px; --card-shadow: 0 0 10px rgba(255,176,0,.1); --pill-radius: 2px;
+  }
+  :root[data-theme="paper"] {
+    /* ── Paper Print (PVE Dashboard) ── */
+    --bg: #f4f1ea; --bg2: #efeae0; --panel: #fffdf8; --border: #d8d2c4;
+    --fg: #1c1b18; --dim: #6b675e; --dimmer: #9a968a;
+    --accent: #9a3b2e; --accent-hi: #b8503e; --accent2: #3a6b2e;
+    --warn: #9a7b1a; --err: #a32a22; --mention: #9a7b1a;
+    --hover: #f5f0e6; --ov: 0,0,0;
+    --card-radius: 2px; --card-shadow: 0 1px 0 #d8d2c4; --pill-radius: 2px;
+  }
+  :root[data-theme="vaporwave"] {
+    /* ── Vaporwave (PVE Dashboard) ── */
+    --bg: #2b0f54; --bg2: #1b1145; --panel: #3a1f6e; --border: rgba(255,134,200,.3);
+    --fg: #ffe6ff; --dim: #c7a6ff; --dimmer: #8a6ac0;
+    --accent: #7af9ff; --accent-hi: #a0fcff; --accent2: #9bffb0;
+    --warn: #ffe66d; --err: #ff6b8b; --mention: #ffe66d;
+    --hover: #4a2f80; --ov: 255,255,255;
+    --card-radius: 16px; --card-shadow: 0 8px 24px rgba(255,134,200,.25); --pill-radius: 999px;
+  }
+  :root[data-theme="synthwave"] {
+    /* ── Synthwave (PVE Dashboard) ── */
+    --bg: #120024; --bg2: #06000f; --panel: #1c0636; --border: rgba(5,217,232,.3);
+    --fg: #ffd9ff; --dim: #b07adb; --dimmer: #7a50a0;
+    --accent: #05d9e8; --accent-hi: #40e8f0; --accent2: #39ff14;
+    --warn: #f9c80e; --err: #ff2a6d; --mention: #f9c80e;
+    --hover: #2a1048; --ov: 255,255,255;
+    --card-radius: 4px; --card-shadow: 0 0 18px rgba(255,42,109,.3); --pill-radius: 3px;
+  }
+  :root[data-theme="gameboy"] {
+    /* ── Game Boy (PVE Dashboard) ── */
+    --bg: #9bbc0f; --bg2: #9bbc0f; --panel: #8bac0f; --border: #306230;
+    --fg: #0f380f; --dim: #306230; --dimmer: #5a8a5a;
+    --accent: #0f380f; --accent-hi: #1a4a1a; --accent2: #0f380f;
+    --warn: #306230; --err: #0f380f; --mention: #306230;
+    --hover: #98b80e; --ov: 0,0,0;
+    --card-radius: 0; --card-shadow: 3px 3px 0 #0f380f; --pill-radius: 0;
+  }
+  :root[data-theme="dosblue"] {
+    /* ── DOS Blue (PVE Dashboard) ── */
+    --bg: #0000aa; --bg2: #0000aa; --panel: #0000aa; --border: #5555ff;
+    --fg: #fff; --dim: #55ffff; --dimmer: #3a9a9a;
+    --accent: #ffff55; --accent-hi: #ffffaa; --accent2: #55ff55;
+    --warn: #ffff55; --err: #ff5555; --mention: #ffff55;
+    --hover: #000080; --ov: 255,255,255;
+    --card-radius: 0; --card-shadow: none; --pill-radius: 0;
+  }
+  :root[data-theme="popart"] {
+    /* ── Pop Art (PVE Dashboard) ── */
+    --bg: #0a0014; --bg2: #1a0033; --panel: #15041f; --border: #3a0d5e;
+    --fg: #fff5e1; --dim: #b89cff; --dimmer: #7a60c0;
+    --accent: #00f5ff; --accent-hi: #60faff; --accent2: #39ff14;
+    --warn: #ffbe0b; --err: #ff206e; --mention: #ffbe0b;
+    --hover: #200840; --ov: 255,255,255;
+    --card-radius: 0; --card-shadow: 5px 5px 0 #ff006e; --pill-radius: 0;
+  }
+  :root[data-theme="lcars"] {
+    /* ── LCARS (PVE Dashboard) ── */
+    --bg: #000; --bg2: #000; --panel: #140d06; --border: #3a2a14;
+    --fg: #FFCC99; --dim: #C9A98C; --dimmer: #8a6a50;
+    --accent: #FF9900; --accent-hi: #FFCC66; --accent2: #66CC66;
+    --warn: #FFCC66; --err: #CC6666; --mention: #FFCC66;
+    --hover: #1f1508; --ov: 255,255,255;
+    --card-radius: 14px; --card-shadow: none; --pill-radius: 999px;
   }
   * { box-sizing: border-box; }
   :root {
@@ -1063,40 +1627,66 @@ INDEX_HTML = r"""<!doctype html>
 
   #app { display: grid; grid-template-columns: 1fr 300px; grid-template-rows: 42px 1fr auto;
          height: 100vh; }
+  #app.side-collapsed { grid-template-columns: 1fr 0; }
+  #app.side-collapsed #side { display: none; }
 
   /* ── Header ── */
   header { grid-column: 1 / 3; background: var(--bg2); border-bottom: 1px solid var(--border);
-           display: flex; align-items: center; padding: 0 14px; gap: 12px;
+           display: flex; align-items: center; padding: 0 16px; gap: 14px;
            font-weight: 600; }
   header .title { color: var(--accent); }
   header .meta { color: var(--dim); font-weight: 400; font-size: 11px; }
   header .spacer { flex: 1; }
-  header .pill {
-    font-size: 11px; padding: 3px 8px; border-radius: 3px; cursor: pointer;
+  .pill {
+    font-size: 11px; padding: 3px 8px; border-radius: var(--pill-radius); cursor: pointer;
     background: var(--panel); border: 1px solid var(--border); user-select: none;
     color: var(--dim); font-weight: 500;
   }
-  header .pill:hover { border-color: var(--accent); color: var(--fg); }
-  header .pill.on { background: var(--accent); color: var(--bg); border-color: var(--accent); }
+  .pill:hover { border-color: var(--accent); color: var(--fg); }
+  a.pill { text-decoration: none; }
+  .pill.on { background: var(--accent); color: var(--bg); border-color: var(--accent); }
   header .pill.conn.ok { color: var(--accent2); }
   header .pill.conn.bad { color: var(--err); }
   header #filter { background: var(--panel); color: var(--fg); border: 1px solid var(--border);
                    padding: 3px 8px; border-radius: 3px; font-family: inherit; font-size: 11px;
                    width: 160px; }
   header #filter:focus { outline: none; border-color: var(--accent); }
-  header #font-picker { background: var(--panel); color: var(--fg); border: 1px solid var(--border);
+  #font-picker, #theme-picker {
+                        background: var(--panel); color: var(--fg); border: 1px solid var(--border);
                         padding: 3px 6px; border-radius: 3px; font-family: inherit; font-size: 11px;
                         cursor: pointer; }
-  header #font-picker:focus { outline: none; border-color: var(--accent); }
+  #font-picker:focus, #theme-picker:focus { outline: none; border-color: var(--accent); }
+
+  /* ── Settings panel (drawer) ── */
+  #settings-panel {
+    position: fixed; top: 46px; right: 10px; z-index: 30;
+    background: var(--panel); border: 1px solid var(--border); border-radius: var(--card-radius);
+    padding: 12px 14px; min-width: 250px; max-width: 320px;
+    box-shadow: var(--card-shadow, 0 8px 30px rgba(0,0,0,0.4));
+    display: flex; flex-direction: column; gap: 10px;
+  }
+  #settings-panel[hidden] { display: none; }
+  #settings-panel h3 { margin: 0; font-size: 10px; text-transform: uppercase;
+                       letter-spacing: 0.6px; color: var(--dim); font-weight: 700; }
+  #settings-panel .set-row { display: flex; align-items: center;
+                             justify-content: space-between; gap: 12px;
+                             font-size: 12px; color: var(--fg); }
+  #settings-panel .set-row[hidden] { display: none; }
+  #settings-panel .set-row > span:first-child { color: var(--dim); white-space: nowrap; }
+  #settings-panel select {
+    background: var(--panel); color: var(--fg); border: 1px solid var(--border);
+    padding: 3px 6px; border-radius: 3px; font-family: inherit; font-size: 11px; cursor: pointer; }
+  #settings-panel select:focus { outline: none; border-color: var(--accent); }
+  #settings-panel input[type="range"] { width: 130px; cursor: pointer; accent-color: var(--accent); }
 
   /* ── Chat ── */
   #chat-wrap { grid-row: 2 / 3; grid-column: 1 / 2; position: relative; overflow: hidden; }
-  #chat { height: 100%; overflow-y: auto; padding: 12px 16px; scroll-behavior: smooth; }
-  .msg { margin-bottom: 10px; word-wrap: break-word; cursor: pointer; padding: 4px 8px 6px;
-         border-radius: 3px; border-left: 3px solid transparent; margin-left: -8px; }
-  .msg:hover { background: #0f1420; }
-  .msg .head { font-size: 11px; color: var(--dim); margin-bottom: 2px;
-               display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  #chat { height: 100%; overflow-y: auto; padding: 14px 18px; scroll-behavior: smooth; }
+  .msg { margin-bottom: 12px; word-wrap: break-word; cursor: pointer; padding: 6px 10px 8px;
+         border-radius: var(--card-radius); border-left: 3px solid transparent; margin-left: -10px; }
+  .msg:hover { background: var(--hover); }
+  .msg .head { font-size: 11px; color: var(--dim); margin-bottom: 4px;
+               display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
   .msg .head .time { cursor: help; }
   .msg .author { font-weight: 600; }
   .msg .mentions-bar { font-size: 11px; margin: 2px 0 4px;
@@ -1144,10 +1734,10 @@ INDEX_HTML = r"""<!doctype html>
   .msg .body > *:first-child { margin-top: 0; }
   .msg .body > *:last-child { margin-bottom: 0; }
   .msg .body p { margin: 4px 0; white-space: pre-wrap; }
-  #chat .msg .body code.mdic { background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.1);
+  #chat .msg .body code.mdic { background: rgba(var(--ov),0.08); border: 1px solid rgba(var(--ov),0.1);
                          border-radius: 3px; padding: 0 4px; font-family: ui-monospace, Menlo, Monaco, monospace;
                          font-size: 0.92em; }
-  #chat .msg .body pre.mdcode { background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1);
+  #chat .msg .body pre.mdcode { background: rgba(var(--ov),0.05); border: 1px solid rgba(var(--ov),0.1);
                           border-radius: 4px; padding: 6px 8px; margin: 4px 0;
                           font-family: ui-monospace, Menlo, Monaco, monospace; font-size: 0.9em;
                           white-space: pre-wrap; overflow-x: auto; }
@@ -1158,8 +1748,8 @@ INDEX_HTML = r"""<!doctype html>
   .msg .body h1, .msg .body h2, .msg .body h3,
   .msg .body h4, .msg .body h5, .msg .body h6 {
     margin: 8px 0 4px; font-weight: 700; line-height: 1.25; }
-  .msg .body h1 { font-size: 1.35em; border-bottom: 1px solid rgba(255,255,255,0.15); padding-bottom: 2px; }
-  .msg .body h2 { font-size: 1.2em; border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom: 2px; }
+  .msg .body h1 { font-size: 1.35em; border-bottom: 1px solid rgba(var(--ov),0.15); padding-bottom: 2px; }
+  .msg .body h2 { font-size: 1.2em; border-bottom: 1px solid rgba(var(--ov),0.1); padding-bottom: 2px; }
   .msg .body h3 { font-size: 1.1em; }
   .msg .body h4 { font-size: 1.0em; }
   .msg .body h5 { font-size: 0.95em; opacity: 0.9; }
@@ -1171,11 +1761,11 @@ INDEX_HTML = r"""<!doctype html>
   .msg .body li.task { list-style: none; margin-left: -18px; }
   .msg .body li.task input { margin-right: 6px; vertical-align: -1px; }
   .msg .body blockquote { margin: 4px 0; padding: 2px 10px; border-left: 3px solid var(--accent2);
-                          background: rgba(255,255,255,0.03); color: rgba(255,255,255,0.85); }
-  .msg .body hr { border: 0; border-top: 1px solid rgba(255,255,255,0.18); margin: 8px 0; }
+                          background: rgba(var(--ov),0.03); color: rgba(var(--ov),0.85); }
+  .msg .body hr { border: 0; border-top: 1px solid rgba(var(--ov),0.18); margin: 8px 0; }
   .msg .body table { border-collapse: collapse; margin: 4px 0; font-size: 0.95em; }
-  .msg .body th, .msg .body td { border: 1px solid rgba(255,255,255,0.15); padding: 3px 8px; }
-  .msg .body th { background: rgba(255,255,255,0.06); font-weight: 700; text-align: left; }
+  .msg .body th, .msg .body td { border: 1px solid rgba(var(--ov),0.15); padding: 3px 8px; }
+  .msg .body th { background: rgba(var(--ov),0.06); font-weight: 700; text-align: left; }
   .msg.compact .body {
     display: -webkit-box;
     -webkit-line-clamp: 3;
@@ -1214,6 +1804,7 @@ INDEX_HTML = r"""<!doctype html>
                    transition: transform 0.35s ease;
                    text-shadow: 0 0 2px var(--bg), 0 0 2px var(--bg); }
   .watermark-pin.self { filter: drop-shadow(0 0 3px var(--accent)); }
+  .watermark-pin.ctx-ringed { border-radius: 50%; padding: 2px; }
   .watermark-pin.here { animation: here-pulse 1.8s ease-in-out infinite; }
   @keyframes here-pulse {
     0%, 100% { transform: translateX(0); opacity: 0.95; }
@@ -1226,7 +1817,7 @@ INDEX_HTML = r"""<!doctype html>
               border-radius: 18px; cursor: pointer; font-weight: 600; font-size: 11px;
               box-shadow: 0 4px 14px rgba(0,0,0,0.5); display: none; z-index: 5; }
   #jump-btn.show { display: block; }
-  #jump-btn:hover { background: #50b0f0; }
+  #jump-btn:hover { background: var(--accent-hi); }
   #jump-btn .count { background: var(--err); color: white;
                      border-radius: 10px; padding: 1px 6px; margin-left: 4px; font-size: 10px; }
 
@@ -1234,13 +1825,13 @@ INDEX_HTML = r"""<!doctype html>
   #side { grid-row: 2 / 3; grid-column: 2 / 3;
           background: var(--panel); border-left: 1px solid var(--border);
           overflow-y: auto; display: flex; flex-direction: column; }
-  #side section { padding: 10px 12px; border-bottom: 1px solid var(--border); }
+  #side section { padding: 14px 14px; border-bottom: 1px solid var(--border); }
   #side section:last-child { border-bottom: none; }
   #side h2 { font-size: 10px; text-transform: uppercase; color: var(--dim);
-             letter-spacing: 0.08em; margin: 0 0 8px; font-weight: 600; }
+             letter-spacing: 0.08em; margin: 0 0 10px; font-weight: 600; }
 
-  .member { padding: 5px 0; cursor: pointer; }
-  .member + .member { border-top: 1px solid #1d2533; }
+  .member { padding: 8px 0; cursor: pointer; }
+  .member + .member { border-top: 1px solid var(--border); }
   .member .row { display: flex; align-items: center; gap: 8px; }
   .member .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
   .member .roster-animal { font-size: 16px; line-height: 1; flex-shrink: 0;
@@ -1251,6 +1842,24 @@ INDEX_HTML = r"""<!doctype html>
                     text-transform: uppercase; letter-spacing: 0.5px; }
   .member .dm-btn:hover { background: var(--accent); color: var(--bg);
                           border-color: var(--accent); }
+  .ctx-card { display: flex; align-items: center; gap: 8px; padding: 4px 2px; }
+  .ctx-ring { position: relative; width: 36px; height: 36px; flex: none; }
+  .ctx-ring svg { width: 36px; height: 36px; transform: rotate(-90deg); }
+  .ctx-ring .track { fill: none; stroke: var(--border); stroke-width: 4; }
+  .ctx-ring .fill { fill: none; stroke-width: 4; stroke-linecap: round;
+                    transition: stroke-dashoffset 0.6s ease; }
+  .ctx-ring .pct-text { position: absolute; inset: 0; display: flex;
+                        align-items: center; justify-content: center;
+                        font-size: 10px; color: var(--fg); }
+  .ctx-info { min-width: 0; }
+  .ctx-name { font-size: 11px; color: var(--fg); white-space: nowrap;
+              overflow: hidden; text-overflow: ellipsis; }
+  .ctx-meta { font-size: 10px; color: var(--dim); }
+  .ctx-empty { font-size: 11px; color: var(--dim); padding: 2px; }
+  .member .ctx-pct { font-size: 9px; padding: 1px 5px; border-radius: 7px;
+                     background: #2a3340; color: #8fa5c0; margin-left: 4px; }
+  .member .ctx-pct.warm { background: #4a3a20; color: #e5d35e; }
+  .member .ctx-pct.hot  { background: #4a2420; color: #ff8470; }
   .member .fmode { font-size: 9px; padding: 1px 5px; border-radius: 3px;
                    flex-shrink: 0; user-select: none;
                    text-transform: uppercase; letter-spacing: 0.5px;
@@ -1269,14 +1878,14 @@ INDEX_HTML = r"""<!doctype html>
   .dot.idle { background: var(--dimmer); }
   .dot.stale { background: var(--warn); }
   .dot.dead { background: var(--err); }
-  .member .stext { font-size: 10px; color: var(--dim); margin-top: 2px;
+  .member .stext { font-size: 10px; color: var(--dim); margin-top: 4px;
                    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-                   padding-left: 16px; }
+                   padding-left: 16px; line-height: 1.4; }
 
-  .member .stats { display: none; padding: 8px 0 2px 16px;
+  .member .stats { display: none; padding: 10px 0 4px 16px;
                    font-size: 10px; color: var(--dim); }
   .member.expanded .stats { display: block; }
-  .stats .stat-row { display: flex; justify-content: space-between; padding: 2px 0; gap: 10px; }
+  .stats .stat-row { display: flex; justify-content: space-between; padding: 3px 0; gap: 12px; }
   .stats .stat-label { color: var(--dim); }
   .stats .stat-val { color: var(--fg); font-weight: 600; text-align: right;
                      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -1289,7 +1898,7 @@ INDEX_HTML = r"""<!doctype html>
                     max-height: 54px; overflow: hidden; }
 
   /* Channel stats block */
-  #chanstats .stat-row { display: flex; justify-content: space-between; padding: 3px 0;
+  #chanstats .stat-row { display: flex; justify-content: space-between; padding: 4px 0;
                          font-size: 11px; }
   #chanstats .stat-label { color: var(--dim); }
   #chanstats .stat-val { color: var(--fg); font-weight: 600; }
@@ -1303,7 +1912,7 @@ INDEX_HTML = r"""<!doctype html>
   /* ── Composer (unchanged from v1) ── */
   #composer { grid-row: 3 / 4; grid-column: 1 / 3;
               background: var(--bg2); border-top: 1px solid var(--border);
-              padding: 8px 14px; display: flex; flex-direction: column; gap: 4px; }
+              padding: 10px 16px; display: flex; flex-direction: column; gap: 6px; }
   #preview { font-size: 11px; color: var(--dim); min-height: 14px; }
   #preview .tgt { color: var(--mention); font-weight: 600; }
   /* Horizontal persistent-target selector — pick 1..N claudes (or All) and
@@ -1327,13 +1936,13 @@ INDEX_HTML = r"""<!doctype html>
   body.dm-mode #target-bar { display: none; }
   #input-row { display: flex; gap: 8px; align-items: flex-end; position: relative; }
   #input { flex: 1; background: var(--bg); color: var(--fg); border: 1px solid var(--border);
-           padding: 8px 10px; border-radius: 4px; font-family: inherit; font-size: 13px;
+           padding: 8px 10px; border-radius: var(--input-radius); font-family: inherit; font-size: 13px;
            resize: none; min-height: 36px; max-height: 160px; }
   #input:focus { outline: none; border-color: var(--accent); }
   #send-btn { background: var(--accent); color: var(--bg); border: none;
               padding: 0 18px; height: 36px; border-radius: 4px; cursor: pointer;
               font-weight: 600; font-family: inherit; font-size: 13px; }
-  #send-btn:hover { background: #50b0f0; }
+  #send-btn:hover { background: var(--accent-hi); }
   #send-btn:disabled { opacity: 0.5; cursor: not-allowed; }
   #hint { font-size: 10px; color: var(--dimmer); margin-top: 2px; }
   #hint kbd { background: var(--panel); border: 1px solid var(--border); padding: 1px 5px;
@@ -1349,6 +1958,64 @@ INDEX_HTML = r"""<!doctype html>
   .completion .cname { color: var(--fg); }
   .completion .cid { color: var(--dimmer); font-size: 10px; }
   .completion .cdot { width: 6px; height: 6px; border-radius: 50%; }
+
+  /* Mobile roster toggle — hidden on desktop, sole sidebar opener on mobile */
+  #btn-mobile-roster { display: none; font-size: 16px; padding: 3px 10px; }
+
+  /* ── Mobile responsive ── */
+  @media (max-width: 768px) {
+    #app { grid-template-columns: 1fr !important; grid-template-rows: auto 1fr auto; }
+    header { flex-wrap: nowrap; gap: 6px; padding: 6px 10px; height: 42px; overflow: hidden; }
+    header .spacer { flex: 1; }
+    header .meta { display: none; }
+    /* Mobile header: channel name + spacer + hamburger + settings + conn dot */
+    header > #filter, header > #font-picker, header > #theme-picker,
+    header > #btn-side, header > #btn-compact, header > #btn-notify,
+    header > #btn-sound { display: none !important; }
+    #btn-mobile-roster { display: inline-block !important; order: 9; }
+    #btn-settings { order: 10; font-size: 14px; padding: 3px 8px; }
+    #h-conn { order: 11; font-size: 10px; padding: 2px 6px; }
+
+    /* Sidebar: hidden by default, full-overlay when toggled open */
+    #side { display: none !important; position: fixed; inset: 0; z-index: 20;
+            grid-column: 1; grid-row: 2; border-left: none;
+            overflow-y: auto; padding-top: 48px; }
+    #app.mobile-side-open #side { display: flex !important; }
+    /* Scrim behind sidebar overlay */
+    #mobile-scrim { display: none; position: fixed; inset: 0; z-index: 19;
+                    background: rgba(0,0,0,0.5); }
+    #app.mobile-side-open #mobile-scrim { display: block; }
+
+    /* Settings panel: full-width on mobile */
+    #settings-panel { right: 0; left: 0; max-width: 100%; border-radius: 0;
+                      top: auto; position: fixed; }
+
+    /* Composer: touch-friendly */
+    #composer { padding: 6px 8px; }
+    #input { font-size: 16px; min-height: 40px; }  /* ≥16px prevents iOS zoom */
+    #send-btn { height: 40px; padding: 0 14px; }
+    #hint { display: none; }
+    #target-bar { gap: 4px; }
+    #target-bar .tb-pill { padding: 4px 10px; font-size: 12px; }
+
+    /* Chat: tighter padding */
+    #chat { padding: 8px 10px; }
+    .msg { margin-left: -4px; padding: 4px 4px 6px; }
+
+    /* Completions: full-width */
+    #completions { left: 0; right: 0; min-width: auto; }
+
+    /* Jump button: centered */
+    #jump-btn { right: 50%; transform: translateX(50%); }
+  }
+
+  @media (max-width: 480px) {
+    header .meta { display: none; }
+    .msg .head { font-size: 10px; }
+    .msg .mentions-bar .mchip, .msg .refs-bar .mchip,
+    .msg .bangs-bar .mchip { font-size: 10px; padding: 1px 5px; }
+    #target-bar .tb-pill { padding: 3px 7px; font-size: 11px; }
+  }
 
   /* Guest identify modal */
   #guest-modal { position: fixed; inset: 0; background: rgba(0,0,0,0.75);
@@ -1371,7 +2038,7 @@ INDEX_HTML = r"""<!doctype html>
   #guest-modal button { margin-top: 10px; padding: 8px 16px; background: var(--accent);
                         color: var(--bg); border: none; border-radius: 4px;
                         font-weight: 600; cursor: pointer; }
-  #guest-modal button:hover { background: #50b0f0; }
+  #guest-modal button:hover { background: var(--accent-hi); }
 </style>
 </head>
 <body>
@@ -1392,9 +2059,36 @@ INDEX_HTML = r"""<!doctype html>
 </div>
 <div id="app">
   <header>
+    <a class="pill" id="btn-home" href="/" title="back to the hub landing page">⌂</a>
     <span class="title" id="h-channel">trio#…</span>
     <span class="meta" id="h-meta">connecting…</span>
     <span class="spacer"></span>
+    <select id="theme-picker" title="color theme">
+      <optgroup label="Dark">
+        <option value="midnight">Midnight</option>
+        <option value="nord">Nord</option>
+        <option value="dracula">Dracula</option>
+        <option value="pve-dark">Proxmox</option>
+        <option value="solarized">Solarized</option>
+        <option value="synthwave">Synthwave</option>
+        <option value="vaporwave">Vaporwave</option>
+        <option value="lcars">LCARS</option>
+      </optgroup>
+      <optgroup label="Light">
+        <option value="light">Daylight</option>
+        <option value="pve-light">Clean</option>
+        <option value="paper">Paper</option>
+        <option value="popart">Pop Art</option>
+        <option value="bluebubble">Walled Garden</option>
+      </optgroup>
+      <optgroup label="Retro">
+        <option value="crt">CRT Green</option>
+        <option value="amber">Amber Mono</option>
+        <option value="dosblue">DOS Blue</option>
+        <option value="gameboy">Game Boy</option>
+        <option value="win31">Windows 3.1</option>
+      </optgroup>
+    </select>
     <select id="font-picker" title="message font">
       <option value='"JetBrains Mono", "Fira Code", "Cascadia Code", ui-monospace, Menlo, monospace'>JetBrains Mono (default)</option>
       <option value='"Fira Code", ui-monospace, Menlo, monospace'>Fira Code</option>
@@ -1405,14 +2099,22 @@ INDEX_HTML = r"""<!doctype html>
       <option value='Menlo, Monaco, ui-monospace, monospace'>Menlo</option>
       <option value='Monaco, Menlo, ui-monospace, monospace'>Monaco</option>
       <option value='Consolas, "Cascadia Mono", ui-monospace, monospace'>Consolas</option>
-      <option value='ui-monospace, SFMono-Regular, Menlo, Consolas, monospace'>System mono</option>
+      <option value='"SF Mono", "SFMono-Regular", ui-monospace, Menlo, monospace'>SF Mono</option>
     </select>
     <input id="filter" type="text" placeholder="filter messages…" spellcheck="false">
+    <span class="pill on" id="btn-side" title="show/hide the roster sidebar">roster</span>
     <span class="pill" id="btn-compact" title="clamp every message body to 3 lines">compact</span>
     <span class="pill" id="btn-notify" title="desktop notifications on @you">🔔 off</span>
+    <span class="pill" id="btn-sound" title="play a chime on any new message">🔊 off</span>
+    <span class="pill" id="btn-settings" title="settings">⚙ settings</span>
+    <span class="pill" id="btn-mobile-roster" title="show roster &amp; context">☰</span>
     <span class="pill conn bad" id="h-conn">● disconnected</span>
   </header>
+  <div id="settings-panel" hidden>
+    <h3>Settings</h3>
+  </div>
 
+  <div id="mobile-scrim"></div>
   <div id="chat-wrap">
     <div id="chat"></div>
     <button id="jump-btn">↓ latest<span class="count" id="jump-count" style="display:none">0</span></button>
@@ -1436,7 +2138,7 @@ INDEX_HTML = r"""<!doctype html>
     <div id="target-bar"></div>
     <div id="input-row">
       <div id="completions"></div>
-      <textarea id="input" rows="1" placeholder="Type a message. @ to mention, $task <desc> to post a claimable task. Enter to send, Shift+Enter for newline."></textarea>
+      <textarea id="input" rows="1" placeholder="Message — @ to mention, Enter to send"></textarea>
       <button id="send-btn">Send</button>
     </div>
     <div id="hint">
@@ -1449,6 +2151,7 @@ INDEX_HTML = r"""<!doctype html>
       <kbd>Alt+1..9</kbd> toggle target
       <kbd>Alt+A</kbd> all
       <kbd>Alt+0</kbd> clear
+      <kbd>Ctrl+B</kbd> roster
       <span style="margin-left:14px;color:var(--dim)">click a message to expand/collapse in compact mode</span>
     </div>
   </div>
@@ -1474,6 +2177,7 @@ INDEX_HTML = r"""<!doctype html>
   const filterBanner = document.getElementById('filter-banner');
   const btnCompact = document.getElementById('btn-compact');
   const btnNotify = document.getElementById('btn-notify');
+  const btnSound = document.getElementById('btn-sound');
   const fontPicker = document.getElementById('font-picker');
   const jumpBtn = document.getElementById('jump-btn');
   const jumpCount = document.getElementById('jump-count');
@@ -1496,10 +2200,37 @@ INDEX_HTML = r"""<!doctype html>
     try { localStorage.setItem('trio.msgFont', v); } catch (_) {}
   });
 
+  // Theme picker — persists per-origin via localStorage. Unknown/missing
+  // theme falls back to 'midnight' (the base :root palette).
+  const themePicker = document.getElementById('theme-picker');
+  function applyTheme(v) {
+    document.documentElement.setAttribute('data-theme', v || 'midnight');
+  }
+  try {
+    const savedTheme = localStorage.getItem('trio.theme');
+    if (savedTheme) {
+      for (const opt of themePicker.options) {
+        if (opt.value === savedTheme) { themePicker.value = savedTheme; break; }
+      }
+      applyTheme(savedTheme);
+    } else {
+      applyTheme('midnight');
+    }
+  } catch (_) { applyTheme('midnight'); }
+  themePicker.addEventListener('change', () => {
+    applyTheme(themePicker.value);
+    try { localStorage.setItem('trio.theme', themePicker.value); } catch (_) {}
+  });
+
   // ── URL params ──
   const URL_PARAMS = new URLSearchParams(location.search);
   const DM_TARGET_ID = URL_PARAMS.get('dm') || '';
   const DM_MODE = !!DM_TARGET_ID;
+  // Landing-mode multiplexing: when this page is served at /c/<code>, the
+  // server substitutes a "?channel=<code>" query string here so every API
+  // call names its channel. Single-channel mode leaves it '' (the server
+  // already knows its one channel) — the token below is valid JS as-is.
+  const API_QS = /*__API_QS__*/'';
 
   // ── State ──
   const state = {
@@ -1520,6 +2251,11 @@ INDEX_HTML = r"""<!doctype html>
     expandedMsgs: new Set(),        // ids with per-msg override (toggle-specific)
     expandedMembers: new Set(),     // member ids with expanded stats
     notifyEnabled: false,
+    initialLoad: true,              // pin to newest until the history burst settles
+    soundEnabled: false,
+    chimeVolume: 0.33,
+    notifyScope: 'mention',   // 'mention' | 'all'
+    notifyWhen: 'hidden',     // 'hidden' | 'always'
     unreadCount: 0,                 // for tab title while hidden
     jumpUnread: 0,                  // messages arrived while user was scrolled up
     rateBins: new Map(),            // bin_epoch_10s → count
@@ -2036,6 +2772,19 @@ INDEX_HTML = r"""<!doctype html>
     else node.classList.remove('compact');
   }
 
+  // After the initial history burst goes quiet, snap once more to the bottom
+  // (markdown/fonts reflow taller after the synchronous appends) and switch to
+  // normal "follow only if near bottom" behavior for live messages.
+  let _initialSettleTimer = null;
+  function scheduleInitialSettle() {
+    if (_initialSettleTimer) clearTimeout(_initialSettleTimer);
+    _initialSettleTimer = setTimeout(() => {
+      _initialSettleTimer = null;
+      state.initialLoad = false;
+      requestAnimationFrame(() => { chat.scrollTop = chat.scrollHeight; });
+    }, 250);
+  }
+
   function appendMessage(m) {
     if (state.seenMsgIds.has(m.id)) return;
     state.seenMsgIds.add(m.id);
@@ -2120,7 +2869,12 @@ INDEX_HTML = r"""<!doctype html>
     renderWatermarkPins();
     scheduleHereUpdate();
 
-    if (nearBottom) {
+    if (state.initialLoad) {
+      // Fresh page load: keep pinned to the newest message through the whole
+      // history burst, then do one final settle after layout reflows.
+      chat.scrollTop = chat.scrollHeight;
+      scheduleInitialSettle();
+    } else if (nearBottom) {
       chat.scrollTop = chat.scrollHeight;
     } else {
       state.jumpUnread++;
@@ -2135,9 +2889,12 @@ INDEX_HTML = r"""<!doctype html>
 
     // Desktop notification on @you while hidden (opt-in). In DM mode,
     // only fire for the DM target — don't pull focus for other channel chatter.
-    const notifyEligible = !isMine && mentionsOperator &&
-                           (!state.dmTargetId || m.member_id === state.dmTargetId);
-    if (document.hidden && notifyEligible && state.notifyEnabled &&
+    const dmOk = (!state.dmTargetId || m.member_id === state.dmTargetId);
+    const scopeOk = state.notifyScope === 'all'
+      ? (!isMine && !isSystem)
+      : (!isMine && mentionsOperator);
+    const whenOk = state.notifyWhen === 'always' ? true : document.hidden;
+    if (state.notifyEnabled && whenOk && scopeOk && dmOk &&
         'Notification' in window && Notification.permission === 'granted') {
       try {
         const n = new Notification(`@${state.operator.name} — ${m.member_name}`, {
@@ -2148,6 +2905,9 @@ INDEX_HTML = r"""<!doctype html>
         n.onclick = () => { window.focus(); n.close(); };
       } catch (e) { /* ignore */ }
     }
+
+    // In-page chime on any new message from someone else (opt-in, focus-agnostic).
+    if (state.soundEnabled && !isMine && !isSystem) playChime();
   }
 
   // Existing message names may change (rename) — update author labels + mention
@@ -2330,6 +3090,10 @@ INDEX_HTML = r"""<!doctype html>
     // before any render path that looks up avatars by id.
     rememberAvatars(members);
 
+    // Per-member context (fingerprint-joined server-side): drives the
+    // ring on each member's watermark pin.
+    state.contextByMember = new Map(
+      members.filter(m => m.context_pct != null).map(m => [m.id, m.context_pct]));
     // Reconcile state.members — and detect name changes so the chat can
     // retroactively re-label past messages from the renamed member.
     const rename_from = new Map();  // id → old member_name for messages
@@ -2415,6 +3179,14 @@ INDEX_HTML = r"""<!doctype html>
       pin.className = 'watermark-pin' + (mid === state.operator.id ? ' self' : '');
       pin.textContent = a.emoji;
       pin.title = `${mem.name} — the ${a.name} — read through #${lr}`;
+      const cpct = state.contextByMember && state.contextByMember.get(mid);
+      if (cpct != null) {
+        const cc = cpct >= 80 ? 'var(--err)' : cpct >= 60 ? 'var(--warn)' : 'var(--accent2)';
+        pin.classList.add('ctx-ringed');
+        pin.style.background =
+          `conic-gradient(${cc} ${Math.round(cpct)}%, var(--border) 0)`;
+        pin.title += ` — context ${Math.round(cpct)}%`;
+      }
       c.appendChild(pin);
     }
   }
@@ -2455,6 +3227,16 @@ INDEX_HTML = r"""<!doctype html>
         ? 'Listening mode: at — only wakes on @pings. Ambient messages silent.'
         : 'Listening mode: about — wakes on @pings and #pounds. Ambient silent.';
       topRow.appendChild(fmPill);
+    }
+    // Context-window usage badge — present only for sessions on the same
+    // machine as this nth_web (fed by the statusline publisher).
+    if (m.context_pct != null) {
+      const ctxPill = document.createElement('span');
+      const pct = Math.round(m.context_pct);
+      ctxPill.className = 'ctx-pct' + (pct >= 80 ? ' hot' : pct >= 60 ? ' warm' : '');
+      ctxPill.textContent = pct + '%';
+      ctxPill.title = 'Context window used (from this machine\'s statusline publisher)';
+      topRow.appendChild(ctxPill);
     }
     // DM button — opens a filtered-view tab for this agent.
     // Hide for self, for human operator rows, and inside an existing DM tab.
@@ -2531,6 +3313,37 @@ INDEX_HTML = r"""<!doctype html>
     }
     if (snippet) {
       html += `<div class="snippet" title="${escapeHtml(snippet)}">${escapeHtml(snippet)}</div>`;
+    }
+    if (m.context) {
+      const c = m.context;
+      const h = c.harness || {};
+      const cw = h.context_window || {};
+      const rl = h.rate_limits || {};
+      // Claude snapshots nest sizes under harness; codex publisher snapshots
+      // carry cw_size (and effort) at the top level.
+      const cwSize = (cw.context_window_size || c.cw_size || 0);
+      const cwLabel = cwSize >= 1e6 ? (cwSize/1e6)+'M' : cwSize >= 1e3 ? Math.round(cwSize/1e3)+'k' : '';
+      const pct = c.used_pct != null ? Math.round(c.used_pct) + '%' : '—';
+      const pctClass = (c.used_pct || 0) >= 80 ? 'bad' : (c.used_pct || 0) >= 60 ? 'warn' : 'good';
+      const model = ((c.model || '').startsWith('claude-')
+        ? c.model.replace(/^claude-/, '').split('-').slice(0, 2).join(' ')
+        : (c.model || '')) || '—';
+      const fiveH = rl.five_hour || {};
+      const sevenD = rl.seven_day || {};
+      const fhPct = fiveH.used_percentage != null ? Math.round(fiveH.used_percentage) + '%' : '';
+      const sdPct = sevenD.used_percentage != null ? Math.round(sevenD.used_percentage) + '%' : '';
+      const ctxRows = [
+        ['context', `${pct} of ${cwLabel}`, pctClass],
+        ['model', model, ''],
+      ];
+      if (c.effort) ctxRows.push(['effort', escapeHtml(c.effort), '']);
+      if (fhPct) ctxRows.push(['5h limit', fhPct, (fiveH.used_percentage||0) >= 80 ? 'bad' : '']);
+      if (sdPct) ctxRows.push(['7d limit', sdPct, (sevenD.used_percentage||0) >= 80 ? 'bad' : '']);
+      if (c.session_name) ctxRows.push(['session', escapeHtml(c.session_name), '']);
+      for (const [k2, v2, cl] of ctxRows) {
+        html += `<div class="stat-row"><span class="stat-label">${k2}</span>`
+             +  `<span class="stat-val ${cl}">${v2}</span></div>`;
+      }
     }
     return html;
   }
@@ -2782,7 +3595,7 @@ INDEX_HTML = r"""<!doctype html>
     }
     sendBtn.disabled = true;
     try {
-      const r = await fetch('/api/send', {
+      const r = await fetch('/api/send' + API_QS, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ content: text, mentions: mentionIds }),
@@ -2925,6 +3738,214 @@ INDEX_HTML = r"""<!doctype html>
       btnNotify.textContent = '🔔 off';
       btnNotify.classList.remove('on');
     }
+    if (typeof syncSettingVisibility === 'function') syncSettingVisibility();
+  });
+
+  // ── Chime (WebAudio, no audio asset — synthesized on the fly) ──
+  let _audioCtx = null;
+  function ensureAudio() {
+    if (_audioCtx) return _audioCtx;
+    try {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      _audioCtx = AC ? new AC() : null;
+    } catch (_) { _audioCtx = null; }
+    return _audioCtx;
+  }
+  function playChime() {
+    const ctx = ensureAudio();
+    if (!ctx) return;
+    if (ctx.state === 'suspended') { try { ctx.resume(); } catch (_) {} }
+    const vol = Math.max(0, Math.min(1, state.chimeVolume));
+    if (vol <= 0) return;
+    try {
+      const now = ctx.currentTime;
+      const gain = ctx.createGain();
+      gain.gain.setValueAtTime(0.0001, now);
+      gain.gain.exponentialRampToValueAtTime(vol, now + 0.012);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.40);
+      gain.connect(ctx.destination);
+      // two-note ping: E6 -> A6
+      [[1318.51, 0], [1760.0, 0.09]].forEach(([freq, t]) => {
+        const osc = ctx.createOscillator();
+        osc.type = 'sine';
+        osc.frequency.value = freq;
+        osc.connect(gain);
+        osc.start(now + t);
+        osc.stop(now + t + 0.28);
+      });
+    } catch (_) { /* ignore */ }
+  }
+
+  // ── Sound (chime) toggle — off by default; chimes on any new peer message ──
+  btnSound.addEventListener('click', () => {
+    state.soundEnabled = !state.soundEnabled;
+    btnSound.textContent = state.soundEnabled ? '🔊 on' : '🔊 off';
+    btnSound.classList.toggle('on', state.soundEnabled);
+    try { localStorage.setItem('trio.sound', state.soundEnabled ? '1' : '0'); } catch (_) {}
+    // The click is a user gesture — unlock the AudioContext and preview the chime.
+    if (state.soundEnabled) { ensureAudio(); playChime(); }
+    if (typeof syncSettingVisibility === 'function') syncSettingVisibility();
+  });
+  // Restore persisted preference (audio stays suspended until the first gesture).
+  try {
+    if (localStorage.getItem('trio.sound') === '1') {
+      state.soundEnabled = true;
+      btnSound.textContent = '🔊 on';
+      btnSound.classList.add('on');
+    }
+  } catch (_) {}
+
+  // ── Sidebar collapse toggle — persisted; 'on' pill state == roster visible ──
+  const btnSide = document.getElementById('btn-side');
+  const appEl = document.getElementById('app');
+  function applySidebar(collapsed) {
+    appEl.classList.toggle('side-collapsed', collapsed);
+    btnSide.classList.toggle('on', !collapsed);
+  }
+  let _sideCollapsed = false;
+  try { _sideCollapsed = localStorage.getItem('trio.sideCollapsed') === '1'; } catch (_) {}
+  applySidebar(_sideCollapsed);
+  function toggleSidebar() {
+    _sideCollapsed = !_sideCollapsed;
+    applySidebar(_sideCollapsed);
+    try { localStorage.setItem('trio.sideCollapsed', _sideCollapsed ? '1' : '0'); } catch (_) {}
+  }
+  btnSide.addEventListener('click', () => {
+    if (window.innerWidth <= 768) { toggleMobileSidebar(); } else { toggleSidebar(); }
+  });
+  // Keyboard shortcut: Ctrl+B toggles the roster sidebar (editor convention).
+  document.addEventListener('keydown', (e) => {
+    if (e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey &&
+        (e.key === 'b' || e.key === 'B')) {
+      e.preventDefault();
+      if (window.innerWidth <= 768) { toggleMobileSidebar(); } else { toggleSidebar(); }
+    }
+  });
+
+  // ── Mobile sidebar: overlay with scrim ──
+  const mobileScrim = document.getElementById('mobile-scrim');
+  const btnMobileRoster = document.getElementById('btn-mobile-roster');
+  function toggleMobileSidebar() {
+    const open = appEl.classList.toggle('mobile-side-open');
+    btnSide.classList.toggle('on', open);
+    if (btnMobileRoster) btnMobileRoster.classList.toggle('on', open);
+  }
+  if (btnMobileRoster) btnMobileRoster.addEventListener('click', toggleMobileSidebar);
+  if (mobileScrim) {
+    mobileScrim.addEventListener('click', () => {
+      appEl.classList.remove('mobile-side-open');
+      btnSide.classList.toggle('on', false);
+      if (btnMobileRoster) btnMobileRoster.classList.toggle('on', false);
+    });
+  }
+  // Auto-collapse sidebar on narrow viewports at load
+  if (window.innerWidth <= 768) {
+    applySidebar(true);
+  }
+
+  // ── Settings panel: relocate controls out of the header into a ⚙ drawer ──
+  // appendChild MOVES the live elements, so every existing handler/state stays
+  // intact — no rewiring, no reproducing the font list.
+  const btnSettings = document.getElementById('btn-settings');
+  const settingsPanel = document.getElementById('settings-panel');
+  [
+    ['Theme', 'theme-picker'],
+    ['Message font', 'font-picker'],
+    ['Roster sidebar', 'btn-side'],
+    ['Compact messages', 'btn-compact'],
+    ['Desktop notifications', 'btn-notify'],
+    ['Chime on new message', 'btn-sound'],
+  ].forEach(([labelText, id]) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    const row = document.createElement('div');
+    row.className = 'set-row';
+    const lab = document.createElement('span');
+    lab.textContent = labelText;
+    row.appendChild(lab);
+    row.appendChild(el);
+    settingsPanel.appendChild(row);
+  });
+
+  // Extra settings built here (not relocated): chime volume + notify prefs.
+  function addSettingRow(labelText, controlEl) {
+    const row = document.createElement('div');
+    row.className = 'set-row';
+    const lab = document.createElement('span');
+    lab.textContent = labelText;
+    row.appendChild(lab);
+    row.appendChild(controlEl);
+    settingsPanel.appendChild(row);
+    return row;
+  }
+
+  // Chime volume slider — drives state.chimeVolume; previews on release.
+  try {
+    const sv = parseFloat(localStorage.getItem('trio.chimeVolume'));
+    if (!isNaN(sv)) state.chimeVolume = Math.max(0, Math.min(1, sv));
+  } catch (_) {}
+  const volSlider = document.createElement('input');
+  volSlider.type = 'range';
+  volSlider.min = '0'; volSlider.max = '1'; volSlider.step = '0.01';
+  volSlider.value = String(state.chimeVolume);
+  volSlider.addEventListener('input', () => {
+    state.chimeVolume = parseFloat(volSlider.value) || 0;
+    try { localStorage.setItem('trio.chimeVolume', String(state.chimeVolume)); } catch (_) {}
+  });
+  volSlider.addEventListener('change', () => { ensureAudio(); playChime(); });
+  const chimeVolRow = addSettingRow('Chime volume', volSlider);
+
+  // Notification preference dropdowns.
+  function prefSelect(options, current) {
+    const sel = document.createElement('select');
+    options.forEach(([val, label]) => {
+      const o = document.createElement('option');
+      o.value = val; o.textContent = label;
+      if (val === current) o.selected = true;
+      sel.appendChild(o);
+    });
+    return sel;
+  }
+  try {
+    const ns = localStorage.getItem('trio.notifyScope'); if (ns) state.notifyScope = ns;
+    const nw = localStorage.getItem('trio.notifyWhen'); if (nw) state.notifyWhen = nw;
+  } catch (_) {}
+  const notifyScopeSel = prefSelect(
+    [['mention', '@mentions only'], ['all', 'all messages']], state.notifyScope);
+  notifyScopeSel.addEventListener('change', () => {
+    state.notifyScope = notifyScopeSel.value;
+    try { localStorage.setItem('trio.notifyScope', state.notifyScope); } catch (_) {}
+  });
+  const notifyScopeRow = addSettingRow('Notify for', notifyScopeSel);
+  const notifyWhenSel = prefSelect(
+    [['hidden', 'tab in background'], ['always', 'always']], state.notifyWhen);
+  notifyWhenSel.addEventListener('change', () => {
+    state.notifyWhen = notifyWhenSel.value;
+    try { localStorage.setItem('trio.notifyWhen', state.notifyWhen); } catch (_) {}
+  });
+  const notifyWhenRow = addSettingRow('Notify when', notifyWhenSel);
+
+  // Sub-settings only show when their parent feature is enabled.
+  function syncSettingVisibility() {
+    if (chimeVolRow) chimeVolRow.hidden = !state.soundEnabled;
+    if (notifyScopeRow) notifyScopeRow.hidden = !state.notifyEnabled;
+    if (notifyWhenRow) notifyWhenRow.hidden = !state.notifyEnabled;
+  }
+  syncSettingVisibility();
+
+  function toggleSettings(force) {
+    const show = (force !== undefined) ? force : settingsPanel.hasAttribute('hidden');
+    if (show) { settingsPanel.removeAttribute('hidden'); btnSettings.classList.add('on'); }
+    else { settingsPanel.setAttribute('hidden', ''); btnSettings.classList.remove('on'); }
+  }
+  btnSettings.addEventListener('click', (e) => { e.stopPropagation(); toggleSettings(); });
+  document.addEventListener('click', (e) => {
+    if (settingsPanel.hasAttribute('hidden')) return;
+    if (settingsPanel.contains(e.target) || btnSettings.contains(e.target)) return;
+    toggleSettings(false);
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !settingsPanel.hasAttribute('hidden')) toggleSettings(false);
   });
 
   // ── Jump-to-latest + unread counter ──
@@ -3010,7 +4031,7 @@ INDEX_HTML = r"""<!doctype html>
   let reconnectTimer = null;
   function connect() {
     if (es) try { es.close(); } catch (e) {}
-    es = new EventSource('/api/events');
+    es = new EventSource('/api/events' + API_QS);
     es.onopen = () => {
       hConn.textContent = '● connected';
       hConn.classList.remove('bad');
@@ -3021,6 +4042,7 @@ INDEX_HTML = r"""<!doctype html>
         const payload = JSON.parse(ev.data);
         if (payload.type === 'message') appendMessage(payload);
         else if (payload.type === 'roster') renderRoster(payload.members);
+        else if (payload.type === 'context') renderContext(payload.sessions);
       } catch (e) { console.error('bad event', e); }
     };
     es.onerror = () => {
@@ -3067,7 +4089,7 @@ INDEX_HTML = r"""<!doctype html>
     const name = (field.value || '').trim();
     if (!name) { err.textContent = 'Name is required.'; return null; }
     try {
-      const r = await fetch('/api/identify', {
+      const r = await fetch('/api/identify' + API_QS, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name }),
@@ -3107,7 +4129,7 @@ INDEX_HTML = r"""<!doctype html>
   // ── Bootstrap ──
   async function boot() {
     try {
-      const r = await fetch('/api/meta');
+      const r = await fetch('/api/meta' + API_QS);
       const meta = await r.json();
       state.channel = meta.channel;
       state.server_host = meta.server_host;
@@ -3135,6 +4157,64 @@ INDEX_HTML = r"""<!doctype html>
     updateChanStats();
   }
 
+  // ── Context rings ──
+  const ctxListEl = document.getElementById('ctx-list');
+  const CTX_CIRC = 2 * Math.PI * 14; // r=14 for 36px ring
+  function ctxColor(pct) {
+    if (pct >= 80) return 'var(--err)';
+    if (pct >= 60) return 'var(--warn)';
+    return 'var(--accent2)';
+  }
+  function ctxModelShort(m) {
+    if (!m) return '';
+    const p = m.replace(/^claude-/, '').split('-');
+    return p[0] || m;
+  }
+  function renderContext(sessions) {
+    if (!ctxListEl) return;
+    if (!sessions || !sessions.length) {
+      ctxListEl.innerHTML = '<div class="ctx-empty">no active sessions</div>';
+      return;
+    }
+    ctxListEl.innerHTML = '';
+    for (const s of sessions) {
+      const pct = s.used_pct || 0;
+      const color = ctxColor(pct);
+      const offset = CTX_CIRC * (1 - pct / 100);
+      const name = s.session_name || s.session_id || '?';
+      const model = ctxModelShort(s.model);
+      const cwLabel = s.cw_size >= 1000000
+        ? (s.cw_size / 1000000) + 'M'
+        : s.cw_size >= 1000 ? Math.round(s.cw_size / 1000) + 'k' : '';
+      const age = s._age_s || 0;
+      const fresh = age < 30;
+
+      const card = document.createElement('div');
+      card.className = 'ctx-card';
+      card.title = `${Math.round(pct)}% of ${cwLabel} context · ${model} · ${age}s ago`;
+      card.style.opacity = fresh ? '1' : '0.5';
+      card.innerHTML = `
+        <div class="ctx-ring">
+          <svg viewBox="0 0 36 36">
+            <circle class="track" cx="18" cy="18" r="14"/>
+            <circle class="fill" cx="18" cy="18" r="14"
+              stroke="${color}"
+              stroke-dasharray="${CTX_CIRC}"
+              stroke-dashoffset="${offset}"/>
+          </svg>
+          <div class="pct-text">${Math.round(pct)}</div>
+        </div>
+        <div class="ctx-info">
+          <div class="ctx-name">${escapeHtml(name)}</div>
+          <div class="ctx-meta">
+            <span class="ctx-model">${escapeHtml(model)}</span>
+            ${cwLabel ? ' · ' + cwLabel : ''}
+          </div>
+        </div>`;
+      ctxListEl.appendChild(card);
+    }
+  }
+
   boot();
 })();
 </script>
@@ -3151,10 +4231,242 @@ INDEX_HTML = (
 )
 
 
+# ───────── Landing page (served as / in landing mode) ─────────
+# Fleet strip + node check-ins + channel index. Renders exclusively through
+# DOM APIs (textContent) — channel codes and hostnames are DB strings and
+# must never hit innerHTML.
+LANDING_HTML = r"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>nth — fleet</title>
+<style>
+  :root {
+    --bg: #101318; --panel: #171b22; --border: #262c37;
+    --fg: #d7dde6; --dim: #79839a; --accent: #62d7ef;
+    --ok: #7ede7e; --warn: #e5d35e; --bad: #ff8470;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 14px/1.45 ui-monospace, "JetBrains Mono", Menlo, Consolas, monospace;
+    padding: 1.2rem; max-width: 900px; margin-inline: auto;
+  }
+  h1 { font-size: 1.05rem; margin: 0; letter-spacing: .04em; }
+  h1 .v { color: var(--dim); font-weight: normal; font-size: .85rem; }
+  h2 { font-size: .8rem; color: var(--dim); text-transform: uppercase;
+       letter-spacing: .12em; margin: 1.6rem 0 .5rem; }
+  header { display: flex; align-items: baseline; gap: .8rem; flex-wrap: wrap; }
+  #strip { display: flex; gap: .5rem; flex-wrap: wrap; margin-top: .9rem; }
+  .pill { background: var(--panel); border: 1px solid var(--border);
+          border-radius: 999px; padding: .15rem .7rem; font-size: .8rem; }
+  .pill b { font-weight: 600; }
+  .ok   { color: var(--ok); }
+  .warn { color: var(--warn); }
+  .bad  { color: var(--bad); }
+  .dim  { color: var(--dim); }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: .3rem .6rem; font-size: .85rem;
+           border-bottom: 1px solid var(--border); }
+  th { color: var(--dim); font-weight: normal; font-size: .72rem;
+       text-transform: uppercase; letter-spacing: .1em; }
+  td.num, th.num { text-align: right; }
+  .dot { display: inline-block; width: .55em; height: .55em;
+         border-radius: 50%; margin-right: .45em; vertical-align: baseline; }
+  .dot.live  { background: var(--ok); }
+  .dot.idle  { background: var(--dim); }
+  .dot.ended { background: transparent; border: 1px solid var(--dim); }
+  a.chan { color: var(--accent); text-decoration: none; }
+  a.chan:hover { text-decoration: underline; }
+  tr.ended td { color: var(--dim); }
+  #err { color: var(--bad); margin-top: 1rem; display: none; }
+  footer { color: var(--dim); font-size: .72rem; margin-top: 2rem; }
+  #ctx-strip { display: flex; flex-wrap: wrap; gap: .9rem; }
+  .ctxs { display: flex; align-items: center; gap: .5rem;
+          background: var(--panel); border: 1px solid var(--border);
+          border-radius: 8px; padding: .35rem .6rem; }
+  .ctxs svg { width: 34px; height: 34px; transform: rotate(-90deg); flex: none; }
+  .ctxs .track { fill: none; stroke: var(--border); stroke-width: 4; }
+  .ctxs .arc { fill: none; stroke-width: 4; stroke-linecap: round; }
+  .ctxs .who { font-size: .8rem; }
+  .ctxs .sub { font-size: .68rem; color: var(--dim); }
+  .ctxs.stale { opacity: .45; }
+  #ctx-strip .none { color: var(--dim); font-size: .8rem; }
+</style>
+</head>
+<body>
+<header>
+  <h1>nth <span class="dim">//</span> fleet <span class="v" id="hdr-host"></span></h1>
+</header>
+<div id="strip"></div>
+<div id="err"></div>
+<h2>Sessions <span class="dim" style="font-size:.65rem">(this host)</span></h2>
+<div id="ctx-strip"></div>
+<h2>Nodes</h2>
+<table id="nodes"><thead><tr>
+  <th>host</th><th>transport</th><th>version</th><th>python</th><th class="num">seen</th>
+</tr></thead><tbody></tbody></table>
+<h2>Channels</h2>
+<table id="channels"><thead><tr>
+  <th>channel</th><th class="num">members</th><th class="num">live</th>
+  <th class="num">msgs</th><th class="num">activity</th>
+</tr></thead><tbody></tbody></table>
+<footer id="foot"></footer>
+<script>
+  function ageStr(s) {
+    if (s === null || s === undefined) return 'never';
+    if (s < 90) return s + 's';
+    if (s < 5400) return Math.floor(s / 60) + 'm';
+    if (s < 172800) return (s / 3600).toFixed(1) + 'h';
+    return (s / 86400).toFixed(1) + 'd';
+  }
+  function pill(html_free_text, cls) {
+    const el = document.createElement('span');
+    el.className = 'pill' + (cls ? ' ' + cls : '');
+    el.textContent = html_free_text;
+    return el;
+  }
+  function td(text, cls) {
+    const el = document.createElement('td');
+    if (cls) el.className = cls;
+    el.textContent = text;
+    return el;
+  }
+  async function refresh() {
+    let d;
+    try {
+      const r = await fetch('/api/landing');
+      d = await r.json();
+    } catch (e) {
+      document.getElementById('err').style.display = 'block';
+      document.getElementById('err').textContent = 'landing fetch failed: ' + e;
+      return;
+    }
+    document.getElementById('err').style.display = 'none';
+    document.getElementById('hdr-host').textContent =
+      d.host + ' · v' + d.version;
+
+    const liveMembers = d.channels.reduce((a, c) => a + c.live, 0);
+    const liveNodes = d.nodes.filter(n => n.live).length;
+    const activeCh = d.channels.filter(c => c.status === 'active').length;
+    const strip = document.getElementById('strip');
+    strip.replaceChildren(
+      pill(d.db_ok ? 'db ok' : 'DB DOWN', d.db_ok ? 'ok' : 'bad'),
+      pill(activeCh + ' active channels'),
+      pill(liveMembers + ' live members', liveMembers ? 'ok' : ''),
+      pill('nodes ' + liveNodes + '/' + d.nodes.length + ' live',
+           liveNodes ? 'ok' : 'warn'),
+    );
+
+    const ctxStrip = document.getElementById('ctx-strip');
+    const CIRC = 2 * Math.PI * 14;
+    const sessions = d.context_sessions || [];
+    if (!sessions.length) {
+      const none = document.createElement('span');
+      none.className = 'none';
+      none.textContent = 'no publishing sessions on this host';
+      ctxStrip.replaceChildren(none);
+    } else {
+      ctxStrip.replaceChildren(...sessions.map(s => {
+        const pct = Math.round(s.used_pct || 0);
+        const card = document.createElement('div');
+        card.className = 'ctxs' + ((s._age_s || 0) > 30 ? ' stale' : '');
+        const svgNS = 'http://www.w3.org/2000/svg';
+        const svg = document.createElementNS(svgNS, 'svg');
+        svg.setAttribute('viewBox', '0 0 36 36');
+        const track = document.createElementNS(svgNS, 'circle');
+        track.setAttribute('class', 'track');
+        ['cx','cy','r'].forEach((a,i)=>track.setAttribute(a,[18,18,14][i]));
+        const arc = document.createElementNS(svgNS, 'circle');
+        arc.setAttribute('class', 'arc');
+        ['cx','cy','r'].forEach((a,i)=>arc.setAttribute(a,[18,18,14][i]));
+        arc.setAttribute('stroke', pct >= 80 ? 'var(--bad)' : pct >= 60 ? 'var(--warn)' : 'var(--ok)');
+        arc.setAttribute('stroke-dasharray', String(CIRC));
+        arc.setAttribute('stroke-dashoffset', String(CIRC * (1 - pct / 100)));
+        svg.append(track, arc);
+        const info = document.createElement('div');
+        const who = document.createElement('div');
+        who.className = 'who';
+        who.textContent = (s.session_name || s.session_id || '?') + ' · ' + pct + '%';
+        const sub = document.createElement('div');
+        sub.className = 'sub';
+        const cw = s.cw_size >= 1e6 ? (s.cw_size/1e6) + 'M' : Math.round((s.cw_size||0)/1e3) + 'k';
+        sub.textContent = (s.model || '').replace(/^claude-/, '') + ' · ' + cw;
+        info.append(who, sub);
+        card.append(svg, info);
+        return card;
+      }));
+    }
+
+    const ntb = document.querySelector('#nodes tbody');
+    ntb.replaceChildren(...d.nodes.map(n => {
+      const tr = document.createElement('tr');
+      const hostCell = td('');
+      const dot = document.createElement('span');
+      dot.className = 'dot ' + (n.live ? 'live' : 'idle');
+      hostCell.append(dot, document.createTextNode(n.hostname));
+      tr.append(hostCell, td(n.transport),
+                td(n.nth_version ? 'v' + n.nth_version : '?'),
+                td(n.python || '?'),
+                td(ageStr(n.age_s), 'num ' + (n.live ? 'ok' : 'dim')));
+      return tr;
+    }));
+
+    const ctb = document.querySelector('#channels tbody');
+    ctb.replaceChildren(...d.channels.map(c => {
+      const tr = document.createElement('tr');
+      if (c.status === 'ended') tr.className = 'ended';
+      const cCell = td('');
+      const dot = document.createElement('span');
+      dot.className = 'dot ' +
+        (c.status === 'ended' ? 'ended' : (c.live > 0 ? 'live' : 'idle'));
+      const a = document.createElement('a');
+      a.className = 'chan';
+      a.href = '/c/' + encodeURIComponent(c.code);
+      a.textContent = c.code;
+      cCell.append(dot, a);
+      if (c.status === 'ended') {
+        cCell.append(document.createTextNode(' (ended)'));
+      }
+      tr.append(cCell, td(String(c.members), 'num'),
+                td(String(c.live), 'num ' + (c.live ? 'ok' : 'dim')),
+                td(String(c.msgs), 'num'),
+                td(ageStr(c.last_msg_age_s), 'num'));
+      return tr;
+    }));
+
+    document.getElementById('foot').textContent =
+      'db: ' + d.db + ' · refreshed ' + new Date().toLocaleTimeString();
+  }
+  refresh();
+  setInterval(refresh, 5000);
+</script>
+</body>
+</html>
+"""
+
+
 # ───────── Entry ─────────
+class QuietThreadingHTTPServer(ThreadingHTTPServer):
+    """Ignore expected disconnects from tab closes, refreshes, and SSE retries."""
+
+    daemon_threads = True
+
+    def handle_error(self, request, client_address):
+        exc = sys.exc_info()[1]
+        if isinstance(exc, (ConnectionResetError, BrokenPipeError,
+                            ConnectionAbortedError)):
+            return
+        super().handle_error(request, client_address)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Web dashboard for a trio channel.")
-    ap.add_argument("channel", help="Channel code to observe.")
+    ap.add_argument("channel", nargs="?", default=None,
+                    help="Channel code to observe. Omit to serve the landing "
+                         "page instead: fleet health + channel index at /, "
+                         "with every channel's dashboard at /c/<code>.")
     ap.add_argument("--host", default=None,
                     help="Interface to bind. Default 127.0.0.1. "
                          "Use --tailnet to bind 0.0.0.0 instead.")
@@ -3176,21 +4488,48 @@ def main() -> int:
     if host is None:
         host = "0.0.0.0" if args.tailnet else "127.0.0.1"
 
-    # Spin up the event hub before serving.
-    hub = EventHub(db_path, args.channel)
-    hub.start()
-
-    NthWebHandler.hub = hub
-    NthWebHandler.channel = args.channel
+    # Single-channel mode spins up its one event hub before serving.
+    # Landing mode creates hubs lazily, one per channel actually viewed.
+    hub = None
+    if args.channel:
+        hub = EventHub(db_path, args.channel)
+        hub.start()
+        NthWebHandler.hub = hub
+        NthWebHandler.channel = args.channel
+    else:
+        NthWebHandler.landing_mode = True
     NthWebHandler.db_path = db_path
 
-    server = ThreadingHTTPServer((host, args.port), NthWebHandler)
+    # Let multiple channel dashboards start without manual port coordination.
+    requested_port = args.port
+    port = requested_port
+    server = None
+    for _ in range(50):
+        try:
+            server = QuietThreadingHTTPServer((host, port), NthWebHandler)
+            break
+        except OSError as exc:
+            if exc.errno == errno.EADDRINUSE:
+                port += 1
+                continue
+            raise
+    if server is None:
+        sys.stderr.write(
+            f"No free port found in {requested_port}..{requested_port + 49}\n")
+        return 1
     # Threaded server handles one SSE connection per thread; don't let them
     # keep the process alive on Ctrl-C.
     server.daemon_threads = True
 
+    def stop_hubs():
+        if hub is not None:
+            hub.stop()
+        with NthWebHandler.hubs_lock:
+            for h in NthWebHandler.hubs.values():
+                h.stop()
+
     def shutdown(_sig=None, _frm=None):
-        hub.stop()
+        stop_hubs()
         threading.Thread(target=server.shutdown, daemon=True).start()
 
     signal.signal(signal.SIGINT, shutdown)
@@ -3198,12 +4537,14 @@ def main() -> int:
     # Banner
     ts_ip = get_tailscale_ip()
     print("nth_web serving:")
-    print(f"  channel:     {args.channel}")
+    print(f"  channel:     {args.channel or '(landing page — all channels at /c/<code>)'}")
     print(f"  db:          {db_path}")
-    print(f"  bound on:    http://{host}:{args.port}/")
-    print(f"  localhost:   http://127.0.0.1:{args.port}/")
+    if port != requested_port:
+        print(f"  note:        port {requested_port} was busy — using {port} instead")
+    print(f"  bound on:    http://{host}:{port}/")
+    print(f"  localhost:   http://127.0.0.1:{port}/")
     if ts_ip and host in ("0.0.0.0",):
-        print(f"  tailnet:     http://{ts_ip}:{args.port}/   (visible to tailnet peers)")
+        print(f"  tailnet:     http://{ts_ip}:{port}/   (visible to tailnet peers)")
     elif ts_ip:
         print(f"  tailnet IP:  {ts_ip}   (pass --tailnet to bind)")
     print("  Ctrl-C to stop.")
@@ -3214,7 +4555,7 @@ def main() -> int:
     except KeyboardInterrupt:
         pass
     finally:
-        hub.stop()
+        stop_hubs()
 
     return 0
 
