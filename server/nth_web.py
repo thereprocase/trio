@@ -4864,35 +4864,29 @@ WORKSPACE_HTML = r"""<!doctype html>
           overflow: hidden; background: var(--bg2); min-height: 0;
           box-shadow: 0 1px 6px rgba(0,0,0,0.45);
           transition: border-color 0.15s, box-shadow 0.15s; }
-  /* Unread: the pane you are not looking at got a message. This has to win
-     against the pane's own content at a glance across a wide screen, so it
-     is a thick inset ring plus an outer halo rather than a hairline border. */
+  /* Unread: the pane you are not looking at got a message. Enough to draw
+     the eye across a wide screen, not enough to demand attention — it is a
+     notice, not an alarm. */
   .pane.has-unread {
     border-color: var(--accent);
-    box-shadow: 0 0 0 2px var(--accent), 0 0 18px 3px rgba(74, 168, 255, 0.55);
+    box-shadow: 0 0 0 1px var(--accent), 0 0 12px rgba(74, 168, 255, 0.3);
   }
   .pane.has-unread::after {
     content: ''; position: absolute; inset: 0; border-radius: 4px;
-    pointer-events: none; box-shadow: inset 0 0 0 3px var(--accent);
-    animation: trio-unread-glow 1.25s ease-in-out infinite;
+    pointer-events: none; box-shadow: inset 0 0 0 1px var(--accent);
+    animation: trio-unread-glow 2.4s ease-in-out infinite;
   }
   @keyframes trio-unread-glow {
-    0%, 100% { opacity: 1; }
-    50%      { opacity: 0.3; }
+    0%, 100% { opacity: 0.85; }
+    50%      { opacity: 0.35; }
   }
   .pane .unread-badge {
-    position: absolute; top: 0; left: 0; right: 0; z-index: 5;
+    position: absolute; top: 5px; left: 7px; z-index: 5;
     background: var(--accent); color: #04121f; font-weight: 700;
-    font-size: 11px; letter-spacing: 0.03em; padding: 3px 8px;
-    text-align: center; pointer-events: none;
-    animation: trio-unread-bar 1.25s ease-in-out infinite; }
-  @keyframes trio-unread-bar {
-    0%, 100% { opacity: 1; }
-    50%      { opacity: 0.72; }
-  }
+    font-size: 10px; padding: 1px 7px; border-radius: 9px;
+    pointer-events: none; }
   @media (prefers-reduced-motion: reduce) {
-    .pane.has-unread::after,
-    .pane .unread-badge { animation: none; opacity: 1; }
+    .pane.has-unread::after { animation: none; opacity: 0.85; }
   }
   .pane iframe { width: 100%; height: 100%; border: 0; display: block; }
   .pane-tools { position: absolute; top: 4px; right: 6px; z-index: 5;
