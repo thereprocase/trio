@@ -1634,9 +1634,25 @@ INDEX_HTML = r"""<!doctype html>
   header { grid-column: 1 / 3; background: var(--bg2); border-bottom: 1px solid var(--border);
            display: flex; align-items: center; padding: 0 16px; gap: 14px;
            font-weight: 600; }
-  header .title { color: var(--accent); }
+  header .title { color: var(--accent); flex-shrink: 0; }
   header .meta { color: var(--dim); font-weight: 400; font-size: 11px; }
   header .spacer { flex: 1; }
+  /* Participant chips — the "who is in this chat" label for a scoped
+     conversation view. Sized off the target-bar pills so every theme's
+     border/radius tokens apply without per-theme work. */
+  header .participants { display: flex; align-items: center; gap: 5px;
+                         overflow: hidden; flex-shrink: 1; min-width: 0; }
+  header .participants:empty { display: none; }
+  header .participants .pchip {
+    display: inline-flex; align-items: center; gap: 4px; flex-shrink: 0;
+    font-size: 11px; font-weight: 600; padding: 2px 8px;
+    border-radius: var(--pill-radius); background: var(--panel);
+    border: 1px solid var(--border); max-width: 160px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  header .participants .pchip.unknown { color: var(--dimmer); font-weight: 400;
+                                        font-style: italic; }
+  header .participants .pchip .pc-emoji { font-size: 13px; line-height: 1; }
   .pill {
     font-size: 11px; padding: 3px 8px; border-radius: var(--pill-radius); cursor: pointer;
     background: var(--panel); border: 1px solid var(--border); user-select: none;
@@ -1778,7 +1794,10 @@ INDEX_HTML = r"""<!doctype html>
   .msg.targeted { background: #1a2030; border-left-color: var(--mention); }
   .msg.filtered-out { display: none; }
   .msg.dm-hidden { display: none; }
-  body.dm-mode .acks { display: none; }  /* two participants; ack badges are noise */
+  /* Two-party view: "who has read this" is just the one other person, so the
+     ack badges are noise. With three or more participants they carry real
+     information again, so they stay. */
+  body.conv-pair .acks { display: none; }
 
   /* Ack badges — one per member. Emoji is the identity; colored ring
      is a secondary signal. Read = full opacity, pending = dim + desaturated. */
@@ -1842,6 +1861,11 @@ INDEX_HTML = r"""<!doctype html>
                     text-transform: uppercase; letter-spacing: 0.5px; }
   .member .dm-btn:hover { background: var(--accent); color: var(--bg);
                           border-color: var(--accent); }
+  .member .conv-pick { font-size: 12px; line-height: 1; cursor: pointer;
+                       color: var(--dimmer); flex-shrink: 0; user-select: none; }
+  .member .conv-pick:hover { color: var(--accent); }
+  .member .conv-pick.on { color: var(--accent); }
+  #conv-pickbar { display: flex; flex-wrap: wrap; gap: 5px; margin: 0 0 8px; }
   .ctx-card { display: flex; align-items: center; gap: 8px; padding: 4px 2px; }
   .ctx-ring { position: relative; width: 36px; height: 36px; flex: none; }
   .ctx-ring svg { width: 36px; height: 36px; transform: rotate(-90deg); }
@@ -1933,7 +1957,9 @@ INDEX_HTML = r"""<!doctype html>
   #target-bar .tb-pill.on .tb-num { opacity: 0.9; }
   #target-bar .tb-pill.tb-all { border-style: dashed; }
   #target-bar .tb-pill.tb-all.on { border-style: solid; }
-  body.dm-mode #target-bar { display: none; }
+  /* The target bar stays visible in a conversation — restricted to that
+     conversation's members — so you can still reply to just one of them
+     without leaving the view. */
   #input-row { display: flex; gap: 8px; align-items: flex-end; position: relative; }
   #input { flex: 1; background: var(--bg); color: var(--fg); border: 1px solid var(--border);
            padding: 8px 10px; border-radius: var(--input-radius); font-family: inherit; font-size: 13px;
@@ -2061,6 +2087,7 @@ INDEX_HTML = r"""<!doctype html>
   <header>
     <a class="pill" id="btn-home" href="/" title="back to the hub landing page">⌂</a>
     <span class="title" id="h-channel">trio#…</span>
+    <span class="participants" id="h-participants"></span>
     <span class="meta" id="h-meta">connecting…</span>
     <span class="spacer"></span>
     <select id="theme-picker" title="color theme">
@@ -2124,6 +2151,7 @@ INDEX_HTML = r"""<!doctype html>
     <section>
       <div id="filter-banner">filter active — showing matching messages only. click to clear.</div>
       <h2 id="r-heading">Members</h2>
+      <div id="conv-pickbar" hidden></div>
       <div id="r-list"></div>
     </section>
     <section id="chanstats-wrap">
@@ -2164,9 +2192,11 @@ INDEX_HTML = r"""<!doctype html>
   const chat = document.getElementById('chat');
   const rosterEl = document.getElementById('r-list');
   const rosterHeading = document.getElementById('r-heading');
+  const convPickBar = document.getElementById('conv-pickbar');
   const chanStatsEl = document.getElementById('chanstats');
   const sparkEl = document.getElementById('sparkline');
   const hChannel = document.getElementById('h-channel');
+  const partsEl = document.getElementById('h-participants');
   const hMeta = document.getElementById('h-meta');
   const hConn = document.getElementById('h-conn');
   const input = document.getElementById('input');
@@ -2224,8 +2254,32 @@ INDEX_HTML = r"""<!doctype html>
 
   // ── URL params ──
   const URL_PARAMS = new URLSearchParams(location.search);
-  const DM_TARGET_ID = URL_PARAMS.get('dm') || '';
-  const DM_MODE = !!DM_TARGET_ID;
+  // ?dm=<id> historically scoped the view to one agent. It now accepts a
+  // comma-separated list (?dm=idA,idB) describing a *conversation*: the
+  // operator plus N agents. One id keeps the old two-party behaviour, so
+  // existing bookmarked DM tabs keep working unchanged.
+  // Ids are validated and capped: they arrive from a URL, are used as Map
+  // keys and textContent (never innerHTML), and an unbounded list would make
+  // refreshDmVisibility() walk the set once per message per render.
+  const CONV_MAX = 8;
+  const CONV_IDS = [...new Set(
+    (URL_PARAMS.get('dm') || '')
+      .split(',').map(s => s.trim())
+      .filter(s => s && /^[A-Za-z0-9_.-]+$/.test(s))
+  )].slice(0, CONV_MAX);
+  const CONV_MODE = CONV_IDS.length > 0;
+  // Kept as aliases so the pre-existing DM call sites keep reading naturally.
+  const DM_TARGET_ID = CONV_IDS.length === 1 ? CONV_IDS[0] : '';
+  const DM_MODE = CONV_MODE;
+  // ?pane=1 marks this document as embedded in the /workspace shell. Panes
+  // must not write shared localStorage keys — iframes share the top-level
+  // origin's storage, so a pane persisting its view would silently redefine
+  // the main tab's preferences.
+  const PANE_MODE = URL_PARAMS.get('pane') === '1';
+  // ?roster=0 forces the sidebar hidden on load regardless of the
+  // localStorage preference. Split-screen panes use this so an embedded
+  // pane never inherits the standalone window's roster choice.
+  const ROSTER_PARAM = URL_PARAMS.get('roster');
   // Landing-mode multiplexing: when this page is served at /c/<code>, the
   // server substitutes a "?channel=<code>" query string here so every API
   // call names its channel. Single-channel mode leaves it '' (the server
@@ -2238,6 +2292,9 @@ INDEX_HTML = r"""<!doctype html>
     operator: { id: '', name: '' },
     server_host: '',
     dmTargetId: DM_TARGET_ID,      // empty string → main channel view
+    // Conversation scope: member ids this view is limited to (excluding the
+    // operator, who is always implicitly present). Empty → whole channel.
+    convIds: new Set(CONV_IDS),
     members: new Map(),            // id → member (roster row)
     messages: new Map(),            // id → message
     messageDomById: new Map(),      // id → DOM node (for ack badge updates)
@@ -2264,6 +2321,9 @@ INDEX_HTML = r"""<!doctype html>
     // Persistent target selection: set of member_ids that every send is
     // addressed to (prepended as @name mentions). Empty = broadcast.
     selectedTargets: new Set(),
+    // Roster checkboxes staging a new conversation ("Start a conversation").
+    // View-local and deliberately unpersisted — it's a transient selection.
+    convPicks: new Set(),
     // Ordered list of target ids as rendered in the bar — index → id,
     // so Alt+1..9 maps to the Nth pill.
     targetOrder: [],
@@ -2887,9 +2947,11 @@ INDEX_HTML = r"""<!doctype html>
       updateTitle();
     }
 
-    // Desktop notification on @you while hidden (opt-in). In DM mode,
-    // only fire for the DM target — don't pull focus for other channel chatter.
-    const dmOk = (!state.dmTargetId || m.member_id === state.dmTargetId);
+    // Desktop notification on @you while hidden (opt-in). In a scoped
+    // conversation, only fire for messages that view actually shows — reuse
+    // the view predicate rather than restating the rule, so the two can't
+    // drift apart.
+    const dmOk = isRelevantInDm(m);
     const scopeOk = state.notifyScope === 'all'
       ? (!isMine && !isSystem)
       : (!isMine && mentionsOperator);
@@ -2970,7 +3032,15 @@ INDEX_HTML = r"""<!doctype html>
   function targetStorageKey() {
     return 'trio_targets_' + (state.channel || '_');
   }
+  // A conversation view derives its targets from the URL, and localStorage is
+  // shared across every same-origin document — including split-screen panes.
+  // Letting a scoped view read or write the shared key would make panes race
+  // each other and silently redefine the main tab's sticky selection.
   function loadPersistedTargets() {
+    if (CONV_MODE) {
+      state.selectedTargets = new Set(CONV_IDS);
+      return;
+    }
     try {
       const raw = localStorage.getItem(targetStorageKey());
       if (!raw) return;
@@ -2981,6 +3051,7 @@ INDEX_HTML = r"""<!doctype html>
     } catch (_) { /* ignore */ }
   }
   function savePersistedTargets() {
+    if (CONV_MODE) return;
     try {
       localStorage.setItem(targetStorageKey(),
         JSON.stringify([...state.selectedTargets]));
@@ -3011,6 +3082,10 @@ INDEX_HTML = r"""<!doctype html>
     const order = { active: 0, idle: 1, stale: 2, dead: 3 };
     const targetables = [...state.members.values()]
       .filter(isTargetable)
+      // In a conversation view the bar is restricted to that conversation's
+      // participants — offering the rest of the channel would let a send
+      // silently escape the scope the view promises.
+      .filter(m => !CONV_MODE || state.convIds.has(m.id))
       .sort((a, b) => {
         const oa = order[a.status] ?? 4;
         const ob = order[b.status] ?? 4;
@@ -3071,10 +3146,12 @@ INDEX_HTML = r"""<!doctype html>
       const clearPill = document.createElement('button');
       clearPill.type = 'button';
       clearPill.className = 'tb-pill';
-      clearPill.textContent = 'clear';
-      clearPill.title = 'clear selection (broadcast) — Alt+0';
+      clearPill.textContent = CONV_MODE ? 'all in chat' : 'clear';
+      clearPill.title = CONV_MODE
+        ? 'reset to every participant — Alt+0'
+        : 'clear selection (broadcast) — Alt+0';
       clearPill.addEventListener('click', () => {
-        state.selectedTargets.clear();
+        state.selectedTargets = CONV_MODE ? new Set(CONV_IDS) : new Set();
         savePersistedTargets();
         renderComposerTargets();
         updatePreview();
@@ -3128,23 +3205,97 @@ INDEX_HTML = r"""<!doctype html>
     rosterHeading.textContent = `Members (${members.length})`;
 
     renderComposerTargets();
+    renderParticipants();
+    renderRosterPickBar();
     updateAllAckBadges();
     renderWatermarkPins();
     scheduleHereUpdate();
     updateChanStats();
+  }
 
-    // DM mode: update tab title with target's current name/animal now
-    // that we have the roster.
-    if (DM_MODE) {
-      const tgt = state.members.get(DM_TARGET_ID);
-      if (tgt) {
-        const a = animalFor(tgt);
-        const label = `DM ${a.emoji} ${tgt.name} — trio#${state.channel}`;
-        state.originalTitle = label;
-        hChannel.textContent = label;
-        updateTitle();
+  // ── "Start a conversation": act on the roster checkboxes ──
+  // Opens a scoped view over the picked members. Ephemeral by design — the
+  // conversation lives entirely in the URL, so it's shareable and
+  // reload-survivable without any server-side saved-view state.
+  function convUrlFor(ids, opts) {
+    const qs = 'dm=' + ids.map(encodeURIComponent).join(',');
+    return '/?' + qs + ((opts && opts.pane) ? '&roster=0&pane=1' : '');
+  }
+  function renderRosterPickBar() {
+    if (!convPickBar) return;
+    const ids = [...state.convPicks];
+    convPickBar.hidden = ids.length === 0;
+    convPickBar.innerHTML = '';
+    if (!ids.length) return;
+
+    const open = document.createElement('button');
+    open.type = 'button';
+    open.className = 'tb-pill on';
+    open.textContent = `Start conversation (${ids.length})`;
+    open.title = 'Open a view scoped to the checked members';
+    open.addEventListener('click', () => {
+      window.open(convUrlFor(ids), '_blank');
+    });
+    convPickBar.appendChild(open);
+
+    const split = document.createElement('button');
+    split.type = 'button';
+    split.className = 'tb-pill';
+    split.textContent = 'Split screen';
+    split.title = 'Open the split-screen workspace with this conversation as the first pane';
+    split.addEventListener('click', () => {
+      window.open('/workspace?p=' + encodeURIComponent(ids.join(',')), '_blank');
+    });
+    convPickBar.appendChild(split);
+
+    const clear = document.createElement('button');
+    clear.type = 'button';
+    clear.className = 'tb-pill';
+    clear.textContent = 'clear';
+    clear.addEventListener('click', () => {
+      state.convPicks.clear();
+      renderRosterPickBar();
+      renderRoster([...state.members.values()]);
+    });
+    convPickBar.appendChild(clear);
+  }
+
+  // ── Participant chips: who is in this scoped conversation ──
+  // The header chips are the pane's identity. In a split-screen grid the
+  // composer's target bar is off at the bottom of a short pane, so the
+  // header is the only place a glance can answer "which chat is this".
+  function renderParticipants() {
+    if (!partsEl) return;
+    partsEl.innerHTML = '';
+    if (!CONV_MODE) return;
+    const emojis = [];
+    for (const id of CONV_IDS) {
+      const m = state.members.get(id);
+      const chip = document.createElement('span');
+      chip.className = 'pchip' + (m ? '' : ' unknown');
+      if (m) {
+        const a = animalFor(m);
+        emojis.push(a.emoji);
+        const em = document.createElement('span');
+        em.className = 'pc-emoji';
+        em.textContent = a.emoji;
+        chip.appendChild(em);
+        const nm = document.createElement('span');
+        nm.textContent = m.name;
+        nm.style.color = colorFor(m.id);
+        chip.appendChild(nm);
+        chip.title = `${m.name} (${m.id}) — the ${a.name}`;
+      } else {
+        // Roster hasn't arrived yet, or this member left the channel.
+        chip.textContent = id;
+        chip.title = `${id} — not in the current roster`;
       }
+      partsEl.appendChild(chip);
     }
+    // Tab title carries the emoji run so a row of pinned tabs stays legible.
+    const label = `${emojis.join('')} trio#${state.channel}`;
+    state.originalTitle = label;
+    updateTitle();
   }
 
   // ── Watermark pins: one animal per member, parked at their last-read msg ──
@@ -3240,7 +3391,21 @@ INDEX_HTML = r"""<!doctype html>
     }
     // DM button — opens a filtered-view tab for this agent.
     // Hide for self, for human operator rows, and inside an existing DM tab.
-    if (!DM_MODE && m.id !== state.operator.id && !m.id.startsWith('_op_')) {
+    if (!CONV_MODE && m.id !== state.operator.id && !m.id.startsWith('_op_')) {
+      const pick = document.createElement('span');
+      pick.className = 'conv-pick' + (state.convPicks.has(m.id) ? ' on' : '');
+      pick.textContent = state.convPicks.has(m.id) ? '☑' : '☐';
+      pick.title = `Include ${m.name} in a new conversation`;
+      pick.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (state.convPicks.has(m.id)) state.convPicks.delete(m.id);
+        else state.convPicks.add(m.id);
+        renderRosterPickBar();
+        pick.classList.toggle('on', state.convPicks.has(m.id));
+        pick.textContent = state.convPicks.has(m.id) ? '☑' : '☐';
+      });
+      topRow.appendChild(pick);
+
       const dmBtn = document.createElement('span');
       dmBtn.className = 'dm-btn';
       dmBtn.textContent = 'DM';
@@ -3564,19 +3729,12 @@ INDEX_HTML = r"""<!doctype html>
     if (!text) return;
     const resolved = resolveMentions(input.value);
     const mentionIds = resolved.map(m => m.id);
-    // DM mode: always include the DM target so the agent sees the message
-    // (even if the operator forgot the @mention). Also prepend the visible
-    // @name to the content so it's unambiguous in main-tab backscroll — the
-    // composer doesn't need to show it; it's added at send time.
-    if (state.dmTargetId) {
-      if (!mentionIds.includes(state.dmTargetId)) mentionIds.push(state.dmTargetId);
-      const tgt = state.members.get(state.dmTargetId);
-      const tgtName = tgt ? tgt.name : state.dmTargetId;
-      const atTag = '@' + tgtName;
-      if (!text.toLowerCase().startsWith(atTag.toLowerCase())) {
-        text = atTag + ' ' + text;
-      }
-    } else if (state.selectedTargets.size > 0) {
+    // A conversation view seeds its own targets from the participant set, so
+    // both the old DM case and the target-bar case are the same rule at
+    // different arities: force every selected id into mentions (the agent
+    // must be woken even if the operator forgot the @mention) and prepend the
+    // visible @name so the message reads unambiguously in main-tab backscroll.
+    if (state.selectedTargets.size > 0) {
       // Persistent target bar: prepend @name for each selected agent that
       // the typed content doesn't already mention, and make sure all
       // selected ids end up in mentionIds so the server-side wake logic
@@ -3638,19 +3796,20 @@ INDEX_HTML = r"""<!doctype html>
         e.preventDefault(); return;
       }
     }
-    if (e.altKey && !e.ctrlKey && !e.metaKey && !state.dmTargetId) {
+    if (e.altKey && !e.ctrlKey && !e.metaKey) {
       if (e.key >= '1' && e.key <= '9') {
         const idx = parseInt(e.key, 10) - 1;
         const id = state.targetOrder[idx];
         if (id) { toggleTarget(id); e.preventDefault(); return; }
       }
       if (e.key === '0') {
-        if (state.selectedTargets.size > 0) {
-          state.selectedTargets.clear();
-          savePersistedTargets();
-          renderComposerTargets();
-          updatePreview();
-        }
+        // In a conversation, "clear" means every participant again — an
+        // empty selection would broadcast outside the view's scope.
+        const reset = CONV_MODE ? new Set(CONV_IDS) : new Set();
+        state.selectedTargets = reset;
+        savePersistedTargets();
+        renderComposerTargets();
+        updatePreview();
         e.preventDefault(); return;
       }
       if (e.key === 'a' || e.key === 'A') {
@@ -3686,18 +3845,21 @@ INDEX_HTML = r"""<!doctype html>
     node.classList.toggle('filtered-out', !hit);
   }
   function isRelevantInDm(m) {
-    // Conversation between operator and DM target:
-    //  • authored by target → must @mention operator
-    //  • authored by operator → must @mention target
-    //  • system notices about this target (e.g. task claims) stay visible
-    if (!state.dmTargetId) return true;
-    const ms = m.mentions || [];
-    if (m.member_id === state.dmTargetId && ms.includes(state.operator.id)) return true;
-    if (m.member_id === state.operator.id && ms.includes(state.dmTargetId)) return true;
-    return false;
+    // A message belongs to this conversation when either end of it is a
+    // participant: the author is in the set, or the message is addressed to
+    // someone in the set. The operator counts as a participant, so their own
+    // posts and anything aimed at them stay visible.
+    //
+    // Deliberately looser than a strict two-party DM — with three or more
+    // participants, side remarks that don't @mention everyone are still part
+    // of the same thread, and dropping them would silently hide context.
+    if (!state.convIds.size) return true;
+    const inScope = (id) => !!id && (state.convIds.has(id) || id === state.operator.id);
+    if (inScope(m.member_id)) return true;
+    return (m.mentions || []).some(inScope);
   }
   function applyDmFilterToNode(node, m) {
-    if (!state.dmTargetId) { node.classList.remove('dm-hidden'); return; }
+    if (!state.convIds.size) { node.classList.remove('dm-hidden'); return; }
     node.classList.toggle('dm-hidden', !isRelevantInDm(m));
   }
   function refreshDmVisibility() {
@@ -3802,12 +3964,21 @@ INDEX_HTML = r"""<!doctype html>
     appEl.classList.toggle('side-collapsed', collapsed);
     btnSide.classList.toggle('on', !collapsed);
   }
+  // ?roster=0/1 is a per-document view instruction and wins over the stored
+  // preference; without the param we fall back to what the user last chose.
   let _sideCollapsed = false;
-  try { _sideCollapsed = localStorage.getItem('trio.sideCollapsed') === '1'; } catch (_) {}
+  if (ROSTER_PARAM !== null) {
+    _sideCollapsed = ROSTER_PARAM === '0';
+  } else {
+    try { _sideCollapsed = localStorage.getItem('trio.sideCollapsed') === '1'; } catch (_) {}
+  }
   applySidebar(_sideCollapsed);
   function toggleSidebar() {
     _sideCollapsed = !_sideCollapsed;
     applySidebar(_sideCollapsed);
+    // A pane must not persist this: localStorage is shared with the main tab,
+    // so a pane hiding its roster would make the main tab open collapsed too.
+    if (PANE_MODE) return;
     try { localStorage.setItem('trio.sideCollapsed', _sideCollapsed ? '1' : '0'); } catch (_) {}
   }
   btnSide.addEventListener('click', () => {
@@ -3838,8 +4009,10 @@ INDEX_HTML = r"""<!doctype html>
       if (btnMobileRoster) btnMobileRoster.classList.toggle('on', false);
     });
   }
-  // Auto-collapse sidebar on narrow viewports at load
-  if (window.innerWidth <= 768) {
+  // Auto-collapse sidebar on narrow viewports at load. An explicit ?roster=
+  // wins — otherwise a pane in a split-screen grid (which is narrow by
+  // construction) could never be asked to show its roster.
+  if (window.innerWidth <= 768 && ROSTER_PARAM === null) {
     applySidebar(true);
   }
 
@@ -4135,9 +4308,13 @@ INDEX_HTML = r"""<!doctype html>
       state.server_host = meta.server_host;
       loadPersistedTargets();
       renderComposerTargets();
-      hChannel.textContent = (DM_MODE ? 'DM — trio#' : 'trio#') + meta.channel;
-      state.originalTitle = (DM_MODE ? 'DM — trio#' : 'trio#') + meta.channel;
-      if (DM_MODE) document.body.classList.add('dm-mode');
+      // The channel label stays plain — participant chips (rendered once the
+      // roster lands) carry the "who is in this chat" information.
+      hChannel.textContent = (CONV_MODE ? '⇄ trio#' : 'trio#') + meta.channel;
+      state.originalTitle = (CONV_MODE ? '⇄ trio#' : 'trio#') + meta.channel;
+      if (CONV_MODE) document.body.classList.add('dm-mode');
+      if (CONV_IDS.length === 1) document.body.classList.add('conv-pair');
+      renderParticipants();
       updateTitle();
       if (meta.operator.pending) {
         // Untrusted connection — need a name before anything else
