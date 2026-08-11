@@ -1653,18 +1653,22 @@ INDEX_HTML = r"""<!doctype html>
   .completion .cid { color: var(--dimmer); font-size: 10px; }
   .completion .cdot { width: 6px; height: 6px; border-radius: 50%; }
 
+  /* Mobile roster toggle — hidden on desktop, sole sidebar opener on mobile */
+  #btn-mobile-roster { display: none; font-size: 16px; padding: 3px 10px; }
+
   /* ── Mobile responsive ── */
   @media (max-width: 768px) {
     #app { grid-template-columns: 1fr !important; grid-template-rows: auto 1fr auto; }
-    header { flex-wrap: wrap; gap: 4px; padding: 6px 10px; height: auto; min-height: 42px; }
-    header .spacer { display: none; }
-    /* Keep only: title, meta, settings gear, connection status */
+    header { flex-wrap: nowrap; gap: 6px; padding: 6px 10px; height: 42px; overflow: hidden; }
+    header .spacer { flex: 1; }
+    header .meta { display: none; }
+    /* Mobile header: channel name + spacer + hamburger + settings + conn dot */
     header > #filter, header > #font-picker, header > #theme-picker,
-    header > #btn-compact, header > #btn-notify,
+    header > #btn-side, header > #btn-compact, header > #btn-notify,
     header > #btn-sound { display: none !important; }
-    /* #btn-side stays visible: it is the only way to open the overlay. */
-    #btn-settings { order: 10; }
-    #h-conn { order: 11; }
+    #btn-mobile-roster { display: inline-block !important; order: 9; }
+    #btn-settings { order: 10; font-size: 14px; padding: 3px 8px; }
+    #h-conn { order: 11; font-size: 10px; padding: 2px 6px; }
 
     /* Sidebar: hidden by default, full-overlay when toggled open */
     #side { display: none !important; position: fixed; inset: 0; z-index: 20;
@@ -1781,6 +1785,7 @@ INDEX_HTML = r"""<!doctype html>
     <span class="pill" id="btn-notify" title="desktop notifications on @you">🔔 off</span>
     <span class="pill" id="btn-sound" title="play a chime on any new message">🔊 off</span>
     <span class="pill" id="btn-settings" title="settings">⚙ settings</span>
+    <span class="pill" id="btn-mobile-roster" title="show roster &amp; context">☰</span>
     <span class="pill conn bad" id="h-conn">● disconnected</span>
   </header>
   <div id="settings-panel" hidden>
@@ -3458,14 +3463,18 @@ INDEX_HTML = r"""<!doctype html>
 
   // ── Mobile sidebar: overlay with scrim ──
   const mobileScrim = document.getElementById('mobile-scrim');
+  const btnMobileRoster = document.getElementById('btn-mobile-roster');
   function toggleMobileSidebar() {
-    appEl.classList.toggle('mobile-side-open');
-    btnSide.classList.toggle('on', appEl.classList.contains('mobile-side-open'));
+    const open = appEl.classList.toggle('mobile-side-open');
+    btnSide.classList.toggle('on', open);
+    if (btnMobileRoster) btnMobileRoster.classList.toggle('on', open);
   }
+  if (btnMobileRoster) btnMobileRoster.addEventListener('click', toggleMobileSidebar);
   if (mobileScrim) {
     mobileScrim.addEventListener('click', () => {
       appEl.classList.remove('mobile-side-open');
       btnSide.classList.toggle('on', false);
+      if (btnMobileRoster) btnMobileRoster.classList.toggle('on', false);
     });
   }
   // Auto-collapse sidebar on narrow viewports at load
