@@ -1055,8 +1055,19 @@ class NthWebHandler(BaseHTTPRequestHandler):
             token, _ident, is_new = self._resolve_identity()
             body = LANDING_HTML if self.landing_mode else INDEX_HTML
             self._serve_html(body, set_cookie_token=token if is_new else None)
+        elif path == "/workspace":
+            # Split-screen shell. The cookie must be minted by this top-level
+            # document so every pane iframe inherits the same operator
+            # identity instead of each minting its own.
+            token, _ident, is_new = self._resolve_identity()
+            self._serve_html(WORKSPACE_HTML,
+                             set_cookie_token=token if is_new else None)
         elif self.landing_mode and path.startswith("/c/"):
-            code = path[3:].rstrip("/")
+            rest = path[3:].strip("/")
+            want_workspace = rest.endswith("/workspace")
+            if want_workspace:
+                rest = rest[: -len("/workspace")]
+            code = rest
             if not CHANNEL_CODE_RE.match(code):
                 self._error(404, "bad channel code")
                 return
@@ -1066,7 +1077,8 @@ class NthWebHandler(BaseHTTPRequestHandler):
             token, _ident, is_new = self._resolve_identity()
             # The channel code passed CHANNEL_CODE_RE, so this substitution
             # cannot inject into the script context.
-            body = INDEX_HTML.replace(
+            template = WORKSPACE_HTML if want_workspace else INDEX_HTML
+            body = template.replace(
                 "/*__API_QS__*/''", json.dumps(f"?channel={code}"))
             self._serve_html(body, set_cookie_token=token if is_new else None)
         elif self.landing_mode and path == "/api/landing":
@@ -4489,6 +4501,281 @@ INDEX_HTML = (
     .replace("/*__ANIMAL_EMOJIS__*/", json.dumps([e for _, e in ANIMAL_EMOJIS]))
     .replace("/*__ANIMAL_NAMES__*/",  json.dumps([n for n, _ in ANIMAL_EMOJIS]))
 )
+
+
+# ───────── Workspace shell (served at /workspace) ─────────
+# A grid of iframes, each loading the normal dashboard scoped to its own
+# conversation. Deliberately thin: it owns layout only, and every pane is a
+# full independent dashboard, so nothing here duplicates chat behaviour.
+#
+# Panes are capped. Each pane holds a permanently-open SSE connection, and
+# browsers allow only ~6 concurrent connections per origin over HTTP/1.1
+# (this server is plain HTTP, so there is no HTTP/2 multiplexing to rescue
+# us). Past the cap, POST /api/send would block forever with no error —
+# the pane would look fine and silently fail to send. See PANE_CAP below.
+WORKSPACE_HTML = r"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>trio — workspace</title>
+<style>
+  :root {
+    --bg: #0b0f14; --bg2: #121821; --panel: #161d27; --border: #273040;
+    --fg: #d6dde8; --dim: #8b97a8; --dimmer: #5d6675; --accent: #4aa8ff;
+  }
+  html, body { margin: 0; padding: 0; height: 100%; background: var(--bg);
+               color: var(--fg);
+               font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+               font-size: 13px; }
+  #bar { height: 38px; box-sizing: border-box; display: flex; align-items: center;
+         gap: 8px; padding: 0 12px; background: var(--bg2);
+         border-bottom: 1px solid var(--border); }
+  #bar .brand { color: var(--accent); font-weight: 600; }
+  #bar .spacer { flex: 1; }
+  .btn { font-size: 11px; padding: 3px 9px; border-radius: 3px; cursor: pointer;
+         background: var(--panel); border: 1px solid var(--border);
+         color: var(--dim); font-family: inherit; }
+  .btn:hover:not(:disabled) { border-color: var(--accent); color: var(--fg); }
+  .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .note { color: var(--dimmer); font-size: 11px; }
+  #panes { display: grid; gap: 6px; padding: 6px; box-sizing: border-box;
+           height: calc(100% - 38px); }
+  .pane { position: relative; border: 1px solid var(--border); border-radius: 4px;
+          overflow: hidden; background: var(--bg2); min-height: 0; }
+  .pane iframe { width: 100%; height: 100%; border: 0; display: block; }
+  .pane .close { position: absolute; top: 4px; right: 6px; z-index: 5;
+                 font-size: 12px; line-height: 1; padding: 2px 6px;
+                 border-radius: 3px; cursor: pointer; color: var(--dimmer);
+                 background: var(--panel); border: 1px solid var(--border); }
+  .pane .close:hover { color: #fff; background: #a33; border-color: #a33; }
+  #empty { color: var(--dimmer); padding: 24px; line-height: 1.7; }
+  #empty code { color: var(--dim); }
+  dialog { background: var(--bg2); color: var(--fg); border: 1px solid var(--border);
+           border-radius: 6px; padding: 16px; font-family: inherit; min-width: 300px; }
+  dialog::backdrop { background: rgba(0,0,0,0.55); }
+  dialog h3 { margin: 0 0 10px; font-size: 12px; text-transform: uppercase;
+              letter-spacing: 0.08em; color: var(--dim); font-weight: 600; }
+  .pick { display: flex; align-items: center; gap: 8px; padding: 4px 2px;
+          cursor: pointer; }
+  .pick input { accent-color: var(--accent); }
+  .dlg-actions { display: flex; gap: 8px; justify-content: flex-end;
+                 margin-top: 14px; }
+</style>
+</head>
+<body>
+  <div id="bar">
+    <span class="brand">trio workspace</span>
+    <span class="note" id="chan"></span>
+    <span class="spacer"></span>
+    <span class="note" id="cap-note"></span>
+    <button class="btn" id="btn-add">+ pane</button>
+    <button class="btn" id="btn-cols">columns: auto</button>
+    <a class="btn" id="btn-full" href="/" style="text-decoration:none">full channel</a>
+  </div>
+  <div id="panes"></div>
+  <div id="empty" hidden>
+    No panes yet. Hit <code>+ pane</code> to add one.<br>
+    Each pane is a conversation — pick who should be in it.
+  </div>
+
+  <dialog id="picker">
+    <h3>Who is in this pane?</h3>
+    <div id="pick-list"></div>
+    <div class="dlg-actions">
+      <button class="btn" id="pick-cancel">cancel</button>
+      <button class="btn" id="pick-ok">add pane</button>
+    </div>
+  </dialog>
+
+<script>
+(() => {
+  'use strict';
+  const API_QS = /*__API_QS__*/'';
+  // Six connections per origin, minus headroom for /api/send and /api/meta.
+  const PANE_CAP = 4;
+
+  const panesEl = document.getElementById('panes');
+  const emptyEl = document.getElementById('empty');
+  const chanEl = document.getElementById('chan');
+  const capNote = document.getElementById('cap-note');
+  const btnAdd = document.getElementById('btn-add');
+  const btnCols = document.getElementById('btn-cols');
+  const picker = document.getElementById('picker');
+  const pickList = document.getElementById('pick-list');
+
+  let channel = '';
+  let roster = [];
+  // Each pane is an array of member ids; [] means the whole channel.
+  let panes = [];
+  let cols = 0;  // 0 = auto
+
+  // ── URL is the source of truth; localStorage only fills a bare /workspace ──
+  // A layout you can paste to yourself matters more here than for a single
+  // pane: rebuilding a four-pane grid by hand after an accidental reload is
+  // genuinely annoying. The stored copy never overrides an explicit URL.
+  function storeKey() { return 'trio.workspace.' + (channel || '_'); }
+
+  function readUrl() {
+    const p = new URLSearchParams(location.search);
+    const raw = p.getAll('p');
+    const c = parseInt(p.get('cols') || '0', 10);
+    if (!isNaN(c) && c >= 0 && c <= 4) cols = c;
+    if (!raw.length) return null;
+    return raw.map(s => s.split(',').map(x => x.trim())
+                         .filter(x => /^[A-Za-z0-9_.-]+$/.test(x)));
+  }
+
+  function writeUrl() {
+    const p = new URLSearchParams();
+    for (const ids of panes) p.append('p', ids.join(','));
+    if (cols) p.set('cols', String(cols));
+    // replaceState, not pushState — resizing shouldn't fill the back button.
+    history.replaceState(null, '', location.pathname + '?' + p.toString());
+    try { localStorage.setItem(storeKey(), JSON.stringify({ panes, cols })); }
+    catch (_) {}
+  }
+
+  function restore() {
+    const fromUrl = readUrl();
+    if (fromUrl) { panes = fromUrl.slice(0, PANE_CAP); return; }
+    try {
+      const raw = localStorage.getItem(storeKey());
+      if (raw) {
+        const saved = JSON.parse(raw);
+        if (Array.isArray(saved.panes)) panes = saved.panes.slice(0, PANE_CAP);
+        if (typeof saved.cols === 'number') cols = saved.cols;
+      }
+    } catch (_) {}
+  }
+
+  // In landing (multi-channel) mode "/" serves the fleet page, not a
+  // dashboard — panes must load the channel-scoped /c/<code> route instead.
+  function channelBase() {
+    return API_QS ? '/c/' + encodeURIComponent(channel) : '/';
+  }
+  function paneSrc(ids) {
+    const qs = ids.length ? ('dm=' + ids.map(encodeURIComponent).join(',') + '&') : '';
+    return channelBase() + '?' + qs + 'roster=0&pane=1';
+  }
+
+  function render() {
+    panesEl.innerHTML = '';
+    emptyEl.hidden = panes.length > 0;
+    const n = panes.length;
+    const c = cols || (n <= 1 ? 1 : n <= 4 ? 2 : 3);
+    panesEl.style.gridTemplateColumns = `repeat(${c}, minmax(0, 1fr))`;
+    panesEl.style.gridAutoRows = 'minmax(0, 1fr)';
+
+    panes.forEach((ids, i) => {
+      const pane = document.createElement('div');
+      pane.className = 'pane';
+      const frame = document.createElement('iframe');
+      frame.src = paneSrc(ids);
+      frame.title = ids.length ? ids.join(', ') : 'full channel';
+      pane.appendChild(frame);
+      const x = document.createElement('span');
+      x.className = 'close';
+      x.textContent = '✕';
+      x.title = 'close this pane';
+      x.addEventListener('click', () => {
+        panes.splice(i, 1);
+        writeUrl(); render();
+      });
+      pane.appendChild(x);
+      panesEl.appendChild(pane);
+    });
+
+    btnAdd.disabled = n >= PANE_CAP;
+    capNote.textContent = n >= PANE_CAP
+      ? `${PANE_CAP}-pane max — each holds a live connection`
+      : '';
+    btnCols.textContent = 'columns: ' + (cols || 'auto');
+  }
+
+  // ── Add-pane picker, populated from the roster ──
+  function openPicker() {
+    pickList.innerHTML = '';
+    if (!roster.length) {
+      const p = document.createElement('div');
+      p.className = 'note';
+      p.textContent = 'roster still loading — try again in a moment';
+      pickList.appendChild(p);
+    }
+    for (const m of roster) {
+      const row = document.createElement('label');
+      row.className = 'pick';
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.value = m.id;
+      row.appendChild(cb);
+      const em = document.createElement('span');
+      em.textContent = m.animal_emoji || '';
+      row.appendChild(em);
+      const nm = document.createElement('span');
+      nm.textContent = m.name;
+      row.appendChild(nm);
+      pickList.appendChild(row);
+    }
+    picker.showModal();
+  }
+
+  document.getElementById('pick-ok').addEventListener('click', () => {
+    const ids = [...pickList.querySelectorAll('input:checked')].map(i => i.value);
+    picker.close();
+    if (panes.length >= PANE_CAP) return;
+    panes.push(ids);
+    writeUrl(); render();
+  });
+  document.getElementById('pick-cancel').addEventListener('click', () => picker.close());
+  btnAdd.addEventListener('click', openPicker);
+  btnCols.addEventListener('click', () => {
+    cols = (cols + 1) % 5;   // auto → 1 → 2 → 3 → 4 → auto
+    writeUrl(); render();
+  });
+
+  // ── Roster for the picker ──
+  // Uses one short-lived EventSource rather than holding a permanent one:
+  // the shell only needs a single roster snapshot, and a persistent
+  // connection here would burn one of the origin's scarce slots for good.
+  function loadRoster() {
+    let es;
+    try { es = new EventSource('/api/events' + API_QS); } catch (_) { return; }
+    const done = () => { try { es.close(); } catch (_) {} };
+    es.onmessage = (ev) => {
+      let payload;
+      try { payload = JSON.parse(ev.data); } catch (_) { return; }
+      if (payload.type === 'roster') {
+        roster = (payload.members || [])
+          .filter(m => !String(m.id).startsWith('_op_'));
+        done();
+      }
+    };
+    es.onerror = done;
+    // Hard stop regardless — never leave this open competing with panes.
+    setTimeout(done, 8000);
+  }
+
+  (async function boot() {
+    try {
+      const r = await fetch('/api/meta' + API_QS);
+      const meta = await r.json();
+      channel = meta.channel || '';
+      chanEl.textContent = 'trio#' + channel;
+      document.title = 'workspace — trio#' + channel;
+      document.getElementById('btn-full').href = channelBase();
+    } catch (_) {
+      chanEl.textContent = '(offline)';
+    }
+    restore();
+    render();
+    loadRoster();
+  })();
+})();
+</script>
+</body>
+</html>
+"""
 
 
 # ───────── Landing page (served as / in landing mode) ─────────
