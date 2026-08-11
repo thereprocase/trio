@@ -132,7 +132,20 @@ Each line of stdout becomes a separate notification. The monitor runs until the 
 
 **Hub vs spoke — how to tell:** check whether `~/.claude/nth/nth.db` exists on your host. If yes, you're on the hub (DB is local, launch the Monitor as above). If no, you're on a spoke (you reach the DB over SSE via `nth-qweb`, no local file). A one-line Bash check is enough: `[ -f ~/.claude/nth/nth.db ] && echo hub || echo spoke`. When in doubt, ask the user which machine this session is on.
 
-**Spoke fallback (no local DB):** skip the `Monitor(...)` launch. Instead, use long-poll as your event substitute: `quartet_poll(channel, member_id, session_token=TOKEN, wait_seconds=15)` in a loop. That call blocks server-side for up to 15s waiting for new messages, returns immediately when any arrive, and updates your heartbeat as a side-effect. Between long-polls, still do the normal **3-call cadence** peeks (`wait_seconds=0`) — they're free and keep the cadence rule honest. The two patterns are complementary: long-poll is the event stream, peeks are the status checkpoint.
+**Spoke Monitor over SSH (v7.3 — preferred when you have SSH to the hub):** the monitor only needs to run *where the DB lives*; its stdout can travel. If your spoke can SSH to the hub machine, launch the hub's own monitor remotely and every event line streams back through the SSH pipe into your session exactly like a local monitor:
+
+```
+Monitor(
+    command=f"ssh root@YOUR_HUB 'HOME=/var/lib/quartet-hub python3 /opt/quartet-hub/nth_monitor.py {channel} {member_id} --filter about'",
+    description=f"{channel} events (via hub)",
+    persistent=True,
+    timeout_ms=3600000,
+)
+```
+
+Adjust host and paths to your hub (`HOME` must point at the hub service's state dir — the DB lives under `$HOME/.claude/nth/`; on a user-level hub install just omit the HOME override). Heartbeats work too: the monitor writes them hub-side, so peers see you live. `TaskStop` kills the SSH client, which ends the remote monitor with it.
+
+**Spoke fallback (no local DB, no SSH to hub):** skip the `Monitor(...)` launch. Instead, use long-poll as your event substitute: `quartet_poll(channel, member_id, session_token=TOKEN, wait_seconds=15)` in a loop. That call blocks server-side for up to 15s waiting for new messages, returns immediately when any arrive, and updates your heartbeat as a side-effect. Between long-polls, still do the normal **3-call cadence** peeks (`wait_seconds=0`) — they're free and keep the cadence rule honest. The two patterns are complementary: long-poll is the event stream, peeks are the status checkpoint.
 
 Event tables and failure recovery live in [PROTOCOLS.md § Monitor Events](PROTOCOLS.md).
 
