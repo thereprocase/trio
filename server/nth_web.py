@@ -2197,6 +2197,14 @@ INDEX_HTML = r"""<!doctype html>
      roster at all. */
   body.pane-mode #btn-mobile-roster { display: inline-block; order: 9; }
   body.pane-mode header > #btn-side { display: none; }
+  /* Pane controls sit with the roster toggle and must survive the narrow
+     header rules, which hide most pills at pane widths. */
+  /* Same order as the roster toggle so DOM order decides — they sit
+     immediately after it, ahead of settings (10) and the conn pill (11). */
+  body.pane-mode #btn-pane-edit,
+  body.pane-mode #btn-pane-close { display: inline-block !important; order: 9; }
+  body.pane-mode #btn-pane-close:hover { background: #a33; color: #fff;
+                                         border-color: #a33; }
   /* Chips yield space before the controls do. */
   body.pane-mode header .participants { flex-shrink: 1; min-width: 0; }
   body.pane-mode header .pill { flex-shrink: 0; }
@@ -2359,6 +2367,8 @@ INDEX_HTML = r"""<!doctype html>
     <span class="pill" id="btn-sound" title="play a chime on any new message">🔊 off</span>
     <span class="pill" id="btn-settings" title="settings">⚙ settings</span>
     <span class="pill" id="btn-mobile-roster" title="show roster &amp; context">☰</span>
+    <span class="pill" id="btn-pane-edit" title="change who is in this pane" hidden>✎</span>
+    <span class="pill" id="btn-pane-close" title="close this pane" hidden>✕</span>
     <span class="pill conn bad" id="h-conn">● disconnected</span>
   </header>
   <div id="settings-panel" hidden>
@@ -3873,7 +3883,21 @@ INDEX_HTML = r"""<!doctype html>
     const snippet = (state.agentStats.get(m.id) || {}).lastSnippet || '';
     const lastSeenAge = m.last_seen ? fmtRel((Date.now() - new Date(m.last_seen).getTime()) / 1000) : '—';
 
-    const rows = [
+    // Where the agent is working leads: it is the first thing you check when
+    // scanning who is on what, and it does not change while you read.
+    const ctx0 = m.context || {};
+    const h0 = ctx0.harness || {};
+    const ws0 = h0.workspace || {};
+    const dir0 = ctx0.cwd || h0.cwd || ws0.current_dir || '';
+    const rows = [];
+    if (ctx0.branch) rows.push(['branch', escapeHtml(ctx0.branch), '']);
+    if (dir0) {
+      const short0 = dir0.replace(/^\/Users\/[^/]+/, '~');
+      const tail0 = short0.length > 34 ? '…' + short0.slice(-33) : short0;
+      rows.push(['dir', `<span title="${escapeHtml(dir0)}">${escapeHtml(tail0)}</span>`, '']);
+    }
+    if (ws0.git_worktree) rows.push(['worktree', escapeHtml(ws0.git_worktree), '']);
+    rows.push(
       ['seen',          escapeHtml(lastSeenAge), ''],
       ['last_read',     `${m.last_read} <span style="color:var(--dimmer)">(${behind} behind)</span>`, behind > 5 ? 'warn' : ''],
       ['read-lat',      lat == null ? '—' : lat.toFixed(1) + 's', latClass],
@@ -3881,7 +3905,7 @@ INDEX_HTML = r"""<!doctype html>
       ['queue',         String(q), qClass],
       ['@reply %',      rr == null ? '—' : Math.round(rr * 100) + '%', ''],
       ['avg len',       alen == null ? '—' : Math.round(alen), ''],
-    ];
+    );
     let html = '';
     for (const [k, v, cls] of rows) {
       html += `<div class="stat-row"><span class="stat-label">${k}</span>`
@@ -3912,18 +3936,7 @@ INDEX_HTML = r"""<!doctype html>
         ['context', `${pct} of ${cwLabel}`, pctClass],
         ['model', model, ''],
       ];
-      // Where this agent is actually working. The branch answers "are they
-      // on the thing I think they're on"; the directory disambiguates
-      // worktrees of the same repo, which otherwise look identical.
-      const ws = h.workspace || {};
-      const dir = c.cwd || h.cwd || ws.current_dir || '';
-      if (c.branch) ctxRows.push(['branch', escapeHtml(c.branch), '']);
-      if (dir) {
-        const short = dir.replace(/^\/Users\/[^/]+/, '~');
-        const tail = short.length > 34 ? '…' + short.slice(-33) : short;
-        ctxRows.push(['dir', `<span title="${escapeHtml(dir)}">${escapeHtml(tail)}</span>`, '']);
-      }
-      if (ws.git_worktree) ctxRows.push(['worktree', escapeHtml(ws.git_worktree), '']);
+      // branch / dir / worktree are rendered at the top of the block instead.
       if (c.effort) ctxRows.push(['effort', escapeHtml(c.effort), '']);
       if (fhPct) ctxRows.push(['5h limit', fhPct, (fiveH.used_percentage||0) >= 80 ? 'bad' : '']);
       if (sdPct) ctxRows.push(['7d limit', sdPct, (sevenD.used_percentage||0) >= 80 ? 'bad' : '']);
@@ -4415,6 +4428,25 @@ INDEX_HTML = r"""<!doctype html>
     // there to tell you about.
     input.addEventListener('focus', clearPaneUnread);
     input.addEventListener('click', clearPaneUnread);
+
+    // Pane controls live in the pane's own header rather than floating over
+    // it: the shell's overlay buttons sat exactly on top of this header's
+    // ☰, so the two competed for the same few pixels. The shell owns the
+    // layout, so the click is relayed up rather than handled here.
+    const paneAct = (action) => {
+      if (window.parent === window) return;
+      try {
+        window.parent.postMessage(
+          { type: 'trio-pane-action', action }, location.origin);
+      } catch (_) { /* cross-origin parent — nothing to relay to */ }
+    };
+    for (const [id, action] of [['btn-pane-edit', 'edit'],
+                                ['btn-pane-close', 'close']]) {
+      const el = document.getElementById(id);
+      if (!el) continue;
+      el.hidden = false;
+      el.addEventListener('click', () => paneAct(action));
+    }
   }
 
   // ── Split-screen entry point ──
@@ -4972,13 +5004,8 @@ WORKSPACE_HTML = r"""<!doctype html>
     .pane.has-unread::after { animation: none; opacity: 0.85; }
   }
   .pane iframe { width: 100%; height: 100%; border: 0; display: block; }
-  .pane-tools { position: absolute; top: 4px; right: 6px; z-index: 5;
-                display: flex; gap: 4px; }
-  .pane .ptool { font-size: 12px; line-height: 1; padding: 2px 6px;
-                 border-radius: 3px; cursor: pointer; color: var(--dimmer);
-                 background: var(--panel); border: 1px solid var(--border); }
-  .pane .ptool:hover { color: var(--fg); border-color: var(--accent); }
-  .pane .ptool.close:hover { color: #fff; background: #a33; border-color: #a33; }
+  /* Pane controls live inside the pane's own header (see INDEX_HTML's
+     #btn-pane-edit / #btn-pane-close), not floating over it. */
   #empty { color: var(--dimmer); padding: 24px; line-height: 1.7; }
   #empty code { color: var(--dim); }
   dialog { background: var(--bg2); color: var(--fg); border: 1px solid var(--border);
@@ -5133,26 +5160,9 @@ WORKSPACE_HTML = r"""<!doctype html>
       pane.appendChild(frame);
       frames[i] = frame;
 
-      const tools = document.createElement('div');
-      tools.className = 'pane-tools';
-      // Editing a pane in place is the answer to "how do I change who is on
-      // the right" — without it the only route is close-then-re-add.
-      const edit = document.createElement('span');
-      edit.className = 'ptool';
-      edit.textContent = '✎';
-      edit.title = 'change who is in this pane';
-      edit.addEventListener('click', () => openPicker(i));
-      tools.appendChild(edit);
-      const x = document.createElement('span');
-      x.className = 'ptool close';
-      x.textContent = '✕';
-      x.title = 'close this pane';
-      x.addEventListener('click', () => {
-        panes.splice(i, 1);
-        writeUrl(); render();
-      });
-      tools.appendChild(x);
-      pane.appendChild(tools);
+      // No overlay controls: the pane renders its own ✎/✕ in its header,
+      // next to the roster toggle, and relays the click up. Floating them
+      // over the pane put them exactly on top of that header's ☰.
       panesEl.appendChild(pane);
     });
 
@@ -5230,9 +5240,17 @@ WORKSPACE_HTML = r"""<!doctype html>
   window.addEventListener('message', (ev) => {
     if (ev.origin !== location.origin) return;
     const d = ev.data;
-    if (!d || d.type !== 'trio-pane-unread') return;
+    if (!d) return;
     const idx = frames.findIndex(f => f && f.contentWindow === ev.source);
     if (idx < 0) return;
+
+    // Pane header controls, relayed up because the shell owns the layout.
+    if (d.type === 'trio-pane-action') {
+      if (d.action === 'edit') openPicker(idx);
+      else if (d.action === 'close') { panes.splice(idx, 1); writeUrl(); render(); }
+      return;
+    }
+    if (d.type !== 'trio-pane-unread') return;
     const pane = panesEl.children[idx];
     if (!pane) return;
     const n = Math.max(0, parseInt(d.count, 10) || 0);
