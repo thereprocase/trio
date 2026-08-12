@@ -2200,9 +2200,32 @@ INDEX_HTML = r"""<!doctype html>
   /* Pane controls sit with the roster toggle and must survive the narrow
      header rules, which hide most pills at pane widths. */
   /* Same order as the roster toggle so DOM order decides — they sit
-     immediately after it, ahead of settings (10) and the conn pill (11). */
+     immediately after it, ahead of settings (10) and the conn pill (11).
+     Sized to match ☰ so the three read as one control group. */
   body.pane-mode #btn-pane-edit,
-  body.pane-mode #btn-pane-close { display: inline-block !important; order: 9; }
+  body.pane-mode #btn-pane-close { display: inline-block !important; order: 9;
+                                   font-size: 16px; padding: 3px 10px;
+                                   line-height: 1.1; }
+  /* The ⌂ pill leaves the pane pointed at the bare channel, which inside an
+     iframe is a dead end — the shell's "full channel" button is the way out. */
+  body.pane-mode #btn-home { display: none; }
+  /* Your own avatar and name, repeated in every pane, is the same fact N
+     times. It stays in the standalone view, where it is the only thing that
+     says which identity you are posting as (local vs tailnet vs guest). */
+  body.pane-mode header .meta { display: none; }
+  /* Filter floats over the transcript instead of holding header width — a
+     pane's header is the scarcest space in the layout, and search is used in
+     bursts. Dim until wanted, and it expands on hover/focus. Overrides the
+     narrow-viewport rule that hides it outright, since panes are narrow by
+     construction and would otherwise lose search entirely. */
+  body.pane-mode header > #filter {
+    display: block !important;
+    position: fixed; top: 47px; right: 9px; z-index: 6;
+    width: 108px; opacity: 0.45;
+    transition: opacity 0.12s ease, width 0.12s ease;
+  }
+  body.pane-mode header > #filter:hover,
+  body.pane-mode header > #filter:focus { opacity: 1; width: 190px; }
   body.pane-mode #btn-pane-close:hover { background: #a33; color: #fff;
                                          border-color: #a33; }
   /* Chips yield space before the controls do. */
