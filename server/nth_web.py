@@ -692,6 +692,16 @@ class EventHub:
                         context_full = ctx_usage[fp]
                         context_pct = float(context_full["used_pct"])
                         break
+            # Branch is resolved from the filesystem, so it is only meaningful
+            # for sessions on this machine. A relayed snapshot carries no host,
+            # and a spoke's cwd could name a path that also exists here — which
+            # would show the hub's branch for someone else's work. Attaching it
+            # only when the session id appears in the local publisher files
+            # proves the session is local.
+            if context_full is not None:
+                local = ctx_usage.get(context_full.get("session_id") or "")
+                if local and local.get("branch"):
+                    context_full = {**context_full, "branch": local["branch"]}
             aname, aemoji = avatars.get(r["id"], animal_for(r["id"]))
             out.append({
                 "id": r["id"],
@@ -817,6 +827,62 @@ CONTEXT_USAGE_STALE_S = 60
 CONTEXT_SNAPSHOT_STALE_S = 120
 
 
+# Git branch per working directory, for the roster's per-agent detail.
+#
+# Read from .git rather than shelling out to git: this runs inside the 0.5s
+# roster poll, once per live session, and a subprocess per session per tick
+# would be the most expensive thing the poll does. Results are cached briefly
+# for the same reason — branches change on the order of minutes, not ticks.
+_BRANCH_CACHE: Dict[str, Any] = {}
+_BRANCH_TTL_S = 10
+
+
+def _git_branch(cwd: str) -> str:
+    """Current branch for a working tree, or a short SHA when detached."""
+    if not cwd:
+        return ""
+    hit = _BRANCH_CACHE.get(cwd)
+    now = time.time()
+    if hit and (now - hit[0]) < _BRANCH_TTL_S:
+        return hit[1]
+
+    branch = ""
+    try:
+        path = Path(cwd)
+        # Walk up: the publisher reports the session's cwd, which may sit
+        # below the repo root.
+        for base in [path, *path.parents]:
+            dotgit = base / ".git"
+            if not dotgit.exists():
+                continue
+            if dotgit.is_file():
+                # Worktree or submodule: ".git" is a file pointing at the
+                # real git dir, which holds that worktree's own HEAD.
+                text = dotgit.read_text(encoding="utf-8", errors="replace")
+                target = text.split("gitdir:", 1)[-1].strip()
+                if not target:
+                    break
+                gitdir = Path(target)
+                if not gitdir.is_absolute():
+                    gitdir = (base / gitdir).resolve()
+            else:
+                gitdir = dotgit
+            head = gitdir / "HEAD"
+            if not head.exists():
+                break
+            raw = head.read_text(encoding="utf-8", errors="replace").strip()
+            if raw.startswith("ref:"):
+                branch = raw.split("/", 2)[-1] if "/" in raw else raw[4:].strip()
+            elif raw:
+                branch = raw[:8]  # detached HEAD
+            break
+    except (OSError, ValueError):
+        branch = ""
+
+    _BRANCH_CACHE[cwd] = (now, branch)
+    return branch
+
+
 def _read_context_snapshots() -> List[Dict[str, Any]]:
     """All fresh publisher files as dicts (plus _age_s), newest first.
     Stale >120s ignored; the UI additionally dims entries older than 30s."""
@@ -832,6 +898,11 @@ def _read_context_snapshots() -> List[Dict[str, Any]]:
                 if not isinstance(data.get("session_id"), str):
                     continue
                 data["_age_s"] = int(age)
+                # The publisher reports cwd but not the branch; resolve it
+                # here so the roster can show what each agent is working on.
+                cwd = data.get("cwd") or (data.get("harness") or {}).get("cwd") or ""
+                if cwd:
+                    data["branch"] = _git_branch(str(cwd))
                 out.append(data)
             except (OSError, ValueError):
                 continue
@@ -3841,6 +3912,18 @@ INDEX_HTML = r"""<!doctype html>
         ['context', `${pct} of ${cwLabel}`, pctClass],
         ['model', model, ''],
       ];
+      // Where this agent is actually working. The branch answers "are they
+      // on the thing I think they're on"; the directory disambiguates
+      // worktrees of the same repo, which otherwise look identical.
+      const ws = h.workspace || {};
+      const dir = c.cwd || h.cwd || ws.current_dir || '';
+      if (c.branch) ctxRows.push(['branch', escapeHtml(c.branch), '']);
+      if (dir) {
+        const short = dir.replace(/^\/Users\/[^/]+/, '~');
+        const tail = short.length > 34 ? '…' + short.slice(-33) : short;
+        ctxRows.push(['dir', `<span title="${escapeHtml(dir)}">${escapeHtml(tail)}</span>`, '']);
+      }
+      if (ws.git_worktree) ctxRows.push(['worktree', escapeHtml(ws.git_worktree), '']);
       if (c.effort) ctxRows.push(['effort', escapeHtml(c.effort), '']);
       if (fhPct) ctxRows.push(['5h limit', fhPct, (fiveH.used_percentage||0) >= 80 ? 'bad' : '']);
       if (sdPct) ctxRows.push(['7d limit', sdPct, (sevenD.used_percentage||0) >= 80 ? 'bad' : '']);
