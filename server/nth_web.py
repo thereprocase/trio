@@ -2392,7 +2392,7 @@ INDEX_HTML = r"""<!doctype html>
     <span class="pill on" id="btn-side" title="show/hide the roster sidebar">roster</span>
     <span class="pill" id="btn-compact" title="clamp every message body to 3 lines">compact</span>
     <span class="pill" id="btn-notify" title="desktop notifications on @you">🔔 off</span>
-    <span class="pill" id="btn-sound" title="play a chime on any new message">🔊 off</span>
+    <span class="pill" id="btn-sound" title="play a chime on new messages (scope in settings when on)">🔊 off</span>
     <span class="pill" id="btn-settings" title="settings">⚙ settings</span>
     <span class="pill" id="btn-mobile-roster" title="show roster &amp; context">☰</span>
     <span class="pill conn bad" id="h-conn">● disconnected</span>
@@ -2601,6 +2601,10 @@ INDEX_HTML = r"""<!doctype html>
     initialLoad: true,              // pin to newest until the history burst settles
     soundEnabled: false,
     chimeVolume: 0.33,
+    soundScope: 'all',        // 'mention' | 'all' — chime scope, INDEPENDENT of
+                              // notifyScope. Defaults to 'all' to preserve the
+                              // historical "chime on any new message" behavior
+                              // for operators who already had the chime on.
     notifyScope: 'mention',   // 'mention' | 'all'
     notifyWhen: 'hidden',     // 'hidden' | 'always'
     unreadCount: 0,                 // for tab title while hidden
@@ -3237,13 +3241,23 @@ INDEX_HTML = r"""<!doctype html>
   // (markdown/fonts reflow taller after the synchronous appends) and switch to
   // normal "follow only if near bottom" behavior for live messages.
   let _initialSettleTimer = null;
+  let _initialSettleDeadline = 0;
+  function settleInitialLoad() {
+    _initialSettleTimer = null;
+    _initialSettleDeadline = 0;
+    state.initialLoad = false;
+    requestAnimationFrame(() => { chat.scrollTop = chat.scrollHeight; });
+  }
   function scheduleInitialSettle() {
+    // The quiet gap is rescheduled on each append, so a burst spaced under
+    // 250ms would hold initialLoad open for its whole duration — and the chime
+    // is gated on that flag, so it would be muted exactly during an agent
+    // flurry. Cap the total wait so a dense burst still settles.
+    const now = Date.now();
+    if (!_initialSettleDeadline) _initialSettleDeadline = now + 3000;
     if (_initialSettleTimer) clearTimeout(_initialSettleTimer);
-    _initialSettleTimer = setTimeout(() => {
-      _initialSettleTimer = null;
-      state.initialLoad = false;
-      requestAnimationFrame(() => { chat.scrollTop = chat.scrollHeight; });
-    }, 250);
+    const wait = Math.max(0, Math.min(250, _initialSettleDeadline - now));
+    _initialSettleTimer = setTimeout(settleInitialLoad, wait);
   }
 
   function appendMessage(m) {
@@ -3255,6 +3269,11 @@ INDEX_HTML = r"""<!doctype html>
     const isMine = m.member_id === state.operator.id;
     const isSystem = isSystemContent(m.content || '');
     const mentionsOperator = (m.mentions || []).includes(state.operator.id);
+    // '!' sigils land in a separate `bangs` column, never in `mentions`.
+    // A bang is the last-resort signal an agent cannot be opted out of, so
+    // it must reach a mention-scoped chime too — otherwise the one message
+    // that paints a red BANG bar is the one message that makes no sound.
+    const bangsOperator = (m.bangs || []).includes(state.operator.id);
 
     const div = document.createElement('div');
     div.className = 'msg' + (isMine ? ' mine' : '') + (isSystem ? ' system' : '')
@@ -3374,8 +3393,23 @@ INDEX_HTML = r"""<!doctype html>
       } catch (e) { /* ignore */ }
     }
 
-    // In-page chime on any new message from someone else (opt-in, focus-agnostic).
-    if (state.soundEnabled && !isMine && !isSystem) playChime();
+    // In-page chime for a new peer message (opt-in, focus-agnostic). The scope
+    // (soundScope) is kept independent of the desktop-notify scope, so a quiet
+    // chime on all messages can coexist with a popup only on @mentions, or vice
+    // versa. Reuses the same mentionsOperator predicate the notify block uses.
+    // Skip the primed-history burst on load/reconnect — chime only for LIVE
+    // messages once state.initialLoad has settled. Without this, a refresh plays
+    // every historical chime at once (overlapping waveforms = loud + phasey).
+    // In a DM view every channel message is still appended and merely
+    // CSS-hidden, so without this the operator hears a chime for a message
+    // they cannot see — an audible event with no visible cause.
+    if (shouldChime({
+          initialLoad: state.initialLoad, soundEnabled: state.soundEnabled,
+          isMine, isSystem,
+          dmVisible: (!state.dmTargetId || isRelevantInDm(m)),
+          scope: state.soundScope,
+          addressed: mentionsOperator || bangsOperator,
+        })) playChime();
   }
 
   // Existing message names may change (rename) — update author labels + mention
@@ -4260,9 +4294,37 @@ INDEX_HTML = r"""<!doctype html>
     } catch (_) { _audioCtx = null; }
     return _audioCtx;
   }
+  // Does a peer message qualify for the chime under the current scope?
+  //   'all'     → every peer message chimes.
+  //   'mention' → only messages that @mention the operator chime.
+  // Pure (no DOM/state) so it can be unit-tested via the harness hook. The
+  // on/off master is state.soundEnabled + the btn-sound pill; this only refines
+  // an already-enabled chime, and stays independent of notifyScope.
+  function chimeScopeAllows(scope, mentionsOperator) {
+    return scope === 'all' ? true : !!mentionsOperator;
+  }
+  // The whole chime decision, pure and testable. The gate that actually
+  // matters is not the scope predicate but the conditions around it: the
+  // history burst, your own messages, system notices, and a DM view where the
+  // message is appended but hidden.
+  function shouldChime(o) {
+    if (!o || o.initialLoad) return false;      // primed history, not live
+    if (!o.soundEnabled) return false;
+    if (o.isMine || o.isSystem) return false;
+    if (!o.dmVisible) return false;             // appended but CSS-hidden
+    return chimeScopeAllows(o.scope, o.addressed);
+  }
+  let _lastChimeAt = 0;
   function playChime() {
     const ctx = ensureAudio();
     if (!ctx) return;
+    // Coalesce. A reconnect drains the whole offline backlog through one
+    // synchronous handler, and each call ramps a fresh gain to full volume at
+    // essentially the same currentTime — forty of those sum into clipping
+    // rather than forty chimes. One sound per burst is the useful signal.
+    const nowMs = Date.now();
+    if (nowMs - _lastChimeAt < 400) return;
+    _lastChimeAt = nowMs;
     if (ctx.state === 'suspended') { try { ctx.resume(); } catch (_) {} }
     const vol = Math.max(0, Math.min(1, state.chimeVolume));
     if (vol <= 0) return;
@@ -4285,7 +4347,8 @@ INDEX_HTML = r"""<!doctype html>
     } catch (_) { /* ignore */ }
   }
 
-  // ── Sound (chime) toggle — off by default; chimes on any new peer message ──
+  // ── Sound (chime) toggle — off by default; the pill is the on/off master and
+  //    state.soundScope (settings drawer) refines which peer messages chime. ──
   btnSound.addEventListener('click', () => {
     state.soundEnabled = !state.soundEnabled;
     btnSound.textContent = state.soundEnabled ? '🔊 on' : '🔊 off';
@@ -4389,6 +4452,36 @@ INDEX_HTML = r"""<!doctype html>
     return row;
   }
 
+  // Build a <select> preloaded with `options` ([value, label] pairs) and the
+  // `current` value pre-selected. Shared by the chime + notification prefs.
+  function prefSelect(options, current) {
+    const sel = document.createElement('select');
+    options.forEach(([val, label]) => {
+      const o = document.createElement('option');
+      o.value = val; o.textContent = label;
+      if (val === current) o.selected = true;
+      sel.appendChild(o);
+    });
+    return sel;
+  }
+
+  // Chime scope — off is the btn-sound pill; this refines an enabled chime to
+  // fire on every message or only @mentions. Independent of the notify scope.
+  try {
+    const ss = localStorage.getItem('trio.soundScope'); if (ss) state.soundScope = ss;
+  } catch (_) {}
+  // Wording ('all messages' / '@mentions only') and the mention-first vs
+  // all-first default are matched to the notify-scope select so the two read as
+  // siblings; the title spells out that they're independent controls.
+  const soundScopeSel = prefSelect(
+    [['all', 'all messages'], ['mention', '@mentions only']], state.soundScope);
+  soundScopeSel.title = 'Chime scope — independent of desktop notifications';
+  soundScopeSel.addEventListener('change', () => {
+    state.soundScope = soundScopeSel.value;
+    try { localStorage.setItem('trio.soundScope', state.soundScope); } catch (_) {}
+  });
+  const soundScopeRow = addSettingRow('Chime for', soundScopeSel);
+
   // Chime volume slider — drives state.chimeVolume; previews on release.
   try {
     const sv = parseFloat(localStorage.getItem('trio.chimeVolume'));
@@ -4405,17 +4498,7 @@ INDEX_HTML = r"""<!doctype html>
   volSlider.addEventListener('change', () => { ensureAudio(); playChime(); });
   const chimeVolRow = addSettingRow('Chime volume', volSlider);
 
-  // Notification preference dropdowns.
-  function prefSelect(options, current) {
-    const sel = document.createElement('select');
-    options.forEach(([val, label]) => {
-      const o = document.createElement('option');
-      o.value = val; o.textContent = label;
-      if (val === current) o.selected = true;
-      sel.appendChild(o);
-    });
-    return sel;
-  }
+  // Notification preference dropdowns (reuse prefSelect defined above).
   try {
     const ns = localStorage.getItem('trio.notifyScope'); if (ns) state.notifyScope = ns;
     const nw = localStorage.getItem('trio.notifyWhen'); if (nw) state.notifyWhen = nw;
@@ -4437,6 +4520,7 @@ INDEX_HTML = r"""<!doctype html>
 
   // Sub-settings only show when their parent feature is enabled.
   function syncSettingVisibility() {
+    if (soundScopeRow) soundScopeRow.hidden = !state.soundEnabled;
     if (chimeVolRow) chimeVolRow.hidden = !state.soundEnabled;
     if (notifyScopeRow) notifyScopeRow.hidden = !state.notifyEnabled;
     if (notifyWhenRow) notifyWhenRow.hidden = !state.notifyEnabled;
@@ -4543,6 +4627,10 @@ INDEX_HTML = r"""<!doctype html>
     if (es) try { es.close(); } catch (e) {}
     es = new EventSource('/api/events' + API_QS);
     es.onopen = () => {
+      // A channel with no history primes zero messages, so appendMessage never
+      // fires and nothing would ever clear initialLoad — the first live message
+      // would arrive un-chimed. Arm the settle from the connection itself.
+      if (state.initialLoad) scheduleInitialSettle();
       hConn.textContent = '● connected';
       hConn.classList.remove('bad');
       hConn.classList.add('ok');
@@ -4719,6 +4807,7 @@ INDEX_HTML = r"""<!doctype html>
       formatTime,
       collectMentionMatches, mentionMemberForToken,
       decorateInlineMentions, composerMentionHtml,
+      chimeScopeAllows, shouldChime,
     };
   }
   // __TRIO_TEST_HOOK_END__

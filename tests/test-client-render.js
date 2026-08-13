@@ -205,6 +205,66 @@ check('composer: the tail after the last mention is escaped too', () => {
   assert.ok(/bold/.test(html), 'but its text is preserved');
 });
 
+// ── chimeScopeAllows: mention-scoped chime predicate (feature #7) ─────────────
+// The chime's scope gate. Pure, and independent of notifyScope: 'all' chimes on
+// every peer message; 'mention' only when the operator is @'d.
+check("chimeScopeAllows: 'all' chimes regardless of mention", () => {
+  assert.strictEqual(H.chimeScopeAllows('all', false), true);
+  assert.strictEqual(H.chimeScopeAllows('all', true), true);
+});
+check("chimeScopeAllows: 'mention' gates on the mention predicate", () => {
+  assert.strictEqual(H.chimeScopeAllows('mention', true), true);
+  assert.strictEqual(H.chimeScopeAllows('mention', false), false);
+});
+check('chimeScopeAllows: mention flag is coerced to a real boolean', () => {
+  // appendMessage passes `(m.mentions || []).includes(id)` — already boolean —
+  // but the helper must not leak a truthy/undefined value through.
+  assert.strictEqual(H.chimeScopeAllows('mention', undefined), false);
+  assert.strictEqual(H.chimeScopeAllows('mention', 0), false);
+});
+check('chimeScopeAllows: unknown/absent scope falls through to mention-gated', () => {
+  // Only 'all' opens the gate unconditionally; any other/absent value defers to
+  // the mention predicate rather than chiming on everything.
+  assert.strictEqual(H.chimeScopeAllows('', true), true);
+  assert.strictEqual(H.chimeScopeAllows('', false), false);
+  assert.strictEqual(H.chimeScopeAllows(undefined, false), false);
+});
+
+// ── shouldChime: the call-site gate, not just the scope predicate ────────────
+// chimeScopeAllows was already covered, but a regression in the conditions
+// AROUND it — the history burst, own messages, the DM view — would have left
+// the suite green. These pin each one.
+const CHIME_BASE = {
+  initialLoad: false, soundEnabled: true, isMine: false, isSystem: false,
+  dmVisible: true, scope: 'all', addressed: false,
+};
+const chimeWith = (o) => H.shouldChime(Object.assign({}, CHIME_BASE, o));
+
+check('shouldChime: a live peer message chimes', () => {
+  assert.strictEqual(chimeWith({}), true);
+});
+check('shouldChime: the primed history burst is silent', () => {
+  assert.strictEqual(chimeWith({ initialLoad: true }), false);
+});
+check('shouldChime: sound off means silent', () => {
+  assert.strictEqual(chimeWith({ soundEnabled: false }), false);
+});
+check('shouldChime: your own message never chimes', () => {
+  assert.strictEqual(chimeWith({ isMine: true }), false);
+});
+check('shouldChime: system notices never chime', () => {
+  assert.strictEqual(chimeWith({ isSystem: true }), false);
+});
+check('shouldChime: a message hidden by the DM view is silent', () => {
+  // It is appended and CSS-hidden, so chiming would be an audible event with
+  // no visible cause.
+  assert.strictEqual(chimeWith({ dmVisible: false }), false);
+});
+check('shouldChime: mention scope needs you addressed', () => {
+  assert.strictEqual(chimeWith({ scope: 'mention', addressed: false }), false);
+  assert.strictEqual(chimeWith({ scope: 'mention', addressed: true }), true);
+});
+
 console.log('');
 console.log((failures.length ? 'FAILED' : 'OK') + ` — ${passed} passed, ${failures.length} failure(s)`);
 process.exit(failures.length ? 1 : 0);
