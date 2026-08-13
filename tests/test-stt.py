@@ -81,6 +81,17 @@ finally:
             os.environ[k] = v
     shutil.rmtree(_cachedir, ignore_errors=True)
 
+# Regression guard for a threshold calibrated on the wrong kind of audio. The
+# original 0.005 floor replaced a 0.02 one that had been set against macOS
+# `say` output (loud, normalised, close-miked). Real microphone speech measured
+# 0.0147–0.0343 on the first machine it met, so 0.02 rejected quiet takes as
+# silence at random. Tier 3 below cannot catch a recurrence: it generates its
+# audio with `say` too, reproducing the very bias that caused the bug.
+check("silence floor is below real quiet speech (0.0147 measured)",
+      wk.RMS_SILENCE_THRESHOLD < 0.0147)
+check("silence floor still clears digital silence",
+      wk.RMS_SILENCE_THRESHOLD > 0.0)
+
 h = web.STT.health()
 check("health has required keys", {"available", "engine", "model", "warm", "detail"} <= set(h))
 check("health engine is mlx_whisper", h["engine"] == "mlx_whisper")

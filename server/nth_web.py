@@ -2161,6 +2161,10 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 self._json({"ok": True, "text": result.get("text", ""),
                             "seconds": result.get("seconds"),
                             "no_speech": bool(result.get("no_speech")),
+                            # Surfaced so the client can tell "you said nothing"
+                            # from "you were too quiet to clear the gate" — the
+                            # difference between try-again and move-closer.
+                            "rms": result.get("rms"),
                             "engine": "mlx_whisper", "model": STT_MODEL})
             except SttEngineError as e:
                 # Engine text is verbatim ffmpeg/mlx output — kilobytes of it,
@@ -5393,6 +5397,17 @@ INDEX_HTML = r"""<!doctype html>
     return 'Could not open the microphone' + (n ? ' (' + n + ')' : '') + '.';
   }
 
+  // The server reports the clip's measured energy. Near-zero means the mic
+  // captured nothing; low-but-present means it heard someone too quiet to
+  // clear the silence gate — which needs different advice from "try again".
+  function quietHint(rms) {
+    if (typeof rms === 'number' && rms > 0 && rms < 0.01) {
+      return 'That was very quiet — move closer to the microphone or raise its'
+           + ' input level, then try again.';
+    }
+    return 'No message detected — try again.';
+  }
+
   function webSpeechAvailable() {
     return !!(window.SpeechRecognition || window.webkitSpeechRecognition);
   }
@@ -5566,7 +5581,10 @@ INDEX_HTML = r"""<!doctype html>
         if (!r.ok || !data.ok) { offerWebFallback((data && data.error) || ('HTTP ' + r.status)); return; }
         if (data.no_speech || !(data.text || '').trim()) {   // Whisper's own no-speech backstop
           setMicState('idle');
-          showSttBanner('No message detected — try again.', 'warn');
+          // A clip that carried real energy but no words is a different problem
+          // from one the gate rejected, and "try again" is the wrong advice for
+          // someone who simply spoke too quietly.
+          showSttBanner(quietHint(data.rms), 'warn');
           return;
         }
         hideSttBanner();

@@ -29,11 +29,22 @@ import wave
 
 DEFAULT_MODEL = "mlx-community/whisper-large-v3-turbo"
 # Whisper hallucinates words from silence/near-silence, and its own
-# no_speech_prob is unreliable (mlx returns ~0 even for pure silence). So we gate
-# on actual audio energy (RMS): below this floor we skip transcription entirely
-# and report no speech. Measured: silence≈0.000, quiet room noise≈0.010,
-# speech≈0.156 — so 0.02 cleanly separates speech from silence/quiet noise.
-RMS_SILENCE_THRESHOLD = float(os.environ.get("NTH_STT_SILENCE_RMS", "0.02"))
+# no_speech_prob is unreliable (mlx returns ~0 even for pure silence), so we
+# gate on actual audio energy (RMS) and skip transcription below this floor.
+#
+# The floor was originally 0.02, calibrated against a reference of speech≈0.156.
+# That reference came from macOS `say` output — synthetic, loud, close-miked and
+# normalised. Real microphone input at conversational distance measured 0.015 to
+# 0.034 on the first machine this met, i.e. the OLD THRESHOLD SAT INSIDE THE
+# RANGE OF NORMAL SPEECH: the same person saying the same sentence would be
+# transcribed or rejected as silence depending on how loudly they happened to
+# say it. The unit tests never caught it because they generate their audio with
+# `say` too, reproducing the very bias that set the number.
+#
+# 0.005 clears digital silence (0.000) and sits well under quiet real speech,
+# leaving Whisper's own empty-transcript result as the backstop for room noise.
+# Raise it via the env var on a noisy machine that hallucinates from ambience.
+RMS_SILENCE_THRESHOLD = float(os.environ.get("NTH_STT_SILENCE_RMS", "0.005"))
 
 
 def _load_and_rms(path):
