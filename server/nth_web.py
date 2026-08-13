@@ -3118,10 +3118,12 @@ INDEX_HTML = r"""<!doctype html>
       // History burst. The baseline is set once in seedBaseline() when the
       // burst settles; advancing per-message here would race a hidden tab.
     } else if (!document.hidden && nearBottom && !isHiddenMsg(div)) {
-      // Only messages the user can actually see count as read on arrival. A
-      // filter left switched on would otherwise mark every non-matching
-      // message read as it lands, with no scroll involved at all.
-      state.lastSeenId = Math.max(state.lastSeenId, m.id);
+      // Only messages the user can actually see count as read on arrival, and
+      // the advance has to be the same ascending walk markCaughtUp does — a
+      // bare Math.max would jump the watermark over earlier messages a filter
+      // is hiding, which is the very thing that walk exists to prevent. One
+      // function owns the invariant.
+      markCaughtUp();
     } else {
       refreshUnreadDivider();
     }
@@ -4317,7 +4319,7 @@ INDEX_HTML = r"""<!doctype html>
       // several of its own (the post-burst settle, the jump-to-unread), so
       // attribute the scroll to a recent real gesture instead of racing it
       // against a timer.
-      if (!document.hidden && Date.now() - state.userIntentAt < USER_INTENT_MS) markCaughtUp();
+      if (!document.hidden && scrollIsUsers()) markCaughtUp();
       return;
     }
     jumpBtn.classList.add('show');
@@ -4370,14 +4372,34 @@ INDEX_HTML = r"""<!doctype html>
   // preceded it. Programmatic scrolls (settle, jump-to-unread) have none, so
   // they can never mark messages read. Bound to the scroller, not the
   // document, so clicking the "new messages" bar is not mistaken for intent.
-  const noteIntent = () => { state.userIntentAt = Date.now(); };
+  function noteIntent() { state.userIntentAt = Date.now(); }
+  // True when a scroll happening right now is attributable to the user.
+  function scrollIsUsers() { return Date.now() - state.userIntentAt < USER_INTENT_MS; }
+  // Keep an already-attributed scroll attributed while it is still moving.
+  // Cannot bootstrap: an unattributed scroll starts stale and stays stale.
+  function sustainIntent() { if (scrollIsUsers()) noteIntent(); }
   for (const ev of ['wheel', 'touchstart', 'touchmove', 'pointerdown', 'mousedown']) {
     chat.addEventListener(ev, noteIntent, { passive: true });
   }
   document.addEventListener('keydown', (e) => {
+    // Only keys that could plausibly have scrolled the chat. Typing in the
+    // composer must not count: boot focuses #input, so a space typed while a
+    // programmatic scroll is still gliding would hand it the user's
+    // attribution and let it mark the unread read.
+    if (e.target && e.target.closest &&
+        e.target.closest('input, textarea, select, [contenteditable]')) return;
     if (['PageDown', 'PageUp', 'End', 'Home', 'ArrowDown', 'ArrowUp', ' '].includes(e.key)) noteIntent();
   }, { passive: true });
-  chat.addEventListener('scroll', () => { updateJumpButton(); scheduleHereUpdate(); });
+  chat.addEventListener('scroll', () => {
+    // A scroll that is ALREADY the user's keeps its attribution for as long as
+    // it keeps moving — iOS momentum routinely runs 1-3s past touchend, and a
+    // long smooth scroll can outlast USER_INTENT_MS on its own. This cannot
+    // bootstrap a programmatic scroll into attribution: that one starts stale,
+    // so the condition is false on its very first frame and stays false.
+    sustainIntent();
+    updateJumpButton();
+    scheduleHereUpdate();
+  });
   jumpBtn.addEventListener('click', () => {
     chat.scrollTop = chat.scrollHeight;
     state.jumpUnread = 0;

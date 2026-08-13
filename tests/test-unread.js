@@ -42,10 +42,11 @@ const sandbox = {
   Math, console,
 };
 const code = [grab('isHiddenMsg'), grab('firstVisibleUnreadDom'), grab('unreadCountVisible'),
-              grab('markCaughtUp'), grab('seedBaseline'), grab('updateJumpButton')].join('\n');
+              grab('markCaughtUp'), grab('seedBaseline'), grab('updateJumpButton'),
+              grab('noteIntent'), grab('scrollIsUsers'), grab('sustainIntent')].join('\n');
 const fn = new Function('sandbox', `with (sandbox) { ${code};
   return { isHiddenMsg, firstVisibleUnreadDom, unreadCountVisible, markCaughtUp, seedBaseline,
-           updateJumpButton,
+           updateJumpButton, noteIntent, scrollIsUsers, sustainIntent,
            refreshUnreadDivider: () => {}, updateNewBar: () => {} }; }`);
 // refreshUnreadDivider/updateNewBar are stubbed via the returned closure below
 sandbox.refreshUnreadDivider = () => {};
@@ -183,6 +184,27 @@ check('a long smooth scroll still cannot mark caught up at any point', () => {
   }
   assert.strictEqual(sandbox.state.lastSeenId, 1, 'no frame may mark caught up');
   assert.strictEqual(dividerPresent, true);
+});
+
+check('a moving user scroll keeps its attribution past the window', () => {
+  sandbox.state = mkState({ userIntentAt: Date.now() - 1400 });
+  for (let i = 0; i < 40; i++) H.sustainIntent();   // frames of a long fling
+  assert.strictEqual(H.scrollIsUsers(), true, 'momentum must not lose attribution');
+});
+
+check('a programmatic scroll can never bootstrap attribution', () => {
+  sandbox.state = mkState({ userIntentAt: 0 });
+  for (let i = 0; i < 200; i++) H.sustainIntent();
+  assert.strictEqual(H.scrollIsUsers(), false, 'stale must stay stale');
+});
+
+check('appendMessage-style advance uses the walk, not a bare max', () => {
+  const m = new Map();
+  m.set(3573, node()); m.set(3578, node('filtered-out')); m.set(3579, node());
+  sandbox.state = mkState({ lastSeenId: 3573, messageDomById: m });
+  H.markCaughtUp();
+  assert.strictEqual(sandbox.state.lastSeenId, 3573,
+    'a later visible message must not leapfrog an earlier hidden one');
 });
 
 console.log('');
