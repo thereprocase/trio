@@ -1462,7 +1462,9 @@ class SttWorker:
         base = {"engine": "mlx_whisper", "model": self.model}
         proc = self._proc            # snapshot once — health() runs without the lock
         if proc is not None and proc.poll() is None:
-            return {**base, "available": True, "warm": True,
+            # A running worker has the weights loaded, so they are on disk by
+            # definition — no need to pay for the glob to say so.
+            return {**base, "available": True, "warm": True, "cached": True,
                     "detail": "worker running — model is warm"}
         if not STT_WORKER.exists():
             return {**base, "available": False, "warm": False,
@@ -1483,7 +1485,10 @@ class SttWorker:
             return {**base, "available": False, "warm": False,
                     "detail": "ffmpeg not found — the engine cannot decode audio"}
         cached = _stt_model_cached(self.model)
-        return {**base, "available": True, "warm": False,
+        # `cached` is reported as its own field, not just prose: the composer's
+        # slow-transcription label reads it to decide whether "downloading the
+        # model (first run)" is an honest thing to say.
+        return {**base, "available": True, "warm": False, "cached": cached,
                 "detail": ("model cached — first use warms it (~2s)" if cached
                            else "model will download (~1.5GB) on first use")}
 
@@ -5612,8 +5617,25 @@ INDEX_HTML = r"""<!doctype html>
       setMicState('working');
       showViz('spin', 'transcribing…');
       composerAbort = new AbortController();
-      // Relabel if it's slow — the first run downloads the model, not a hang.
-      const slowTimer = setTimeout(() => showViz('spin', 'preparing model (first run)…'), 4000);
+      // Relabel if it's slow, but only claim what we can check. Saying "first
+      // run" unconditionally was false on every later slow take — the model is
+      // downloaded once. Start with wording that is true whenever the timer
+      // fires, then ask /api/stt/health, which reports `cached` straight off
+      // the weights on disk: cached === false at this instant means the
+      // download really is still in flight, so the stronger label is earned.
+      const slowTimer = setTimeout(() => {
+        const myAbort = composerAbort;
+        showViz('spin', 'still transcribing…');
+        fetch('/api/stt/health')
+          .then((r) => r.json())
+          .then((d) => {
+            // The take may have finished or been cancelled while we asked.
+            if (composerAbort !== myAbort || micPhase !== 'working') return;
+            if (d && d.available && d.cached === false)
+              showViz('spin', 'downloading the speech model (first run)…');
+          })
+          .catch(() => {});   // a failed health check just leaves the neutral label
+      }, 4000);
       const killTimer = setTimeout(() => { try { composerAbort.abort('timeout'); } catch (_) {} }, STT_FETCH_TIMEOUT_MS);
       try {
         const r = await fetch('/api/stt/transcribe', {
