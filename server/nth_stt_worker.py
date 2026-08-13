@@ -41,10 +41,21 @@ DEFAULT_MODEL = "mlx-community/whisper-large-v3-turbo"
 # say it. The unit tests never caught it because they generate their audio with
 # `say` too, reproducing the very bias that set the number.
 #
-# 0.005 clears digital silence (0.000) and sits well under quiet real speech,
-# leaving Whisper's own empty-transcript result as the backstop for room noise.
-# Raise it via the env var on a noisy machine that hallucinates from ambience.
-RMS_SILENCE_THRESHOLD = float(os.environ.get("NTH_STT_SILENCE_RMS", "0.005"))
+# 0.002 clears digital silence (0.000) while leaving room for a whisper, which
+# is quieter again than the quiet speech measured above. Whisper's own empty
+# transcript is the backstop for room noise: measured on attenuated speech down
+# to 0.0025 RMS, it still transcribes accurately, so there is no accuracy reason
+# to demand a louder signal — only a hallucination reason to reject a silent one.
+# Raise it via the env var on a noisy machine that invents words from ambience.
+RMS_SILENCE_THRESHOLD = float(os.environ.get("NTH_STT_SILENCE_RMS", "0.002"))
+
+# Deliberately NO input gain here. It looked like the obvious fix for quiet
+# dictation, so it was built and measured: real speech attenuated to 0.0100,
+# 0.0050 and 0.0025 RMS transcribed perfectly with no gain at all — Whisper's
+# own front end already normalises. Amplifying would have added a hallucination
+# risk (scaled-up hiss is exactly the material it invents words from) to buy
+# nothing measurable. What actually blocked quiet speech was the silence gate
+# above, and the browser's noise suppression before it.
 
 
 def _load_and_rms(path):

@@ -5240,7 +5240,12 @@ INDEX_HTML = r"""<!doctype html>
   // Below this normalized peak amplitude a clip is treated as silent and never
   // sent to Whisper (which otherwise hallucinates words from noise). Kept lenient
   // so quiet speech still goes through; the server no_speech check is the backstop.
-  const STT_SILENCE_PEAK = 0.015;
+  // Only has to reject a clip that captured nothing at all. Anything with real
+  // signal is the server's decision, made on a full RMS measurement rather than
+  // this coarse peak. It was 0.015, which quiet speech does not always reach.
+  const STT_SILENCE_PEAK = 0.004;
+  // Display-only amplification for the level meter (see makeWaveform).
+  const WAVE_DISPLAY_GAIN = 6;
   const STT_FETCH_TIMEOUT_MS = 240000;   // backstop; cold start can download ~1.5GB
   // Mirrors the server's NTH_STT_LANG so both dictation paths speak the same
   // language. BCP-47 needs a region; a bare "en" is widely mishandled.
@@ -5307,9 +5312,15 @@ INDEX_HTML = r"""<!doctype html>
         const slice = w / data.length;
         let x = 0, frameMax = 0;
         for (let i = 0; i < data.length; i++) {
-          const dev = Math.abs(data[i] - 128);
-          if (dev > frameMax) frameMax = dev;
-          const y = (data[i] / 128.0) * h / 2;   // 128 = silence midline
+          const dev = data[i] - 128;
+          if (Math.abs(dev) > frameMax) frameMax = Math.abs(dev);
+          // Drawn with gain: at true scale a normal speaking voice moves this
+          // line by a couple of pixels and a whisper not visibly at all, so it
+          // read as "the mic isn't hearing me" when the mic was fine. The gain
+          // is display-only — `peak` below stays the true measurement, because
+          // the silence gate must not be fooled by a scaled-up picture.
+          const shown = Math.max(-128, Math.min(127, dev * WAVE_DISPLAY_GAIN));
+          const y = ((shown + 128) / 128.0) * h / 2;   // 128 = silence midline
           if (i === 0) cx.moveTo(x, y); else cx.lineTo(x, y);
           x += slice;
         }
@@ -5528,9 +5539,25 @@ INDEX_HTML = r"""<!doctype html>
     if (localStarting) return;   // ignore a second click before the mic opens
     localStarting = true;
     setMicState('opening');      // the permission sheet can sit here indefinitely
+    // Browsers apply noise suppression and echo cancellation by default. Both
+    // are tuned for telephony, where the goal is suppressing anything that is
+    // not loud, tonal speech — which describes whispering, so a quiet voice
+    // gets attenuated before it ever reaches the recorder. Turn them off and
+    // leave AGC on, which is the piece that actually helps a quiet talker.
+    // Fall back to plain audio:true if a browser rejects the constraints.
     let stream;
-    try { stream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
-    catch (e) { localStarting = false; showSttBanner(micErrorMessage(e), 'err'); setMicState('idle'); return; }
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: true },
+      });
+    } catch (e) {
+      if (e && (e.name === 'OverconstrainedError' || e.name === 'NotSupportedError' || e.name === 'TypeError')) {
+        try { stream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
+        catch (e2) { localStarting = false; showSttBanner(micErrorMessage(e2), 'err'); setMicState('idle'); return; }
+      } else {
+        localStarting = false; showSttBanner(micErrorMessage(e), 'err'); setMicState('idle'); return;
+      }
+    }
     const myStream = stream;     // this take's stream, captured for its own teardown
     mediaStream = stream;
     mediaChunks = [];
