@@ -5769,6 +5769,177 @@ INDEX_HTML = r"""<!doctype html>
   });
   const notifyWhenRow = addSettingRow('Notify when', notifyWhenSel);
 
+  // ── Transcription (speech-to-text) ──
+  // Main panel keeps a SINGLE control (the mode). Status + Test live on their
+  // own sub-page, opened via "Test ›".
+  try { const sm = localStorage.getItem('trio.sttMode'); if (sm === 'web' || sm === 'local') state.sttMode = sm; } catch (_) {}
+  const sttModeSel = prefSelect(
+    [['local', 'local — Whisper (on-device)'], ['web', 'web — browser']], state.sttMode);
+  sttModeSel.addEventListener('change', () => {
+    state.sttMode = sttModeSel.value;
+    try { localStorage.setItem('trio.sttMode', state.sttMode); } catch (_) {}
+    updateSttEntry();
+  });
+  const sttOpenBtn = document.createElement('button');
+  sttOpenBtn.className = 'pill';
+  sttOpenBtn.textContent = 'Test ›';
+  sttOpenBtn.title = 'check local transcription works';
+  const sttDictWrap = document.createElement('div');
+  sttDictWrap.style.display = 'flex';
+  sttDictWrap.style.gap = '8px';
+  sttDictWrap.style.alignItems = 'center';
+  sttDictWrap.appendChild(sttModeSel);
+  sttDictWrap.appendChild(sttOpenBtn);
+  addSettingRow('Dictation', sttDictWrap);
+
+  // Sub-page: back link, status, test recorder (waveform → spinner → result).
+  const sttPage = document.createElement('div');
+  sttPage.id = 'settings-stt-page';
+  const sttBack = document.createElement('button');
+  sttBack.className = 'stt-back';
+  sttBack.textContent = '‹ Settings';
+  const sttPageTitle = document.createElement('h3');
+  sttPageTitle.textContent = 'Local transcription';
+  const sttStatus = document.createElement('div');
+  sttStatus.className = 'stt-status';
+  sttStatus.textContent = '…';
+  const sttTestBtn = document.createElement('button');
+  sttTestBtn.className = 'pill';
+  sttTestBtn.innerHTML = ICON_MIC + ' Test';
+  sttTestBtn.title = 'record a short clip and transcribe it locally';
+  const sttTestVizWrap = document.createElement('div');
+  sttTestVizWrap.className = 'stt-testviz';
+  sttTestVizWrap.hidden = true;
+  const sttTestWave = document.createElement('canvas');
+  sttTestWave.id = 'stt-test-wave'; sttTestWave.width = 260; sttTestWave.height = 30;
+  const sttTestSpin = document.createElement('div');
+  sttTestSpin.className = 'stt-spinner'; sttTestSpin.hidden = true;
+  const sttTestVizLabel = document.createElement('span');
+  sttTestVizLabel.className = 'stt-viz-label';
+  sttTestVizWrap.appendChild(sttTestWave);
+  sttTestVizWrap.appendChild(sttTestSpin);
+  sttTestVizWrap.appendChild(sttTestVizLabel);
+  const sttTestOut = document.createElement('div');
+  sttTestOut.className = 'stt-test-out';
+  sttPage.appendChild(sttBack);
+  sttPage.appendChild(sttPageTitle);
+  sttPage.appendChild(sttStatus);
+  sttPage.appendChild(sttTestBtn);
+  sttPage.appendChild(sttTestVizWrap);
+  sttPage.appendChild(sttTestOut);
+  settingsPanel.appendChild(sttPage);
+
+  const testWave = makeWaveform(sttTestWave);
+
+  function openSttPage() { settingsPanel.classList.add('stt-page-open'); refreshSttStatus(); }
+  function closeSttPage() { stopTestRecording(); settingsPanel.classList.remove('stt-page-open'); }
+  sttOpenBtn.addEventListener('click', openSttPage);
+  sttBack.addEventListener('click', closeSttPage);
+
+  // The test is local-only; hide its entry in web mode.
+  function updateSttEntry() { sttOpenBtn.hidden = (state.sttMode !== 'local'); }
+  updateSttEntry();
+
+  async function refreshSttStatus() {
+    sttStatus.textContent = 'checking…'; sttStatus.className = 'stt-status';
+    try {
+      const r = await fetch('/api/stt/health');
+      const d = await r.json();
+      if (d.available) {
+        sttStatus.textContent = (d.warm ? '✓ ready (warm) — ' : '✓ ready — ') + (d.model || '');
+        sttStatus.className = 'stt-status ok';
+      } else {
+        sttStatus.textContent = '✗ ' + (d.detail || 'unavailable');
+        sttStatus.className = 'stt-status err';
+      }
+    } catch (e) {
+      sttStatus.textContent = '✗ health check failed';
+      sttStatus.className = 'stt-status err';
+    }
+  }
+
+  // Test recorder: waveform while recording, spinner while transcribing.
+  let sttTestRec = null, sttTestChunks = [], sttTestStream = null, sttTestRecording = false;
+  let sttTestStarting = false, sttTestCancelled = false;
+  // Cancel an in-progress test (mic OFF, no transcription). Used when leaving the
+  // test page or closing the settings drawer so the microphone never stays hot.
+  function stopTestRecording() {
+    if (!sttTestRecording && !sttTestStream) return;
+    sttTestCancelled = true;
+    sttTestRecording = false;
+    testWave.stop();
+    if (sttTestRec && sttTestRec.state !== 'inactive') { try { sttTestRec.stop(); } catch (_) {} }
+    if (sttTestStream) { try { sttTestStream.getTracks().forEach(t => t.stop()); } catch (_) {} sttTestStream = null; }
+    sttTestVizWrap.hidden = true; sttTestSpin.hidden = true; sttTestWave.hidden = false; sttTestVizLabel.textContent = '';
+    sttTestBtn.innerHTML = ICON_MIC + ' Test';
+    sttTestOut.textContent = ''; sttTestOut.className = 'stt-test-out';
+  }
+  sttTestBtn.addEventListener('click', async () => {
+    if (sttTestRecording) {   // "Stop" → finalize + transcribe (the actual test)
+      sttTestRecording = false;
+      if (sttTestRec && sttTestRec.state !== 'inactive') { try { sttTestRec.stop(); } catch (_) {} }
+      return;
+    }
+    if (sttTestStarting) return;   // ignore a second click before the mic opens
+    sttTestStarting = true;
+    sttTestCancelled = false;
+    sttTestOut.textContent = ''; sttTestOut.className = 'stt-test-out';
+    if (!window.isSecureContext) { sttTestStarting = false; sttTestOut.textContent = 'Dictation needs HTTPS or localhost.'; sttTestOut.className = 'stt-test-out err'; return; }
+    try { sttTestStream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
+    catch (e) { sttTestStarting = false; sttTestOut.textContent = 'Microphone permission denied.'; sttTestOut.className = 'stt-test-out err'; return; }
+    if (sttTestCancelled) { sttTestStarting = false; try { sttTestStream.getTracks().forEach(t => t.stop()); } catch (_) {} sttTestStream = null; return; }
+    sttTestChunks = [];
+    try { sttTestRec = new MediaRecorder(sttTestStream); }
+    catch (e) { sttTestStarting = false; sttTestOut.textContent = 'Recording unsupported.'; sttTestOut.className = 'stt-test-out err'; sttTestStream.getTracks().forEach(t => t.stop()); sttTestStream = null; return; }
+    sttTestRec.ondataavailable = (e) => { if (e.data && e.data.size) sttTestChunks.push(e.data); };
+    sttTestRec.onstop = async () => {
+      if (sttTestCancelled) { sttTestCancelled = false; return; }   // cancelled → no transcription
+      if (sttTestStream) { try { sttTestStream.getTracks().forEach(t => t.stop()); } catch (_) {} sttTestStream = null; }
+      const peak = testWave.getPeak();
+      testWave.stop();
+      sttTestBtn.innerHTML = ICON_MIC + ' Test';
+      const blob = new Blob(sttTestChunks, { type: (sttTestRec && sttTestRec.mimeType) || 'audio/webm' });
+      if (peak >= 0 && peak < STT_SILENCE_PEAK) {   // silent — no round trip
+        sttTestVizWrap.hidden = true; sttTestSpin.hidden = true; sttTestWave.hidden = false; sttTestVizLabel.textContent = '';
+        sttTestOut.textContent = 'No message detected — try again.';
+        sttTestOut.className = 'stt-test-out err';
+        return;
+      }
+      sttTestWave.hidden = true; sttTestSpin.hidden = false; sttTestVizLabel.textContent = 'transcribing…';
+      sttTestOut.textContent = ''; sttTestOut.className = 'stt-test-out';
+      const ctrl = new AbortController();
+      const killTimer = setTimeout(() => { try { ctrl.abort('timeout'); } catch (_) {} }, STT_FETCH_TIMEOUT_MS);
+      try {
+        const r = await fetch('/api/stt/transcribe', { method: 'POST', headers: { 'Content-Type': blob.type || 'audio/webm' }, body: blob, signal: ctrl.signal });
+        const d = await r.json().catch(() => ({}));
+        if (r.ok && d.ok) {
+          if (d.no_speech || !(d.text || '').trim()) {
+            sttTestOut.textContent = 'No message detected — try again.';
+            sttTestOut.className = 'stt-test-out err';
+          } else {
+            sttTestOut.textContent = '✓ “' + d.text + '”' + (d.seconds != null ? ' (' + d.seconds + 's)' : '');
+            sttTestOut.className = 'stt-test-out ok';
+          }
+        } else {
+          sttTestOut.textContent = '✗ ' + (d.error || ('HTTP ' + r.status));
+          sttTestOut.className = 'stt-test-out err';
+        }
+      } catch (e) {
+        sttTestOut.textContent = (e && e.name === 'AbortError') ? '✗ timed out' : ('✗ ' + (e.message || 'failed'));
+        sttTestOut.className = 'stt-test-out err';
+      } finally {
+        clearTimeout(killTimer);
+      }
+      sttTestVizWrap.hidden = true; sttTestSpin.hidden = true; sttTestWave.hidden = false; sttTestVizLabel.textContent = '';
+      refreshSttStatus();
+    };
+    sttTestRec.start(); sttTestRecording = true; sttTestStarting = false;
+    sttTestBtn.innerHTML = ICON_STOP + ' Stop';
+    sttTestVizWrap.hidden = false; sttTestWave.hidden = false; sttTestSpin.hidden = true; sttTestVizLabel.textContent = 'listening…';
+    sttTestOut.textContent = '';
+    testWave.start(sttTestStream);
+  });
+
   // Sub-settings only show when their parent feature is enabled.
   function syncSettingVisibility() {
     if (chimeVolRow) chimeVolRow.hidden = !state.soundEnabled;
@@ -5779,8 +5950,10 @@ INDEX_HTML = r"""<!doctype html>
 
   function toggleSettings(force) {
     const show = (force !== undefined) ? force : settingsPanel.hasAttribute('hidden');
-    if (show) { settingsPanel.removeAttribute('hidden'); btnSettings.classList.add('on'); }
-    else { settingsPanel.setAttribute('hidden', ''); btnSettings.classList.remove('on'); }
+    // Closing always cancels a running mic test — the drawer can be dismissed by
+    // Escape or an outside click, and neither should leave the microphone hot.
+    if (show) { settingsPanel.classList.remove('stt-page-open'); settingsPanel.removeAttribute('hidden'); btnSettings.classList.add('on'); }
+    else { stopTestRecording(); settingsPanel.setAttribute('hidden', ''); btnSettings.classList.remove('on'); }
   }
   btnSettings.addEventListener('click', (e) => { e.stopPropagation(); toggleSettings(); });
   document.addEventListener('click', (e) => {
