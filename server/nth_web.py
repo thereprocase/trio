@@ -2447,6 +2447,9 @@ INDEX_HTML = r"""<!doctype html>
   const API_QS = /*__API_QS__*/'';
 
   // ── State ──
+  // How recently a real gesture must have happened for a scroll to count as
+  // the user's. Covers a smooth-scroll animation started by a real drag.
+  const USER_INTENT_MS = 1500;
   const state = {
     channel: '',
     operator: { id: '', name: '' },
@@ -2473,8 +2476,7 @@ INDEX_HTML = r"""<!doctype html>
     unreadCount: 0,                 // for tab title while hidden
     jumpUnread: 0,                  // messages arrived while user was scrolled up
     lastSeenId: 0,                  // highest msg id the user has caught up to
-    suppressCatchUp: false,         // true while a programmatic scroll is settling
-    _suppressTimer: null,
+    userIntentAt: 0,                // timestamp of the last real scroll gesture
                                     // (session-based; drives the unread divider)
     rateBins: new Map(),            // bin_epoch_10s → count
     startedAt: Date.now(),
@@ -3115,7 +3117,10 @@ INDEX_HTML = r"""<!doctype html>
     if (state.initialLoad) {
       // History burst. The baseline is set once in seedBaseline() when the
       // burst settles; advancing per-message here would race a hidden tab.
-    } else if (!document.hidden && nearBottom) {
+    } else if (!document.hidden && nearBottom && !isHiddenMsg(div)) {
+      // Only messages the user can actually see count as read on arrival. A
+      // filter left switched on would otherwise mark every non-matching
+      // message read as it lands, with no scroll involved at all.
       state.lastSeenId = Math.max(state.lastSeenId, m.id);
     } else {
       refreshUnreadDivider();
@@ -4242,13 +4247,17 @@ INDEX_HTML = r"""<!doctype html>
     }
     updateNewBar();
   }
-  // Establish the read watermark once, when the history burst settles. Prefer
-  // the server's own last_read for this operator: it is what "already read"
-  // actually means across tabs and reloads, and it is the only thing that works
-  // when the channel was opened in a background tab (landing mode makes that
-  // the normal way in). With no server value — a first visit — everything
-  // already on screen counts as seen, so you arrive caught up rather than
-  // staring at a divider above the entire history.
+  // Establish the read watermark once, when the history burst settles — the
+  // only place that works when the channel was opened in a background tab,
+  // which landing mode makes the normal way in.
+  //
+  // Everything already on screen counts as seen, so you arrive caught up
+  // rather than staring at a divider above the entire history. If the server
+  // has a last_read for this operator it wins, but note that nth_web.py does
+  // not currently write members.last_read for web operators (ensure_operator_row
+  // inserts 0 and only last_seen is updated), so in practice this resolves to
+  // "newest" today. The branch is here so that persisting a web operator's
+  // read position starts working without touching this function.
   function seedBaseline() {
     if (state.lastSeenId) return;
     // reduce(), not Math.max(...spread) — a long channel would exceed the
@@ -4303,8 +4312,12 @@ INDEX_HTML = r"""<!doctype html>
       state.jumpUnread = 0;
       jumpBtn.classList.remove('show');
       jumpCount.style.display = 'none';
-      // Only a scroll the USER performed means "I have read to here".
-      if (!document.hidden && !state.suppressCatchUp) markCaughtUp();
+      // Only a scroll the USER performed means "I have read to here". A
+      // scroll event alone does not say who caused it, and the page issues
+      // several of its own (the post-burst settle, the jump-to-unread), so
+      // attribute the scroll to a recent real gesture instead of racing it
+      // against a timer.
+      if (!document.hidden && Date.now() - state.userIntentAt < USER_INTENT_MS) markCaughtUp();
       return;
     }
     jumpBtn.classList.add('show');
@@ -4353,6 +4366,17 @@ INDEX_HTML = r"""<!doctype html>
     pin.title = `you are here — the ${a.name}`;
     container.appendChild(pin);
   }
+  // A scroll is "the user's" when a real input gesture on the scroller
+  // preceded it. Programmatic scrolls (settle, jump-to-unread) have none, so
+  // they can never mark messages read. Bound to the scroller, not the
+  // document, so clicking the "new messages" bar is not mistaken for intent.
+  const noteIntent = () => { state.userIntentAt = Date.now(); };
+  for (const ev of ['wheel', 'touchstart', 'touchmove', 'pointerdown', 'mousedown']) {
+    chat.addEventListener(ev, noteIntent, { passive: true });
+  }
+  document.addEventListener('keydown', (e) => {
+    if (['PageDown', 'PageUp', 'End', 'Home', 'ArrowDown', 'ArrowUp', ' '].includes(e.key)) noteIntent();
+  }, { passive: true });
   chat.addEventListener('scroll', () => { updateJumpButton(); scheduleHereUpdate(); });
   jumpBtn.addEventListener('click', () => {
     chat.scrollTop = chat.scrollHeight;
@@ -4365,14 +4389,12 @@ INDEX_HTML = r"""<!doctype html>
   newBar.addEventListener('click', () => {
     const dom = firstVisibleUnreadDom();
     if (!dom) return;
-    // The browser clamps this to max scroll whenever the unread block is
-    // shorter than one viewport, which lands us at the bottom and would
-    // otherwise trip the catch-up path — destroying the state we are
-    // navigating to. Suppress catch-up until the resulting scroll settles.
-    state.suppressCatchUp = true;
+    // #chat is scroll-behavior: smooth, so this starts an animation lasting
+    // well over a second on a long channel, and the browser clamps it to the
+    // bottom whenever the unread block is shorter than one viewport. Neither
+    // is a scroll the user performed, so neither may count as catching up —
+    // see USER_INTENT_MS.
     chat.scrollTop = Math.max(0, dom.offsetTop - 8);
-    clearTimeout(state._suppressTimer);
-    state._suppressTimer = setTimeout(() => { state.suppressCatchUp = false; }, 400);
   });
 
   // ── Title / tab badge ──

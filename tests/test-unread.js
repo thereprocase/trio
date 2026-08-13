@@ -28,18 +28,24 @@ function node(...classes) {
   return { classList: { contains: c => set.has(c), add: c => set.add(c), remove: c => set.delete(c) } };
 }
 
-let removedDivider = false, newBarText = null;
+let dividerPresent = true, newBarText = null;
+function armDivider() { dividerPresent = true; }
 const sandbox = {
   state: null,
-  document: { getElementById: () => (removedDivider ? null : { remove() { removedDivider = true; } }) },
+  document: { getElementById: () => (dividerPresent ? { remove() { dividerPresent = false; } } : null) },
   newBar: { classList: { add() {}, remove() {} }, set textContent(v) { newBarText = v; } },
-  chat: { insertBefore() {} },
+  chat: { insertBefore() {}, scrollHeight: 10000, clientHeight: 800, scrollTop: 0 },
+  jumpBtn: { classList: { add() {}, remove() {} } },
+  jumpCount: { style: {}, textContent: '' },
+  USER_INTENT_MS: 1500,
+  Date,
   Math, console,
 };
 const code = [grab('isHiddenMsg'), grab('firstVisibleUnreadDom'), grab('unreadCountVisible'),
-              grab('markCaughtUp'), grab('seedBaseline')].join('\n');
+              grab('markCaughtUp'), grab('seedBaseline'), grab('updateJumpButton')].join('\n');
 const fn = new Function('sandbox', `with (sandbox) { ${code};
   return { isHiddenMsg, firstVisibleUnreadDom, unreadCountVisible, markCaughtUp, seedBaseline,
+           updateJumpButton,
            refreshUnreadDivider: () => {}, updateNewBar: () => {} }; }`);
 // refreshUnreadDivider/updateNewBar are stubbed via the returned closure below
 sandbox.refreshUnreadDivider = () => {};
@@ -136,6 +142,47 @@ check('firstVisibleUnreadDom skips hidden and returns the lowest unread', () => 
   m.set(1, node()); m.set(2, node('dm-hidden')); m.set(3, want); m.set(4, node());
   sandbox.state = mkState({ lastSeenId: 1, messageDomById: m });
   assert.strictEqual(H.firstVisibleUnreadDom(), want);
+});
+
+// ── the two criticals: who caused the scroll ────────────────────────────────
+function atBottom() { sandbox.chat.scrollTop = sandbox.chat.scrollHeight - sandbox.chat.clientHeight; }
+
+check('a programmatic scroll to the bottom does NOT mark caught up', () => {
+  const m = new Map(); m.set(1, node()); m.set(2, node()); m.set(3, node());
+  sandbox.state = mkState({ lastSeenId: 1, messageDomById: m, userIntentAt: 0 });
+  armDivider(); atBottom();
+  H.updateJumpButton();                       // settle / jump-to-unread, no gesture
+  assert.strictEqual(sandbox.state.lastSeenId, 1, 'watermark must not move');
+  assert.strictEqual(dividerPresent, true, 'divider must survive');
+});
+
+check('a user-driven scroll to the bottom DOES mark caught up', () => {
+  const m = new Map(); m.set(1, node()); m.set(2, node()); m.set(3, node());
+  sandbox.state = mkState({ lastSeenId: 1, messageDomById: m, userIntentAt: Date.now() });
+  armDivider(); atBottom();
+  H.updateJumpButton();
+  assert.strictEqual(sandbox.state.lastSeenId, 3);
+});
+
+check('a stale gesture no longer counts as intent', () => {
+  const m = new Map(); m.set(1, node()); m.set(2, node());
+  sandbox.state = mkState({ lastSeenId: 1, messageDomById: m,
+                            userIntentAt: Date.now() - 5000 });
+  armDivider(); atBottom();
+  H.updateJumpButton();
+  assert.strictEqual(sandbox.state.lastSeenId, 1);
+});
+
+check('a long smooth scroll still cannot mark caught up at any point', () => {
+  const m = new Map(); m.set(1, node()); m.set(2, node()); m.set(3, node());
+  sandbox.state = mkState({ lastSeenId: 1, messageDomById: m, userIntentAt: 0 });
+  armDivider();
+  for (let i = 0; i < 174; i++) {            // the measured event count
+    sandbox.chat.scrollTop = (sandbox.chat.scrollHeight - sandbox.chat.clientHeight) * (i / 173);
+    H.updateJumpButton();
+  }
+  assert.strictEqual(sandbox.state.lastSeenId, 1, 'no frame may mark caught up');
+  assert.strictEqual(dividerPresent, true);
 });
 
 console.log('');
