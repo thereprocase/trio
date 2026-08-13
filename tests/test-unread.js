@@ -22,10 +22,19 @@ function grab(name) {
   throw new Error(`unbalanced braces reading ${name}`);
 }
 
-// Fake message node: only classList is exercised by the read-state rules.
+// Fake message node. classList carries the visibility rules; dataset.sender
+// carries authorship, which the read-state rules need in order to never count
+// your own message as unread. `sender` defaults to a peer, so every existing
+// test keeps meaning what it meant.
 function node(...classes) {
   const set = new Set(classes);
-  return { classList: { contains: c => set.has(c), add: c => set.add(c), remove: c => set.delete(c) } };
+  return { classList: { contains: c => set.has(c), add: c => set.add(c), remove: c => set.delete(c) },
+           dataset: { sender: 'peer' } };
+}
+function ownNode(...classes) {
+  const n = node(...classes);
+  n.dataset.sender = 'op';        // matches mkState's operator.id
+  return n;
 }
 
 let dividerPresent = true, newBarText = null;
@@ -41,12 +50,12 @@ const sandbox = {
   Date,
   Math, console,
 };
-const code = [grab('isHiddenMsg'), grab('firstVisibleUnreadDom'), grab('unreadCountVisible'),
+const code = [grab('isHiddenMsg'), grab('isOwnMsg'), grab('firstVisibleUnreadDom'), grab('unreadCountVisible'),
               grab('markCaughtUp'), grab('seedBaseline'), grab('updateJumpButton'),
               grab('noteIntent'), grab('scrollIsUsers'), grab('sustainIntent'),
               grab('disownScroll'), grab('updateNewBar')].join('\n');
 const fn = new Function('sandbox', `with (sandbox) { ${code};
-  return { isHiddenMsg, firstVisibleUnreadDom, unreadCountVisible, markCaughtUp, seedBaseline,
+  return { isHiddenMsg, isOwnMsg, firstVisibleUnreadDom, unreadCountVisible, markCaughtUp, seedBaseline,
            updateJumpButton, noteIntent, scrollIsUsers, sustainIntent, disownScroll, updateNewBar,
            refreshUnreadDivider: () => {} }; }`);
 // refreshUnreadDivider/updateNewBar are stubbed via the returned closure below
@@ -244,6 +253,53 @@ check('the new-bar still reports unread when scrolled up', () => {
   sandbox.chat.scrollTop = 0;
   H.updateNewBar();
   assert.strictEqual(shown, true);
+});
+
+
+
+// ── your own message is never unread (found in live testing) ────────────────
+check('a message you sent while scrolled up is not counted unread', () => {
+  const m = new Map();
+  m.set(1, node()); m.set(2, ownNode());
+  sandbox.state = mkState({ lastSeenId: 1, messageDomById: m });
+  assert.strictEqual(H.unreadCountVisible(), 0,
+    'sending while scrolled up must not raise your own unread count');
+});
+
+check('the divider is not drawn above your own message', () => {
+  const m = new Map();
+  m.set(1, node()); m.set(2, ownNode());
+  sandbox.state = mkState({ lastSeenId: 1, messageDomById: m });
+  assert.strictEqual(H.firstVisibleUnreadDom(), null);
+});
+
+check("a peer's message is still unread when yours follows it", () => {
+  const m = new Map();
+  const peer = node();
+  m.set(1, node()); m.set(2, peer); m.set(3, ownNode());
+  sandbox.state = mkState({ lastSeenId: 1, messageDomById: m });
+  assert.strictEqual(H.unreadCountVisible(), 1, 'only the peer message counts');
+  assert.strictEqual(H.firstVisibleUnreadDom(), peer,
+    'the divider belongs above the peer message, not yours');
+});
+
+// This is why the fix skips at COUNTING time rather than advancing lastSeenId
+// past your own message: a high-water mark moved over id 3 would also bury the
+// peer's unread id 2 underneath it.
+check('replying does not silently mark an earlier peer message read', () => {
+  const m = new Map();
+  m.set(1, node()); m.set(2, node()); m.set(3, ownNode());
+  sandbox.state = mkState({ lastSeenId: 1, messageDomById: m });
+  assert.strictEqual(sandbox.state.lastSeenId, 1, 'watermark untouched by counting');
+  assert.strictEqual(H.unreadCountVisible(), 1);
+});
+
+check('own-message skipping needs an operator id (guards a null identity)', () => {
+  const m = new Map();
+  m.set(1, node()); m.set(2, ownNode());
+  sandbox.state = mkState({ lastSeenId: 1, messageDomById: m, operator: { id: '' } });
+  assert.strictEqual(H.unreadCountVisible(), 1,
+    'with no identity yet, fall back to counting everything rather than nothing');
 });
 
 console.log('');

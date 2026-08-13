@@ -4218,18 +4218,30 @@ INDEX_HTML = r"""<!doctype html>
   function isHiddenMsg(dom) {
     return dom.classList.contains('filtered-out') || dom.classList.contains('dm-hidden');
   }
+  // You cannot have unread your own message. Sending while scrolled up used to
+  // raise a "new messages" divider above your own post and add it to the
+  // counter, because unread was decided purely by id > lastSeenId.
+  //
+  // Skipped at the point of COUNTING rather than by advancing lastSeenId past
+  // it. The watermark is a single high-water mark: moving it over your own
+  // message would also mark every earlier message read, so a peer's message
+  // that arrived while you were scrolled up would vanish from the divider
+  // merely because you replied to something else.
+  function isOwnMsg(dom) {
+    return !!state.operator.id && dom.dataset.sender === state.operator.id;
+  }
   function firstVisibleUnreadDom() {
     for (const id of [...state.messageDomById.keys()].sort((a, b) => a - b)) {
       if (id <= state.lastSeenId) continue;
       const dom = state.messageDomById.get(id);
-      if (dom && !isHiddenMsg(dom)) return dom;
+      if (dom && !isHiddenMsg(dom) && !isOwnMsg(dom)) return dom;
     }
     return null;
   }
   function unreadCountVisible() {
     let n = 0;
     for (const [id, dom] of state.messageDomById) {
-      if (id > state.lastSeenId && !isHiddenMsg(dom)) n++;
+      if (id > state.lastSeenId && !isHiddenMsg(dom) && !isOwnMsg(dom)) n++;
     }
     return n;
   }
