@@ -524,7 +524,10 @@ function buildScript() {
     .replace(/\/\*__ASK_HELPERS__\*\//g, () => askHelpers)
     // The channel query-string placeholder is substituted per-request in
     // production; under the harness a fixed test channel is enough.
-    .replace(/\/\*__API_QS__\*\/''/g, JSON.stringify('?channel=test'));
+    .replace(/\/\*__API_QS__\*\/''/g, JSON.stringify('?channel=test'))
+    // Web-dictation language, injected at import time from NTH_STT_LANG. The
+    // literal already carries the production default, so keep it.
+    .replace(/\/\*__STT_LANG__\*\/'en-US'/g, JSON.stringify('en-US'));
   // Any leftover /*__FOO__*/ placeholder means nth_web.py grew a new injection
   // point the harness doesn't know about. Left unsubstituted it would either be
   // a parse error (statement position) or silently wrong — either way, surface

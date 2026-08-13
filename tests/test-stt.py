@@ -153,10 +153,28 @@ try:
         web.STT_WORKER = _stubpaths[stub]
         return web.SttWorker("stub-model", "en")
 
-    # startup-failure branches
+    # startup-failure branches. The worker's own error text is NOT relayed:
+    # it is Python loader output that can carry local paths, and the client
+    # only ever pattern-matches it. It goes to the server log instead.
     w = mkworker("notready")
-    check("startup: not-ready -> RuntimeError(load fail)",
-          raises_runtime(lambda: w.transcribe("/x"), "stub load fail")); w._reset()
+    check("startup: not-ready -> generic RuntimeError",
+          raises_runtime(lambda: w.transcribe("/x"), "failed to start"))
+    check("startup: worker error text is not relayed to the caller",
+          not raises_runtime(lambda: w.transcribe("/x"), "stub load fail")); w._reset()
+
+    # ...except the one case the user can act on, which must stay recognisable
+    # to humanizeSttError or the most common failure reads as "an unexpected
+    # error" on every machine without the engine.
+    _nomod = Path(_stubdir) / "stub_nomodule.py"
+    _nomod.write_text(
+        "import sys,json\n"
+        "sys.stdout.write(json.dumps({'ready':False,"
+        "'error':\"mlx_whisper import failed: No module named 'mlx_whisper'\"})+chr(10))\n"
+        "sys.stdout.flush()\n")
+    web.STT_WORKER = _nomod
+    w = web.SttWorker("stub-model", "en")
+    check("startup: a missing engine says 'not installed'",
+          raises_runtime(lambda: w.transcribe("/x"), "not installed")); w._reset()
 
     w = mkworker("badready")
     check("startup: malformed ready line -> RuntimeError",
@@ -234,6 +252,21 @@ class _FakeRfile:
         return self._d[:n]
 
 
+class _FakeConn:
+    """The handler bounds the body read with a socket timeout, so the fake must
+    carry a connection like the real one does — a handler without it would make
+    these tests pass against code that crashes in production."""
+
+    def __init__(self):
+        self.timeout = None
+
+    def gettimeout(self):
+        return self.timeout
+
+    def settimeout(self, value):
+        self.timeout = value
+
+
 def _drive_transcribe(exc):
     """Run _handle_transcribe with STT.transcribe raising `exc`; return what it
     would have sent as {'body': ..., 'status': ...}."""
@@ -246,6 +279,7 @@ def _drive_transcribe(exc):
     h._resolve_identity = lambda: ("tok", ident, False)
     h.headers = {"Content-Length": "4", "Content-Type": "audio/webm"}
     h.rfile = _FakeRfile(b"abcd")
+    h.connection = _FakeConn()
     saved = web.STT.transcribe
     web.STT.transcribe = lambda _p: (_ for _ in ()).throw(exc)
     try:
@@ -281,6 +315,7 @@ _h._resolve_identity = lambda: ("tok", types.SimpleNamespace(
     source=web.IDENTITY_SOURCE_TAILSCALE, member_id="_op_t", display_name="t"), False)
 _h.headers = {"Content-Length": str(web.MAX_STT_BYTES + 1), "Content-Type": "audio/webm"}
 _h.rfile = _FakeRfile(b"")
+_h.connection = _FakeConn()
 _h._handle_transcribe()
 check("oversized audio rejected with 400", _sent.get("status") == 400)
 
