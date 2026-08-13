@@ -2213,6 +2213,7 @@ INDEX_HTML = r"""<!doctype html>
         <option value="solarized">Solarized</option>
         <option value="synthwave">Synthwave</option>
         <option value="vaporwave">Vaporwave</option>
+        <option value="popart">Pop Art</option>
         <option value="lcars">LCARS</option>
         <option value="bluebubble">Walled Garden</option>
       </optgroup>
@@ -2220,7 +2221,6 @@ INDEX_HTML = r"""<!doctype html>
         <option value="light">Daylight</option>
         <option value="pve-light">Clean</option>
         <option value="paper">Paper</option>
-        <option value="popart">Pop Art</option>
       </optgroup>
       <optgroup label="Retro">
         <option value="crt">CRT Green</option>
