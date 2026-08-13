@@ -2778,11 +2778,18 @@ INDEX_HTML = r"""<!doctype html>
     return Math.floor(s / 86400) + 'd';
   }
 
-  const SYSTEM_PREFIXES = ['[claimed ', '[done ', '[cancelled ', '[released ',
-                           '[retracted ', '[joined ', '[left ', '[ended ',
-                           '[locked ', '[unlocked ', '[status ', '[pinned ',
-                           '[renamed '];
-  function isSystemContent(s) { return SYSTEM_PREFIXES.some(p => s.startsWith(p)); }
+  const SYSTEM_WORDS = new Set(['claimed', 'done', 'cancelled', 'released',
+    'retracted', 'joined', 'left', 'ended', 'locked', 'unlocked', 'status',
+    'pinned', 'renamed']);
+  // System notices come in two shapes: "[word #id] ..." (the task family) and
+  // "[word] ..." (join/pin/lock/unlock/rename). A plain startsWith('[word ')
+  // only ever matched the first, so the second rendered as ordinary markdown.
+  // Requiring a space-or-end after the "]" keeps a markdown link such as
+  // [done](url) from being muted as a system notice.
+  function isSystemContent(s) {
+    const m = /^\[([a-z]+)(?:\s|\](?:\s|$))/.exec(s || '');
+    return !!m && SYSTEM_WORDS.has(m[1]);
+  }
 
   // Rewrite @<member_id> / #<member_id> / !<member_id> to @<friendly-name>
   // in message bodies before rendering. The raw id-sigil form is valid
