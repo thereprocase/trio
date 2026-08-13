@@ -1435,7 +1435,14 @@ class NthWebHandler(BaseHTTPRequestHandler):
                     pass
                 raise
         except sqlite3.Error as e:
-            self._error(500, f"db error: {e}")
+            # Same reasoning as the search handler above: sqlite's text names
+            # tables and columns, and a client learns the schema one failed
+            # request at a time. It is also useless to the person who hit it —
+            # "no such column: bangs" after a missed migration tells them
+            # nothing they can act on, while the operator's log is exactly
+            # where that belongs.
+            sys.stderr.write(f"[nth_web] send db error: {e}\n")
+            self._error(500, "send failed")
             return
         finally:
             if db is not None:
