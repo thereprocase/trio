@@ -107,11 +107,17 @@ class FakeElement {
     this.dataset = {};
     this.style = makeStyle();
     this.value = '';
+    // Textarea/input caret state. Real elements expose these as numbers, and
+    // caret-aware code (insertTranscript) branches on that type — so a stub
+    // that omitted them would silently exercise only the fallback path.
+    this.selectionStart = 0;
+    this.selectionEnd = 0;
     this.checked = false;
     this.disabled = false;
     this.options = [];
     this.classList = makeClassList(this);
     this._listeners = {};
+    this.dispatched = [];        // event types passed to dispatchEvent()
     this.scrollTop = 0;
     this.scrollHeight = 0;
     this.clientHeight = 0;
@@ -217,7 +223,11 @@ class FakeElement {
     const a = this._listeners[type]; if (!a) return;
     const i = a.indexOf(fn); if (i >= 0) a.splice(i, 1);
   }
-  dispatchEvent() { return true; }
+  // Listeners are recorded, never fired (as everywhere else in this harness),
+  // but the dispatched types are kept so a test can assert that code which
+  // MUST notify the mention mirror / autosize / preview actually did.
+  dispatchEvent(e) { this.dispatched.push((e && e.type) || ''); return true; }
+  setSelectionRange(s, e) { this.selectionStart = s; this.selectionEnd = e; }
 
   focus() {} blur() {} click() {} scrollIntoView() {}
   getBoundingClientRect() { return { top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0 }; }
@@ -466,6 +476,9 @@ function buildSandbox() {
     scrollTo: noop,
     fetch: () => new Promise(() => {}),   // never resolves; boot()'s network calls hang harmlessly
     EventSource: FakeEventSource,
+    // `new Event('input')` is how the client tells the mention mirror, the
+    // autosize and the preview that the composer changed.
+    Event: function Event(type) { this.type = String(type); },
     Notification: function () {},
     AudioContext: function () { return { createOscillator: () => ({ connect: noop, start: noop, stop: noop }), createGain: () => ({ connect: noop, gain: {} }), destination: {}, currentTime: 0 }; },
   };

@@ -5456,13 +5456,31 @@ INDEX_HTML = r"""<!doctype html>
     sttBanner.hidden = false;
   }
 
+  // Land the transcript where the caret is, replacing any selection, and leave
+  // the caret after it. Appending to the end was wrong for anyone who moved the
+  // cursor back to fix a word mid-draft: the dictated phrase arrived at the
+  // bottom of the message instead of where they were looking.
   function insertTranscript(text) {
     text = (text || '').trim();
     if (!text) return;
     const cur = input.value;
-    input.value = cur + ((cur && !/\s$/.test(cur)) ? ' ' : '') + text;
+    // selectionStart is null on elements that don't expose a caret; in that
+    // case fall back to the old append-at-end behaviour.
+    const hasCaret = typeof input.selectionStart === 'number';
+    const start = hasCaret ? input.selectionStart : cur.length;
+    const end = hasCaret ? input.selectionEnd : cur.length;
+    const before = cur.slice(0, start);
+    const after = cur.slice(end);
+    // Same spacing rule as before, applied at the insertion point rather than
+    // at the end — plus its mirror on the trailing side, which an append-only
+    // insert never had to think about.
+    const lead = (before && !/\s$/.test(before)) ? ' ' : '';
+    const trail = (after && !/^\s/.test(after)) ? ' ' : '';
+    input.value = before + lead + text + trail + after;
+    const caret = (before + lead + text).length;
     input.dispatchEvent(new Event('input'));   // autosize + mention mirror + preview
     input.focus();
+    if (hasCaret && input.setSelectionRange) input.setSelectionRange(caret, caret);
   }
 
   // Web SpeechRecognition (streaming; interim words appear live).
@@ -6572,6 +6590,9 @@ INDEX_HTML = r"""<!doctype html>
       formatTime,
       collectMentionMatches, mentionMemberForToken,
       decorateInlineMentions, composerMentionHtml,
+      // insertTranscript writes through the composer element it closed over,
+      // so the element ships with it or the test has nothing to inspect.
+      insertTranscript, composerInput: input,
     };
   }
   // __TRIO_TEST_HOOK_END__
