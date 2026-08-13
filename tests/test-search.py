@@ -57,6 +57,14 @@ for msg in ["the quick brown fox", "PLAIN text here", "50% discount today",
             "another brown message", "unrelated content"]:
     srv.nth_send(channel=CH, member_id=asker, message=msg)
 
+# A SECOND channel, for landing mode (one process serving many channels).
+# Its messages share the "brown" term on purpose: if the handler ever binds
+# the process-wide channel instead of the per-request one, these leak.
+r2 = json.loads(srv.nth_connect(summary="t", name="Other", channel="searchtest2"))
+CH2, other = r2["channel"], r2["member_id"]
+for msg in ["brown zebracrossing secret", "second channel only"]:
+    srv.nth_send(channel=CH2, member_id=other, message=msg)
+
 
 def contents(results):
     return [x["content"] for x in results]
@@ -100,6 +108,57 @@ try:
         # no matches
         st, d = http_get(port, "/api/search?q=zzzznomatch")
         check("search: no matches -> empty", d.get("ok") and d.get("count") == 0)
+
+        # ── landing mode: one process, many channels ──
+        # The channel is resolved per request from ?channel=<code>, so every
+        # request below addresses a channel the handler is NOT bound to.
+        web.NthWebHandler.landing_mode = True
+        web.NthWebHandler.channel = ""
+        try:
+            st, d = http_get(port, f"/api/search?channel={CH}&q=brown")
+            check("landing: search resolves the requested channel",
+                  st == 200 and d.get("ok") and d.get("count") == 2)
+            check("landing: no cross-channel leak",
+                  all("zebracrossing" not in c for c in contents(d.get("results", []))))
+            # A term that exists ONLY in the other channel must not match.
+            st, d = http_get(port, f"/api/search?channel={CH}&q=zebracrossing")
+            check("landing: other channel's content absent",
+                  st == 200 and d.get("count") == 0)
+            # ...and the same term does match when that channel is asked.
+            st, d = http_get(port, f"/api/search?channel={CH2}&q=zebracrossing")
+            check("landing: sibling channel searchable by code",
+                  st == 200 and d.get("count") == 1
+                  and "brown zebracrossing secret" in contents(d["results"]))
+            # Unknown channel code: 404, not a 500 and not another channel's rows.
+            st, d = http_get(port, "/api/search?channel=nosuchchannel&q=brown")
+            check("landing: unknown channel -> 404", st == 404)
+            # Missing channel param: 400 (without it there is nothing to scope to).
+            st, d = http_get(port, "/api/search?q=brown")
+            check("landing: missing channel param -> 400", st == 400)
+            # Malformed code never reaches SQL — _channel_for_request rejects it.
+            st, d = http_get(port, "/api/search?channel=" + quote("Bad Code!") + "&q=brown")
+            check("landing: malformed channel code -> 400", st == 400)
+        finally:
+            web.NthWebHandler.landing_mode = False
+            web.NthWebHandler.channel = CH
+
+        # ── db failure surfaces a generic reason, not sqlite internals ──
+        # Point the handler at a file that is not a database; the sqlite3
+        # message would otherwise name the file path in the HTTP response.
+        bad_db = Path(_tmp) / "not-a-database.db"
+        bad_db.write_bytes(b"this is not a sqlite database")
+        web.NthWebHandler.db_path = bad_db
+        try:
+            st, d = http_get(port, "/api/search?q=brown")
+            err = str(d.get("error", ""))
+            check("search: db error -> 500", st == 500)
+            check("search: db error message is generic",
+                  err == "search failed")
+            check("search: db error leaks no sqlite detail/path",
+                  "database" not in err.lower() and "sqlite" not in err.lower()
+                  and _tmp not in err)
+        finally:
+            web.NthWebHandler.db_path = srv.DB_PATH
 except OSError as e:
     skip("search", f"could not start server: {e}")
 finally:

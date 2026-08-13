@@ -1293,7 +1293,12 @@ class NthWebHandler(BaseHTTPRequestHandler):
                         "content": r["content"] or "", "created_at": r["created_at"]}
                        for r in rows]
         except sqlite3.Error as e:
-            self._error(500, f"db error: {e}")
+            # sqlite3's message can carry table/column names and the db file
+            # path — internal shape the browser has no business seeing. Log
+            # the detail to the operator's journal, hand the client a short
+            # generic reason.
+            sys.stderr.write(f"[nth_web] search db error: {e}\n")
+            self._error(500, "search failed")
             return
         finally:
             if db is not None:
