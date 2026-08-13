@@ -132,6 +132,79 @@ check('humanizeIdSigils leaves unknown ids untouched', () => {
   assert.strictEqual(H.humanizeIdSigils('@_op_g_nobody_x'), '@_op_g_nobody_x');
 });
 
+// ── mention resolution + composer escaping ──────────────────────────────────
+// These were entirely absent: ~250 lines of parsing and DOM logic shipped with
+// no coverage and were not even exported through the test hook.
+function seedMembers(pairs) {
+  H.state.members = new Map(pairs.map(([id, name]) => [id, { id, name }]));
+}
+
+check('mentions: a roster name resolves', () => {
+  seedMembers([['m1', 'alice']]);
+  const hits = H.collectMentionMatches('ping @alice please', null);
+  assert.strictEqual(hits.length, 1);
+  assert.strictEqual(hits[0].member.id, 'm1');
+});
+
+check('mentions: an unknown name does NOT resolve', () => {
+  seedMembers([['m1', 'alice']]);
+  assert.strictEqual(H.collectMentionMatches('ping @ali please', null).length, 0);
+});
+
+check('mentions: resolution is case-insensitive', () => {
+  seedMembers([['m1', 'alice']]);
+  assert.strictEqual(H.collectMentionMatches('@ALICE', null).length, 1);
+});
+
+check('mentions: trailing sentence punctuation is not part of the name', () => {
+  seedMembers([['m1', 'alice']]);
+  const hits = H.collectMentionMatches('thanks @alice.', null);
+  assert.strictEqual(hits.length, 1);
+  assert.strictEqual(hits[0].member.id, 'm1');
+});
+
+check('mentions: an email-looking token is not a mention', () => {
+  seedMembers([['m1', 'alice']]);
+  assert.strictEqual(H.collectMentionMatches('mail me@alice.com', null).length, 0);
+});
+
+check('mentions: @all resolves to the broadcast pseudo-member', () => {
+  seedMembers([['m1', 'alice']]);
+  const hits = H.collectMentionMatches('@all standup', null);
+  assert.strictEqual(hits.length, 1);
+  assert.strictEqual(hits[0].member.id, 'all');
+});
+
+check('mentions: a member id resolves as well as a name', () => {
+  seedMembers([['m1', 'alice']]);
+  assert.strictEqual(H.mentionMemberForToken('m1', null, true).id, 'm1');
+});
+
+// The composer builds HTML from raw user input, so this is the one path where
+// a missed escape is exploitable by typing.
+check('composer: markup in the draft is escaped, not interpreted', () => {
+  seedMembers([['m1', 'alice']]);
+  const html = H.composerMentionHtml('<script>alert(1)</script> @alice');
+  // The security property is that no executable markup survives. Assert that,
+  // not a particular entity spelling.
+  assert.ok(!/<script/i.test(html), 'raw <script> must not survive');
+  assert.ok(!/<\/script/i.test(html), 'nor its closing tag');
+  assert.ok(/composer-mention/.test(html), 'and the real mention still decorates');
+});
+
+check('composer: a member NAME containing markup cannot inject', () => {
+  seedMembers([['m1', '<img src=x onerror=alert(1)>']]);
+  const html = H.composerMentionHtml('hi @<img src=x onerror=alert(1)>');
+  assert.ok(!/<img /.test(html), 'a hostile member name must not reach the DOM raw');
+});
+
+check('composer: the tail after the last mention is escaped too', () => {
+  seedMembers([['m1', 'alice']]);
+  const html = H.composerMentionHtml('@alice <b>bold</b>');
+  assert.ok(!/<b>/.test(html), 'markup after the last mention must not survive raw');
+  assert.ok(/bold/.test(html), 'but its text is preserved');
+});
+
 console.log('');
 console.log((failures.length ? 'FAILED' : 'OK') + ` — ${passed} passed, ${failures.length} failure(s)`);
 process.exit(failures.length ? 1 : 0);
