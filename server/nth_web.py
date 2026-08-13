@@ -1962,6 +1962,20 @@ INDEX_HTML = r"""<!doctype html>
   #jump-btn:hover { background: var(--accent-hi); }
   #jump-btn .count { background: var(--err); color: white;
                      border-radius: 10px; padding: 1px 6px; margin-left: 4px; font-size: 10px; }
+  /* top "N new messages" bar — jump to the first unread */
+  #new-bar { position: absolute; left: 50%; top: 10px; transform: translateX(-50%);
+             background: var(--mention); color: var(--bg); border: none; z-index: 6;
+             padding: 5px 14px; border-radius: 16px; font-size: 11px; font-weight: 600;
+             cursor: pointer; box-shadow: 0 4px 14px rgba(0,0,0,0.5); display: none;
+             user-select: none; }
+  #new-bar.show { display: block; }
+  #new-bar:hover { filter: brightness(1.1); }
+  /* "new messages" divider before the first unread message */
+  .unread-divider { display: flex; align-items: center; gap: 8px; margin: 10px 4px;
+                    color: var(--mention); font-size: 10px; font-weight: 600;
+                    text-transform: uppercase; letter-spacing: 0.6px; }
+  .unread-divider::before, .unread-divider::after { content: ""; flex: 1; height: 1px;
+                    background: var(--mention); opacity: 0.5; }
 
   /* ── Roster sidebar ── */
   #side { grid-row: 2 / 3; grid-column: 2 / 3;
@@ -2258,6 +2272,7 @@ INDEX_HTML = r"""<!doctype html>
 
   <div id="mobile-scrim"></div>
   <div id="chat-wrap">
+    <div id="new-bar" title="jump to the first unread message"></div>
     <div id="chat"></div>
     <button id="jump-btn">↓ latest<span class="count" id="jump-count" style="display:none">0</span></button>
   </div>
@@ -2324,6 +2339,7 @@ INDEX_HTML = r"""<!doctype html>
   const fontPicker = document.getElementById('font-picker');
   const jumpBtn = document.getElementById('jump-btn');
   const jumpCount = document.getElementById('jump-count');
+  const newBar = document.getElementById('new-bar');
   const targetBar = document.getElementById('target-bar');
 
   // Message-font picker — persists per-origin via localStorage.
@@ -2456,6 +2472,8 @@ INDEX_HTML = r"""<!doctype html>
     notifyWhen: 'hidden',     // 'hidden' | 'always'
     unreadCount: 0,                 // for tab title while hidden
     jumpUnread: 0,                  // messages arrived while user was scrolled up
+    lastSeenId: 0,                  // highest msg id the user has caught up to
+                                    // (session-based; drives the unread divider)
     rateBins: new Map(),            // bin_epoch_10s → count
     startedAt: Date.now(),
     originalTitle: 'nth_web',
@@ -3078,11 +3096,23 @@ INDEX_HTML = r"""<!doctype html>
       // history burst, then do one final settle after layout reflows.
       chat.scrollTop = chat.scrollHeight;
       scheduleInitialSettle();
-    } else if (nearBottom) {
+    } else if (nearBottom && !document.hidden) {
+      // Only auto-pin to the bottom when the tab is VISIBLE. Pinning while
+      // hidden would leave us at the bottom on return, so the "new messages"
+      // divider for what arrived while away would be marked caught-up and lost.
       chat.scrollTop = chat.scrollHeight;
     } else {
       state.jumpUnread++;
       updateJumpButton();
+    }
+
+    // Unread divider: if the user is keeping up (tab visible + at/near bottom),
+    // they've seen this message; otherwise it's unread since they looked away or
+    // scrolled up, and a "new messages" divider is drawn before the first such.
+    if (!document.hidden && (state.initialLoad || nearBottom)) {
+      state.lastSeenId = Math.max(state.lastSeenId, m.id);
+    } else {
+      refreshUnreadDivider();
     }
 
     // Tab-title badge when hidden
@@ -3893,8 +3923,13 @@ INDEX_HTML = r"""<!doctype html>
   }
   function applyFilterToAll() {
     for (const node of chat.children) applyFilterToNode(node);
+    // Re-anchor the unread divider to the first still-visible unread message
+    // (a filter may have hidden the one it was sitting before).
+    refreshUnreadDivider();
   }
   function applyFilterToNode(node) {
+    // Skip non-message children (e.g. the unread divider) — they have no msgId.
+    if (!node.dataset || node.dataset.msgId === undefined) return;
     if (!state.filter) { node.classList.remove('filtered-out'); return; }
     const hit = (node.dataset.search || '').includes(state.filter);
     node.classList.toggle('filtered-out', !hit);
@@ -4164,20 +4199,79 @@ INDEX_HTML = r"""<!doctype html>
   });
 
   // ── Jump-to-latest + unread counter ──
+  // ── Unread divider ──
+  // Count / locate unread (id > lastSeenId), skipping filtered/DM-hidden nodes
+  // so the divider + "new" bar stay in sync with what's actually shown.
+  function isHiddenMsg(dom) {
+    return dom.classList.contains('filtered-out') || dom.classList.contains('dm-hidden');
+  }
+  function firstVisibleUnreadDom() {
+    for (const id of [...state.messageDomById.keys()].sort((a, b) => a - b)) {
+      if (id <= state.lastSeenId) continue;
+      const dom = state.messageDomById.get(id);
+      if (dom && !isHiddenMsg(dom)) return dom;
+    }
+    return null;
+  }
+  function unreadCountVisible() {
+    let n = 0;
+    for (const [id, dom] of state.messageDomById) {
+      if (id > state.lastSeenId && !isHiddenMsg(dom)) n++;
+    }
+    return n;
+  }
+  // Draw a "new messages" line before the first *visible* unread message.
+  function refreshUnreadDivider() {
+    const old = document.getElementById('unread-divider');
+    if (old) old.remove();
+    if (state.lastSeenId) {
+      const dom = firstVisibleUnreadDom();
+      if (dom) {
+        const bar = document.createElement('div');
+        bar.id = 'unread-divider';
+        bar.className = 'unread-divider';
+        bar.textContent = 'new messages';
+        chat.insertBefore(bar, dom);
+      }
+    }
+    updateNewBar();
+  }
+  // The user caught up — advance lastSeenId to the newest VISIBLE message and
+  // clear the divider. reduce() (not Math.max(...spread)) avoids a RangeError
+  // on very long channels.
+  function markCaughtUp() {
+    for (const [id, dom] of state.messageDomById) {
+      if (!isHiddenMsg(dom) && id > state.lastSeenId) state.lastSeenId = id;
+    }
+    const bar = document.getElementById('unread-divider');
+    if (bar) bar.remove();
+    updateNewBar();
+  }
+  // Top "N new messages" bar — the conventional jump-to-first-unread affordance.
+  // Shown whenever an unread divider exists; clicking scrolls up to it.
+  function updateNewBar() {
+    if (!newBar) return;
+    if (!document.getElementById('unread-divider')) { newBar.classList.remove('show'); return; }
+    const n = unreadCountVisible();
+    newBar.textContent = '↓ ' + n + ' new message' + (n === 1 ? '' : 's');
+    newBar.classList.add('show');
+  }
+
   function updateJumpButton() {
     const atBottom = chat.scrollHeight - chat.clientHeight - chat.scrollTop < 80;
     if (atBottom) {
       state.jumpUnread = 0;
       jumpBtn.classList.remove('show');
       jumpCount.style.display = 'none';
+      if (!document.hidden) markCaughtUp();   // reached bottom → all seen
+      return;
+    }
+    jumpBtn.classList.add('show');
+    if (state.jumpUnread > 0) {
+      jumpCount.style.display = '';
+      jumpCount.textContent = state.jumpUnread;
     } else {
-      jumpBtn.classList.add('show');
-      if (state.jumpUnread > 0) {
-        jumpCount.style.display = '';
-        jumpCount.textContent = state.jumpUnread;
-      } else {
-        jumpCount.style.display = 'none';
-      }
+      jumpCount.style.display = 'none';
     }
   }
   // ── "You are here" indicator — operator's emoji on topmost visible
@@ -4222,7 +4316,14 @@ INDEX_HTML = r"""<!doctype html>
   jumpBtn.addEventListener('click', () => {
     chat.scrollTop = chat.scrollHeight;
     state.jumpUnread = 0;
+    if (!document.hidden) markCaughtUp();
     updateJumpButton();
+  });
+  // Top bar: scroll UP to the first unread message (the divider). Does not mark
+  // caught-up — you're going TO the unread, not past it.
+  newBar.addEventListener('click', () => {
+    const dom = firstVisibleUnreadDom();
+    if (dom) chat.scrollTop = Math.max(0, dom.offsetTop - 8);
   });
 
   // ── Title / tab badge ──
@@ -4234,6 +4335,12 @@ INDEX_HTML = r"""<!doctype html>
     if (!document.hidden) {
       state.unreadCount = 0;
       updateTitle();
+      // Returning to the tab: if already at the bottom, they've caught up;
+      // otherwise surface the "new messages" divider for what arrived while away.
+      const atBottom = chat.scrollHeight - chat.clientHeight - chat.scrollTop < 80;
+      if (atBottom) markCaughtUp();
+      else refreshUnreadDivider();
+      updateJumpButton();
     }
   });
   window.addEventListener('focus', () => {
