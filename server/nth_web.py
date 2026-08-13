@@ -3107,7 +3107,11 @@ INDEX_HTML = r"""<!doctype html>
       // divider for what arrived while away would be marked caught-up and lost.
       chat.scrollTop = chat.scrollHeight;
     } else {
-      state.jumpUnread++;
+      // Same rule as the divider: your own message is not something you have
+      // yet to read. Without this, sending while scrolled up raises the
+      // jump-to-latest badge as well as the divider — two separate claims that
+      // there is something new, both of them about you.
+      if (!isMine) state.jumpUnread++;
       updateJumpButton();
     }
 
@@ -3129,7 +3133,7 @@ INDEX_HTML = r"""<!doctype html>
     }
 
     // Tab-title badge when hidden
-    if (document.hidden) {
+    if (document.hidden && !isMine) {
       state.unreadCount++;
       updateTitle();
     }
