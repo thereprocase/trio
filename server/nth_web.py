@@ -348,22 +348,62 @@ def parse_mentions_json(raw: Optional[str]) -> List[str]:
         return []
 
 
-def member_status(last_seen_iso: Optional[str], status_text: str) -> str:
-    """Match the dashboard's status classification."""
-    if not last_seen_iso:
-        return "dead"
+def _iso_secs(iso: Optional[str]) -> Optional[float]:
+    """Parse an ISO 8601 timestamp to epoch seconds, or None if unusable."""
+    if not iso:
+        return None
     try:
-        ts = datetime.fromisoformat(last_seen_iso).timestamp()
+        return datetime.fromisoformat(iso).timestamp()
     except (ValueError, TypeError):
+        return None
+
+
+def member_status(last_seen_iso: Optional[str], status_text: str,
+                  session_activity_iso: Optional[str] = None,
+                  last_turn_end_iso: Optional[str] = None) -> str:
+    """Classify a member for the roster dot.
+
+    States: working / active / idle / stale / dead.
+      dead    — no heartbeat for DEAD_SECONDS (process gone).
+      stale   — heartbeat aging (> STALE_SECONDS).
+      idle    — alive, but its last turn has ended (nothing since) or it set a
+                sleeping status_text: "done / waiting on you".
+      working — alive AND it has acted since its last turn end (mid-turn). This
+                is the pulsing "keep chilling, it's on it" dot; it needs the
+                nth_turn_hook to have recorded a turn end. "Acted" means its
+                sessions.last_seen advanced past that turn end. With the
+                nth_activity_hook installed (PreToolUse + UserPromptSubmit),
+                *any* tool call or prompt bumps last_seen, so this holds for the
+                whole active turn — reasoning, a long Bash, a sub-agent — not
+                just from the agent's first trio call. Without the activity hook
+                only trio RPCs bump last_seen, so a turn that makes zero trio
+                calls would read idle until its Stop hook fires.
+      active  — alive but we have no turn data (hook not installed): the legacy
+                green dot, so hook-less deployments are unchanged.
+    """
+    ls = _iso_secs(last_seen_iso)
+    if ls is None:
         return "dead"
-    age = datetime.now(timezone.utc).timestamp() - ts
+    age = datetime.now(timezone.utc).timestamp() - ls
     if age > DEAD_SECONDS:
         return "dead"
     if age > STALE_SECONDS:
         return "stale"
     if status_text and any(kw in status_text.lower() for kw in SLEEPING_KEYWORDS):
         return "idle"
-    return "active"
+    # Turn-state split — only when the turn hook has recorded an end for this
+    # member. Acted since that end -> mid-turn -> working; otherwise finished.
+    end = _iso_secs(last_turn_end_iso)
+    if end is not None:
+        # A backward wall-clock step (NTP correction, host sleep/wake) can leave
+        # a Stop stamp in the future. No later activity can then exceed it, so
+        # the member would read idle while genuinely working. Treat a turn end
+        # that is ahead of now as no turn data at all.
+        if end > datetime.now(timezone.utc).timestamp() + 1:
+            return "active"
+        act = _iso_secs(session_activity_iso)
+        return "working" if (act is not None and act > end) else "idle"
+    return "active"  # no turn data (hook not installed) — legacy behavior
 
 
 _GUEST_SUFFIX_RE = re.compile(r"\s*\(\s*guest\s*\)\s*$", re.IGNORECASE)
@@ -623,45 +663,46 @@ class EventHub:
         # v6.2+ session-mode clients write sessions.last_read / last_seen
         # and never touch members.*. Reconcile like nth_monitor.py:171-183
         # so the web console sees real watermark + liveness movement.
-        # filter_mode (v7.2) is best-effort; older schemas fall back to 'all'.
-        try:
-            rows = db.execute(
-                "SELECT m.id AS id, m.name AS name, m.status_text AS status_text, "
-                "m.last_seen AS member_last_seen, m.last_read AS member_last_read, "
-                "m.messenger_heartbeat AS messenger_heartbeat, "
-                "m.watchdog_heartbeat AS watchdog_heartbeat, "
-                "m.filter_mode AS filter_mode, "
-                "m.context_json AS context_json, "
-                "COALESCE(MAX(s.last_read), 0) AS session_last_read, "
-                "MAX(s.last_seen) AS session_last_seen, "
-                "GROUP_CONCAT(s.fingerprint) AS fingerprints "
-                "FROM members m "
-                "LEFT JOIN sessions s "
-                "  ON s.channel = m.channel AND s.member_id = m.id "
-                "  AND s.revoked_at IS NULL "
-                "WHERE m.channel = ? "
-                "GROUP BY m.id, m.channel "
-                "ORDER BY m.joined_at",
-                (self.channel,),
-            ).fetchall()
-        except sqlite3.OperationalError:
-            rows = db.execute(
-                "SELECT m.id AS id, m.name AS name, m.status_text AS status_text, "
-                "m.last_seen AS member_last_seen, m.last_read AS member_last_read, "
-                "m.messenger_heartbeat AS messenger_heartbeat, "
-                "m.watchdog_heartbeat AS watchdog_heartbeat, "
-                "COALESCE(MAX(s.last_read), 0) AS session_last_read, "
-                "MAX(s.last_seen) AS session_last_seen, "
-                "GROUP_CONCAT(s.fingerprint) AS fingerprints "
-                "FROM members m "
-                "LEFT JOIN sessions s "
-                "  ON s.channel = m.channel AND s.member_id = m.id "
-                "  AND s.revoked_at IS NULL "
-                "WHERE m.channel = ? "
-                "GROUP BY m.id, m.channel "
-                "ORDER BY m.joined_at",
-                (self.channel,),
-            ).fetchall()
+        # Two independently-optional columns, so they get independent tiers:
+        # filter_mode/context_json (v7.2) and last_turn_end (this feature). The
+        # turn column is added by nth_server at MCP startup, but the dashboard
+        # can be launched standalone against a DB whose server has not restarted
+        # — folding both into one try/except would drop filter_mode and the
+        # context % for every member just because the turn column is missing.
+        def _roster_sql(turn: bool, v72: bool) -> str:
+            cols = [
+                "m.id AS id", "m.name AS name", "m.status_text AS status_text",
+                "m.last_seen AS member_last_seen", "m.last_read AS member_last_read",
+                "m.messenger_heartbeat AS messenger_heartbeat",
+                "m.watchdog_heartbeat AS watchdog_heartbeat",
+            ]
+            if v72:
+                cols += ["m.filter_mode AS filter_mode", "m.context_json AS context_json"]
+            cols += [
+                "COALESCE(MAX(s.last_read), 0) AS session_last_read",
+                "MAX(s.last_seen) AS session_last_seen",
+                "GROUP_CONCAT(s.fingerprint) AS fingerprints",
+            ]
+            if turn:
+                cols.append("MAX(s.last_turn_end) AS session_last_turn_end")
+            return ("SELECT " + ", ".join(cols) + " FROM members m "
+                    "LEFT JOIN sessions s "
+                    "  ON s.channel = m.channel AND s.member_id = m.id "
+                    "  AND s.revoked_at IS NULL "
+                    "WHERE m.channel = ? "
+                    "GROUP BY m.id, m.channel "
+                    "ORDER BY m.joined_at")
+
+        rows = None
+        for _turn, _v72 in ((True, True), (False, True), (False, False)):
+            try:
+                rows = db.execute(_roster_sql(_turn, _v72), (self.channel,)).fetchall()
+                break
+            except sqlite3.OperationalError:
+                continue
+        if rows is None:
+            rows = []
+
         # Collision-free avatars per channel. Sorted-id assignment in
         # animal_for_channel() makes the mapping stable across roster
         # refreshes as long as the member set is fixed; joins/leaves
@@ -702,6 +743,8 @@ class EventHub:
                         context_full = ctx_usage[fp]
                         context_pct = float(context_full["used_pct"])
                         break
+            keys = r.keys()
+            s_turn_end = r["session_last_turn_end"] if "session_last_turn_end" in keys else None
             aname, aemoji = avatars.get(r["id"], animal_for(r["id"]))
             out.append({
                 "id": r["id"],
@@ -710,9 +753,19 @@ class EventHub:
                 "last_seen": effective_last_seen,
                 "last_read": effective_last_read,
                 "filter_mode": fm or "all",
-                "status": member_status(effective_last_seen, r["status_text"] or ""),
                 "context_pct": context_pct,
                 "context": context_full,
+                # working/idle split uses the session's OWN activity (not the
+                # monitor-inflated effective_last_seen) vs. its last turn end.
+                # MAX(last_seen) and MAX(last_turn_end) are taken independently,
+                # which is correct under trio's one-primary-session-per-member
+                # invariant (nth_connect mints a single session per member id).
+                # If multi-session members are reintroduced, pair both values
+                # from the newest-last_seen session instead.
+                "status": member_status(
+                    effective_last_seen, r["status_text"] or "",
+                    session_activity_iso=(r["session_last_seen"] or None),
+                    last_turn_end_iso=s_turn_end),
                 "animal_name": aname,
                 "animal_emoji": aemoji,
             })
@@ -2003,6 +2056,16 @@ INDEX_HTML = r"""<!doctype html>
   .member.expanded .caret { transform: rotate(90deg); }
   .member .id { color: var(--dimmer); font-size: 10px; margin-left: 2px; }
   .dot.active { background: var(--accent2); }
+  /* working = alive AND mid-turn: a breathing green dot, the "it's on it,
+     keep chilling" cue. Distinct from the solid green "active" (legacy /
+     hook-not-installed) and the grey "idle" (turn ended, waiting on you). */
+  .dot.working { background: var(--accent2); animation: workpulse 1.3s ease-in-out infinite; }
+  @keyframes workpulse {
+    0%   { opacity: 1;    transform: scale(1); }
+    50%  { opacity: 0.4;  transform: scale(0.72); }
+    100% { opacity: 1;    transform: scale(1); }
+  }
+  @media (prefers-reduced-motion: reduce) { .dot.working { animation: none; } }
   .dot.idle { background: var(--dimmer); }
   .dot.stale { background: var(--warn); }
   .dot.dead { background: var(--err); }
@@ -3212,7 +3275,7 @@ INDEX_HTML = r"""<!doctype html>
     targetBar.innerHTML = '';
     // Build the ordered list of targetable members. Sort by active-first
     // then name so the numbering is stable-ish across renders.
-    const order = { active: 0, idle: 1, stale: 2, dead: 3 };
+    const order = { working: 0, active: 1, idle: 2, stale: 3, dead: 4 };
     const targetables = [...state.members.values()]
       .filter(isTargetable)
       .sort((a, b) => {
@@ -3320,7 +3383,7 @@ INDEX_HTML = r"""<!doctype html>
 
     rosterEl.innerHTML = '';
     const sorted = members.slice().sort((a, b) => {
-      const order = { active: 0, idle: 1, stale: 2, dead: 3 };
+      const order = { working: 0, active: 1, idle: 2, stale: 3, dead: 4 };
       if (a.id === state.operator.id) return 1;
       if (b.id === state.operator.id) return -1;
       const oa = order[a.status] ?? 4;
