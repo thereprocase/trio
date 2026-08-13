@@ -489,18 +489,27 @@ function buildSandbox() {
 // same substitution nth_web.py performs at serve time.
 function buildScript() {
   const py = fs.readFileSync(WEB_PY, 'utf8');
-  // The client bundle is exactly ONE inline <script> block. If a second one is
-  // ever added, fail loudly rather than silently testing only the first — a
-  // green suite that exercises nothing is the worst outcome for a harness.
-  const opens = (py.match(/<script(\s[^>]*)?>/g) || []);
-  if (opens.length !== 1) {
-    throw new Error(`expected exactly 1 <script> block in nth_web.py, found ${opens.length}; ` +
-      `the harness only loads the first — update dom-harness.js to handle the new block`);
+  // nth_web.py serves more than one document (the channel dashboard and the
+  // fleet landing page), so "the only <script>" is not a safe selector. Pick
+  // the block that carries the test-hook sentinel — that is by definition the
+  // dashboard bundle these tests exercise. If no block has it, fail loudly
+  // rather than silently testing the wrong one: a green suite that exercises
+  // nothing is the worst outcome for a harness.
+  const SENTINEL = '__TRIO_TEST_HOOK_START__';
+  const blocks = [];
+  for (const m of py.matchAll(/<script(?:\s[^>]*)?>/g)) {
+    const bodyStart = m.index + m[0].length;
+    const bodyEnd = py.indexOf('</script>', bodyStart);
+    if (bodyEnd < 0) continue;
+    blocks.push({ bodyStart, bodyEnd });
   }
-  const start = py.indexOf('<script>');
-  const end = py.indexOf('</script>', start);
-  if (start < 0 || end < 0) throw new Error('could not locate <script> block in nth_web.py');
-  let js = py.slice(start + '<script>'.length, end);
+  const hits = blocks.filter(b => py.slice(b.bodyStart, b.bodyEnd).includes(SENTINEL));
+  if (hits.length !== 1) {
+    throw new Error(`expected exactly 1 <script> block carrying ${SENTINEL} in nth_web.py, ` +
+      `found ${hits.length} of ${blocks.length} block(s) — update dom-harness.js`);
+  }
+  const { bodyStart: start, bodyEnd: end } = hits[0];
+  let js = py.slice(start, end);
   // The ask-helpers module is optional: it only exists in builds that ship
   // the multiple-choice picker. Absent it, the placeholder collapses to ''.
   const askHelpers = fs.existsSync(ASK_JS) ? fs.readFileSync(ASK_JS, 'utf8') : '';
@@ -512,7 +521,10 @@ function buildScript() {
   js = js
     .replace(/\/\*__ANIMAL_EMOJIS__\*\//g, '[]')
     .replace(/\/\*__ANIMAL_NAMES__\*\//g, '[]')
-    .replace(/\/\*__ASK_HELPERS__\*\//g, () => askHelpers);
+    .replace(/\/\*__ASK_HELPERS__\*\//g, () => askHelpers)
+    // The channel query-string placeholder is substituted per-request in
+    // production; under the harness a fixed test channel is enough.
+    .replace(/\/\*__API_QS__\*\/''/g, JSON.stringify('?channel=test'));
   // Any leftover /*__FOO__*/ placeholder means nth_web.py grew a new injection
   // point the harness doesn't know about. Left unsubstituted it would either be
   // a parse error (statement position) or silently wrong — either way, surface
