@@ -1324,13 +1324,25 @@ class SttWorker:
         self._q = None
 
     def _spawn(self) -> None:
+        # Checked explicitly: the command we spawn is sys.executable, which
+        # exists, so a missing sidecar would otherwise surface as the
+        # interpreter exiting during startup — reported to the user as "the
+        # engine restarted" when the truth is that it was never installed.
+        if not STT_WORKER.exists():
+            raise RuntimeError("speech worker not installed")
         # sys.executable is the interpreter running this server; on the hub it is
         # the env that has mlx_whisper installed.
-        proc = subprocess.Popen(
-            [sys.executable, str(STT_WORKER), self.model],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL, text=True, bufsize=1,
-        )
+        try:
+            proc = subprocess.Popen(
+                [sys.executable, str(STT_WORKER), self.model],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL, text=True, bufsize=1,
+            )
+        except OSError:
+            # Most likely the sidecar was not installed alongside this file. Say
+            # so in the language the client's fallback banner understands, and
+            # without echoing the path we tried.
+            raise RuntimeError("speech worker not installed")
         q: "queue.Queue" = queue.Queue()
 
         def _reader() -> None:
@@ -1410,6 +1422,9 @@ class SttWorker:
         if proc is not None and proc.poll() is None:
             return {**base, "available": True, "warm": True,
                     "detail": "worker running — model is warm"}
+        if not STT_WORKER.exists():
+            return {**base, "available": False, "warm": False,
+                    "detail": "speech worker not installed"}
         try:
             r = subprocess.run(
                 [sys.executable, "-c", "import mlx_whisper"],

@@ -85,6 +85,25 @@ h = web.STT.health()
 check("health has required keys", {"available", "engine", "model", "warm", "detail"} <= set(h))
 check("health engine is mlx_whisper", h["engine"] == "mlx_whisper")
 
+# The sidecar is a separate file that the installer has to copy. If it is
+# missing, say so plainly instead of failing later with a path-bearing OSError.
+_saved_worker = web.STT_WORKER
+web.STT_WORKER = Path(tempfile.gettempdir()) / "definitely_not_here_nth_stt_worker.py"
+try:
+    _hm = web.SttWorker("stub-model", "en").health()
+    check("health: missing sidecar reports unavailable", _hm.get("available") is False)
+    check("health: missing sidecar says 'not installed'",
+          "not installed" in _hm.get("detail", ""))
+    check("spawn: missing sidecar -> clean RuntimeError, no path echoed",
+          raises_runtime(lambda: web.SttWorker("stub-model", "en").transcribe("/x"),
+                         "not installed"))
+finally:
+    web.STT_WORKER = _saved_worker
+
+# setup.sh must actually ship the sidecar, or dictation installs half-built.
+_setup = (Path(__file__).resolve().parent.parent / "setup.sh").read_text()
+check("setup.sh installs nth_stt_worker.py", "nth_stt_worker.py" in _setup)
+
 
 # ── 2. SttWorker manager branches via stub workers (no model needed) ──────────
 STUBS = {
