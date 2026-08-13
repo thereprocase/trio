@@ -2928,6 +2928,13 @@ def nth_cull(channel: str, member_id: str, target_member_id: str) -> str:
             "DELETE FROM members WHERE id = ? AND channel = ?",
             (target_member_id, channel),
         )
+        # Revoke their sessions so a lingering token can't be reused if the same
+        # member_id ever re-joins (defence-in-depth; also stops row build-up).
+        db.execute(
+            "UPDATE sessions SET revoked_at = ? WHERE channel = ? AND member_id = ? "
+            "AND revoked_at IS NULL",
+            (now, channel, target_member_id),
+        )
 
         released_ids = [t["id"] for t in released_tasks]
         released_lock_names = [lk["resource"] for lk in released_locks]
