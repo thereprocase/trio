@@ -1975,7 +1975,7 @@ INDEX_HTML = r"""<!doctype html>
                     color: var(--mention); font-size: 10px; font-weight: 600;
                     text-transform: uppercase; letter-spacing: 0.6px; }
   .unread-divider::before, .unread-divider::after { content: ""; flex: 1; height: 1px;
-                    background: var(--mention); opacity: 0.5; }
+                    background: var(--mention); }
 
   /* ── Roster sidebar ── */
   #side { grid-row: 2 / 3; grid-column: 2 / 3;
@@ -2473,6 +2473,8 @@ INDEX_HTML = r"""<!doctype html>
     unreadCount: 0,                 // for tab title while hidden
     jumpUnread: 0,                  // messages arrived while user was scrolled up
     lastSeenId: 0,                  // highest msg id the user has caught up to
+    suppressCatchUp: false,         // true while a programmatic scroll is settling
+    _suppressTimer: null,
                                     // (session-based; drives the unread divider)
     rateBins: new Map(),            // bin_epoch_10s → count
     startedAt: Date.now(),
@@ -2997,6 +2999,7 @@ INDEX_HTML = r"""<!doctype html>
     _initialSettleTimer = setTimeout(() => {
       _initialSettleTimer = null;
       state.initialLoad = false;
+      seedBaseline();
       requestAnimationFrame(() => { chat.scrollTop = chat.scrollHeight; });
     }, 250);
   }
@@ -3109,7 +3112,10 @@ INDEX_HTML = r"""<!doctype html>
     // Unread divider: if the user is keeping up (tab visible + at/near bottom),
     // they've seen this message; otherwise it's unread since they looked away or
     // scrolled up, and a "new messages" divider is drawn before the first such.
-    if (!document.hidden && (state.initialLoad || nearBottom)) {
+    if (state.initialLoad) {
+      // History burst. The baseline is set once in seedBaseline() when the
+      // burst settles; advancing per-message here would race a hidden tab.
+    } else if (!document.hidden && nearBottom) {
       state.lastSeenId = Math.max(state.lastSeenId, m.id);
     } else {
       refreshUnreadDivider();
@@ -4236,15 +4242,49 @@ INDEX_HTML = r"""<!doctype html>
     }
     updateNewBar();
   }
-  // The user caught up — advance lastSeenId to the newest VISIBLE message and
-  // clear the divider. reduce() (not Math.max(...spread)) avoids a RangeError
-  // on very long channels.
+  // Establish the read watermark once, when the history burst settles. Prefer
+  // the server's own last_read for this operator: it is what "already read"
+  // actually means across tabs and reloads, and it is the only thing that works
+  // when the channel was opened in a background tab (landing mode makes that
+  // the normal way in). With no server value — a first visit — everything
+  // already on screen counts as seen, so you arrive caught up rather than
+  // staring at a divider above the entire history.
+  function seedBaseline() {
+    if (state.lastSeenId) return;
+    // reduce(), not Math.max(...spread) — a long channel would exceed the
+    // argument limit and throw RangeError.
+    const newest = [...state.messageDomById.keys()]
+      .reduce((a, b) => (b > a ? b : a), 0);
+    const me = state.members.get(state.operator.id);
+    const serverLastRead = me ? (me.last_read || 0) : 0;
+    state.lastSeenId = serverLastRead > 0 ? Math.min(serverLastRead, newest) : newest;
+    refreshUnreadDivider();
+  }
+
+  // The user caught up — advance the watermark over the messages they could
+  // actually have read, and clear the divider.
+  //
+  // lastSeenId is a single high-water mark, so it must never jump OVER an
+  // unread message the user has not seen. Two kinds of hidden message need
+  // opposite treatment:
+  //   • filtered-out — the user's own filter is hiding it temporarily. Stop
+  //     here. Advancing past it would mark it read because they searched for
+  //     something else, and clearing the filter would silently lose it.
+  //   • dm-hidden — structurally not part of this view at all. Skip it; if it
+  //     blocked the walk the watermark could never advance past it again.
   function markCaughtUp() {
-    for (const [id, dom] of state.messageDomById) {
-      if (!isHiddenMsg(dom) && id > state.lastSeenId) state.lastSeenId = id;
+    let mark = state.lastSeenId;
+    for (const id of [...state.messageDomById.keys()].sort((a, b) => a - b)) {
+      if (id <= state.lastSeenId) continue;
+      const dom = state.messageDomById.get(id);
+      if (dom.classList.contains('filtered-out')) break;
+      mark = id;
     }
-    const bar = document.getElementById('unread-divider');
-    if (bar) bar.remove();
+    state.lastSeenId = mark;
+    if (!unreadCountVisible()) {
+      const bar = document.getElementById('unread-divider');
+      if (bar) bar.remove();
+    }
     updateNewBar();
   }
   // Top "N new messages" bar — the conventional jump-to-first-unread affordance.
@@ -4263,7 +4303,8 @@ INDEX_HTML = r"""<!doctype html>
       state.jumpUnread = 0;
       jumpBtn.classList.remove('show');
       jumpCount.style.display = 'none';
-      if (!document.hidden) markCaughtUp();   // reached bottom → all seen
+      // Only a scroll the USER performed means "I have read to here".
+      if (!document.hidden && !state.suppressCatchUp) markCaughtUp();
       return;
     }
     jumpBtn.classList.add('show');
@@ -4323,7 +4364,15 @@ INDEX_HTML = r"""<!doctype html>
   // caught-up — you're going TO the unread, not past it.
   newBar.addEventListener('click', () => {
     const dom = firstVisibleUnreadDom();
-    if (dom) chat.scrollTop = Math.max(0, dom.offsetTop - 8);
+    if (!dom) return;
+    // The browser clamps this to max scroll whenever the unread block is
+    // shorter than one viewport, which lands us at the bottom and would
+    // otherwise trip the catch-up path — destroying the state we are
+    // navigating to. Suppress catch-up until the resulting scroll settles.
+    state.suppressCatchUp = true;
+    chat.scrollTop = Math.max(0, dom.offsetTop - 8);
+    clearTimeout(state._suppressTimer);
+    state._suppressTimer = setTimeout(() => { state.suppressCatchUp = false; }, 400);
   });
 
   // ── Title / tab badge ──
