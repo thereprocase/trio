@@ -45,7 +45,7 @@ import errno
 import time
 import unicodedata
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -65,8 +65,25 @@ HUB_IDLE_REAP_S = 300        # retire a channel's EventHub after this long unwat
 SSE_HEARTBEAT_SEC = 20       # keep-alive comment interval
 
 # ── Image attachments (Phase-1 prototype) ──
+# Attachments live beside the database they belong to, NOT at a fixed path.
+# A hardcoded location means --db does not isolate anything: pointing the server
+# at a scratch DB still reads and DELETES files belonging to the real one, which
+# is a live footgun for anyone testing the GC below.
 ATTACH_DIR = Path.home() / ".claude" / "nth" / "attachments"
+
+
+def attach_dir_for(db_path: Path) -> Path:
+    """Attachment root for a given database file."""
+    return Path(db_path).resolve().parent / "attachments"
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024     # 10 MB hard cap per image
+# Attachment GC. An upload creates its row UNLINKED and /api/send links it, so
+# anything still unlinked long afterwards was abandoned — a paste thought better
+# of, a closed tab, a failed send. Nothing ever collected those, so they
+# accumulated on disk for the life of the install.
+ATTACH_GC_GRACE_S = 24 * 3600      # an unlinked upload is abandoned after this
+ATTACH_GC_MIN_INTERVAL_S = 600     # at most one sweep per process per 10 min
+ATTACH_GC_MAX_DELETES = 500        # deletions per sweep
+ATTACH_GC_MAX_SCAN = 2000          # files stat'd per sweep, resumed round-robin
 ALLOWED_IMAGE_MIME = {
     "image/png": ".png", "image/jpeg": ".jpg",
     "image/gif": ".gif", "image/webp": ".webp",
@@ -548,6 +565,188 @@ def sniff_image_mime(data: bytes) -> Optional[str]:
     return None
 
 
+_last_attach_gc = 0.0
+_attach_gc_cursor = 0        # resume point for the bounded orphan walk
+_attach_gc_lock = threading.Lock()
+
+
+def _unlink_quietly(path: Path) -> bool:
+    """Delete a file, but only if it lives under the CURRENT attachment root.
+
+    attachments.path stores an absolute path, so a database pointed at by --db
+    can name files belonging to a different install. Without this check, running
+    the server against a scratch copy of a DB deletes the REAL files its rows
+    happen to reference — which is exactly how this check came to be written.
+    """
+    try:
+        resolved = Path(path).resolve()
+        if not resolved.is_relative_to(ATTACH_DIR.resolve()):
+            return False
+        resolved.unlink()
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def sweep_attachments(db_path: Path, force: bool = False) -> Dict[str, int]:
+    """Collect attachments nothing can reach any more.
+
+    Three kinds, all of which leaked before this existed:
+      * abandoned uploads — still unlinked ATTACH_GC_GRACE_S after creation.
+      * attachments of a channel that no longer exists — nth_cleanup deletes a
+        channel's messages and members but never its attachments.
+      * orphan files — a crash between writing the file and inserting its row
+        leaves bytes on disk that nothing references.
+
+    Rows are deleted BEFORE their files: a crash in between leaves an orphan
+    file, which the third sweep reclaims. The other order would leave a row
+    pointing at nothing, which is a visibly broken image instead.
+
+    Opportunistic — called from the upload path and at startup, rate-limited so
+    a burst of uploads does not sweep repeatedly. Mirrors the idle-hub reaper
+    rather than adding a thread. Returns counts for logging/tests.
+    """
+    global _last_attach_gc
+    now = time.time()
+    with _attach_gc_lock:
+        if not force and (now - _last_attach_gc) < ATTACH_GC_MIN_INTERVAL_S:
+            return {"skipped": 1}
+        _last_attach_gc = now
+
+    stats = {"abandoned": 0, "dead_channel": 0, "orphan_files": 0}
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=ATTACH_GC_GRACE_S)
+    cutoff_iso = cutoff.isoformat()
+    db = None
+    try:
+        db = sqlite3.connect(str(db_path), timeout=5, isolation_level=None)
+        db.row_factory = sqlite3.Row
+        db.execute("PRAGMA busy_timeout=3000")
+        ensure_attachments_table(db)
+
+        # Two independent queries with their own budgets. A single UNION ALL
+        # with one LIMIT let the first branch consume the whole budget, so a
+        # dead channel's disk was never freed while any abandoned backlog
+        # existed — and a row matching BOTH predicates came back twice.
+        half = max(1, ATTACH_GC_MAX_DELETES // 2)
+        doomed = [
+            (r["id"], r["path"], "abandoned") for r in db.execute(
+                "SELECT id, path FROM attachments "
+                " WHERE message_id IS NULL AND created_at < ? LIMIT ?",
+                (cutoff_iso, half)).fetchall()
+        ]
+        seen = {d[0] for d in doomed}
+        for r in db.execute(
+                "SELECT a.id AS id, a.path AS path FROM attachments a "
+                " LEFT JOIN channels c ON c.code = a.channel "
+                " WHERE c.code IS NULL LIMIT ?",
+                (ATTACH_GC_MAX_DELETES - len(doomed),)).fetchall():
+            if r["id"] not in seen:
+                doomed.append((r["id"], r["path"], "dead_channel"))
+
+        # One transaction for the batch. Autocommitting each delete took the WAL
+        # writer lock up to 500 times per sweep, interleaved with unlink()
+        # syscalls — measured as ~770ms tail latency on unrelated concurrent
+        # writes (message sends, task claims) for as long as the sweep ran.
+        # Rows still go before files: the commit lands first, then the unlinks,
+        # so a crash in between leaves an orphan file the walk reclaims.
+        if doomed:
+            # Compare-and-swap on the state that made each row doomed. The
+            # select and the delete are separate statements, so a row can be
+            # LINKED by a concurrent /api/send in between — and _handle_send
+            # holds BEGIN IMMEDIATE, so an unconditional delete does not race
+            # it, it queues behind it and then destroys the attachment the user
+            # just successfully posted. Only rows still in the observed state
+            # are deleted, and only rows we actually deleted get their file
+            # unlinked.
+            confirmed = []
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                for att_id, att_path, why in doomed:
+                    if why == "abandoned":
+                        cur = db.execute(
+                            "DELETE FROM attachments "
+                            " WHERE id = ? AND message_id IS NULL", (att_id,))
+                    else:
+                        cur = db.execute(
+                            "DELETE FROM attachments WHERE id = ? AND NOT EXISTS "
+                            " (SELECT 1 FROM channels c WHERE c.code = "
+                            "  (SELECT channel FROM attachments WHERE id = ?))",
+                            (att_id, att_id))
+                    if cur.rowcount:
+                        confirmed.append((att_path, why))
+                db.execute("COMMIT")
+            except sqlite3.Error:
+                db.execute("ROLLBACK")
+                raise
+            # Files only after the rows are durably gone.
+            for att_path, why in confirmed:
+                _unlink_quietly(Path(att_path))
+                stats[why] += 1
+
+        # Orphan files, only ones older than the grace period. NB the upload
+        # path inserts its row FIRST (with an empty path), then writes the file,
+        # then fills the path in — so the window this guards is not "file
+        # written before its row exists" but the gap between the `known`
+        # snapshot below and the walk that follows it. That is seconds; the
+        # grace covers it by orders of magnitude.
+        #
+        # Walk a BOUNDED slice of the tree per sweep, resuming where the last
+        # one stopped. Loading every path and stat'ing every file made the cost
+        # scale with total historical attachments rather than with garbage —
+        # measured at ~1.2s on a 150k-attachment install that had nothing to
+        # collect. Coverage is still complete, just spread over several sweeps.
+        global _attach_gc_cursor
+        try:
+            chan_dirs = sorted(d for d in ATTACH_DIR.iterdir() if d.is_dir())
+        except OSError:
+            chan_dirs = []
+        if chan_dirs:
+            start = _attach_gc_cursor % len(chan_dirs)
+            order = chan_dirs[start:] + chan_dirs[:start]
+            scanned = 0
+            deletes = ATTACH_GC_MAX_DELETES
+            visited = 0
+            for chan_dir in order:
+                if scanned >= ATTACH_GC_MAX_SCAN or deletes <= 0:
+                    break
+                visited += 1
+                # Only this channel's paths, so the set stays proportional to
+                # the slice being walked (indexed by channel).
+                known = {r["path"] for r in db.execute(
+                    "SELECT path FROM attachments WHERE channel = ?",
+                    (chan_dir.name,))}
+                try:
+                    entries = list(chan_dir.iterdir())
+                except OSError:
+                    continue
+                for f in entries:
+                    if scanned >= ATTACH_GC_MAX_SCAN or deletes <= 0:
+                        break
+                    scanned += 1
+                    if str(f) in known:
+                        continue
+                    try:
+                        if not f.is_file():
+                            continue
+                        if (now - f.stat().st_mtime) < ATTACH_GC_GRACE_S:
+                            continue
+                    except OSError:
+                        continue
+                    if _unlink_quietly(f):
+                        stats["orphan_files"] += 1
+                        deletes -= 1
+            _attach_gc_cursor = (start + visited) % len(chan_dirs)
+    except sqlite3.Error:
+        return stats
+    finally:
+        if db is not None:
+            try:
+                db.close()
+            except sqlite3.Error:
+                pass
+    return stats
+
+
 def ensure_attachments_table(db: sqlite3.Connection) -> None:
     """Create the attachments table on demand. The web side owns this for the
     prototype so it works before the MCP server ships the canonical CREATE —
@@ -563,6 +762,14 @@ def ensure_attachments_table(db: sqlite3.Connection) -> None:
         " width INTEGER, height INTEGER, bytes INTEGER,"
         " path TEXT NOT NULL,"
         " created_at TEXT NOT NULL)"
+    )
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_attachments_channel "
+        "ON attachments(channel)"
+    )
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_attachments_unlinked "
+        "ON attachments(created_at) WHERE message_id IS NULL"
     )
     db.execute(
         "CREATE INDEX IF NOT EXISTS idx_attachments_message "
@@ -1582,6 +1789,10 @@ class NthWebHandler(BaseHTTPRequestHandler):
                     pass
         self._json({"ok": True, "id": att_id, "mime": mime,
                     "filename": filename})   # client builds the URL with its channel
+        # Opportunistic GC: uploading is exactly when abandoned uploads accrue,
+        # and it is already a slow path. Rate-limited internally, and after the
+        # response so it can never delay the client.
+        sweep_attachments(self.db_path)
 
     def _serve_attachment(self, path: str) -> None:
         tail = path.rsplit("/", 1)[-1]
@@ -5498,6 +5709,8 @@ def main() -> int:
     args = ap.parse_args()
 
     db_path = Path(args.db)
+    global ATTACH_DIR
+    ATTACH_DIR = attach_dir_for(db_path)
     if not db_path.exists():
         sys.stderr.write(
             f"nth.db not found at {db_path}\n"
@@ -5535,6 +5748,22 @@ def main() -> int:
         host = "0.0.0.0" if args.tailnet else "127.0.0.1"
 
     # Single-channel mode spins up its one event hub before serving.
+    # One sweep at startup so a long-running install reclaims whatever leaked
+    # while it was down, without waiting for someone to upload.
+    def _startup_sweep() -> None:
+        try:
+            _gc = sweep_attachments(db_path, force=True)
+            if any(_gc.get(k) for k in ("abandoned", "dead_channel", "orphan_files")):
+                print(f"attachments: reclaimed {_gc}", flush=True)
+        except Exception:
+            pass
+
+    # On a daemon thread: this ran inline before the socket was bound, so on a
+    # large install the dashboard, every channel and every API route were
+    # unreachable for the duration (measured ~1.2s at 150k attachments, and it
+    # grows with the install). Nothing downstream depends on its result.
+    threading.Thread(target=_startup_sweep, name="attach-gc", daemon=True).start()
+
     # Landing mode creates hubs lazily, one per channel actually viewed.
     hub = None
     if args.channel:

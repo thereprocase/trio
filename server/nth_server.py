@@ -22,7 +22,7 @@ import re
 import hashlib
 import string
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, List, Tuple
 from pathlib import Path
 
 # Add server/ to sys.path so nth_constants can be imported when MCP spawns this
@@ -37,6 +37,8 @@ DB_PATH = DB_DIR / "nth.db"
 # Mirrors nth_web.ATTACH_DIR. Both readers of attachments.path must agree
 # on where a channel's files legitimately live, so the containment check
 # means the same thing on the MCP side as on the web side.
+# Beside the DB, matching nth_web.attach_dir_for(), so a scratch DB
+# genuinely isolates its files.
 ATTACH_DIR = DB_DIR / "attachments"
 
 CHANNEL_CODE_PATTERN = re.compile(r"^[a-z0-9][a-z0-9\-]{0,31}$")
@@ -3028,6 +3030,58 @@ def nth_cull(channel: str, member_id: str, target_member_id: str) -> str:
         db.close()
 
 
+def _purge_channel_attachments(db, channel: str) -> List[str]:
+    """Delete a channel's attachment ROWS; return the file paths to unlink.
+
+    nth_cleanup removes a channel's messages, members, tasks and locks, but
+    attachments were never included — so ending a channel left every image it
+    ever carried on disk forever.
+
+    Files are NOT unlinked here. This runs inside nth_cleanup's transaction,
+    which is not committed until every channel is done; unlinking inline made
+    the deletion permanent while the rows could still roll back on a later
+    failure, leaving a live channel full of rows pointing at files that no
+    longer exist — the exact broken state the row-before-file ordering exists
+    to avoid. The caller unlinks after the commit.
+
+    Paths are containment-checked against ATTACH_DIR: attachments.path is
+    absolute, so a row can name a file belonging to a different install (a
+    stale path after a move, or a database copied from elsewhere). Deleting
+    whatever it names is how real files were lost once already.
+    """
+    try:
+        rows = db.execute(
+            "SELECT id, path FROM attachments WHERE channel = ?", (channel,)
+        ).fetchall()
+    except sqlite3.Error:
+        return []           # table may not exist on an older DB
+    root = ATTACH_DIR.resolve()
+    doomed: List[str] = []
+    for r in rows:
+        db.execute("DELETE FROM attachments WHERE id = ?", (r["id"],))
+        try:
+            target = Path(r["path"]).resolve()
+            if target.is_relative_to(root):
+                doomed.append(str(target))
+        except (OSError, ValueError):
+            pass
+    return doomed
+
+
+def _unlink_purged(paths, channel: str = "") -> None:
+    """Remove files whose rows are already durably deleted."""
+    for p in paths:
+        try:
+            Path(p).unlink()
+        except OSError:
+            pass
+    if channel:
+        try:
+            (ATTACH_DIR / re.sub(r"[^\w.\-]", "_", channel)).rmdir()
+        except OSError:
+            pass
+
+
 @mcp.tool(name=f"{TOOL_PREFIX}_cleanup")
 def nth_cleanup(channel: str = "", all_ended: bool = False) -> str:
     """Delete channels and their data.
@@ -3037,6 +3091,7 @@ def nth_cleanup(channel: str = "", all_ended: bool = False) -> str:
         all_ended: If True, delete all ended channels.
     """
     db = get_db()
+    _doomed_files: List[Tuple[List[str], str]] = []
     try:
         deleted = []
         if channel:
@@ -3051,6 +3106,7 @@ def nth_cleanup(channel: str = "", all_ended: bool = False) -> str:
             db.execute("DELETE FROM tasks WHERE channel = ?", (channel,))
             db.execute("DELETE FROM messages WHERE channel = ?", (channel,))
             db.execute("DELETE FROM members WHERE channel = ?", (channel,))
+            _doomed_files.append((_purge_channel_attachments(db, channel), channel))
             db.execute("DELETE FROM channels WHERE code = ?", (channel,))
             deleted.append(channel)
         elif all_ended:
@@ -3063,12 +3119,17 @@ def nth_cleanup(channel: str = "", all_ended: bool = False) -> str:
                 db.execute("DELETE FROM tasks WHERE channel = ?", (code,))
                 db.execute("DELETE FROM messages WHERE channel = ?", (code,))
                 db.execute("DELETE FROM members WHERE channel = ?", (code,))
+                _doomed_files.append((_purge_channel_attachments(db, code), code))
                 db.execute("DELETE FROM channels WHERE code = ?", (code,))
                 deleted.append(code)
         else:
             return json.dumps({"error": "Specify a channel or set all_ended=True."})
 
         db.commit()
+        # Only now are the row deletions durable, so the files can go. A
+        # failure above rolls the rows back and leaves every file intact.
+        for _paths, _chan in _doomed_files:
+            _unlink_purged(_paths, _chan)
         return json.dumps({"ok": True, "deleted": deleted})
     finally:
         db.close()
