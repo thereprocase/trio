@@ -1502,7 +1502,12 @@ class NthWebHandler(BaseHTTPRequestHandler):
                     pass
                 raise
         except sqlite3.Error as e:
-            self._error(500, f"db error: {e}")
+            # This handler is new in this branch, so shipping the pattern
+            # would INTRODUCE the leak rather than inherit it. sqlite's text
+            # names tables and columns, and cull is reachable by anyone the
+            # server will accept a POST from.
+            sys.stderr.write(f"[nth_web] cull db error: {e}\n")
+            self._error(500, "remove failed")
             return
         finally:
             if db is not None:
