@@ -101,8 +101,8 @@ ALLOWED_IMAGE_MIME = {
 STT_MODEL = os.environ.get("NTH_STT_MODEL", "mlx-community/whisper-large-v3-turbo")
 STT_LANGUAGE = os.environ.get("NTH_STT_LANG", "en")   # "" = auto-detect
 MAX_STT_BYTES = 25 * 1024 * 1024        # 25 MB hard cap per audio clip
-# resolve() follows a symlinked install back to the repo, so the sidecar is
-# found whether nth_web.py is deployed as a symlink (link.sh) or a copy (setup.sh).
+# resolve() follows a symlinked install back to the tree it points at, so the
+# sidecar is found whether this file is deployed as a copy or a symlink.
 STT_WORKER = Path(__file__).resolve().with_name("nth_stt_worker.py")
 STT_WORKER_START_TIMEOUT = 180          # generous: first spawn may download ~1.5GB
 STT_TRANSCRIBE_TIMEOUT = 60             # per-clip inference ceiling
