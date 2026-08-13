@@ -1971,6 +1971,19 @@ INDEX_HTML = r"""<!doctype html>
   #side section:last-child { border-bottom: none; }
   #side h2 { font-size: 10px; text-transform: uppercase; color: var(--dim);
              letter-spacing: 0.08em; margin: 0 0 10px; font-weight: 600; }
+  /* Heading row: section title on the left, close control in the corner. */
+  #side .side-head { display: flex; align-items: center; justify-content: space-between;
+                     gap: 8px; margin: 0 0 10px; }
+  #side .side-head h2 { margin: 0; }
+  #side-close { flex: 0 0 auto; width: 22px; height: 22px; padding: 0;
+                display: flex; align-items: center; justify-content: center;
+                background: var(--bg2); color: var(--dim);
+                border: 1px solid var(--border); border-radius: var(--pill-radius);
+                font-family: inherit; font-size: 12px; line-height: 1; cursor: pointer; }
+  #side-close:hover { background: var(--accent); color: var(--bg);
+                      border-color: var(--accent); }
+  #side-close:focus-visible { outline: none; border-color: var(--accent);
+                              color: var(--fg); }
 
   .member { padding: 8px 0; cursor: pointer; }
   .member + .member { border-top: 1px solid var(--border); }
@@ -2113,15 +2126,10 @@ INDEX_HTML = r"""<!doctype html>
     #side { display: none !important; position: fixed; top: 0; bottom: 0; right: 0;
             width: calc(100vw - 60px); max-width: 320px; z-index: 20;
             grid-column: 1; grid-row: 2; border-left: 1px solid var(--border);
-            overflow-y: auto; padding-top: 48px; }
+            overflow-y: auto; padding-top: 12px; }
     #app.mobile-side-open #side { display: flex !important; }
-    /* Close button inside the sidebar on mobile */
-    #mobile-side-close { display: none; position: absolute; top: 10px; right: 10px;
-                         z-index: 21; background: var(--panel); border: 1px solid var(--border);
-                         color: var(--fg); font-size: 18px; width: 32px; height: 32px;
-                         border-radius: 50%; cursor: pointer; line-height: 1;
-                         display: flex; align-items: center; justify-content: center; }
-    #app.mobile-side-open #mobile-side-close { display: flex; }
+    /* Same corner control, sized for a fingertip. */
+    #side-close { width: 30px; height: 30px; font-size: 15px; }
     /* Scrim behind sidebar overlay */
     #mobile-scrim { display: none; position: fixed; inset: 0; z-index: 19;
                     background: rgba(0,0,0,0.5); }
@@ -2263,10 +2271,12 @@ INDEX_HTML = r"""<!doctype html>
   </div>
 
   <aside id="side">
-    <button id="mobile-side-close" aria-label="Close sidebar">✕</button>
     <section>
       <div id="filter-banner">filter active — showing matching messages only. click to clear.</div>
-      <h2 id="r-heading">Members</h2>
+      <div class="side-head">
+        <h2 id="r-heading">Members</h2>
+        <button id="side-close" aria-label="Close sidebar" title="Close sidebar">✕</button>
+      </div>
       <div id="r-list"></div>
     </section>
     <section id="chanstats-wrap">
@@ -4039,7 +4049,7 @@ INDEX_HTML = r"""<!doctype html>
   // ── Mobile sidebar: overlay with scrim ──
   const mobileScrim = document.getElementById('mobile-scrim');
   const btnMobileRoster = document.getElementById('btn-mobile-roster');
-  const btnMobileClose = document.getElementById('mobile-side-close');
+  const btnSideClose = document.getElementById('side-close');
   function closeMobileSidebar() {
     appEl.classList.remove('mobile-side-open');
     btnSide.classList.toggle('on', false);
@@ -4050,8 +4060,13 @@ INDEX_HTML = r"""<!doctype html>
     btnSide.classList.toggle('on', open);
     if (btnMobileRoster) btnMobileRoster.classList.toggle('on', open);
   }
+  // The in-sidebar close control picks the same path as the header pill.
+  function closeSidebar() {
+    if (window.innerWidth <= 768) { closeMobileSidebar(); }
+    else if (!_sideCollapsed) { toggleSidebar(); }
+  }
   if (btnMobileRoster) btnMobileRoster.addEventListener('click', toggleMobileSidebar);
-  if (btnMobileClose) btnMobileClose.addEventListener('click', closeMobileSidebar);
+  if (btnSideClose) btnSideClose.addEventListener('click', closeSidebar);
   if (mobileScrim) mobileScrim.addEventListener('click', closeMobileSidebar);
   // Auto-collapse sidebar on narrow viewports at load
   if (window.innerWidth <= 768) {
