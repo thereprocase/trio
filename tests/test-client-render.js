@@ -9,8 +9,8 @@
 //                       predicate whose bug rendered [joined]/[pinned]/… as
 //                       markdown; regression-guarded here)
 //   • humanizeIdSigils — @<member_id> → @<friendly-name> rewriting
-//   • paintBody / applyTargetBars — DOM repaint on edit/retract (the edit/
-//                       delete feature's client half)
+//   (paintBody / applyTargetBars coverage lives with the features that
+//    introduce them; those functions do not exist in this tree.)
 //
 // Usage: node tests/test-client-render.js
 'use strict';
@@ -93,8 +93,15 @@ check('renderMarkdown empty string → empty', () => {
 
 // ── isSystemContent (regression-guarded) ─────────────────────────────────────
 check('isSystemContent: [word] events are system', () => {
-  for (const s of ['[joined ] a', '[left ] a', '[ended ]', '[locked ] r',
-                   '[unlocked ] r', '[pinned ] x', '[renamed ] a→b']) {
+  // These are verbatim shapes nth_server.py emits — bracket closed right
+  // after the word. Do not "simplify" them into '[joined ] a'; that shape
+  // never occurs in production and would make this check green against a
+  // predicate that misses every real notice.
+  for (const s of ['[joined] alice — building the parser',
+                   '[pinned] read CURRENT.md first',
+                   '[locked] db.sqlite (TTL 60s)',
+                   '[unlocked] db.sqlite',
+                   '[renamed] bob → robert']) {
     assert.strictEqual(H.isSystemContent(s), true, 'expected system: ' + s);
   }
 });
