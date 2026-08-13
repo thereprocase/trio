@@ -1824,6 +1824,40 @@ INDEX_HTML = r"""<!doctype html>
   /* ── Chat ── */
   #chat-wrap { grid-row: 2 / 3; grid-column: 1 / 2; position: relative; overflow: hidden; }
   #chat { height: 100%; overflow-y: auto; padding: 14px 16px; scroll-behavior: smooth; }
+  /* Message numbers (#N): a per-message left-margin tag, hidden unless #chat
+     carries .show-msg-nums. The number rests at the message's vertical centre;
+     via position:sticky it pins just inside the viewport edge once that centre
+     would scroll out of view, so it stays visible beside its message and then
+     leaves with the message once it's fully off-screen. Pure CSS — the gutter
+     spans the full message height and flex-centres the sticky number. */
+  .msg-num-gutter { display: none; }
+  /* position:relative is also set on .msg below for hover actions/pins; repeated
+     here so this gutter's absolute/full-height centring can't silently break if
+     that unrelated rule is ever changed. */
+  #chat.show-msg-nums .msg { padding-left: 52px; position: relative; }
+  #chat.show-msg-nums .msg-num-gutter {
+    display: flex; align-items: center; justify-content: flex-end;
+    position: absolute; left: 0; top: 0; height: 100%; width: 46px;
+    pointer-events: none; }
+  /* NB: no overflow:auto/hidden/scroll on .msg-num-gutter (or any ancestor up to
+     #chat) — that would make the gutter the sticky scroll-container and break the
+     number's position:sticky. The large-id overflow guard lives on the sticky
+     span itself (own-overflow is safe), not on an ancestor. */
+  #chat.show-msg-nums .msg-num {
+    position: sticky; top: 10px; bottom: 10px;
+    max-width: 100%; overflow: hidden; text-overflow: ellipsis;
+    font-size: 10px; line-height: 1.2; color: var(--dim);
+    font-variant-numeric: tabular-nums; white-space: nowrap;
+    pointer-events: auto; user-select: text; cursor: text; }
+  #chat.show-msg-nums .msg.targeted .msg-num { color: var(--accent); }
+  /* Walled Garden draws each message as a chat bubble (its own padding, an 18px
+     radius and a ::before tail), so padding the bubble would print the number
+     inside it. Indent the column instead and hang the gutter in that margin,
+     leaving the bubble geometry untouched. */
+  :root[data-theme="bluebubble"] #chat.show-msg-nums { padding-left: 46px; }
+  :root[data-theme="bluebubble"] #chat.show-msg-nums .msg { padding-left: 14px; }
+  :root[data-theme="bluebubble"] #chat.show-msg-nums .msg-num-gutter {
+    left: -42px; width: 36px; }
   .msg { margin-bottom: 12px; word-wrap: break-word; cursor: pointer; padding: 6px 10px 8px;
          border-radius: var(--card-radius); border-left: 3px solid transparent; margin-left: -10px; }
   .msg:hover { background: var(--hover); }
@@ -2151,6 +2185,9 @@ INDEX_HTML = r"""<!doctype html>
   }
 
   @media (max-width: 480px) {
+    /* Shrink the message-number gutter on phones so it doesn't eat the body. */
+    #chat.show-msg-nums .msg { padding-left: 44px; }
+    #chat.show-msg-nums .msg-num-gutter { width: 38px; }
     header .meta { display: none; }
     .msg .head { font-size: 10px; }
     .msg .mentions-bar .mchip, .msg .refs-bar .mchip,
@@ -2245,6 +2282,7 @@ INDEX_HTML = r"""<!doctype html>
     </select>
     <input id="filter" type="text" placeholder="filter messages…" spellcheck="false">
     <span class="pill on" id="btn-side" title="show/hide the roster sidebar">roster</span>
+    <span class="pill on" id="btn-msgnum" title="show each message's #number in the left margin">#nums</span>
     <span class="pill" id="btn-compact" title="clamp every message body to 3 lines">compact</span>
     <span class="pill" id="btn-notify" title="desktop notifications on @you">🔔 off</span>
     <span class="pill" id="btn-sound" title="play a chime on any new message">🔊 off</span>
@@ -2316,6 +2354,7 @@ INDEX_HTML = r"""<!doctype html>
   const sendBtn = document.getElementById('send-btn');
   const preview = document.getElementById('preview');
   const compEl = document.getElementById('completions');
+  const btnMsgNum = document.getElementById('btn-msgnum');
   const filterEl = document.getElementById('filter');
   const filterBanner = document.getElementById('filter-banner');
   const btnCompact = document.getElementById('btn-compact');
@@ -3001,6 +3040,26 @@ INDEX_HTML = r"""<!doctype html>
     div.dataset.search = (m.content || '').toLowerCase() + ' '
                        + humanizeIdSigils(m.content || '').toLowerCase() + ' '
                        + (m.member_name || '').toLowerCase();
+
+    // Message-number gutter (#N) — visible only when #chat.show-msg-nums.
+    // Absolute + full-height so it centres on the whole message; the inner
+    // span is position:sticky (see CSS) so the number rides the visible slice.
+    const numGutter = document.createElement('div');
+    numGutter.className = 'msg-num-gutter';
+    // No ARIA here on purpose. The visible "#N" is real text inside the
+    // message's own subtree, ahead of the timestamp in DOM order, so a screen
+    // reader already reads the number then the message — the same order a
+    // sighted reader gets. A role/aria-label would duplicate that text and add
+    // one region boundary per message; aria-hidden would take it away entirely.
+    const numEl = document.createElement('span');
+    numEl.className = 'msg-num';
+    numEl.textContent = '#' + m.id;
+    numEl.title = 'message ' + m.id;
+    // The number is selectable/copyable; don't let a click on it also toggle
+    // the message's compact/expand state.
+    numEl.addEventListener('click', (e) => e.stopPropagation());
+    numGutter.appendChild(numEl);
+    div.appendChild(numGutter);
 
     const head = document.createElement('div');
     head.className = 'head';
@@ -3930,6 +3989,22 @@ INDEX_HTML = r"""<!doctype html>
     for (const [id, dom] of state.messageDomById) applyCompactClass(dom, id);
   });
 
+  // ── Message-number toggle (#N in the left gutter) ──
+  // Persists per-origin via localStorage, default ON. Toggling just flips a
+  // class on #chat; pure-CSS sticky positioning handles the rest (see .msg-num).
+  let msgNumsOn = true;
+  try { msgNumsOn = localStorage.getItem('trio.msgNumbers') !== '0'; } catch (_) {}
+  function applyMsgNums() {
+    chat.classList.toggle('show-msg-nums', msgNumsOn);
+    btnMsgNum.classList.toggle('on', msgNumsOn);
+  }
+  applyMsgNums();
+  btnMsgNum.addEventListener('click', () => {
+    msgNumsOn = !msgNumsOn;
+    try { localStorage.setItem('trio.msgNumbers', msgNumsOn ? '1' : '0'); } catch (_) {}
+    applyMsgNums();
+  });
+
   // ── Notify toggle ──
   btnNotify.addEventListener('click', async () => {
     if (!('Notification' in window)) {
@@ -4068,6 +4143,7 @@ INDEX_HTML = r"""<!doctype html>
     ['Message font', 'font-picker'],
     ['Roster sidebar', 'btn-side'],
     ['Compact messages', 'btn-compact'],
+    ['Message numbers', 'btn-msgnum'],
     ['Desktop notifications', 'btn-notify'],
     ['Chime on new message', 'btn-sound'],
   ].forEach(([labelText, id]) => {
