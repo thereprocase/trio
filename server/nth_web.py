@@ -2126,9 +2126,14 @@ INDEX_HTML = r"""<!doctype html>
   .member.expanded .member-actions { display: flex; }
   /* Destructive, so it carries --err rather than the amber --mention hue that
      means "someone said your name" everywhere else in this UI. */
-  .member .rm-btn { line-height: 1.2; padding: 6px 12px; border-radius: 4px;
+  /* Sized off .dm-btn on purpose: the routine control and the destructive one
+     sit in the same expanded row, and the destructive one should not be the
+     bigger target. */
+  .member .rm-btn { font: inherit; font-size: 9px; line-height: 1.2;
+                    padding: 2px 6px; border-radius: 3px;
                     background: var(--bg2); color: var(--err); border: 1px solid var(--border);
-                    cursor: pointer; user-select: none; font: inherit; font-size: 11px; }
+                    cursor: pointer; flex-shrink: 0; user-select: none;
+                    text-transform: uppercase; letter-spacing: 0.5px; }
   .member .rm-btn:hover:not(:disabled) { background: var(--err); color: var(--bg);
                           border-color: var(--err); }
   .member .rm-btn:disabled { opacity: 0.6; cursor: default; }
@@ -3684,8 +3689,8 @@ INDEX_HTML = r"""<!doctype html>
       const rm = document.createElement('button');
       rm.type = 'button';
       rm.className = 'rm-btn';
-      rm.textContent = 'Remove from channel';
-      rm.title = `Remove ${m.name} from the channel`;
+      rm.textContent = 'Remove';
+      rm.title = `Remove ${m.name} from this channel — releases their tasks and locks, and cannot be undone`;
       rm.addEventListener('click', (e) => { e.stopPropagation(); cullMember(m.id, m.name, rm); });
       actions.appendChild(rm);
       row.appendChild(actions);
