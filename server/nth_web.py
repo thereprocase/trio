@@ -3002,7 +3002,7 @@ INDEX_HTML = r"""<!doctype html>
       _initialSettleTimer = null;
       state.initialLoad = false;
       seedBaseline();
-      requestAnimationFrame(() => { chat.scrollTop = chat.scrollHeight; });
+      requestAnimationFrame(() => { disownScroll(); chat.scrollTop = chat.scrollHeight; });
     }, 250);
   }
 
@@ -4375,6 +4375,11 @@ INDEX_HTML = r"""<!doctype html>
   function noteIntent() { state.userIntentAt = Date.now(); }
   // True when a scroll happening right now is attributable to the user.
   function scrollIsUsers() { return Date.now() - state.userIntentAt < USER_INTENT_MS; }
+  // A scroll the PAGE issues is never the user's, however recently they moved.
+  // Called immediately before every programmatic scrollTop assignment: without
+  // it a wheel in the preceding USER_INTENT_MS donates its attribution to the
+  // animation, and sustainIntent then carries that donation to the bottom.
+  function disownScroll() { state.userIntentAt = 0; }
   // Keep an already-attributed scroll attributed while it is still moving.
   // Cannot bootstrap: an unattributed scroll starts stale and stays stale.
   function sustainIntent() { if (scrollIsUsers()) noteIntent(); }
@@ -4416,6 +4421,7 @@ INDEX_HTML = r"""<!doctype html>
     // bottom whenever the unread block is shorter than one viewport. Neither
     // is a scroll the user performed, so neither may count as catching up —
     // see USER_INTENT_MS.
+    disownScroll();
     chat.scrollTop = Math.max(0, dom.offsetTop - 8);
   });
 

@@ -43,10 +43,11 @@ const sandbox = {
 };
 const code = [grab('isHiddenMsg'), grab('firstVisibleUnreadDom'), grab('unreadCountVisible'),
               grab('markCaughtUp'), grab('seedBaseline'), grab('updateJumpButton'),
-              grab('noteIntent'), grab('scrollIsUsers'), grab('sustainIntent')].join('\n');
+              grab('noteIntent'), grab('scrollIsUsers'), grab('sustainIntent'),
+              grab('disownScroll')].join('\n');
 const fn = new Function('sandbox', `with (sandbox) { ${code};
   return { isHiddenMsg, firstVisibleUnreadDom, unreadCountVisible, markCaughtUp, seedBaseline,
-           updateJumpButton, noteIntent, scrollIsUsers, sustainIntent,
+           updateJumpButton, noteIntent, scrollIsUsers, sustainIntent, disownScroll,
            refreshUnreadDivider: () => {}, updateNewBar: () => {} }; }`);
 // refreshUnreadDivider/updateNewBar are stubbed via the returned closure below
 sandbox.refreshUnreadDivider = () => {};
@@ -205,6 +206,23 @@ check('appendMessage-style advance uses the walk, not a bare max', () => {
   H.markCaughtUp();
   assert.strictEqual(sandbox.state.lastSeenId, 3573,
     'a later visible message must not leapfrog an earlier hidden one');
+});
+
+check('a warm gesture cannot donate attribution to a page-issued scroll', () => {
+  // scroll up to notice the bar, then click it — the primary interaction
+  sandbox.state = mkState({ userIntentAt: Date.now() - 300 });
+  assert.strictEqual(H.scrollIsUsers(), true, 'gesture is warm before the click');
+  H.disownScroll();                                  // what the click handler does
+  for (let i = 0; i < 180; i++) H.sustainIntent();   // frames of the glide
+  assert.strictEqual(H.scrollIsUsers(), false,
+    'the page-issued glide must not inherit the wheel that preceded it');
+});
+
+check('disowning does not block the next real gesture', () => {
+  sandbox.state = mkState({ userIntentAt: Date.now() - 300 });
+  H.disownScroll();
+  H.noteIntent();                                    // user touches the scroller again
+  assert.strictEqual(H.scrollIsUsers(), true);
 });
 
 console.log('');
