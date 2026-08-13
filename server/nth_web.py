@@ -1284,6 +1284,18 @@ def _stt_ext_for(content_type: str) -> str:
     }.get(ct, ".webm")
 
 
+class SttEngineError(RuntimeError):
+    """The engine itself failed on this clip (bad audio, decode failure, OOM).
+
+    Distinguished from SttWorker's own protocol errors because the engine's
+    text is relayed verbatim from mlx_whisper/ffmpeg: it runs to kilobytes and
+    carries absolute local paths, including the server's temp directory. That
+    is fine in the server log and must not reach the client, whereas the
+    protocol errors ("worker pipe broken", "transcription timed out") are
+    short, path-free, and are what the client's fallback banner reads.
+    """
+
+
 class SttWorker:
     """Manages one persistent nth_stt_worker.py subprocess that holds the whisper
     model in memory. Thread-safe: transcription requests are serialized behind a
@@ -1387,7 +1399,7 @@ class SttWorker:
                 self._reset()   # stdout desynced — kill so the next call respawns clean
                 raise RuntimeError("worker sent malformed response")
             if not msg.get("ok"):
-                raise RuntimeError(msg.get("error") or "transcription failed")
+                raise SttEngineError(msg.get("error") or "transcription failed")
             return msg
 
     def health(self) -> Dict[str, Any]:
@@ -2035,6 +2047,13 @@ class NthWebHandler(BaseHTTPRequestHandler):
                             "seconds": result.get("seconds"),
                             "no_speech": bool(result.get("no_speech")),
                             "engine": "mlx_whisper", "model": STT_MODEL})
+            except SttEngineError as e:
+                # Engine text is verbatim ffmpeg/mlx output — kilobytes of it,
+                # carrying absolute local paths (this request's temp file among
+                # them). Log it here; hand the client a bounded, path-free
+                # reason, which is all its fallback banner renders anyway.
+                sys.stderr.write(f"[stt] engine error: {e}\n")
+                self._json({"ok": False, "error": "the audio could not be transcribed"})
             except RuntimeError as e:
                 # Engine/worker failure — 200 with ok:false so the browser reads the
                 # reason and falls back to web speech (per the configured behavior).
@@ -2966,6 +2985,66 @@ INDEX_HTML = r"""<!doctype html>
                 height: 36px; min-width: 38px; border-radius: 4px; cursor: pointer;
                 font-size: 16px; line-height: 1; }
   #attach-btn:hover { border-color: var(--accent); }
+  /* Dictation. #mic-btn borrows #attach-btn's metrics so the composer row stays
+     even, and uses a text glyph for the same reason the attach button does. */
+  #mic-btn { background: var(--panel); color: var(--fg); border: 1px solid var(--border);
+             height: 36px; min-width: 38px; border-radius: 4px; cursor: pointer;
+             font-size: 16px; line-height: 1; }
+  #mic-btn:hover { border-color: var(--accent); }
+  #attach-btn, #mic-btn { display: inline-flex; align-items: center; justify-content: center;
+                          padding: 0; }
+  #mic-btn.recording { border-color: var(--err); color: var(--err);
+                       animation: micpulse 1.2s ease-in-out infinite; }
+  #mic-btn.working { opacity: 0.6; cursor: default; }
+  /* color-mix, not rgba(var(--x-rgb)): the themes define --err as a hex colour,
+     and there is no matching --err-rgb triplet to interpolate. */
+  @keyframes micpulse {
+    0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--err) 50%, transparent); }
+    50%      { box-shadow: 0 0 0 4px color-mix(in srgb, var(--err) 0%, transparent); }
+  }
+  #stt-banner { padding: 5px 9px; margin-bottom: 6px; border-radius: 4px; font-size: 12px; }
+  #stt-banner[hidden] { display: none; }
+  #stt-banner.warn { background: color-mix(in srgb, var(--mention) 14%, transparent);
+                     color: var(--fg);
+                     border: 1px solid color-mix(in srgb, var(--mention) 45%, transparent); }
+  #stt-banner.err  { background: color-mix(in srgb, var(--err) 14%, transparent);
+                     color: var(--fg);
+                     border: 1px solid color-mix(in srgb, var(--err) 50%, transparent); }
+  .stt-status.ok { color: #5ec26a; }
+  .stt-status.err { color: var(--err); }
+  .stt-test-out { font-size: 11px; color: var(--dim); }
+  .stt-test-out.ok { color: #5ec26a; }
+  .stt-test-out.err { color: var(--err); }
+  #settings-panel button.pill { padding: 2px 9px; }
+  #settings-stt-page .pill { display: inline-flex; align-items: center; gap: 5px; }
+  /* STT recording waveform + transcription spinner */
+  .stt-spinner { width: 20px; height: 20px; border-radius: 50%; flex-shrink: 0;
+                 border: 3px solid rgba(var(--ov), 0.25); border-top-color: var(--accent);
+                 animation: sttspin 0.8s linear infinite; }
+  .stt-spinner[hidden] { display: none; }
+  @keyframes sttspin { to { transform: rotate(360deg); } }
+  /* Matches how the @all shimmer and composer mirror already behave. The
+     spinner keeps its ring (it still reads as "busy" without spinning). */
+  @media (prefers-reduced-motion: reduce) {
+    #mic-btn.recording { animation: none; }
+    .stt-spinner { animation: none; }
+  }
+  #stt-viz { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+  #stt-viz[hidden] { display: none; }
+  #stt-wave { width: 300px; max-width: 100%; height: 30px; }
+  #stt-wave[hidden] { display: none; }
+  #stt-viz-label, .stt-viz-label { font-size: 11px; color: var(--dim); }
+  /* Settings → local-transcription sub-page */
+  #settings-stt-page { display: none; }
+  #settings-panel.stt-page-open > :not(#settings-stt-page) { display: none; }
+  #settings-panel.stt-page-open > #settings-stt-page { display: block; }
+  #settings-stt-page .stt-back { background: none; border: none; color: var(--accent);
+                                 cursor: pointer; font-size: 12px; padding: 0 0 6px; }
+  #settings-stt-page h3 { margin: 2px 0 8px; }
+  #settings-stt-page .stt-status { margin-bottom: 8px; }
+  .stt-testviz { display: flex; align-items: center; gap: 8px; margin: 8px 0; }
+  .stt-testviz[hidden] { display: none; }
+  #stt-test-wave { width: 260px; max-width: 100%; height: 30px; }
   #attach-strip { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 6px; }
   #attach-strip:empty { display: none; }
   .attach-thumb { position: relative; width: 60px; height: 60px; border-radius: 4px;
@@ -3200,10 +3279,17 @@ INDEX_HTML = r"""<!doctype html>
     <div id="preview">(broadcast — all connected members receive this)</div>
     <div id="target-bar"></div>
     <div id="attach-strip"></div>
+    <div id="stt-banner" hidden></div>
+    <div id="stt-viz" hidden>
+      <canvas id="stt-wave" width="300" height="30"></canvas>
+      <div id="stt-spinner" class="stt-spinner" hidden></div>
+      <span id="stt-viz-label"></span>
+    </div>
     <input type="file" id="file-input" accept="image/png,image/jpeg,image/gif,image/webp" multiple style="display:none">
     <div id="input-row">
       <div id="completions"></div>
       <button id="attach-btn" title="attach image (or paste / drop into the box)">🖼</button>
+      <button id="mic-btn" title="dictate (speech to text)" aria-label="dictate">🎤</button>
       <div id="input-stack">
         <div id="input-highlight" aria-hidden="true"></div>
         <textarea id="input" rows="1" placeholder="Message — @ to mention, Enter to send"></textarea>
@@ -3383,6 +3469,8 @@ INDEX_HTML = r"""<!doctype html>
     notifyScope: 'mention',   // 'mention' | 'all'
     notifyWhen: 'hidden',     // 'hidden' | 'always'
     pendingAttachments: [],   // images uploaded but not yet attached to a send
+    sttMode: 'local',         // 'local' (Whisper sidecar) | 'web' (browser SpeechRecognition)
+    sttRecording: false,      // mic is actively capturing
     unreadCount: 0,                 // for tab title while hidden
     jumpUnread: 0,                  // messages arrived while user was scrolled up
     rateBins: new Map(),            // bin_epoch_10s → count
@@ -4987,6 +5075,288 @@ INDEX_HTML = r"""<!doctype html>
     const gone = new Set(slots);
     state.pendingAttachments = state.pendingAttachments.filter(a => !gone.has(a));
   }
+
+  // ── Speech-to-text: mic → composer ──
+  // Two modes (state.sttMode): 'local' records a clip and POSTs it to the warm
+  // Whisper sidecar (/api/stt/transcribe); 'web' uses the browser's streaming
+  // SpeechRecognition. If a LOCAL attempt fails, we auto-fall back to web and
+  // show a banner — never a silent failure. Neither endpoint takes a channel,
+  // so these fetches intentionally carry no API_QS.
+  const micBtn = document.getElementById('mic-btn');
+  const sttBanner = document.getElementById('stt-banner');
+  const sttViz = document.getElementById('stt-viz');
+  const sttWaveCanvas = document.getElementById('stt-wave');
+  const sttSpinner = document.getElementById('stt-spinner');
+  const sttVizLabel = document.getElementById('stt-viz-label');
+  // Glyphs match #attach-btn's text-glyph idiom. ICON_MIC is captured from the
+  // button's static markup so the glyph itself lives in exactly one place.
+  const ICON_STOP = '⏹';
+  const ICON_MIC = micBtn ? micBtn.innerHTML : '';
+  // Below this normalized peak amplitude a clip is treated as silent and never
+  // sent to Whisper (which otherwise hallucinates words from noise). Kept lenient
+  // so quiet speech still goes through; the server no_speech check is the backstop.
+  const STT_SILENCE_PEAK = 0.015;
+  const STT_FETCH_TIMEOUT_MS = 240000;   // backstop; cold start can download ~1.5GB
+  // Turn an internal engine reason into something a person can read.
+  function humanizeSttError(reason) {
+    reason = String(reason || '');
+    if (/timed out|timeout/i.test(reason)) return 'it timed out';
+    if (/busy/i.test(reason)) return 'it was busy';
+    if (/pipe|exited|respawn|malformed/i.test(reason)) return 'the engine restarted';
+    if (/not (importable|available|installed)/i.test(reason)) return 'it isn’t installed';
+    if (/HTTP\s*\d/i.test(reason)) return 'the server returned an error';
+    if (/audio|transcrib/i.test(reason)) return 'the audio could not be read';
+    return 'an unexpected error';
+  }
+  try { const m = localStorage.getItem('trio.sttMode'); if (m === 'web' || m === 'local') state.sttMode = m; } catch (_) {}
+
+  function showSttBanner(msg, kind) {
+    if (!sttBanner) return;
+    sttBanner.textContent = msg;
+    sttBanner.className = kind || '';
+    sttBanner.hidden = false;
+  }
+  function hideSttBanner() { if (sttBanner) sttBanner.hidden = true; }
+
+  // Live audio waveform on a <canvas> from a MediaStream. Reusable across the
+  // composer and the settings test page. Returns { start(stream), stop() }.
+  function makeWaveform(canvas) {
+    let raf = null, audioCtx = null, analyser = null, source = null, data = null;
+    let peak = 0, sampled = false;   // loudest normalized sample seen this session (0..1)
+    function start(stream) {
+      stop();
+      peak = 0; sampled = false;
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC || !canvas || !stream) return;
+      try {
+        audioCtx = new AC();
+        if (audioCtx.state === 'suspended') { try { audioCtx.resume(); } catch (_) {} }
+        source = audioCtx.createMediaStreamSource(stream);
+        analyser = audioCtx.createAnalyser();
+        analyser.fftSize = 1024;
+        source.connect(analyser);
+        data = new Uint8Array(analyser.fftSize);
+      } catch (_) { stop(); return; }
+      const cx = canvas.getContext('2d');
+      const stroke = (getComputedStyle(document.documentElement)
+                      .getPropertyValue('--accent') || '#62d7ef').trim() || '#62d7ef';
+      function draw() {
+        raf = requestAnimationFrame(draw);
+        analyser.getByteTimeDomainData(data);
+        const w = canvas.width, h = canvas.height;
+        cx.clearRect(0, 0, w, h);
+        cx.lineWidth = 2;
+        cx.strokeStyle = stroke;
+        cx.beginPath();
+        const slice = w / data.length;
+        let x = 0, frameMax = 0;
+        for (let i = 0; i < data.length; i++) {
+          const dev = Math.abs(data[i] - 128);
+          if (dev > frameMax) frameMax = dev;
+          const y = (data[i] / 128.0) * h / 2;   // 128 = silence midline
+          if (i === 0) cx.moveTo(x, y); else cx.lineTo(x, y);
+          x += slice;
+        }
+        sampled = true;
+        if (frameMax / 128 > peak) peak = frameMax / 128;   // energy proxy for silence detection
+        cx.stroke();
+      }
+      draw();
+    }
+    function stop() {
+      if (raf) { cancelAnimationFrame(raf); raf = null; }
+      if (source) { try { source.disconnect(); } catch (_) {} source = null; }
+      if (audioCtx) { try { audioCtx.close(); } catch (_) {} audioCtx = null; }
+      analyser = null; data = null;
+    }
+    // getPeak() returns -1 when no audio was ever sampled (analyser unavailable),
+    // so callers can distinguish "silent" from "couldn't measure".
+    return { start, stop, getPeak: () => (sampled ? peak : -1) };
+  }
+
+  const composerWave = makeWaveform(sttWaveCanvas);
+
+  // Composer visualizer: 'wave' while recording, 'spin' while transcribing.
+  function showViz(kind, label, stream) {
+    if (!sttViz) return;
+    sttViz.hidden = false;
+    if (sttVizLabel) sttVizLabel.textContent = label || '';
+    if (kind === 'wave') {
+      if (sttWaveCanvas) sttWaveCanvas.hidden = false;
+      if (sttSpinner) sttSpinner.hidden = true;
+      composerWave.start(stream);
+    } else {   // 'spin'
+      composerWave.stop();
+      if (sttWaveCanvas) sttWaveCanvas.hidden = true;
+      if (sttSpinner) sttSpinner.hidden = false;
+    }
+  }
+  function hideViz() {
+    composerWave.stop();
+    if (sttViz) sttViz.hidden = true;
+    if (sttWaveCanvas) sttWaveCanvas.hidden = false;
+    if (sttSpinner) sttSpinner.hidden = true;
+  }
+
+  function setMicState(s) {   // 'idle' | 'recording' | 'working'
+    state.sttRecording = (s === 'recording');
+    if (micBtn) {
+      micBtn.classList.toggle('recording', s === 'recording');
+      micBtn.classList.toggle('working', s === 'working');
+      micBtn.innerHTML = (s === 'recording') ? ICON_STOP : ICON_MIC;
+      micBtn.title = (s === 'recording') ? 'stop dictation'
+                   : (s === 'working') ? 'transcribing…' : 'dictate (speech to text)';
+      micBtn.setAttribute('aria-label', micBtn.title);
+    }
+    if (s === 'idle') hideViz();
+  }
+
+  function insertTranscript(text) {
+    text = (text || '').trim();
+    if (!text) return;
+    const cur = input.value;
+    input.value = cur + ((cur && !/\s$/.test(cur)) ? ' ' : '') + text;
+    input.dispatchEvent(new Event('input'));   // autosize + mention mirror + preview
+    input.focus();
+  }
+
+  // Web SpeechRecognition (streaming; interim words appear live).
+  let webRec = null;
+  function startWebDictation(fallbackReason) {
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) {
+      showSttBanner('Web speech recognition isn’t supported here (try Chrome or Safari).', 'err');
+      setMicState('idle');
+      return;
+    }
+    if (fallbackReason) {
+      showSttBanner('On-device transcription unavailable (' + humanizeSttError(fallbackReason)
+        + '). Switched to the browser’s speech recognition, which may send audio to the browser'
+        + ' vendor. Speak again to use it, or pick a different Dictation mode in settings.', 'warn');
+    }
+    hideViz();   // web mode exposes no stream to visualize; the pulsing button conveys state
+    const base = input.value + ((input.value && !/\s$/.test(input.value)) ? ' ' : '');
+    let finalTxt = '';
+    const rec = new SR();
+    webRec = rec;
+    rec.lang = 'en-US'; rec.interimResults = true; rec.continuous = true;
+    rec.onresult = (e) => {
+      let interim = '';
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        if (e.results[i].isFinal) finalTxt += e.results[i][0].transcript;
+        else interim += e.results[i][0].transcript;
+      }
+      input.value = base + finalTxt + interim;
+      input.dispatchEvent(new Event('input'));
+    };
+    rec.onerror = (e) => { showSttBanner('Web speech error: ' + (e.error || 'unknown'), 'err'); };
+    rec.onend = () => {
+      // Chrome auto-ends on silence/timeout; while still recording, restart so
+      // long dictation keeps going.
+      if (state.sttRecording && webRec === rec) { try { rec.start(); return; } catch (_) {} }
+      if (webRec === rec) webRec = null;
+      setMicState('idle');
+    };
+    try { rec.start(); setMicState('recording'); }
+    catch (e) { showSttBanner('Could not start web speech: ' + e.message, 'err'); setMicState('idle'); }
+  }
+  function stopWebDictation() {
+    state.sttRecording = false;
+    if (webRec) { try { webRec.stop(); } catch (_) {} }
+  }
+
+  // Local dictation: record with MediaRecorder, POST the clip to the sidecar.
+  let mediaRec = null, mediaChunks = [], mediaStream = null;
+  let localStarting = false;   // synchronous guard: mic is opening (pre-getUserMedia resolve)
+  let composerAbort = null;    // AbortController for the in-flight transcribe fetch
+  function stopTracks() {
+    if (mediaStream) { mediaStream.getTracks().forEach(t => t.stop()); mediaStream = null; }
+  }
+  async function startLocalDictation() {
+    if (localStarting) return;   // ignore a second click before the mic opens
+    localStarting = true;
+    let stream;
+    try { stream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
+    catch (e) { localStarting = false; showSttBanner('Microphone permission denied: ' + (e.message || e.name), 'err'); setMicState('idle'); return; }
+    mediaStream = stream;
+    mediaChunks = [];
+    const mime = (window.MediaRecorder && MediaRecorder.isTypeSupported('audio/webm')) ? 'audio/webm' : '';
+    try { mediaRec = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined); }
+    catch (e) { stopTracks(); localStarting = false; showSttBanner('Recording unsupported: ' + e.message, 'err'); setMicState('idle'); return; }
+    mediaChunks = [];
+    mediaRec.ondataavailable = (e) => { if (e.data && e.data.size) mediaChunks.push(e.data); };
+    mediaRec.onstop = async () => {
+      stopTracks();
+      const peak = composerWave.getPeak();
+      const blob = new Blob(mediaChunks, { type: (mediaRec && mediaRec.mimeType) || 'audio/webm' });
+      if (!blob.size) { setMicState('idle'); return; }
+      if (peak >= 0 && peak < STT_SILENCE_PEAK) {   // essentially silent — don't feed Whisper
+        setMicState('idle');
+        showSttBanner('No message detected — try again.', 'warn');
+        return;
+      }
+      setMicState('working');
+      showViz('spin', 'transcribing…');
+      composerAbort = new AbortController();
+      // Relabel if it's slow — the first run downloads the model, not a hang.
+      const slowTimer = setTimeout(() => showViz('spin', 'preparing model (first run)…'), 4000);
+      const killTimer = setTimeout(() => { try { composerAbort.abort('timeout'); } catch (_) {} }, STT_FETCH_TIMEOUT_MS);
+      try {
+        const r = await fetch('/api/stt/transcribe', {
+          method: 'POST',
+          headers: { 'Content-Type': blob.type || 'audio/webm' },
+          body: blob,
+          signal: composerAbort.signal,
+        });
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok || !data.ok) { startWebDictation((data && data.error) || ('HTTP ' + r.status)); return; }
+        if (data.no_speech || !(data.text || '').trim()) {   // Whisper's own no-speech backstop
+          setMicState('idle');
+          showSttBanner('No message detected — try again.', 'warn');
+          return;
+        }
+        hideSttBanner();
+        insertTranscript(data.text);
+        setMicState('idle');
+      } catch (e) {
+        if (e && e.name === 'AbortError') {
+          setMicState('idle');
+          showSttBanner('Transcription cancelled.', 'warn');
+        } else {
+          startWebDictation(e.message || 'network error');
+        }
+      } finally {
+        clearTimeout(slowTimer); clearTimeout(killTimer); composerAbort = null;
+      }
+    };
+    try {
+      mediaRec.start();
+      setMicState('recording');
+      showViz('wave', 'listening…', stream);
+    } catch (e) { stopTracks(); showSttBanner('Could not start recording: ' + e.message, 'err'); setMicState('idle'); }
+    localStarting = false;   // recording is live (or failed) — allow the next action
+  }
+  function stopLocalDictation() {
+    state.sttRecording = false;
+    if (mediaRec && mediaRec.state !== 'inactive') { try { mediaRec.stop(); } catch (_) {} }
+  }
+
+  function micToggle() {
+    if (micBtn && micBtn.classList.contains('working')) {   // transcribing → click cancels
+      if (composerAbort) { try { composerAbort.abort('cancel'); } catch (_) {} }
+      return;
+    }
+    if (localStarting) return;   // mic is opening — ignore extra clicks
+    if (state.sttRecording) { stopWebDictation(); stopLocalDictation(); return; }
+    hideSttBanner();
+    if (!window.isSecureContext) {
+      showSttBanner('Dictation needs HTTPS or localhost (this page is insecure). Use “tailscale serve” for HTTPS on your phone.', 'err');
+      return;
+    }
+    if (state.sttMode === 'web') startWebDictation();
+    else startLocalDictation();
+  }
+  if (micBtn) micBtn.addEventListener('click', micToggle);
 
   async function sendMessage() {
     let text = input.value.trim();
