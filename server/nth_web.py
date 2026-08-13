@@ -49,7 +49,7 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 sys.path.insert(0, str(Path(__file__).parent))
 from nth_constants import (ANIMAL_EMOJIS, animal_for, animal_for_channel,
@@ -63,6 +63,14 @@ DB_POLL_INTERVAL = 0.5
 HISTORY_LIMIT = 200          # messages sent to a client on /api/history
 HUB_IDLE_REAP_S = 300        # retire a channel's EventHub after this long unwatched
 SSE_HEARTBEAT_SEC = 20       # keep-alive comment interval
+
+# ── Image attachments (Phase-1 prototype) ──
+ATTACH_DIR = Path.home() / ".claude" / "nth" / "attachments"
+MAX_UPLOAD_BYTES = 10 * 1024 * 1024     # 10 MB hard cap per image
+ALLOWED_IMAGE_MIME = {
+    "image/png": ".png", "image/jpeg": ".jpg",
+    "image/gif": ".gif", "image/webp": ".webp",
+}
 STALE_SECONDS = 300          # fresh heartbeat threshold
 DEAD_SECONDS = 900           # no heartbeat this long → dead
 SLEEPING_KEYWORDS = ("idle", "standing by", "tier 3", "agent-monitor")
@@ -526,6 +534,56 @@ def ensure_operator_row(db: sqlite3.Connection, channel: str, ident: OperatorIde
     return ident.member_id, ident.display_name
 
 
+def sniff_image_mime(data: bytes) -> Optional[str]:
+    """Real image MIME from magic bytes, or None if not a supported image.
+    We trust the sniffed type over the client-declared Content-Type."""
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    if data[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    if data[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    return None
+
+
+def ensure_attachments_table(db: sqlite3.Connection) -> None:
+    """Create the attachments table on demand. The web side owns this for the
+    prototype so it works before the MCP server ships the canonical CREATE —
+    both use IF NOT EXISTS, so it stays safe once the server half lands."""
+    db.execute(
+        "CREATE TABLE IF NOT EXISTS attachments ("
+        " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        " channel TEXT NOT NULL,"
+        " message_id INTEGER,"
+        " member_id TEXT NOT NULL,"
+        " mime TEXT NOT NULL,"
+        " filename TEXT,"
+        " width INTEGER, height INTEGER, bytes INTEGER,"
+        " path TEXT NOT NULL,"
+        " created_at TEXT NOT NULL)"
+    )
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_attachments_message "
+        "ON attachments(message_id)"
+    )
+
+
+def attachments_for_message(db: sqlite3.Connection, msg_id: int) -> List[Dict[str, Any]]:
+    """[{id, mime, filename}] for a message. Defensive: returns [] if the
+    attachments table doesn't exist yet (no uploads have happened)."""
+    try:
+        rows = db.execute(
+            "SELECT id, mime, filename FROM attachments "
+            "WHERE message_id = ? ORDER BY id", (msg_id,),
+        ).fetchall()
+    except sqlite3.Error:
+        return []
+    return [{"id": r["id"], "mime": r["mime"], "filename": r["filename"] or ""}
+            for r in rows]
+
+
 # ───────── EventHub: polls DB, fans out SSE events ─────────
 class EventHub:
     """Single background thread watches the DB and pushes JSON events to any
@@ -595,6 +653,7 @@ class EventHub:
                     "refs": parse_mentions_json(r["refs"] if "refs" in r.keys() else ""),
                     "bangs": parse_mentions_json(r["bangs"] if "bangs" in r.keys() else ""),
                     "created_at": r["created_at"],
+                    "attachments": attachments_for_message(db, r["id"]),
                 }))
         except (sqlite3.Error, queue.Full):
             pass
@@ -767,6 +826,7 @@ class EventHub:
                             "refs": parse_mentions_json(r["refs"] if "refs" in r.keys() else ""),
                             "bangs": parse_mentions_json(r["bangs"] if "bangs" in r.keys() else ""),
                             "created_at": r["created_at"],
+                            "attachments": attachments_for_message(db, r["id"]),
                         })
                         self.last_msg_id = r["id"]
 
@@ -1163,6 +1223,8 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 self._error(404, f"no such channel: {ch}")
                 return
             self._serve_sse(self._hub_for_channel(ch))
+        elif path.startswith("/api/attachment/"):
+            self._serve_attachment(path)
         else:
             self._error(404, "not found")
 
@@ -1172,6 +1234,8 @@ class NthWebHandler(BaseHTTPRequestHandler):
             self._handle_send()
         elif parsed.path == "/api/identify":
             self._handle_identify()
+        elif parsed.path == "/api/upload":
+            self._handle_upload()
         else:
             self._error(404, "not found")
 
@@ -1289,9 +1353,27 @@ class NthWebHandler(BaseHTTPRequestHandler):
             return
 
         content = (body.get("content") or "").strip()
-        if not content:
+        raw_ids = body.get("attachment_ids") or []
+        if not isinstance(raw_ids, list):
+            self._error(400, "invalid attachment_ids")
+            return
+        # Strict integer contract: reject floats, bools, and numeric strings
+        # (type(True) is bool, so booleans are rejected here too).
+        if not all(type(a) is int and a > 0 for a in raw_ids):
+            self._error(400, "invalid attachment_ids")
+            return
+        attachment_ids = list(raw_ids)
+        if len(attachment_ids) > 8:
+            self._error(400, "too many attachments (max 8)")
+            return
+        if len(set(attachment_ids)) != len(attachment_ids):
+            self._error(400, "duplicate attachment id")
+            return
+        if not content and not attachment_ids:
             self._error(400, "empty content")
             return
+        if not content and attachment_ids:
+            content = "[image]"
         if len(content) > 4000:
             self._error(400, "content too long (max 4000 chars)")
             return
@@ -1318,6 +1400,23 @@ class NthWebHandler(BaseHTTPRequestHandler):
             try:
                 op_id, op_name = ensure_operator_row(db, send_channel, ident)
                 now = now_iso()
+
+                # Validate attachments up front: every requested id must be
+                # this operator's own, unlinked, in-channel row — else abort,
+                # so an image-only send can't post a false "[image]" with no
+                # image actually attached.
+                if attachment_ids:
+                    ensure_attachments_table(db)
+                    placeholders = ",".join("?" * len(attachment_ids))
+                    owned = db.execute(
+                        f"SELECT id FROM attachments WHERE id IN ({placeholders}) "
+                        "AND channel = ? AND member_id = ? AND message_id IS NULL",
+                        (*attachment_ids, send_channel, op_id),
+                    ).fetchall()
+                    if {r["id"] for r in owned} != set(attachment_ids):
+                        db.execute("ROLLBACK")
+                        self._error(400, "invalid or already-linked attachment id")
+                        return
 
                 # Leading "$task " marks this as a claimable task — same
                 # table + status flow as trio_send(task=True). The prefix
@@ -1363,6 +1462,14 @@ class NthWebHandler(BaseHTTPRequestHandler):
                      json.dumps(bang_ids)    if bang_ids    else ""),
                 )
                 msg_id = cursor.lastrowid
+                # Link any uploaded attachments to this message (own, unlinked).
+                if attachment_ids:
+                    db.executemany(
+                        "UPDATE attachments SET message_id = ? "
+                        "WHERE id = ? AND channel = ? AND member_id = ? "
+                        "AND message_id IS NULL",
+                        [(msg_id, aid, send_channel, op_id) for aid in attachment_ids],
+                    )
                 db.execute(
                     "UPDATE members SET last_seen = ? WHERE channel = ? AND id = ?",
                     (now, send_channel, op_id),
@@ -1385,6 +1492,175 @@ class NthWebHandler(BaseHTTPRequestHandler):
                     pass
 
         self._json({"ok": True, "id": msg_id})
+
+    def _handle_upload(self) -> None:
+        """Accept a raw image body (Content-Type = mime, X-Filename header),
+        validate by magic bytes, store on disk, and create an unlinked
+        attachments row. The subsequent /api/send links it to a message."""
+        token, ident, _is_new = self._resolve_identity()
+        if ident.source == IDENTITY_SOURCE_PENDING:
+            self._error(403, "identity required — POST /api/identify first")
+            return
+        # Same reason as _serve_attachment: the channel comes from the request,
+        # not from a process-wide attribute that landing mode never sets.
+        ch = self._channel_for_request(urlparse(self.path))
+        if ch is None:
+            self._error(400, "channel query param required")
+            return
+        if self.landing_mode and not self._channel_exists(ch):
+            self._error(404, f"no such channel: {ch}")
+            return
+        try:
+            length = int(self.headers.get("Content-Length", "0") or 0)
+        except (TypeError, ValueError):
+            self._error(400, "invalid Content-Length")
+            return
+        if length <= 0 or length > MAX_UPLOAD_BYTES:
+            self._error(400, "image is missing or larger than the 10 MB limit")
+            return
+        try:
+            data = self.rfile.read(length)
+        except OSError:
+            self._error(400, "read failed")
+            return
+        if len(data) != length:
+            self._error(400, "incomplete upload")
+            return
+        mime = sniff_image_mime(data)
+        if mime not in ALLOWED_IMAGE_MIME:
+            self._error(400, "unsupported image type (png/jpeg/gif/webp only)")
+            return
+        ext = ALLOWED_IMAGE_MIME[mime]
+        # X-Filename is percent-encoded by the client (HTTP headers must be
+        # ISO-8859-1, but filenames — e.g. macOS screenshots — carry Unicode).
+        raw_name = unquote(self.headers.get("X-Filename", "") or "")
+        filename = re.sub(r"[^\w.\- ]", "_", raw_name)[:120] or ("image" + ext)
+
+        db = None
+        try:
+            db = sqlite3.connect(str(self.db_path), timeout=5, isolation_level=None)
+            db.row_factory = sqlite3.Row
+            db.execute("PRAGMA busy_timeout=5000")
+            ensure_attachments_table(db)
+            op_id, _op_name = ensure_operator_row(db, ch, ident)
+            now = now_iso()
+            cur = db.execute(
+                "INSERT INTO attachments "
+                "(channel, message_id, member_id, mime, filename, bytes, path, created_at) "
+                "VALUES (?, NULL, ?, ?, ?, ?, '', ?)",
+                (ch, op_id, mime, filename, len(data), now),
+            )
+            att_id = cur.lastrowid
+            fpath = None
+            try:
+                chan_dir = ATTACH_DIR / re.sub(r"[^\w.\-]", "_", ch)
+                chan_dir.mkdir(parents=True, exist_ok=True)
+                fpath = chan_dir / f"{att_id}{ext}"
+                fpath.write_bytes(data)
+                db.execute("UPDATE attachments SET path = ? WHERE id = ?",
+                           (str(fpath), att_id))
+            except (OSError, sqlite3.Error):
+                # Roll back BOTH sides so no orphan row or file survives.
+                try:
+                    db.execute("DELETE FROM attachments WHERE id = ?", (att_id,))
+                except sqlite3.Error:
+                    pass
+                if fpath is not None:
+                    try:
+                        fpath.unlink()
+                    except OSError:
+                        pass
+                raise
+        except (sqlite3.Error, OSError) as e:
+            self._error(500, f"upload error: {e}")
+            return
+        finally:
+            if db is not None:
+                try:
+                    db.close()
+                except sqlite3.Error:
+                    pass
+        self._json({"ok": True, "id": att_id, "mime": mime,
+                    "filename": filename})   # client builds the URL with its channel
+
+    def _serve_attachment(self, path: str) -> None:
+        tail = path.rsplit("/", 1)[-1]
+        if not tail.isdigit():
+            self._error(404, "not found")
+            return
+        att_id = int(tail)
+        # Attachment bytes are channel content, so they get the same bar as
+        # every other read: a resolved identity and the channel taken from the
+        # REQUEST. Binding the process-wide self.channel would serve nothing in
+        # landing mode (it is "" there) and, worse, would ignore which channel
+        # the caller actually asked for. The upstream original had no gate at
+        # all; the fork's gate keyed on a DM visibility engine that does not
+        # exist here, so this is re-derived rather than ported.
+        parsed = urlparse(self.path)
+        ch = self._channel_for_request(parsed)
+        if ch is None:
+            self._error(400, "channel query param required")
+            return
+        if self.landing_mode and not self._channel_exists(ch):
+            self._error(404, f"no such channel: {ch}")
+            return
+        _token, ident, _is_new = self._resolve_identity()
+        if ident.source == IDENTITY_SOURCE_PENDING:
+            self._error(403, "identity required — POST /api/identify first")
+            return
+        row = None
+        db = None
+        try:
+            db = sqlite3.connect(str(self.db_path), timeout=5, isolation_level=None)
+            db.row_factory = sqlite3.Row
+            db.execute("PRAGMA busy_timeout=2000")
+            op_id, _op_name = ensure_operator_row(db, ch, ident)
+            row = db.execute(
+                # An attachment is readable once it is PUBLISHED (linked to a
+                # message everyone in the channel can see). Before that it is
+                # still in someone's composer, so only its uploader may fetch
+                # it. Ids are small sequential integers, so without this an
+                # image pasted and then thought better of stays readable by
+                # anyone who guesses its id. The fork's gate keyed this on a DM
+                # visibility engine that does not exist upstream; the
+                # uploader-only half is not DM-specific and is re-derived here.
+                "SELECT mime, path FROM attachments "
+                " WHERE id = ? AND channel = ? "
+                "   AND (message_id IS NOT NULL OR member_id = ?)",
+                (att_id, ch, op_id),
+            ).fetchone()
+        except sqlite3.Error:
+            row = None
+        finally:
+            if db is not None:
+                try:
+                    db.close()
+                except sqlite3.Error:
+                    pass
+        if not row:
+            self._error(404, "not found")
+            return
+        try:
+            chan_root = (ATTACH_DIR / re.sub(r"[^\w.\-]", "_", ch)).resolve()
+            resolved = Path(row["path"]).resolve()
+            # Defense in depth: only serve files under THIS channel's dir.
+            if not resolved.is_relative_to(chan_root):
+                self._error(404, "not found")
+                return
+            data = resolved.read_bytes()
+        except OSError:
+            self._error(404, "file missing")
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", row["mime"])
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "public, max-age=31536000, immutable")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        try:
+            self.wfile.write(data)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
 
 
 # ───────── HTML / JS / CSS (served as /) ─────────
@@ -2220,6 +2496,39 @@ INDEX_HTML = r"""<!doctype html>
               font-weight: 600; font-family: inherit; font-size: 13px; }
   #send-btn:hover { background: var(--accent-hi); }
   #send-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  #attach-btn { background: var(--panel); color: var(--fg); border: 1px solid var(--border);
+                height: 36px; min-width: 38px; border-radius: 4px; cursor: pointer;
+                font-size: 16px; line-height: 1; }
+  #attach-btn:hover { border-color: var(--accent); }
+  #attach-strip { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 6px; }
+  #attach-strip:empty { display: none; }
+  .attach-thumb { position: relative; width: 60px; height: 60px; border-radius: 4px;
+                  overflow: hidden; border: 1px solid var(--border); background: var(--bg); }
+  .attach-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .attach-thumb .rm { position: absolute; top: 1px; right: 1px; width: 16px; height: 16px;
+                      border-radius: 50%; background: rgba(0,0,0,0.65); color: #fff;
+                      border: none; cursor: pointer; font-size: 11px; line-height: 16px;
+                      padding: 0; text-align: center; }
+  .attach-thumb.uploading { opacity: 0.5; }
+  #composer.dragover { outline: 2px dashed var(--accent); outline-offset: -4px; }
+  /* Compact clamps .body, but attachments are a SIBLING of it — without
+     this an image message stayed 250-380px tall while plain ones clamped
+     to ~57px, so the setting did almost nothing on a channel with images. */
+  .msg.compact .msg-attachments { max-height: 64px; overflow: hidden; }
+  .msg.compact .msg-img { max-height: 64px; }
+  .msg .msg-attachments { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px;
+                          min-width: 0; max-width: 100%; }
+  .msg .msg-attachments > a { min-width: 0; max-width: 100%; }
+  /* min() not a bare 320px: as a flex item with min-width:auto the link
+     refused to shrink, so an image tore through the bubble's rounded corner
+     and off the viewport at every phone width (measured 75px past the edge
+     at 390px in Walled Garden, and 23px at 320px in the default themes). */
+  .msg-img-missing { display: inline-block; font-size: 12px; color: var(--dim);
+                     padding: 6px 10px; border: 1px dashed var(--border);
+                     border-radius: 6px; }
+  .msg .msg-img { max-width: min(320px, 100%); max-height: 320px;
+                  height: auto; border-radius: 6px;
+                  border: 1px solid var(--border); cursor: pointer; display: block; }
   #hint { font-size: 10px; color: var(--dimmer); margin-top: 2px; }
   #hint kbd { background: var(--panel); border: 1px solid var(--border); padding: 1px 5px;
               border-radius: 2px; font-size: 10px; color: var(--dim); }
@@ -2424,8 +2733,11 @@ INDEX_HTML = r"""<!doctype html>
   <div id="composer">
     <div id="preview">(broadcast — all connected members receive this)</div>
     <div id="target-bar"></div>
+    <div id="attach-strip"></div>
+    <input type="file" id="file-input" accept="image/png,image/jpeg,image/gif,image/webp" multiple style="display:none">
     <div id="input-row">
       <div id="completions"></div>
+      <button id="attach-btn" title="attach image (or paste / drop into the box)">🖼</button>
       <div id="input-stack">
         <div id="input-highlight" aria-hidden="true"></div>
         <textarea id="input" rows="1" placeholder="Message — @ to mention, Enter to send"></textarea>
@@ -2443,6 +2755,7 @@ INDEX_HTML = r"""<!doctype html>
       <kbd>Alt+A</kbd> all
       <kbd>Alt+0</kbd> clear
       <kbd>Ctrl+B</kbd> roster
+      <kbd>paste / drop</kbd> image
       <span style="margin-left:14px;color:var(--dim)">click a message to expand/collapse in compact mode</span>
     </div>
   </div>
@@ -2603,6 +2916,7 @@ INDEX_HTML = r"""<!doctype html>
     chimeVolume: 0.33,
     notifyScope: 'mention',   // 'mention' | 'all'
     notifyWhen: 'hidden',     // 'hidden' | 'always'
+    pendingAttachments: [],   // images uploaded but not yet attached to a send
     unreadCount: 0,                 // for tab title while hidden
     jumpUnread: 0,                  // messages arrived while user was scrolled up
     rateBins: new Map(),            // bin_epoch_10s → count
@@ -3307,6 +3621,46 @@ INDEX_HTML = r"""<!doctype html>
       decorateInlineMentions(body, m.mentions || []);
     }
     div.appendChild(body);
+
+    // Image attachments — inline thumbnails, click opens full size in a new tab.
+    if (m.attachments && m.attachments.length) {
+      const wrap = document.createElement('div');
+      wrap.className = 'msg-attachments';
+      for (const att of m.attachments) {
+        // API_QS carries ?channel=<code> in landing mode; without it the
+        // server cannot tell which channel's attachment is being asked for.
+        const url = '/api/attachment/' + att.id + API_QS;
+        const a = document.createElement('a');
+        a.href = url; a.target = '_blank'; a.rel = 'noopener';
+        const img = document.createElement('img');
+        img.className = 'msg-img';
+        img.src = url;
+        img.alt = att.filename || 'image';
+        img.loading = 'lazy';
+        // Late-loading images reflow taller; keep us pinned if near bottom.
+        img.addEventListener('load', () => {
+          const nb = chat.scrollHeight - chat.clientHeight - chat.scrollTop < 120;
+          if (state.initialLoad || nb) chat.scrollTop = chat.scrollHeight;
+        });
+        // A failing image otherwise collapses to a bare broken-image glyph:
+        // the viewer cannot tell whether it was deleted, whether they are not
+        // allowed to see it (the read endpoint requires a resolved identity),
+        // or whether the network hiccupped.
+        img.addEventListener('error', () => {
+          const note = document.createElement('span');
+          note.className = 'msg-img-missing';
+          note.textContent = '🖼 image unavailable — ' + (att.filename || 'attachment');
+          note.title = 'It may have been removed, or you may not have access '
+                     + 'to attachments on this machine.';
+          if (a.parentNode) a.parentNode.replaceChild(note, a);
+        });
+        // Opening the image should not also toggle the message's compact state.
+        a.addEventListener('click', (e) => { e.stopPropagation(); });
+        a.appendChild(img);
+        wrap.appendChild(a);
+      }
+      div.appendChild(wrap);
+    }
 
     // Watermark pins — animals of agents whose last_read == this message id.
     const pins = document.createElement('div');
@@ -4047,9 +4401,134 @@ INDEX_HTML = r"""<!doctype html>
   }
 
   // ── Send ──
+  // ── Image attachments (composer upload) ──
+  const attachBtn = document.getElementById('attach-btn');
+  const fileInput = document.getElementById('file-input');
+  const attachStrip = document.getElementById('attach-strip');
+  const composerEl = document.getElementById('composer');
+
+  function renderAttachStrip() {
+    attachStrip.innerHTML = '';
+    state.pendingAttachments.forEach((att, i) => {
+      const t = document.createElement('div');
+      t.className = 'attach-thumb' + (att.uploading ? ' uploading' : '');
+      if (att.url) {
+        const img = document.createElement('img');
+        img.src = att.url;
+        t.appendChild(img);
+      }
+      if (!att.uploading) {
+        const rm = document.createElement('button');
+        rm.className = 'rm'; rm.textContent = '×'; rm.title = 'remove';
+        rm.addEventListener('click', () => {
+          dropSlot(att);
+          renderAttachStrip();
+        });
+        t.appendChild(rm);
+      }
+      attachStrip.appendChild(t);
+    });
+  }
+
+  function revokeBlob(att) {
+    if (att && att.url && att.url.indexOf('blob:') === 0) URL.revokeObjectURL(att.url);
+  }
+  function dropSlot(slot) {
+    revokeBlob(slot);
+    const idx = state.pendingAttachments.indexOf(slot);
+    if (idx >= 0) state.pendingAttachments.splice(idx, 1);
+  }
+
+  // Mirrors MAX_UPLOAD_BYTES in this file's Python half, so a huge file is
+  // refused before it is pushed over the wire. A literal rather than a
+  // substitution, so the served bundle carries no placeholder the test
+  // harness would need to know about; the server still enforces the real
+  // limit, so drift can only make the client stricter, never unsafe.
+  const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
+
+  async function uploadImage(file) {
+    if (!file) return;
+    if (!file.type || !/^image\//.test(file.type)) {
+      // The composer flashes an accepting outline on dragover, so returning
+      // silently here tells the user the drop landed and then does nothing.
+      // Drag-and-drop also bypasses the file picker's accept= filter entirely.
+      alert('"' + (file.name || 'that file') + '" is not an image. '
+            + 'PNG, JPEG, GIF and WebP can be attached.');
+      return;
+    }
+    if (file.size > MAX_UPLOAD_BYTES) {
+      // Checked here as well as server-side so a 40MB photo is not pushed over
+      // the wire before being refused, and so the number is human-sized.
+      const mb = (n) => (n / (1024 * 1024)).toFixed(1).replace(/\.0$/, '');
+      alert('"' + (file.name || 'that image') + '" is ' + mb(file.size)
+            + ' MB — the limit is ' + mb(MAX_UPLOAD_BYTES) + ' MB.');
+      return;
+    }
+    if (state.pendingAttachments.length >= 8) { alert('max 8 images per message'); return; }
+    const slot = { uploading: true, url: URL.createObjectURL(file) };
+    state.pendingAttachments.push(slot);
+    renderAttachStrip();
+    try {
+      const r = await fetch('/api/upload' + API_QS, {
+        method: 'POST',
+        headers: { 'Content-Type': file.type, 'X-Filename': encodeURIComponent(file.name || 'image') },
+        body: file,
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok || !data.ok) {
+        alert('upload failed: ' + (data.error || r.status));
+        dropSlot(slot);
+      } else {
+        revokeBlob(slot);                       // free the local preview blob
+        slot.id = data.id;
+        slot.uploading = false;
+        slot.url = '/api/attachment/' + data.id + API_QS;
+      }
+    } catch (e) {
+      alert('upload failed: ' + e.message);
+      dropSlot(slot);
+    }
+    renderAttachStrip();
+  }
+
+  attachBtn.addEventListener('click', () => fileInput.click());
+  fileInput.addEventListener('change', () => {
+    for (const f of fileInput.files) uploadImage(f);
+    fileInput.value = '';
+  });
+  input.addEventListener('paste', (e) => {
+    const items = (e.clipboardData || {}).items || [];
+    for (const it of items) {
+      if (it.kind === 'file' && /^image\//.test(it.type)) {
+        const f = it.getAsFile();
+        if (f) { e.preventDefault(); uploadImage(f); }
+      }
+    }
+  });
+  ['dragover', 'dragenter'].forEach(ev => composerEl.addEventListener(ev, (e) => {
+    e.preventDefault(); composerEl.classList.add('dragover');
+  }));
+  ['dragleave', 'drop'].forEach(ev => composerEl.addEventListener(ev, (e) => {
+    e.preventDefault(); composerEl.classList.remove('dragover');
+  }));
+  composerEl.addEventListener('drop', (e) => {
+    const files = (e.dataTransfer || {}).files || [];
+    for (const f of files) uploadImage(f);
+  });
+
+  // Remove specific slots, preserving anything added since.
+  function dropAttachments(slots) {
+    const gone = new Set(slots);
+    state.pendingAttachments = state.pendingAttachments.filter(a => !gone.has(a));
+  }
+
   async function sendMessage() {
     let text = input.value.trim();
-    if (!text) return;
+    const readyAtt = state.pendingAttachments.filter(a => a.id && !a.uploading);
+    if (state.pendingAttachments.some(a => a.uploading)) {
+      alert('wait for image upload to finish'); return;
+    }
+    if (!text && readyAtt.length === 0) return;
     const resolved = resolveMentions(input.value);
     const mentionIds = resolved.map(m => m.id);
     // DM mode: always include the DM target so the agent sees the message
@@ -4086,14 +4565,33 @@ INDEX_HTML = r"""<!doctype html>
       const r = await fetch('/api/send' + API_QS, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ content: text, mentions: mentionIds }),
+        body: JSON.stringify({ content: text, mentions: mentionIds,
+                               attachment_ids: readyAtt.map(a => a.id) }),
       });
       if (!r.ok) {
         const err = await r.json().catch(() => ({ error: 'unknown' }));
-        alert('send failed: ' + (err.error || r.status));
+        // A rejected relink means the server already consumed these ids on an
+        // earlier attempt whose response we lost — the images DID post. Drop
+        // them rather than leaving a composer that can never send again and
+        // that invites the user to delete images they actually published.
+        if (/already-linked/.test(err.error || '')) {
+          dropAttachments(readyAtt);
+          renderAttachStrip();
+          alert('Those images were already posted — the earlier send did go '
+                + 'through even though it reported an error. Removed them from '
+                + 'the composer; your text is still here.');
+        } else {
+          alert('send failed: ' + (err.error || r.status));
+        }
         return;
       }
       input.value = '';
+      // Splice out exactly what we sent. Reassigning to [] would also destroy
+      // an image pasted DURING the in-flight send: its upload completes into a
+      // slot no longer in the array, so it vanishes from the strip with no
+      // error and is orphaned server-side.
+      dropAttachments(readyAtt);
+      renderAttachStrip();
       autoResizeInput();
       state.completion.visible = false;
       renderCompletions();

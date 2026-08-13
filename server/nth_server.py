@@ -22,6 +22,7 @@ import re
 import hashlib
 import string
 from datetime import datetime, timedelta, timezone
+from typing import Any
 from pathlib import Path
 
 # Add server/ to sys.path so nth_constants can be imported when MCP spawns this
@@ -29,10 +30,14 @@ import sys
 sys.path.insert(0, str(Path(__file__).parent))
 from nth_constants import SLEEPING_KEYWORDS, NTH_VERSION, project_context
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import FastMCP, Image
 
 DB_DIR = Path.home() / ".claude" / "nth"
 DB_PATH = DB_DIR / "nth.db"
+# Mirrors nth_web.ATTACH_DIR. Both readers of attachments.path must agree
+# on where a channel's files legitimately live, so the containment check
+# means the same thing on the MCP side as on the web side.
+ATTACH_DIR = DB_DIR / "attachments"
 
 CHANNEL_CODE_PATTERN = re.compile(r"^[a-z0-9][a-z0-9\-]{0,31}$")
 MAX_MESSAGE_LENGTH = 4000
@@ -1193,8 +1198,27 @@ def nth_send(channel: str, member_id: str, message: str, task: bool = False, pin
         db.close()
 
 
+# ── Image attachment delivery (Phase 2): poll returns MCP image blocks ──
+POLL_IMAGE_FORMATS = {
+    "image/png": "png", "image/jpeg": "jpeg",
+    "image/gif": "gif", "image/webp": "webp",
+}
+MAX_POLL_IMAGE_BYTES = 8 * 1024 * 1024   # total raw image bytes per poll response
+
+
+def _attachments_for(db: sqlite3.Connection, msg_id: int):
+    """Attachment rows for a message, or [] if the table doesn't exist yet."""
+    try:
+        return db.execute(
+            "SELECT id, mime, filename, path FROM attachments "
+            "WHERE message_id = ? ORDER BY id", (msg_id,),
+        ).fetchall()
+    except sqlite3.Error:
+        return []
+
+
 @mcp.tool(name=f"{TOOL_PREFIX}_poll")
-def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: str = "", session_token: str = "", auto_ack: bool = True, mentions_only: bool = False, monitor_heartbeat: bool = False, monitor_filter: str = "", monitor_context: str = "") -> str:
+def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: str = "", session_token: str = "", auto_ack: bool = True, mentions_only: bool = False, monitor_heartbeat: bool = False, monitor_filter: str = "", monitor_context: str = "") -> Any:
     """Check for new messages since your last read. Blocks up to wait_seconds.
 
     Returns all unread messages, or "no_new" if nothing arrived.
@@ -1408,13 +1432,12 @@ def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: st
                 #   - no session_token, auto_ack=False: don't advance.
                 # When filtering by from_name, never advance — caller hasn't
                 # seen the unfiltered messages.
+                # Deferred until the response is actually built: advancing
+                # here and then failing to return would mark the batch read
+                # while the caller never saw it, losing those messages for good.
+                _pending_ack = None
                 if not from_name_lower and sess_row is None and auto_ack:
-                    max_id = max(m["id"] for m in unread)
-                    db.execute(
-                        "UPDATE members SET last_read = ? WHERE id = ? AND channel = ?",
-                        (max_id, member_id, channel),
-                    )
-                    db.commit()
+                    _pending_ack = max(m["id"] for m in unread)
                 elif sess_row is not None:
                     # Extend session heartbeat on every successful read
                     db.execute(
@@ -1426,6 +1449,8 @@ def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: st
                 # Enrich with mention / reference / bang flags
                 has_mentions = False
                 msg_list = []
+                image_blocks = []
+                image_budget = MAX_POLL_IMAGE_BYTES
                 for m in display_msgs:
                     mentions_raw = m["mentions"] if m["mentions"] else ""
                     try:
@@ -1459,6 +1484,42 @@ def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: st
                         entry["referenced"] = True
                     if banged:
                         entry["banged"] = True
+                    # Phase 2: attach image metadata always; deliver actual
+                    # pixels as MCP Image blocks within the per-poll byte budget.
+                    atts = _attachments_for(db, m["id"])
+                    if atts:
+                        meta = []
+                        for a in atts:
+                            item = {"id": a["id"], "mime": a["mime"],
+                                    "filename": a["filename"] or ""}
+                            fmt = POLL_IMAGE_FORMATS.get(a["mime"])
+                            raw = None
+                            if fmt and a["path"]:
+                                try:
+                                    # Same containment check the web read path
+                                    # applies. attachments.path is always
+                                    # server-computed today, but the two
+                                    # consumers of this column should not
+                                    # disagree about whether it is trusted — if
+                                    # a row ever diverges from its channel dir,
+                                    # both readers must refuse it, not one.
+                                    chan_root = (ATTACH_DIR / re.sub(
+                                        r"[^\w.\-]", "_", channel)).resolve()
+                                    resolved = Path(a["path"]).resolve()
+                                    if resolved.is_relative_to(chan_root):
+                                        raw = resolved.read_bytes()
+                                    else:
+                                        raw = None
+                                except (OSError, ValueError):
+                                    raw = None
+                            if raw is not None and len(raw) <= image_budget:
+                                image_blocks.append(Image(data=raw, format=fmt))
+                                image_budget -= len(raw)
+                                item["delivered"] = True
+                            else:
+                                item["delivered"] = False
+                            meta.append(item)
+                        entry["attachments"] = meta
                     msg_list.append(entry)
 
                 nag = _sentinel_nag(member)
@@ -1473,7 +1534,19 @@ def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: st
                     resp["has_mentions"] = True
                 if from_name_lower:
                     resp["filtered_by"] = from_name
-                return json.dumps(resp)
+                # Text JSON first (backward-compatible), then any image blocks.
+                # A plain str return still becomes a single TextContent, so
+                # text-only clients are unaffected.
+                payload = json.dumps(resp)
+                result = [payload, *image_blocks] if image_blocks else payload
+                # The response exists now, so it is safe to say it was read.
+                if _pending_ack is not None:
+                    db.execute(
+                        "UPDATE members SET last_read = ? WHERE id = ? AND channel = ?",
+                        (_pending_ack, member_id, channel),
+                    )
+                    db.commit()
+                return result
 
             if time.time() >= deadline:
                 nag = _sentinel_nag(member)
