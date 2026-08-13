@@ -116,6 +116,49 @@ def _installed_version():
     return None, None
 
 
+def _running_version():
+    """NTH_VERSION of the copy of the tree this script is running FROM.
+
+    Parsed, not imported, for the same reason as _installed_version: reading a
+    string should not execute a tree's code. Returns (version, directory).
+    """
+    here = Path(__file__).resolve().parent
+    try:
+        text = (here / "nth_constants.py").read_text()
+    except OSError:
+        return None, here
+    m = re.search(r'^NTH_VERSION\s*=\s*["\']([^"\']+)["\']', text, re.M)
+    return (m.group(1) if m else None), here
+
+
+def _install_drift():
+    """Is the installed tree older than the one this script came from?
+
+    setup.sh COPIES the repo into the install directory, so pulling new code
+    changes nothing that actually runs until it is re-run — and nothing
+    anywhere says so. The symptom is a feature that is present in the checkout
+    and simply absent at runtime, which reads as a broken feature rather than a
+    stale install.
+
+    Only meaningful when doctor is run from a checkout: a copy install running
+    its own copy compares itself to itself, and a symlink deploy (link.sh)
+    resolves to the same file. Both correctly report no drift.
+
+    Returns (running_version, installed_version, install_dir) or None.
+    """
+    running, run_dir = _running_version()
+    installed, install_dir = _installed_version()
+    if not running or not installed or install_dir is None:
+        return None
+    try:
+        same_tree = run_dir.resolve() == Path(install_dir).resolve()
+    except OSError:
+        same_tree = False
+    if same_tree or running == installed:
+        return None
+    return running, installed, install_dir
+
+
 def _http_json(url):
     """GET url, parse JSON. Returns (data, latency_ms, error_str)."""
     t0 = time.monotonic()
@@ -206,6 +249,15 @@ def run_checks(hub_override=None):
                        "server files present but no NTH_VERSION (pre-7.3 install)"))
     else:
         checks.append(("install", OK, f"v{local_version} at {install_base}"))
+
+    # --- checkout newer than install ---
+    drift = _install_drift()
+    if drift:
+        running, installed, install_dir = drift
+        checks.append(("install freshness", WARN,
+                       f"this checkout is v{running} but {install_dir} has "
+                       f"v{installed} — run `bash setup.sh`, then restart "
+                       f"Claude Code"))
 
     # --- local database ---
     # Hub-service boxes keep the DB under the service's de-rooted HOME.
