@@ -1163,6 +1163,8 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 self._error(404, f"no such channel: {ch}")
                 return
             self._serve_sse(self._hub_for_channel(ch))
+        elif path == "/api/search":
+            self._handle_search(parsed)
         else:
             self._error(404, "not found")
 
@@ -1247,6 +1249,59 @@ class NthWebHandler(BaseHTTPRequestHandler):
         except (ValueError, UnicodeDecodeError):
             self._error(400, "invalid JSON")
             return None
+
+    def _handle_search(self, parsed) -> None:
+        """Full-history search: substring match over this channel's stored
+        messages (beyond the ~200 the dashboard keeps in memory)."""
+        # Landing mode serves many channels from one process, so the channel
+        # comes from the request, not from a process-wide attribute. Mirrors
+        # every other handler here; binding self.channel would match "" and
+        # silently return nothing.
+        ch = self._channel_for_request(parsed)
+        if ch is None:
+            self._error(400, "channel query param required")
+            return
+        if self.landing_mode and not self._channel_exists(ch):
+            self._error(404, f"no such channel: {ch}")
+            return
+        qs = parse_qs(parsed.query)
+        q = (qs.get("q", [""])[0] or "").strip()
+        if len(q) < 2:
+            self._error(400, "query too short (min 2 chars)")
+            return
+        q = q[:200]
+        _token, ident, _is_new = self._resolve_identity()
+        if ident.source == IDENTITY_SOURCE_PENDING:
+            self._error(403, "identity required — POST /api/identify first")
+            return
+        # Escape LIKE wildcards so a query like "50%" is a literal substring.
+        esc = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        like = f"%{esc}%"
+        db = None
+        try:
+            db = sqlite3.connect(str(self.db_path), timeout=5)
+            db.row_factory = sqlite3.Row
+            db.execute("PRAGMA busy_timeout=3000")
+            rows = db.execute(
+                "SELECT id, member_id, member_name, content, created_at FROM messages "
+                "WHERE channel = ? AND content LIKE ? ESCAPE '\\' "
+                "ORDER BY id DESC LIMIT 200",
+                (ch, like),
+            ).fetchall()
+            results = [{"id": r["id"], "member_id": r["member_id"],
+                        "member_name": r["member_name"] or r["member_id"],
+                        "content": r["content"] or "", "created_at": r["created_at"]}
+                       for r in rows]
+        except sqlite3.Error as e:
+            self._error(500, f"db error: {e}")
+            return
+        finally:
+            if db is not None:
+                try:
+                    db.close()
+                except sqlite3.Error:
+                    pass
+        self._json({"ok": True, "query": q, "count": len(results), "results": results})
 
     def _handle_identify(self) -> None:
         body = self._read_json_body(max_bytes=2048)
@@ -1770,6 +1825,29 @@ INDEX_HTML = r"""<!doctype html>
   #app.side-collapsed { grid-template-columns: 1fr 0; }
   #app.side-collapsed #side { display: none; }
 
+  /* Full-history search panel */
+  #search-panel { position: fixed; top: 8%; left: 50%; transform: translateX(-50%);
+    width: min(680px, 92vw); max-height: 80vh; z-index: 70; display: flex; flex-direction: column;
+    background: var(--bg2); border: 1px solid var(--border); border-radius: 10px;
+    box-shadow: 0 12px 48px rgba(0,0,0,0.55); overflow: hidden; }
+  #search-panel[hidden] { display: none; }
+  .search-head { display: flex; gap: 8px; padding: 10px; border-bottom: 1px solid var(--border); }
+  #search-input { flex: 1; padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px;
+    background: var(--bg); color: var(--fg); font: inherit; }
+  #search-input:focus { outline: none; border-color: var(--accent); }
+  #search-close { background: none; border: none; color: var(--dim); font-size: 22px;
+    line-height: 1; cursor: pointer; padding: 0 8px; }
+  #search-close:hover { color: var(--fg); }
+  #search-status { padding: 6px 12px; font-size: 11px; color: var(--dim); }
+  #search-results { overflow-y: auto; padding: 4px 8px 10px; }
+  .search-hit { padding: 8px 10px; border-radius: 6px; cursor: pointer; border: 1px solid transparent; }
+  .search-hit:hover { background: rgba(var(--ov),0.06); border-color: rgba(var(--ov),0.15); }
+  .search-hit .sh-meta { font-size: 10px; color: var(--dim); margin-bottom: 2px; }
+  .search-hit .sh-author { font-weight: 600; }
+  .search-hit .sh-body { font-size: 12px; white-space: pre-wrap; word-break: break-word; }
+  .msg.flash { animation: flashmsg 1.4s ease-out; }
+  @keyframes flashmsg { 0% { background: var(--hover); } 100% { background: transparent; } }
+
   /* ── Header ── */
   header { grid-column: 1 / 3; background: var(--bg2); border-bottom: 1px solid var(--border);
            display: flex; align-items: center; padding: 0 16px; gap: 12px;
@@ -2244,6 +2322,7 @@ INDEX_HTML = r"""<!doctype html>
       <option value='-apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "Helvetica Neue", "Helvetica", "Arial", sans-serif' disabled>Walled Garden</option>
     </select>
     <input id="filter" type="text" placeholder="filter messages…" spellcheck="false">
+    <span class="pill" id="btn-search" title="search the full channel history">🔍 search</span>
     <span class="pill on" id="btn-side" title="show/hide the roster sidebar">roster</span>
     <span class="pill" id="btn-compact" title="clamp every message body to 3 lines">compact</span>
     <span class="pill" id="btn-notify" title="desktop notifications on @you">🔔 off</span>
@@ -2300,6 +2379,14 @@ INDEX_HTML = r"""<!doctype html>
   </div>
 </div>
 
+<div id="search-panel" hidden>
+  <div class="search-head">
+    <input id="search-input" type="text" placeholder="search all history…" autocomplete="off" spellcheck="false">
+    <button id="search-close" title="close (Esc)" aria-label="close search">×</button>
+  </div>
+  <div id="search-status"></div>
+  <div id="search-results"></div>
+</div>
 <script>
 (() => {
   // ── DOM handles ──
@@ -4394,6 +4481,90 @@ INDEX_HTML = r"""<!doctype html>
     const el = document.getElementById('fatal-banner');
     if (el) el.style.display = 'none';
   }
+  // ── Full-history search (queries the server DB, not just loaded messages) ──
+  const btnSearch = document.getElementById('btn-search');
+  const searchPanel = document.getElementById('search-panel');
+  const searchInput = document.getElementById('search-input');
+  const searchClose = document.getElementById('search-close');
+  const searchStatus = document.getElementById('search-status');
+  const searchResults = document.getElementById('search-results');
+  let searchTimer = 0, searchSeq = 0;
+
+  function openSearch() {
+    searchPanel.hidden = false;
+    if (state.filter && !searchInput.value) searchInput.value = state.filter;
+    searchInput.focus(); searchInput.select();
+    if (searchInput.value.trim().length >= 2) runSearch();
+  }
+  function closeSearch() { searchPanel.hidden = true; }
+  async function runSearch() {
+    const q = searchInput.value.trim();
+    searchResults.innerHTML = '';
+    if (q.length < 2) { searchStatus.textContent = 'type at least 2 characters'; return; }
+    searchStatus.textContent = 'searching…';
+    const seq = ++searchSeq;
+    try {
+      // API_QS carries ?channel=<code> in landing mode and is empty in
+      // single-channel mode, so pick the right query-string joiner.
+      const r = await fetch('/api/search' + (API_QS ? API_QS + '&' : '?')
+                            + 'q=' + encodeURIComponent(q));
+      const d = await r.json().catch(() => ({}));
+      if (seq !== searchSeq) return;   // a newer query superseded this one
+      if (!r.ok || !d.ok) { searchStatus.textContent = 'search failed: ' + (d.error || r.status); return; }
+      renderSearchResults(d.results || []);
+    } catch (e) {
+      if (seq === searchSeq) searchStatus.textContent = 'search failed: ' + e.message;
+    }
+  }
+  function renderSearchResults(results) {
+    const capped = results.length >= 200;
+    searchStatus.textContent = results.length
+      ? (results.length + (capped ? '+' : '') + ' match' + (results.length === 1 ? '' : 'es')
+         + ' — newest first')
+      : 'no matches';
+    const frag = document.createDocumentFragment();
+    for (const m of results) {
+      const hit = document.createElement('div');
+      hit.className = 'search-hit';
+      const meta = document.createElement('div');
+      meta.className = 'sh-meta';
+      const author = document.createElement('span');
+      author.className = 'sh-author';
+      author.textContent = m.member_name;
+      author.style.color = colorFor(m.member_id);
+      meta.appendChild(author);
+      meta.appendChild(document.createTextNode('  ·  ' + formatTime(m.created_at)));
+      const body = document.createElement('div');
+      body.className = 'sh-body';
+      body.textContent = humanizeIdSigils(m.content || '');
+      hit.appendChild(meta);
+      hit.appendChild(body);
+      // If the match is in the loaded timeline, jump + flash it; otherwise the
+      // panel row is the result (it's outside the in-memory window).
+      hit.addEventListener('click', () => {
+        const dom = state.messageDomById.get(m.id);
+        if (dom) {
+          closeSearch();
+          dom.scrollIntoView({ block: 'center' });
+          dom.classList.add('flash');
+          setTimeout(() => dom.classList.remove('flash'), 1500);
+        }
+      });
+      frag.appendChild(hit);
+    }
+    searchResults.appendChild(frag);
+  }
+  btnSearch.addEventListener('click', openSearch);
+  searchClose.addEventListener('click', closeSearch);
+  searchInput.addEventListener('input', () => {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(runSearch, 250);
+  });
+  searchInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') { closeSearch(); }
+    else if (e.key === 'Enter') { clearTimeout(searchTimer); runSearch(); }
+  });
+
   function afterBoot() {
     // API_QS is only set in landing mode. In single-channel mode "/" IS this
     // page, so the home link would just reload and its tooltip would be a lie.
