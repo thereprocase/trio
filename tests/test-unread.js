@@ -44,17 +44,15 @@ const sandbox = {
 const code = [grab('isHiddenMsg'), grab('firstVisibleUnreadDom'), grab('unreadCountVisible'),
               grab('markCaughtUp'), grab('seedBaseline'), grab('updateJumpButton'),
               grab('noteIntent'), grab('scrollIsUsers'), grab('sustainIntent'),
-              grab('disownScroll')].join('\n');
+              grab('disownScroll'), grab('updateNewBar')].join('\n');
 const fn = new Function('sandbox', `with (sandbox) { ${code};
   return { isHiddenMsg, firstVisibleUnreadDom, unreadCountVisible, markCaughtUp, seedBaseline,
-           updateJumpButton, noteIntent, scrollIsUsers, sustainIntent, disownScroll,
-           refreshUnreadDivider: () => {}, updateNewBar: () => {} }; }`);
+           updateJumpButton, noteIntent, scrollIsUsers, sustainIntent, disownScroll, updateNewBar,
+           refreshUnreadDivider: () => {} }; }`);
 // refreshUnreadDivider/updateNewBar are stubbed via the returned closure below
 sandbox.refreshUnreadDivider = () => {};
-sandbox.updateNewBar = () => {};
 const H = fn(sandbox);
 sandbox.refreshUnreadDivider = H.refreshUnreadDivider;
-sandbox.updateNewBar = H.updateNewBar;
 
 let passed = 0; const failures = [];
 function check(name, f) {
@@ -223,6 +221,29 @@ check('disowning does not block the next real gesture', () => {
   H.disownScroll();
   H.noteIntent();                                    // user touches the scroller again
   assert.strictEqual(H.scrollIsUsers(), true);
+});
+
+check('the new-bar makes no claim while the user is at the bottom', () => {
+  const m = new Map(); m.set(1, node()); m.set(2, node());
+  sandbox.state = mkState({ lastSeenId: 1, messageDomById: m });
+  armDivider();
+  let shown = null;
+  sandbox.newBar.classList = { add: () => { shown = true; }, remove: () => { shown = false; } };
+  sandbox.chat.scrollTop = sandbox.chat.scrollHeight - sandbox.chat.clientHeight;
+  H.updateNewBar();
+  assert.strictEqual(shown, false, 'no "messages below" claim when already at the bottom');
+  assert.strictEqual(sandbox.state.lastSeenId, 1, 'and nothing marked read to achieve it');
+});
+
+check('the new-bar still reports unread when scrolled up', () => {
+  const m = new Map(); m.set(1, node()); m.set(2, node());
+  sandbox.state = mkState({ lastSeenId: 1, messageDomById: m });
+  armDivider();
+  let shown = null;
+  sandbox.newBar.classList = { add: () => { shown = true; }, remove: () => { shown = false; } };
+  sandbox.chat.scrollTop = 0;
+  H.updateNewBar();
+  assert.strictEqual(shown, true);
 });
 
 console.log('');

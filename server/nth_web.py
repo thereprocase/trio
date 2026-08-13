@@ -4303,6 +4303,17 @@ INDEX_HTML = r"""<!doctype html>
   function updateNewBar() {
     if (!newBar) return;
     if (!document.getElementById('unread-divider')) { newBar.classList.remove('show'); return; }
+    // "N new messages below" is meaningless when you are already at the bottom
+    // looking at them. This happens two ways: the jump-to-unread clamps here
+    // when the unread block is shorter than the viewport (and then there is no
+    // scroll left to attribute, so nothing marks), and a filter can leave the
+    // walk unable to advance past a hidden message beneath a visible one.
+    // Hiding the claim is honest in both; the watermark is deliberately
+    // untouched, so nothing is marked read on the user's behalf.
+    if (chat.scrollHeight - chat.clientHeight - chat.scrollTop < 80) {
+      newBar.classList.remove('show');
+      return;
+    }
     const n = unreadCountVisible();
     newBar.textContent = '↓ ' + n + ' new message' + (n === 1 ? '' : 's');
     newBar.classList.add('show');
