@@ -40,6 +40,7 @@ import socket
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import threading
 import errno
 import time
@@ -88,6 +89,24 @@ ALLOWED_IMAGE_MIME = {
     "image/png": ".png", "image/jpeg": ".jpg",
     "image/gif": ".gif", "image/webp": ".webp",
 }
+
+# ── Local speech-to-text (optional; powers /api/stt/*) ──
+# Transcription runs via a persistent nth_stt_worker.py sidecar that keeps the
+# whisper model warm, so each dictation costs only inference (~0.8s). The web
+# server itself stays stdlib-only and just pipes audio paths to that process.
+# mlx_whisper is NOT a dependency of this repo: if it is absent the sidecar
+# never starts, /api/stt/health reports unavailable, and the browser falls back
+# to its own speech recognition. Dictation degrades; nothing else notices.
+STT_MODEL = os.environ.get("NTH_STT_MODEL", "mlx-community/whisper-large-v3-turbo")
+STT_LANGUAGE = os.environ.get("NTH_STT_LANG", "en")   # "" = auto-detect
+MAX_STT_BYTES = 25 * 1024 * 1024        # 25 MB hard cap per audio clip
+# resolve() follows a symlinked install back to the repo, so the sidecar is
+# found whether nth_web.py is deployed as a symlink (link.sh) or a copy (setup.sh).
+STT_WORKER = Path(__file__).resolve().with_name("nth_stt_worker.py")
+STT_WORKER_START_TIMEOUT = 180          # generous: first spawn may download ~1.5GB
+STT_TRANSCRIBE_TIMEOUT = 60             # per-clip inference ceiling
+STT_IMPORT_PROBE_TIMEOUT = 8            # cheap "is mlx_whisper importable" check
+STT_MAX_CONCURRENT = int(os.environ.get("NTH_STT_MAX_CONCURRENT", "2"))  # in-flight transcribes
 STALE_SECONDS = 300          # fresh heartbeat threshold
 DEAD_SECONDS = 900           # no heartbeat this long → dead
 SLEEPING_KEYWORDS = ("idle", "standing by", "tier 3", "agent-monitor")
@@ -1235,6 +1254,175 @@ def _landing_snapshot(db_path: Path) -> Dict[str, Any]:
     return out
 
 
+# ───────── Local speech-to-text worker ─────────
+def _stt_model_cached(model: str) -> bool:
+    """True if the HF weights for `model` appear to be on disk already, so the
+    UI can say 'ready' vs 'will download ~1.5GB on first use'."""
+    candidates = []
+    if os.environ.get("HUGGINGFACE_HUB_CACHE"):
+        candidates.append(Path(os.environ["HUGGINGFACE_HUB_CACHE"]))
+    if os.environ.get("HF_HOME"):
+        candidates.append(Path(os.environ["HF_HOME"]) / "hub")
+    candidates.append(Path.home() / ".cache" / "huggingface" / "hub")
+    folder = "models--" + model.replace("/", "--")
+    for hub in candidates:
+        d = hub / folder
+        try:
+            if d.is_dir() and any((d / "snapshots").glob("*/*")):
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def _stt_ext_for(content_type: str) -> str:
+    ct = (content_type or "").split(";")[0].strip().lower()
+    return {
+        "audio/webm": ".webm", "audio/ogg": ".ogg", "audio/wav": ".wav",
+        "audio/x-wav": ".wav", "audio/mp4": ".mp4", "audio/mpeg": ".mp3",
+        "audio/aac": ".aac", "audio/aiff": ".aiff", "audio/x-aiff": ".aiff",
+    }.get(ct, ".webm")
+
+
+class SttWorker:
+    """Manages one persistent nth_stt_worker.py subprocess that holds the whisper
+    model in memory. Thread-safe: transcription requests are serialized behind a
+    lock (dictation is one-at-a-time). Spawns lazily; respawns on death; kills a
+    hung worker on timeout. The worker exits on stdin EOF, so it self-cleans when
+    this server dies."""
+
+    def __init__(self, model: str, language: str):
+        self.model = model
+        self.language = language
+        self._proc: Optional[subprocess.Popen] = None
+        self._q: "Optional[queue.Queue]" = None
+        self._lock = threading.Lock()
+
+    def _alive(self) -> bool:
+        return self._proc is not None and self._proc.poll() is None
+
+    def _reset(self) -> None:
+        if self._proc is not None:
+            try:
+                self._proc.kill()
+                self._proc.wait(timeout=2)   # reap so we don't leave a zombie
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+        self._proc = None
+        self._q = None
+
+    def _spawn(self) -> None:
+        # sys.executable is the interpreter running this server; on the hub it is
+        # the env that has mlx_whisper installed.
+        proc = subprocess.Popen(
+            [sys.executable, str(STT_WORKER), self.model],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, text=True, bufsize=1,
+        )
+        q: "queue.Queue" = queue.Queue()
+
+        def _reader() -> None:
+            try:
+                assert proc.stdout is not None
+                for line in proc.stdout:
+                    q.put(line)
+            except (OSError, ValueError):
+                pass
+            q.put(None)  # EOF sentinel
+
+        threading.Thread(target=_reader, daemon=True).start()
+        try:
+            first = q.get(timeout=STT_WORKER_START_TIMEOUT)
+        except queue.Empty:
+            self._reset_proc(proc)
+            raise RuntimeError("worker start timed out")
+        if first is None:
+            self._reset_proc(proc)
+            raise RuntimeError("worker exited during startup")
+        try:
+            msg = json.loads(first)
+        except ValueError:
+            self._reset_proc(proc)
+            raise RuntimeError("worker sent malformed startup line")
+        if not msg.get("ready"):
+            self._reset_proc(proc)
+            raise RuntimeError(msg.get("error") or "worker failed to load model")
+        self._proc = proc
+        self._q = q
+
+    @staticmethod
+    def _reset_proc(proc: subprocess.Popen) -> None:
+        try:
+            proc.kill()
+            proc.wait(timeout=2)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+
+    def transcribe(self, audio_path: str) -> Dict[str, Any]:
+        """Blocking; returns {'text', 'seconds'} or raises RuntimeError."""
+        with self._lock:
+            if not self._alive():
+                self._spawn()
+            assert self._proc is not None and self._proc.stdin is not None and self._q is not None
+            req: Dict[str, Any] = {"audio": audio_path}
+            if self.language:
+                req["language"] = self.language
+            try:
+                self._proc.stdin.write(json.dumps(req) + "\n")
+                self._proc.stdin.flush()
+            except (BrokenPipeError, OSError):
+                self._reset()
+                raise RuntimeError("worker pipe broken")
+            try:
+                line = self._q.get(timeout=STT_TRANSCRIBE_TIMEOUT)
+            except queue.Empty:
+                self._reset()   # kill the hung worker so the next call respawns
+                raise RuntimeError("transcription timed out")
+            if line is None:
+                self._reset()
+                raise RuntimeError("worker exited mid-request")
+            try:
+                msg = json.loads(line)
+            except ValueError:
+                self._reset()   # stdout desynced — kill so the next call respawns clean
+                raise RuntimeError("worker sent malformed response")
+            if not msg.get("ok"):
+                raise RuntimeError(msg.get("error") or "transcription failed")
+            return msg
+
+    def health(self) -> Dict[str, Any]:
+        """Fast availability check for the settings status line — never loads the
+        model into this process."""
+        base = {"engine": "mlx_whisper", "model": self.model}
+        proc = self._proc            # snapshot once — health() runs without the lock
+        if proc is not None and proc.poll() is None:
+            return {**base, "available": True, "warm": True,
+                    "detail": "worker running — model is warm"}
+        try:
+            r = subprocess.run(
+                [sys.executable, "-c", "import mlx_whisper"],
+                capture_output=True, timeout=STT_IMPORT_PROBE_TIMEOUT,
+            )
+        except (subprocess.TimeoutExpired, OSError):
+            # Deliberately generic — this endpoint is unauthenticated, so we don't
+            # echo exception text that can carry local filesystem paths / username.
+            return {**base, "available": False, "warm": False,
+                    "detail": "speech engine probe failed"}
+        if r.returncode != 0:
+            return {**base, "available": False, "warm": False,
+                    "detail": "speech engine (mlx_whisper) not available"}
+        cached = _stt_model_cached(self.model)
+        return {**base, "available": True, "warm": False,
+                "detail": ("model cached — first use warms it (~2s)" if cached
+                           else "model will download (~1.5GB) on first use")}
+
+
+STT = SttWorker(STT_MODEL, STT_LANGUAGE)
+# Bounds in-flight /api/stt/transcribe requests so a burst of large uploads can't
+# buffer N×MAX_STT_BYTES in memory or pile up behind the single worker lock.
+STT_SLOTS = threading.BoundedSemaphore(STT_MAX_CONCURRENT)
+
+
 # ───────── HTTP handler ─────────
 CHANNEL_CODE_RE = re.compile(r"^[a-z0-9][a-z0-9\-]{0,31}$")
 
@@ -1430,6 +1618,8 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 self._error(404, f"no such channel: {ch}")
                 return
             self._serve_sse(self._hub_for_channel(ch))
+        elif path == "/api/stt/health":
+            self._json(STT.health())
         elif path.startswith("/api/attachment/"):
             self._serve_attachment(path)
         else:
@@ -1443,6 +1633,8 @@ class NthWebHandler(BaseHTTPRequestHandler):
             self._handle_identify()
         elif parsed.path == "/api/upload":
             self._handle_upload()
+        elif parsed.path == "/api/stt/transcribe":
+            self._handle_transcribe()
         else:
             self._error(404, "not found")
 
@@ -1793,6 +1985,69 @@ class NthWebHandler(BaseHTTPRequestHandler):
         # and it is already a slow path. Rate-limited internally, and after the
         # response so it can never delay the client.
         sweep_attachments(self.db_path)
+
+    def _handle_transcribe(self) -> None:
+        """Accept a raw audio body (webm/ogg/wav/…), transcribe locally with the
+        warm mlx_whisper worker, and return {ok, text, seconds}. Engine failures
+        return ok:false (HTTP 200) so the client can show its fallback banner.
+
+        Deliberately channel-agnostic: audio is transcribed and handed straight
+        back to the caller's composer, never stored or attributed to a channel,
+        so there is nothing here to scope by channel in landing mode."""
+        _token, ident, _is_new = self._resolve_identity()
+        if ident.source == IDENTITY_SOURCE_PENDING:
+            self._error(403, "identity required — POST /api/identify first")
+            return
+        # Bound concurrency before reading the (up to 25 MB) body, so a burst of
+        # uploads can't buffer N×MAX_STT_BYTES or pile up behind the worker lock.
+        if not STT_SLOTS.acquire(blocking=False):
+            self._json({"ok": False, "error": "transcription busy — try again in a moment"},
+                       status=503)
+            return
+        tmp = None
+        try:
+            try:
+                length = int(self.headers.get("Content-Length", "0") or 0)
+            except (TypeError, ValueError):
+                self._json({"ok": False, "error": "invalid Content-Length"}, status=400)
+                return
+            if length <= 0 or length > MAX_STT_BYTES:
+                self._json({"ok": False,
+                            "error": f"missing or oversized audio (max {MAX_STT_BYTES} bytes)"},
+                           status=400)
+                return
+            try:
+                data = self.rfile.read(length)
+            except OSError:
+                self._json({"ok": False, "error": "read failed"}, status=400)
+                return
+            if len(data) != length:
+                self._json({"ok": False, "error": "incomplete upload"}, status=400)
+                return
+
+            ext = _stt_ext_for(self.headers.get("Content-Type", ""))
+            try:
+                fd, tmp = tempfile.mkstemp(prefix="nth_stt_", suffix=ext)
+                with os.fdopen(fd, "wb") as fh:
+                    fh.write(data)
+                result = STT.transcribe(tmp)
+                self._json({"ok": True, "text": result.get("text", ""),
+                            "seconds": result.get("seconds"),
+                            "no_speech": bool(result.get("no_speech")),
+                            "engine": "mlx_whisper", "model": STT_MODEL})
+            except RuntimeError as e:
+                # Engine/worker failure — 200 with ok:false so the browser reads the
+                # reason and falls back to web speech (per the configured behavior).
+                self._json({"ok": False, "error": str(e)})
+            except OSError as e:
+                self._json({"ok": False, "error": f"audio write failed: {e}"}, status=500)
+        finally:
+            STT_SLOTS.release()
+            if tmp:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
 
     def _serve_attachment(self, path: str) -> None:
         tail = path.rsplit("/", 1)[-1]
