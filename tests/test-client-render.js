@@ -205,6 +205,23 @@ check('composer: the tail after the last mention is escaped too', () => {
   assert.ok(/bold/.test(html), 'but its text is preserved');
 });
 
+// ── local-STT unavailable → explicit browser fallback ───────────────────────
+// The real engine tier is intentionally skipped where mlx_whisper is absent.
+// This exercises the shipped dashboard's degradation path on those machines:
+// a missing engine must show an honest explanation and offer, never silently
+// enable, browser dictation.
+check('STT: unavailable local engine offers browser dictation explicitly', () => {
+  cx.window.SpeechRecognition = function SpeechRecognition() {};
+  H.offerWebFallback('speech engine (mlx_whisper) not installed');
+  const banner = H.sttBanner;
+  assert.strictEqual(banner.hidden, false, 'fallback banner must be visible');
+  assert.strictEqual(banner.className, 'warn');
+  assert.ok(banner.textContent.includes('On-device transcription unavailable'), banner.textContent);
+  assert.ok(banner.textContent.includes('speech engine is not installed'), banner.textContent);
+  assert.ok(banner.textContent.includes('Use browser dictation instead'), banner.textContent);
+  assert.ok(banner.textContent.includes('sends your audio to your browser vendor'), banner.textContent);
+});
+
 // ── chimeScopeAllows: mention-scoped chime predicate (feature #7) ─────────────
 // The chime's scope gate. Pure, and independent of notifyScope: 'all' chimes on
 // every peer message; 'mention' only when the operator is @'d.
@@ -263,6 +280,75 @@ check('shouldChime: a message hidden by the DM view is silent', () => {
 check('shouldChime: mention scope needs you addressed', () => {
   assert.strictEqual(chimeWith({ scope: 'mention', addressed: false }), false);
   assert.strictEqual(chimeWith({ scope: 'mention', addressed: true }), true);
+});
+
+// ── insertTranscript (dictation → composer) ─────────────────────────────────
+// The dictated text has to land where the user is looking, which is the caret,
+// not the end of the draft.
+function composer(value, start, end) {
+  const el = H.composerInput;
+  el.value = value;
+  el.selectionStart = start === undefined ? value.length : start;
+  el.selectionEnd = end === undefined ? el.selectionStart : end;
+  el.dispatched = [];
+  return el;
+}
+
+check('insertTranscript inserts at the caret, not at the end', () => {
+  const el = composer('hello world', 5, 5);
+  H.insertTranscript('there');
+  assert.strictEqual(el.value, 'hello there world');
+});
+
+check('insertTranscript leaves the caret after the inserted text', () => {
+  const el = composer('hello world', 5, 5);
+  H.insertTranscript('there');
+  assert.strictEqual(el.value.slice(0, el.selectionStart), 'hello there');
+  assert.strictEqual(el.selectionStart, el.selectionEnd);
+});
+
+check('insertTranscript replaces the selection', () => {
+  const el = composer('hello world', 6, 11);
+  H.insertTranscript('everyone');
+  assert.strictEqual(el.value, 'hello everyone');
+});
+
+check('insertTranscript separates from preceding text lacking whitespace', () => {
+  const el = composer('hello', 5, 5);
+  H.insertTranscript('world');
+  assert.strictEqual(el.value, 'hello world');
+});
+
+check('insertTranscript does not double the separator', () => {
+  const el = composer('hello ', 6, 6);
+  H.insertTranscript('world');
+  assert.strictEqual(el.value, 'hello world');
+});
+
+check('insertTranscript at the very start adds no leading space', () => {
+  const el = composer('world', 0, 0);
+  H.insertTranscript('hello');
+  assert.strictEqual(el.value, 'hello world');
+});
+
+check('insertTranscript spaces off following text too', () => {
+  const el = composer('ab', 1, 1);
+  H.insertTranscript('X');
+  assert.strictEqual(el.value, 'a X b');
+});
+
+check('insertTranscript still dispatches input (mirror/autosize/preview)', () => {
+  const el = composer('hi', 2, 2);
+  H.insertTranscript('there');
+  assert.ok(el.dispatched.includes('input'), 'expected an input event: ' + el.dispatched);
+});
+
+check('insertTranscript ignores empty/whitespace transcripts', () => {
+  const el = composer('draft', 2, 2);
+  H.insertTranscript('   ');
+  assert.strictEqual(el.value, 'draft');
+  H.insertTranscript('');
+  assert.strictEqual(el.value, 'draft');
 });
 
 console.log('');
