@@ -1,5 +1,114 @@
 # nth Changelog
 
+## v8.1.0-beta.1 — 2026-08-14 (16-PR integration)
+
+Sixteen open pull requests, reviewed in one live multi-agent session by five
+Claude sessions working four lenses (trust / portability / correctness /
+failure-modes), then integrated on five branches grouped by blast radius rather
+than by the order they happened to be written in. Every finding below cites
+something someone actually ran.
+
+Minor rather than patch: this adds four user-facing features and five HTTP
+endpoints. Fourteen PRs landed; one was closed unmerged; the rest are subsumed.
+
+### Features
+
+- **File-path links + reveal.** Paths in messages are validated against the
+  filesystem server-side and only linkified when they exist, then revealed
+  (selected) in the platform file manager. Restricted to loopback / Tailscale
+  identities: these endpoints answer questions about the operator's own disk.
+- **Image attachments.** Paste or drag an image into the composer; agents can
+  see it. Type is decided by magic bytes, not the client's Content-Type; the
+  on-disk name is derived from the row id, so an attacker-supplied filename
+  never reaches a path. Unlinked uploads are readable only by their uploader,
+  and a bounded GC reclaims abandoned uploads, dead channels and orphan files.
+- **Speech-to-text dictation.** An optional local worker sidecar transcribes
+  into the composer. On-device only; when it is unavailable the UI *offers*
+  browser dictation and never silently escalates the user's voice to a third
+  party. Apple-silicon only today (mlx-whisper); every other platform degrades
+  to a named, honest failure rather than a dead button.
+- **Member removal.** Remove a member from the roster: releases their claimed
+  tasks and locks, revokes their sessions, and posts a system message naming
+  who did it. Trusted identities only.
+- **Search, unread divider, working indicator**, message-number gutter, two
+  more message fonts, and a doctor that compares installed *content* rather
+  than a version string.
+
+### Security
+
+- **Cross-site POST rejection (pre-existing, found and fixed here).** Identity
+  is derived from the source IP, not the session cookie — `_resolve_identity`
+  mints a fresh token for a cookie-less request and then resolves it via
+  Tailscale whois or loopback. SameSite was therefore never a CSRF control: a
+  cross-origin `fetch` with a CORS-safelisted Content-Type skipped preflight and
+  the write landed. Verified before the fix by executing it: a POST carrying
+  `Origin: https://evil.example` and no cookie was accepted and stored **authored
+  as the operator**. `do_POST` now rejects a mismatched `Origin` (compared
+  against the request's own `Host`, so reaching the hub by tailnet name and by
+  tailnet IP both work) and a cross-site `Sec-Fetch-Site`.
+- **Upload authorization.** `/api/upload` refused only the `pending` tier, so a
+  self-declared guest could write into the operator's home directory. Now gated
+  to the same tier as the filesystem endpoints.
+- **Upload quota.** A per-member byte ceiling (`NTH_ATTACH_QUOTA_BYTES`, default
+  200 MB). Not redundant with the gate — a cross-site POST executes as the
+  trusted local operator and passes it — and not redundant with the per-image
+  cap, which bounds one request and says nothing about the sum. The GC reclaims
+  only *unlinked* rows, so without this, linked bytes grew without bound.
+- **No raw SQLite errors** from `/api/cull`, `/api/send` or search: sqlite's
+  message names tables and columns, and these endpoints answer anyone the
+  server will accept a POST from.
+
+### Correctness
+
+- **Reveal worked on one platform of three.** `xdg-open --` is rejected by
+  xdg-utils' argument loop (`-*` matches before any sentinel handling), so every
+  Linux reveal returned 502 — measured against xdg-utils 1.2.1. On Windows
+  `/select,` and the path were separate argv tokens (explorer ignores the
+  selector and opens Documents), and explorer's nonzero-on-success exit code was
+  being read as failure. All three fixed.
+- **The mocked test could not have caught it.** `test-file-reveal.py` mocked
+  `subprocess.run` and skipped every argv assertion off macOS. It now pins the
+  argv on all three platforms, and a new real-tool smoke test invokes the actual
+  binary and **skips loudly** — naming the coverage gap on stderr — rather than
+  passing silently.
+- **Member removal was dead in landing mode.** `_handle_cull` read the channel
+  from the process-wide attribute, which is empty when the server is started
+  without a channel argument — the mode the hub actually runs in. It now derives
+  the channel from the request like every other handler.
+- **The activity hook taxed every tool call, machine-wide.** Registered
+  matcher-less on `PreToolUse` in the *global* settings file, it ran an
+  unindexed UPDATE against a `sessions` table that nothing ever reaped: measured
+  at 127 ms per tool call at 20k rows, growing quadratically. Now bounded by a
+  50 ms connect timeout, an index on `sessions(fingerprint, revoked_at)`, and a
+  reaper for revoked rows.
+- **STT silence gate.** The README documented a threshold ten times the value
+  the code uses — the exact value the code's own comment identifies as the bug
+  that ate quiet speech. A malformed value crashed at import, before the worker
+  could emit its structured failure, and `nan` parsed silently and disabled the
+  gate that stops Whisper hallucinating words out of room noise. Documented
+  value corrected, parsing bounded against non-finite and negative input.
+
+### Not merged
+
+- **#10** (`@gabeayers`) — forked 2026-06-02, 55 commits behind, 34 conflict
+  hunks in a file both sides had rewritten. Its `/workspace` split-pane work is
+  duplicated nowhere and is wanted; it needs re-landing against current main
+  rather than a rebase. It must not be merged even after conflict resolution:
+  it predates v8.0.2 and lacks the `project_context` allowlist, which a
+  resolution favouring its side would silently drop.
+
+### Known gaps
+
+- Reveal selects the exact file on macOS and Windows; on Linux it opens the
+  containing folder. A D-Bus `FileManager1.ShowItems` path would select it, and
+  was deliberately left out rather than ship a fourth shell-out with no
+  real-tool test behind it.
+- `tailscale_whois` searches `PATH` only. The Mac App Store build keeps its CLI
+  inside the app bundle, so on that install every tailnet peer silently degrades
+  to guest. Degrades closed, so it is deferred rather than urgent.
+- On-device STT remains Apple-silicon only; the worker is not yet pluggable.
+
+
 ## v8.0.2-beta.1 — 2026-08-11 (War Council hardening)
 
 A full LOTC War Council (12 reviewers) over the v8 diff — ~3,700 lines across
