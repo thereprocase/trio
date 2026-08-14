@@ -116,6 +116,78 @@ def _installed_version():
     return None, None
 
 
+def _installed_drift(install_dir):
+    """Which installed server files differ from the tree doctor is running from?
+
+    Returns (differing, missing, total) or None when the comparison cannot be
+    made. Compares CONTENT, not NTH_VERSION, for two reasons found in review:
+
+    - NTH_VERSION only moves at release commits, so a version check is blind to
+      exactly the case that matters day to day — pulling a dozen commits under
+      one version string and forgetting to re-run setup.sh.
+    - It says nothing about direction, and there is no safe directional advice
+      to give: an install NEWER than the checkout is a correct install being
+      diagnosed from an old tree (a second clone, a bisect, a git worktree),
+      and telling that operator to run setup.sh would clobber it with older
+      code. Reporting "these differ, deploy whichever you want live" is the
+      honest claim and the only one the data supports.
+
+    Content comparison also handles a symlinked dev install correctly for the
+    right reason: link.sh symlinks individual FILES into a real directory, so
+    the directories never compare equal, but the bytes read through those links
+    are identical by construction and nothing is reported.
+    """
+    src_dir = Path(__file__).resolve().parent
+    try:
+        if not install_dir or not Path(install_dir).is_dir():
+            return None
+        sources = sorted(p for p in src_dir.glob("*.py"))
+    except (OSError, RuntimeError, ValueError):
+        return None
+    if not sources:
+        return None
+    differing, missing, total = [], [], 0
+    for src in sources:
+        dst = Path(install_dir) / src.name
+        total += 1
+        try:
+            if not dst.exists():
+                missing.append(src.name)
+            elif dst.read_bytes() != src.read_bytes():
+                differing.append(src.name)
+        except (OSError, RuntimeError, ValueError):
+            continue          # unreadable either side — not evidence of drift
+    if not differing and not missing:
+        return None
+    return differing, missing, total
+
+
+def _freshness_check(install_dir):
+    """The (label, level, detail) row for install freshness, or None.
+
+    Split out from run_checks so a test can pin the label, the level and the
+    wording — the parts an operator actually acts on — without standing up the
+    network and database work the rest of run_checks does.
+    """
+    drift = _installed_drift(install_dir)
+    if not drift:
+        return None
+    differing, missing, total = drift
+    n = len(differing) + len(missing)
+    src_dir = Path(__file__).resolve().parent
+    # Hub-service installs are refreshed by a different command entirely, and
+    # are not Claude Code spokes, so the spoke remedy is wrong there twice over.
+    if Path(install_dir) == HUB_INSTALL_DIR:
+        fix = "sudo bash setup.sh hub-service (then systemctl restart quartet-hub nth-web)"
+    else:
+        fix = f"bash {src_dir.parent / 'setup.sh'} (then restart Claude Code)"
+    named = ", ".join((differing + missing)[:3])
+    more = f" +{n - 3} more" if n > 3 else ""
+    return ("freshness", WARN,
+            f"{n}/{total} server files in {install_dir} differ from this "
+            f"checkout ({named}{more}) — to make this tree live: {fix}")
+
+
 def _http_json(url):
     """GET url, parse JSON. Returns (data, latency_ms, error_str)."""
     t0 = time.monotonic()
@@ -206,6 +278,20 @@ def run_checks(hub_override=None):
                        "server files present but no NTH_VERSION (pre-7.3 install)"))
     else:
         checks.append(("install", OK, f"v{local_version} at {install_base}"))
+
+    # --- installed tree vs this checkout ---
+    # Reuses install_base from the check above rather than re-reading, so the
+    # two rows cannot describe different install directories. Wrapped because
+    # doctor's whole purpose is to keep reporting on a broken machine: a
+    # symlink loop makes resolve() raise RuntimeError, and a truncated file
+    # makes read_bytes raise ValueError, neither of which should cost the
+    # operator the registration, database and hub findings below.
+    try:
+        freshness = _freshness_check(install_base)
+    except Exception as e:   # noqa: BLE001 — never abort the run
+        freshness = ("freshness", WARN, f"could not compare install: {type(e).__name__}")
+    if freshness:
+        checks.append(freshness)
 
     # --- local database ---
     # Hub-service boxes keep the DB under the service's de-rooted HOME.
