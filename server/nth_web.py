@@ -83,6 +83,9 @@ IDENTITY_SOURCE_PENDING = "pending"
 #   "human — GUEST (self-declared)"   → untrusted self-declared identity
 # Neither replaces direct hub-console input.
 
+# Identity tiers allowed to perform destructive, roster-wide actions (cull).
+# A self-declared guest is deliberately excluded — see _handle_cull.
+CULL_ALLOWED_SOURCES = (IDENTITY_SOURCE_LOOPBACK, IDENTITY_SOURCE_TAILSCALE)
 
 def _is_loopback_ip(remote_ip: str) -> bool:
     """True iff remote_ip is a loopback address (127.0.0.0/8, ::1, or an
@@ -348,22 +351,62 @@ def parse_mentions_json(raw: Optional[str]) -> List[str]:
         return []
 
 
-def member_status(last_seen_iso: Optional[str], status_text: str) -> str:
-    """Match the dashboard's status classification."""
-    if not last_seen_iso:
-        return "dead"
+def _iso_secs(iso: Optional[str]) -> Optional[float]:
+    """Parse an ISO 8601 timestamp to epoch seconds, or None if unusable."""
+    if not iso:
+        return None
     try:
-        ts = datetime.fromisoformat(last_seen_iso).timestamp()
+        return datetime.fromisoformat(iso).timestamp()
     except (ValueError, TypeError):
+        return None
+
+
+def member_status(last_seen_iso: Optional[str], status_text: str,
+                  session_activity_iso: Optional[str] = None,
+                  last_turn_end_iso: Optional[str] = None) -> str:
+    """Classify a member for the roster dot.
+
+    States: working / active / idle / stale / dead.
+      dead    — no heartbeat for DEAD_SECONDS (process gone).
+      stale   — heartbeat aging (> STALE_SECONDS).
+      idle    — alive, but its last turn has ended (nothing since) or it set a
+                sleeping status_text: "done / waiting on you".
+      working — alive AND it has acted since its last turn end (mid-turn). This
+                is the pulsing "keep chilling, it's on it" dot; it needs the
+                nth_turn_hook to have recorded a turn end. "Acted" means its
+                sessions.last_seen advanced past that turn end. With the
+                nth_activity_hook installed (PreToolUse + UserPromptSubmit),
+                *any* tool call or prompt bumps last_seen, so this holds for the
+                whole active turn — reasoning, a long Bash, a sub-agent — not
+                just from the agent's first trio call. Without the activity hook
+                only trio RPCs bump last_seen, so a turn that makes zero trio
+                calls would read idle until its Stop hook fires.
+      active  — alive but we have no turn data (hook not installed): the legacy
+                green dot, so hook-less deployments are unchanged.
+    """
+    ls = _iso_secs(last_seen_iso)
+    if ls is None:
         return "dead"
-    age = datetime.now(timezone.utc).timestamp() - ts
+    age = datetime.now(timezone.utc).timestamp() - ls
     if age > DEAD_SECONDS:
         return "dead"
     if age > STALE_SECONDS:
         return "stale"
     if status_text and any(kw in status_text.lower() for kw in SLEEPING_KEYWORDS):
         return "idle"
-    return "active"
+    # Turn-state split — only when the turn hook has recorded an end for this
+    # member. Acted since that end -> mid-turn -> working; otherwise finished.
+    end = _iso_secs(last_turn_end_iso)
+    if end is not None:
+        # A backward wall-clock step (NTP correction, host sleep/wake) can leave
+        # a Stop stamp in the future. No later activity can then exceed it, so
+        # the member would read idle while genuinely working. Treat a turn end
+        # that is ahead of now as no turn data at all.
+        if end > datetime.now(timezone.utc).timestamp() + 1:
+            return "active"
+        act = _iso_secs(session_activity_iso)
+        return "working" if (act is not None and act > end) else "idle"
+    return "active"  # no turn data (hook not installed) — legacy behavior
 
 
 _GUEST_SUFFIX_RE = re.compile(r"\s*\(\s*guest\s*\)\s*$", re.IGNORECASE)
@@ -526,6 +569,67 @@ def ensure_operator_row(db: sqlite3.Connection, channel: str, ident: OperatorIde
     return ident.member_id, ident.display_name
 
 
+def cull_member(db: sqlite3.Connection, channel: str, caller_id: str,
+                caller_name: str, target_id: str) -> Tuple[Optional[dict], Optional[str]]:
+    """Remove a member from a channel — mirrors nth_server.nth_cull so the web
+    dashboard can offer it directly. Deletes the target's row, releases their
+    claimed tasks back to open, drops their locks, and posts a [culled] system
+    message. Returns (result, error) with exactly one non-None. Must run inside
+    the caller's transaction."""
+    target = db.execute(
+        "SELECT id, name FROM members WHERE id = ? AND channel = ?",
+        (target_id, channel),
+    ).fetchone()
+    if not target:
+        return None, "member not found in this channel"
+    if target_id == caller_id:
+        return None, "you can't remove yourself"
+    now = now_iso()
+    target_name = target["name"]
+
+    released = db.execute(
+        "SELECT id FROM tasks WHERE channel = ? AND claimed_by = ? AND status = 'claimed'",
+        (channel, target_id),
+    ).fetchall()
+    db.execute(
+        "UPDATE tasks SET claimed_by = NULL, status = 'open', updated_at = ? "
+        "WHERE channel = ? AND claimed_by = ? AND status = 'claimed'",
+        (now, channel, target_id),
+    )
+    # Read the held locks before dropping them so the notice can name them —
+    # otherwise the operator gets no record of what was released.
+    released_locks = [r["resource"] for r in db.execute(
+        "SELECT resource FROM locks WHERE channel = ? AND held_by = ?",
+        (channel, target_id)).fetchall()]
+    db.execute("DELETE FROM locks WHERE channel = ? AND held_by = ?", (channel, target_id))
+    db.execute("DELETE FROM members WHERE id = ? AND channel = ?", (target_id, channel))
+    # Revoke their sessions so a lingering token can't be reused if the same
+    # member_id ever re-joins (defence-in-depth; also stops row build-up).
+    db.execute(
+        "UPDATE sessions SET revoked_at = ? WHERE channel = ? AND member_id = ? "
+        "AND revoked_at IS NULL",
+        (now, channel, target_id),
+    )
+
+    released_ids = [r["id"] for r in released]
+    # Name the operator: this renders as an author-less system line, so without
+    # it someone returning to the channel can see a member was removed but not
+    # by whom — for an irreversible action that is the first thing they ask.
+    msg = f"[culled] {target_name} ({target_id}) removed from channel by {caller_name}"
+    if released_ids:
+        msg += " — released tasks: " + ", ".join(f"#{t}" for t in released_ids)
+    if released_locks:
+        msg += " — released locks: " + ", ".join(released_locks)
+    db.execute(
+        "INSERT INTO messages (channel, member_id, member_name, content, created_at) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (channel, caller_id, caller_name, msg, now),
+    )
+    return {"culled": target_name, "culled_id": target_id,
+            "released_tasks": released_ids,
+            "released_locks": released_locks}, None
+
+
 # ───────── EventHub: polls DB, fans out SSE events ─────────
 class EventHub:
     """Single background thread watches the DB and pushes JSON events to any
@@ -623,45 +727,46 @@ class EventHub:
         # v6.2+ session-mode clients write sessions.last_read / last_seen
         # and never touch members.*. Reconcile like nth_monitor.py:171-183
         # so the web console sees real watermark + liveness movement.
-        # filter_mode (v7.2) is best-effort; older schemas fall back to 'all'.
-        try:
-            rows = db.execute(
-                "SELECT m.id AS id, m.name AS name, m.status_text AS status_text, "
-                "m.last_seen AS member_last_seen, m.last_read AS member_last_read, "
-                "m.messenger_heartbeat AS messenger_heartbeat, "
-                "m.watchdog_heartbeat AS watchdog_heartbeat, "
-                "m.filter_mode AS filter_mode, "
-                "m.context_json AS context_json, "
-                "COALESCE(MAX(s.last_read), 0) AS session_last_read, "
-                "MAX(s.last_seen) AS session_last_seen, "
-                "GROUP_CONCAT(s.fingerprint) AS fingerprints "
-                "FROM members m "
-                "LEFT JOIN sessions s "
-                "  ON s.channel = m.channel AND s.member_id = m.id "
-                "  AND s.revoked_at IS NULL "
-                "WHERE m.channel = ? "
-                "GROUP BY m.id, m.channel "
-                "ORDER BY m.joined_at",
-                (self.channel,),
-            ).fetchall()
-        except sqlite3.OperationalError:
-            rows = db.execute(
-                "SELECT m.id AS id, m.name AS name, m.status_text AS status_text, "
-                "m.last_seen AS member_last_seen, m.last_read AS member_last_read, "
-                "m.messenger_heartbeat AS messenger_heartbeat, "
-                "m.watchdog_heartbeat AS watchdog_heartbeat, "
-                "COALESCE(MAX(s.last_read), 0) AS session_last_read, "
-                "MAX(s.last_seen) AS session_last_seen, "
-                "GROUP_CONCAT(s.fingerprint) AS fingerprints "
-                "FROM members m "
-                "LEFT JOIN sessions s "
-                "  ON s.channel = m.channel AND s.member_id = m.id "
-                "  AND s.revoked_at IS NULL "
-                "WHERE m.channel = ? "
-                "GROUP BY m.id, m.channel "
-                "ORDER BY m.joined_at",
-                (self.channel,),
-            ).fetchall()
+        # Two independently-optional columns, so they get independent tiers:
+        # filter_mode/context_json (v7.2) and last_turn_end (this feature). The
+        # turn column is added by nth_server at MCP startup, but the dashboard
+        # can be launched standalone against a DB whose server has not restarted
+        # — folding both into one try/except would drop filter_mode and the
+        # context % for every member just because the turn column is missing.
+        def _roster_sql(turn: bool, v72: bool) -> str:
+            cols = [
+                "m.id AS id", "m.name AS name", "m.status_text AS status_text",
+                "m.last_seen AS member_last_seen", "m.last_read AS member_last_read",
+                "m.messenger_heartbeat AS messenger_heartbeat",
+                "m.watchdog_heartbeat AS watchdog_heartbeat",
+            ]
+            if v72:
+                cols += ["m.filter_mode AS filter_mode", "m.context_json AS context_json"]
+            cols += [
+                "COALESCE(MAX(s.last_read), 0) AS session_last_read",
+                "MAX(s.last_seen) AS session_last_seen",
+                "GROUP_CONCAT(s.fingerprint) AS fingerprints",
+            ]
+            if turn:
+                cols.append("MAX(s.last_turn_end) AS session_last_turn_end")
+            return ("SELECT " + ", ".join(cols) + " FROM members m "
+                    "LEFT JOIN sessions s "
+                    "  ON s.channel = m.channel AND s.member_id = m.id "
+                    "  AND s.revoked_at IS NULL "
+                    "WHERE m.channel = ? "
+                    "GROUP BY m.id, m.channel "
+                    "ORDER BY m.joined_at")
+
+        rows = None
+        for _turn, _v72 in ((True, True), (False, True), (False, False)):
+            try:
+                rows = db.execute(_roster_sql(_turn, _v72), (self.channel,)).fetchall()
+                break
+            except sqlite3.OperationalError:
+                continue
+        if rows is None:
+            rows = []
+
         # Collision-free avatars per channel. Sorted-id assignment in
         # animal_for_channel() makes the mapping stable across roster
         # refreshes as long as the member set is fixed; joins/leaves
@@ -702,6 +807,8 @@ class EventHub:
                         context_full = ctx_usage[fp]
                         context_pct = float(context_full["used_pct"])
                         break
+            keys = r.keys()
+            s_turn_end = r["session_last_turn_end"] if "session_last_turn_end" in keys else None
             aname, aemoji = avatars.get(r["id"], animal_for(r["id"]))
             out.append({
                 "id": r["id"],
@@ -710,9 +817,19 @@ class EventHub:
                 "last_seen": effective_last_seen,
                 "last_read": effective_last_read,
                 "filter_mode": fm or "all",
-                "status": member_status(effective_last_seen, r["status_text"] or ""),
                 "context_pct": context_pct,
                 "context": context_full,
+                # working/idle split uses the session's OWN activity (not the
+                # monitor-inflated effective_last_seen) vs. its last turn end.
+                # MAX(last_seen) and MAX(last_turn_end) are taken independently,
+                # which is correct under trio's one-primary-session-per-member
+                # invariant (nth_connect mints a single session per member id).
+                # If multi-session members are reintroduced, pair both values
+                # from the newest-last_seen session instead.
+                "status": member_status(
+                    effective_last_seen, r["status_text"] or "",
+                    session_activity_iso=(r["session_last_seen"] or None),
+                    last_turn_end_iso=s_turn_end),
                 "animal_name": aname,
                 "animal_emoji": aemoji,
             })
@@ -1163,6 +1280,8 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 self._error(404, f"no such channel: {ch}")
                 return
             self._serve_sse(self._hub_for_channel(ch))
+        elif path == "/api/search":
+            self._handle_search(parsed)
         else:
             self._error(404, "not found")
 
@@ -1172,6 +1291,8 @@ class NthWebHandler(BaseHTTPRequestHandler):
             self._handle_send()
         elif parsed.path == "/api/identify":
             self._handle_identify()
+        elif parsed.path == "/api/cull":
+            self._handle_cull()
         else:
             self._error(404, "not found")
 
@@ -1247,6 +1368,64 @@ class NthWebHandler(BaseHTTPRequestHandler):
         except (ValueError, UnicodeDecodeError):
             self._error(400, "invalid JSON")
             return None
+
+    def _handle_search(self, parsed) -> None:
+        """Full-history search: substring match over this channel's stored
+        messages (beyond the ~200 the dashboard keeps in memory)."""
+        # Landing mode serves many channels from one process, so the channel
+        # comes from the request, not from a process-wide attribute. Mirrors
+        # every other handler here; binding self.channel would match "" and
+        # silently return nothing.
+        ch = self._channel_for_request(parsed)
+        if ch is None:
+            self._error(400, "channel query param required")
+            return
+        if self.landing_mode and not self._channel_exists(ch):
+            self._error(404, f"no such channel: {ch}")
+            return
+        qs = parse_qs(parsed.query)
+        q = (qs.get("q", [""])[0] or "").strip()
+        if len(q) < 2:
+            self._error(400, "query too short (min 2 chars)")
+            return
+        q = q[:200]
+        _token, ident, _is_new = self._resolve_identity()
+        if ident.source == IDENTITY_SOURCE_PENDING:
+            self._error(403, "identity required — POST /api/identify first")
+            return
+        # Escape LIKE wildcards so a query like "50%" is a literal substring.
+        esc = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        like = f"%{esc}%"
+        db = None
+        try:
+            db = sqlite3.connect(str(self.db_path), timeout=5)
+            db.row_factory = sqlite3.Row
+            db.execute("PRAGMA busy_timeout=3000")
+            rows = db.execute(
+                "SELECT id, member_id, member_name, content, created_at FROM messages "
+                "WHERE channel = ? AND content LIKE ? ESCAPE '\\' "
+                "ORDER BY id DESC LIMIT 200",
+                (ch, like),
+            ).fetchall()
+            results = [{"id": r["id"], "member_id": r["member_id"],
+                        "member_name": r["member_name"] or r["member_id"],
+                        "content": r["content"] or "", "created_at": r["created_at"]}
+                       for r in rows]
+        except sqlite3.Error as e:
+            # sqlite3's message can carry table/column names and the db file
+            # path — internal shape the browser has no business seeing. Log
+            # the detail to the operator's journal, hand the client a short
+            # generic reason.
+            sys.stderr.write(f"[nth_web] search db error: {e}\n")
+            self._error(500, "search failed")
+            return
+        finally:
+            if db is not None:
+                try:
+                    db.close()
+                except sqlite3.Error:
+                    pass
+        self._json({"ok": True, "query": q, "count": len(results), "results": results})
 
     def _handle_identify(self) -> None:
         body = self._read_json_body(max_bytes=2048)
@@ -1375,7 +1554,14 @@ class NthWebHandler(BaseHTTPRequestHandler):
                     pass
                 raise
         except sqlite3.Error as e:
-            self._error(500, f"db error: {e}")
+            # Same reasoning as the search handler above: sqlite's text names
+            # tables and columns, and a client learns the schema one failed
+            # request at a time. It is also useless to the person who hit it —
+            # "no such column: bangs" after a missed migration tells them
+            # nothing they can act on, while the operator's log is exactly
+            # where that belongs.
+            sys.stderr.write(f"[nth_web] send db error: {e}\n")
+            self._error(500, "send failed")
             return
         finally:
             if db is not None:
@@ -1385,6 +1571,78 @@ class NthWebHandler(BaseHTTPRequestHandler):
                     pass
 
         self._json({"ok": True, "id": msg_id})
+
+    def _handle_cull(self) -> None:
+        """Remove a member from the channel at the operator's request — the
+        dashboard's roster remove (×) button. Mirrors trio_cull: releases the
+        target's tasks/locks and posts a [culled] system message."""
+        body = self._read_json_body(max_bytes=2048)
+        if body is None:
+            return
+        # _read_json_body only guarantees valid JSON, not a dict of strings —
+        # guard both before .get()/.strip() so bad input is a clean 400, not an
+        # AttributeError that drops the connection.
+        if not isinstance(body, dict):
+            self._error(400, "invalid body")
+            return
+        target_id = body.get("target_member_id")
+        if not isinstance(target_id, str) or not target_id.strip():
+            self._error(400, "target_member_id required")
+            return
+        target_id = target_id.strip()
+        cull_channel = self._channel_for_request(urlparse(self.path))
+        if cull_channel is None:
+            self._error(400, "channel query param required")
+            return
+        if self.landing_mode and not self._channel_exists(cull_channel):
+            self._error(404, f"no such channel: {cull_channel}")
+            return
+        _token, ident, _is_new = self._resolve_identity()
+        if ident.source == IDENTITY_SOURCE_PENDING:
+            self._error(403, "identity required — POST /api/identify first")
+            return
+        # Removing a member is destructive and roster-wide — restrict it to
+        # trusted identities (a local shell or a Tailscale-verified peer). A
+        # self-declared guest, the weakest tier, must not be able to rip out
+        # agents or other participants (esp. under --tailnet's 0.0.0.0 bind).
+        if ident.source not in CULL_ALLOWED_SOURCES:
+            self._error(403, "only a trusted operator (local or tailnet) can remove members")
+            return
+        db = None
+        try:
+            db = sqlite3.connect(str(self.db_path), timeout=5, isolation_level=None)
+            db.row_factory = sqlite3.Row
+            db.execute("PRAGMA busy_timeout=5000")
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                op_id, op_name = ensure_operator_row(db, cull_channel, ident)
+                result, err = cull_member(db, cull_channel, op_id, op_name, target_id)
+                if err:
+                    db.execute("ROLLBACK")
+                    self._error(400, err)
+                    return
+                db.execute("COMMIT")
+            except sqlite3.Error:
+                try:
+                    db.execute("ROLLBACK")
+                except sqlite3.Error:
+                    pass
+                raise
+        except sqlite3.Error as e:
+            # This handler is new in this branch, so shipping the pattern
+            # would INTRODUCE the leak rather than inherit it. sqlite's text
+            # names tables and columns, and cull is reachable by anyone the
+            # server will accept a POST from.
+            sys.stderr.write(f"[nth_web] cull db error: {e}\n")
+            self._error(500, "remove failed")
+            return
+        finally:
+            if db is not None:
+                try:
+                    db.close()
+                except sqlite3.Error:
+                    pass
+        self._json({"ok": True, **(result or {})})
 
 
 # ───────── HTML / JS / CSS (served as /) ─────────
@@ -1588,6 +1846,14 @@ INDEX_HTML = r"""<!doctype html>
   :root[data-theme="bluebubble"] .member .dm-btn {
     background: rgba(10,132,255,0.15); color: #0a84ff; border: none; border-radius: 14px;
   }
+  /* Match the theme's pill shape so the remove control isn't a sharp grey box
+     beside a rounded blue one — destructive, so it keeps the red family. */
+  :root[data-theme="bluebubble"] .member .rm-btn {
+    background: rgba(255,69,58,0.15); color: #ff453a; border: none; border-radius: 14px;
+  }
+  :root[data-theme="bluebubble"] .member .rm-btn:hover:not(:disabled) {
+    background: #ff453a; color: #fff;
+  }
   /* Composer — dark keyboard area */
   :root[data-theme="bluebubble"] #composer {
     background: #1c1c1e; border-top: 0.5px solid rgba(255,255,255,0.08); padding: 8px 10px;
@@ -1783,6 +2049,29 @@ INDEX_HTML = r"""<!doctype html>
          height: 100vh; }
   #app.side-collapsed { grid-template-columns: 1fr 0; }
   #app.side-collapsed #side { display: none; }
+
+  /* Full-history search panel */
+  #search-panel { position: fixed; top: 8%; left: 50%; transform: translateX(-50%);
+    width: min(680px, 92vw); max-height: 80vh; z-index: 70; display: flex; flex-direction: column;
+    background: var(--bg2); border: 1px solid var(--border); border-radius: 10px;
+    box-shadow: 0 12px 48px rgba(0,0,0,0.55); overflow: hidden; }
+  #search-panel[hidden] { display: none; }
+  .search-head { display: flex; gap: 8px; padding: 10px; border-bottom: 1px solid var(--border); }
+  #search-input { flex: 1; padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px;
+    background: var(--bg); color: var(--fg); font: inherit; }
+  #search-input:focus { outline: none; border-color: var(--accent); }
+  #search-close { background: none; border: none; color: var(--dim); font-size: 22px;
+    line-height: 1; cursor: pointer; padding: 0 8px; }
+  #search-close:hover { color: var(--fg); }
+  #search-status { padding: 6px 12px; font-size: 11px; color: var(--dim); }
+  #search-results { overflow-y: auto; padding: 4px 8px 10px; }
+  .search-hit { padding: 8px 10px; border-radius: 6px; cursor: pointer; border: 1px solid transparent; }
+  .search-hit:hover { background: rgba(var(--ov),0.06); border-color: rgba(var(--ov),0.15); }
+  .search-hit .sh-meta { font-size: 10px; color: var(--dim); margin-bottom: 2px; }
+  .search-hit .sh-author { font-weight: 600; }
+  .search-hit .sh-body { font-size: 12px; white-space: pre-wrap; word-break: break-word; }
+  .msg.flash { animation: flashmsg 1.4s ease-out; }
+  @keyframes flashmsg { 0% { background: var(--hover); } 100% { background: transparent; } }
 
   /* ── Header ── */
   header { grid-column: 1 / 3; background: var(--bg2); border-bottom: 1px solid var(--border);
@@ -2090,6 +2379,20 @@ INDEX_HTML = r"""<!doctype html>
   #jump-btn:hover { background: var(--accent-hi); }
   #jump-btn .count { background: var(--err); color: white;
                      border-radius: 10px; padding: 1px 6px; margin-left: 4px; font-size: 10px; }
+  /* top "N new messages" bar — jump to the first unread */
+  #new-bar { position: absolute; left: 50%; top: 10px; transform: translateX(-50%);
+             background: var(--mention); color: var(--bg); border: none; z-index: 6;
+             padding: 5px 14px; border-radius: 16px; font-size: 11px; font-weight: 600;
+             cursor: pointer; box-shadow: 0 4px 14px rgba(0,0,0,0.5); display: none;
+             user-select: none; }
+  #new-bar.show { display: block; }
+  #new-bar:hover { filter: brightness(1.1); }
+  /* "new messages" divider before the first unread message */
+  .unread-divider { display: flex; align-items: center; gap: 8px; margin: 10px 4px;
+                    color: var(--mention); font-size: 10px; font-weight: 600;
+                    text-transform: uppercase; letter-spacing: 0.6px; }
+  .unread-divider::before, .unread-divider::after { content: ""; flex: 1; height: 1px;
+                    background: var(--mention); }
 
   /* ── Roster sidebar ── */
   #side { grid-row: 2 / 3; grid-column: 2 / 3;
@@ -2129,6 +2432,21 @@ INDEX_HTML = r"""<!doctype html>
                      background: var(--bg2); color: var(--dim); margin-left: 4px; }
   .member .ctx-pct.warm { background: #4a3a20; color: #e5d35e; }
   .member .ctx-pct.hot  { background: #4a2420; color: var(--bang-chip); }
+  .member .member-actions { display: none; padding: 6px 0 2px 16px; }
+  .member.expanded .member-actions { display: flex; }
+  /* Destructive, so it carries --err rather than the amber --mention hue that
+     means "someone said your name" everywhere else in this UI. */
+  /* Sized off .dm-btn on purpose: the routine control and the destructive one
+     sit in the same expanded row, and the destructive one should not be the
+     bigger target. */
+  .member .rm-btn { font: inherit; font-size: 9px; line-height: 1.2;
+                    padding: 2px 6px; border-radius: 3px;
+                    background: var(--bg2); color: var(--err); border: 1px solid var(--border);
+                    cursor: pointer; flex-shrink: 0; user-select: none;
+                    text-transform: uppercase; letter-spacing: 0.5px; }
+  .member .rm-btn:hover:not(:disabled) { background: var(--err); color: var(--bg);
+                          border-color: var(--err); }
+  .member .rm-btn:disabled { opacity: 0.6; cursor: default; }
   .member .fmode { font-size: 9px; padding: 1px 5px; border-radius: 3px;
                    flex-shrink: 0; user-select: none;
                    text-transform: uppercase; letter-spacing: 0.5px;
@@ -2144,6 +2462,16 @@ INDEX_HTML = r"""<!doctype html>
   .member.expanded .caret { transform: rotate(90deg); }
   .member .id { color: var(--dimmer); font-size: 10px; margin-left: 2px; }
   .dot.active { background: var(--accent2); }
+  /* working = alive AND mid-turn: a breathing green dot, the "it's on it,
+     keep chilling" cue. Distinct from the solid green "active" (legacy /
+     hook-not-installed) and the grey "idle" (turn ended, waiting on you). */
+  .dot.working { background: var(--accent2); animation: workpulse 1.3s ease-in-out infinite; }
+  @keyframes workpulse {
+    0%   { opacity: 1;    transform: scale(1); }
+    50%  { opacity: 0.4;  transform: scale(0.72); }
+    100% { opacity: 1;    transform: scale(1); }
+  }
+  @media (prefers-reduced-motion: reduce) { .dot.working { animation: none; } }
   .dot.idle { background: var(--dimmer); }
   .dot.stale { background: var(--warn); }
   .dot.dead { background: var(--err); }
@@ -2436,6 +2764,7 @@ INDEX_HTML = r"""<!doctype html>
       <option value='-apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "Helvetica Neue", "Helvetica", "Arial", sans-serif' disabled>Walled Garden</option>
     </select>
     <input id="filter" type="text" placeholder="filter messages…" spellcheck="false">
+    <span class="pill" id="btn-search" title="search the full channel history">🔍 search</span>
     <span class="pill on" id="btn-side" title="show/hide the roster sidebar">roster</span>
     <span class="pill on" id="btn-msgnum" title="show each message's #number in the left margin">#nums</span>
     <span class="pill" id="btn-compact" title="clamp every message body to 3 lines">compact</span>
@@ -2451,6 +2780,7 @@ INDEX_HTML = r"""<!doctype html>
 
   <div id="mobile-scrim"></div>
   <div id="chat-wrap">
+    <div id="new-bar" title="jump to the first unread message"></div>
     <div id="chat"></div>
     <button id="jump-btn">↓ latest<span class="count" id="jump-count" style="display:none">0</span></button>
   </div>
@@ -2498,6 +2828,14 @@ INDEX_HTML = r"""<!doctype html>
   </div>
 </div>
 
+<div id="search-panel" hidden>
+  <div class="search-head">
+    <input id="search-input" type="text" placeholder="search all history…" autocomplete="off" spellcheck="false">
+    <button id="search-close" title="close (Esc)" aria-label="close search">×</button>
+  </div>
+  <div id="search-status"></div>
+  <div id="search-results"></div>
+</div>
 <script>
 (() => {
   // ── DOM handles ──
@@ -2524,6 +2862,7 @@ INDEX_HTML = r"""<!doctype html>
   const fontPicker = document.getElementById('font-picker');
   const jumpBtn = document.getElementById('jump-btn');
   const jumpCount = document.getElementById('jump-count');
+  const newBar = document.getElementById('new-bar');
   const targetBar = document.getElementById('target-bar');
 
   // Message-font picker — persists per-origin via localStorage.
@@ -2631,6 +2970,10 @@ INDEX_HTML = r"""<!doctype html>
   const API_QS = /*__API_QS__*/'';
 
   // ── State ──
+  // How recently a real gesture must have happened for a scroll to count as
+  // the user's. Covers a smooth-scroll animation started by a real drag.
+  const USER_INTENT_MS = 1500;
+  let CAN_CULL = false;
   const state = {
     channel: '',
     operator: { id: '', name: '' },
@@ -2660,6 +3003,9 @@ INDEX_HTML = r"""<!doctype html>
     notifyWhen: 'hidden',     // 'hidden' | 'always'
     unreadCount: 0,                 // for tab title while hidden
     jumpUnread: 0,                  // messages arrived while user was scrolled up
+    lastSeenId: 0,                  // highest msg id the user has caught up to
+    userIntentAt: 0,                // timestamp of the last real scroll gesture
+                                    // (session-based; drives the unread divider)
     rateBins: new Map(),            // bin_epoch_10s → count
     startedAt: Date.now(),
     originalTitle: 'nth_web',
@@ -2984,7 +3330,7 @@ INDEX_HTML = r"""<!doctype html>
 
   const SYSTEM_WORDS = new Set(['claimed', 'done', 'cancelled', 'released',
     'retracted', 'joined', 'left', 'ended', 'locked', 'unlocked', 'status',
-    'pinned', 'renamed']);
+    'pinned', 'renamed', 'culled']);
   // System notices come in two shapes: "[word #id] ..." (the task family) and
   // "[word] ..." (join/pin/lock/unlock/rename). A plain startsWith('[word ')
   // only ever matched the first, so the second rendered as ordinary markdown.
@@ -3297,7 +3643,12 @@ INDEX_HTML = r"""<!doctype html>
     _initialSettleTimer = null;
     _initialSettleDeadline = 0;
     state.initialLoad = false;
-    requestAnimationFrame(() => { chat.scrollTop = chat.scrollHeight; });
+    // seedBaseline + disownScroll come from the unread-divider work: the
+    // baseline must be taken once the history burst has settled, and the
+    // programmatic scroll below must NOT count as user intent — otherwise
+    // opening a channel marks everything read before the reader has seen it.
+    seedBaseline();
+    requestAnimationFrame(() => { disownScroll(); chat.scrollTop = chat.scrollHeight; });
   }
   function scheduleInitialSettle() {
     // The quiet gap is rescheduled on each append, so a burst spaced under
@@ -3307,6 +3658,11 @@ INDEX_HTML = r"""<!doctype html>
     const now = Date.now();
     if (!_initialSettleDeadline) _initialSettleDeadline = now + 3000;
     if (_initialSettleTimer) clearTimeout(_initialSettleTimer);
+    // Both sides changed this scheduler. Kept: the renderer's CAPPED wait (a
+    // dense burst must still settle, or the chime stays muted through an agent
+    // flurry) driving the unread work's settle body, which now lives in
+    // settleInitialLoad() above. Taking either side alone would have silently
+    // dropped the other's fix.
     const wait = Math.max(0, Math.min(250, _initialSettleDeadline - now));
     _initialSettleTimer = setTimeout(settleInitialLoad, wait);
   }
@@ -3432,15 +3788,39 @@ INDEX_HTML = r"""<!doctype html>
       // history burst, then do one final settle after layout reflows.
       chat.scrollTop = chat.scrollHeight;
       scheduleInitialSettle();
-    } else if (nearBottom) {
+    } else if (nearBottom && !document.hidden) {
+      // Only auto-pin to the bottom when the tab is VISIBLE. Pinning while
+      // hidden would leave us at the bottom on return, so the "new messages"
+      // divider for what arrived while away would be marked caught-up and lost.
       chat.scrollTop = chat.scrollHeight;
     } else {
-      state.jumpUnread++;
+      // Same rule as the divider: your own message is not something you have
+      // yet to read. Without this, sending while scrolled up raises the
+      // jump-to-latest badge as well as the divider — two separate claims that
+      // there is something new, both of them about you.
+      if (!isMine) state.jumpUnread++;
       updateJumpButton();
     }
 
+    // Unread divider: if the user is keeping up (tab visible + at/near bottom),
+    // they've seen this message; otherwise it's unread since they looked away or
+    // scrolled up, and a "new messages" divider is drawn before the first such.
+    if (state.initialLoad) {
+      // History burst. The baseline is set once in seedBaseline() when the
+      // burst settles; advancing per-message here would race a hidden tab.
+    } else if (!document.hidden && nearBottom && !isHiddenMsg(div)) {
+      // Only messages the user can actually see count as read on arrival, and
+      // the advance has to be the same ascending walk markCaughtUp does — a
+      // bare Math.max would jump the watermark over earlier messages a filter
+      // is hiding, which is the very thing that walk exists to prevent. One
+      // function owns the invariant.
+      markCaughtUp();
+    } else {
+      refreshUnreadDivider();
+    }
+
     // Tab-title badge when hidden
-    if (document.hidden) {
+    if (document.hidden && !isMine) {
       state.unreadCount++;
       updateTitle();
     }
@@ -3582,7 +3962,7 @@ INDEX_HTML = r"""<!doctype html>
     targetBar.innerHTML = '';
     // Build the ordered list of targetable members. Sort by active-first
     // then name so the numbering is stable-ish across renders.
-    const order = { active: 0, idle: 1, stale: 2, dead: 3 };
+    const order = { working: 0, active: 1, idle: 2, stale: 3, dead: 4 };
     const targetables = [...state.members.values()]
       .filter(isTargetable)
       .sort((a, b) => {
@@ -3676,6 +4056,13 @@ INDEX_HTML = r"""<!doctype html>
       state.members.set(m.id, m);
       if (old && old.name !== m.name) rename_from.set(m.id, { from: old.name, to: m.name });
     }
+    // Drop members the roster no longer lists. state.members backs the composer
+    // target chips (and their Alt+N hotkeys), @-autocomplete, ack badges and
+    // watermark pins — without this a culled member stays selectable until reload.
+    const liveIds = new Set(members.map(m => m.id));
+    for (const id of [...state.members.keys()]) {
+      if (!liveIds.has(id)) state.members.delete(id);
+    }
 
     if (rename_from.size > 0) {
       // Patch cached message records so author label follows the current alias.
@@ -3690,7 +4077,7 @@ INDEX_HTML = r"""<!doctype html>
 
     rosterEl.innerHTML = '';
     const sorted = members.slice().sort((a, b) => {
-      const order = { active: 0, idle: 1, stale: 2, dead: 3 };
+      const order = { working: 0, active: 1, idle: 2, stale: 3, dead: 4 };
       if (a.id === state.operator.id) return 1;
       if (b.id === state.operator.id) return -1;
       const oa = order[a.status] ?? 4;
@@ -3765,6 +4152,47 @@ INDEX_HTML = r"""<!doctype html>
         pin.title += ` — context ${Math.round(cpct)}%`;
       }
       c.appendChild(pin);
+    }
+  }
+
+  // Remove a member from the channel (roster × button). Confirms first — it
+  // releases their claimed tasks + locks and posts a [culled] message. The SSE
+  // roster refresh drops them from the sidebar; it does not stop a live agent's
+  // process (it would just start erroring and could reconnect).
+  async function cullMember(id, name, btn) {
+    // Single backslash-n. This script is embedded in a Python raw string, so a
+    // doubled backslash survives to the browser verbatim and the dialog would
+    // display the escape sequence as literal text.
+    if (!confirm('Remove ' + name + ' from the channel?\n\n'
+        + 'This cannot be undone. Their claimed tasks and held locks are '
+        + 'released, their sessions are revoked, and a [culled] notice is '
+        + 'posted to the channel.\n\n'
+        + 'It does not stop a running process — it only removes them here.')) return;
+    // Disable while in flight and bound the wait. Without this the button gives
+    // no signal at all after you have confirmed an irreversible action — and a
+    // request CAN hang indefinitely: several dashboard tabs consume the
+    // browser's per-origin connection cap with their SSE streams, and the DM
+    // button opens tabs, so reaching the cap is a normal thing to do.
+    const label = btn ? btn.textContent : null;
+    if (btn) { btn.disabled = true; btn.textContent = 'Removing…'; }
+    try {
+      const r = await fetch('/api/cull' + API_QS, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ target_member_id: id }),
+        signal: (AbortSignal && AbortSignal.timeout) ? AbortSignal.timeout(15000) : undefined,
+      });
+      if (!r.ok) {
+        const err = await r.json().catch(() => ({ error: 'unknown' }));
+        alert('remove failed: ' + (err.error || r.status));
+      }
+    } catch (e) {
+      alert(e.name === 'TimeoutError'
+        ? 'remove timed out — the dashboard did not get a reply, so ' + name
+          + ' may or may not have been removed. Reload to check.'
+        : 'remove failed: ' + e.message);
+    } finally {
+      if (btn) { btn.disabled = false; btn.textContent = label; }
     }
   }
 
@@ -3845,6 +4273,24 @@ INDEX_HTML = r"""<!doctype html>
     stats.className = 'stats';
     stats.innerHTML = renderMemberStatsHTML(m);
     row.appendChild(stats);
+
+    // Remove control — revealed only when the row is expanded, so it can't be
+    // mis-clicked from the collapsed roster (on a phone the old always-visible
+    // × sat 53px from the drawer's own close ×, same glyph, at a sub-44px
+    // target). Hidden entirely for identities the server would refuse, rather
+    // than walking them through two dialogs into a 403.
+    if (!DM_MODE && m.id !== state.operator.id && CAN_CULL) {
+      const actions = document.createElement('div');
+      actions.className = 'member-actions';
+      const rm = document.createElement('button');
+      rm.type = 'button';
+      rm.className = 'rm-btn';
+      rm.textContent = 'Remove';
+      rm.title = `Remove ${m.name} from this channel — releases their tasks and locks, and cannot be undone`;
+      rm.addEventListener('click', (e) => { e.stopPropagation(); cullMember(m.id, m.name, rm); });
+      actions.appendChild(rm);
+      row.appendChild(actions);
+    }
 
     row.addEventListener('click', (e) => {
       // Clicking the name on a mention-capable row? On shift-click → filter.
@@ -4293,8 +4739,13 @@ INDEX_HTML = r"""<!doctype html>
   }
   function applyFilterToAll() {
     for (const node of chat.children) applyFilterToNode(node);
+    // Re-anchor the unread divider to the first still-visible unread message
+    // (a filter may have hidden the one it was sitting before).
+    refreshUnreadDivider();
   }
   function applyFilterToNode(node) {
+    // Skip non-message children (e.g. the unread divider) — they have no msgId.
+    if (!node.dataset || node.dataset.msgId === undefined) return;
     if (!state.filter) { node.classList.remove('filtered-out'); return; }
     const hit = (node.dataset.search || '').includes(state.filter);
     node.classList.toggle('filtered-out', !hit);
@@ -4636,20 +5087,145 @@ INDEX_HTML = r"""<!doctype html>
   });
 
   // ── Jump-to-latest + unread counter ──
+  // ── Unread divider ──
+  // Count / locate unread (id > lastSeenId), skipping filtered/DM-hidden nodes
+  // so the divider + "new" bar stay in sync with what's actually shown.
+  function isHiddenMsg(dom) {
+    return dom.classList.contains('filtered-out') || dom.classList.contains('dm-hidden');
+  }
+  // You cannot have unread your own message. Sending while scrolled up used to
+  // raise a "new messages" divider above your own post and add it to the
+  // counter, because unread was decided purely by id > lastSeenId.
+  //
+  // Skipped at the point of COUNTING rather than by advancing lastSeenId past
+  // it. The watermark is a single high-water mark: moving it over your own
+  // message would also mark every earlier message read, so a peer's message
+  // that arrived while you were scrolled up would vanish from the divider
+  // merely because you replied to something else.
+  function isOwnMsg(dom) {
+    return !!state.operator.id && dom.dataset.sender === state.operator.id;
+  }
+  function firstVisibleUnreadDom() {
+    for (const id of [...state.messageDomById.keys()].sort((a, b) => a - b)) {
+      if (id <= state.lastSeenId) continue;
+      const dom = state.messageDomById.get(id);
+      if (dom && !isHiddenMsg(dom) && !isOwnMsg(dom)) return dom;
+    }
+    return null;
+  }
+  function unreadCountVisible() {
+    let n = 0;
+    for (const [id, dom] of state.messageDomById) {
+      if (id > state.lastSeenId && !isHiddenMsg(dom) && !isOwnMsg(dom)) n++;
+    }
+    return n;
+  }
+  // Draw a "new messages" line before the first *visible* unread message.
+  function refreshUnreadDivider() {
+    const old = document.getElementById('unread-divider');
+    if (old) old.remove();
+    if (state.lastSeenId) {
+      const dom = firstVisibleUnreadDom();
+      if (dom) {
+        const bar = document.createElement('div');
+        bar.id = 'unread-divider';
+        bar.className = 'unread-divider';
+        bar.textContent = 'new messages';
+        chat.insertBefore(bar, dom);
+      }
+    }
+    updateNewBar();
+  }
+  // Establish the read watermark once, when the history burst settles — the
+  // only place that works when the channel was opened in a background tab,
+  // which landing mode makes the normal way in.
+  //
+  // Everything already on screen counts as seen, so you arrive caught up
+  // rather than staring at a divider above the entire history. If the server
+  // has a last_read for this operator it wins, but note that nth_web.py does
+  // not currently write members.last_read for web operators (ensure_operator_row
+  // inserts 0 and only last_seen is updated), so in practice this resolves to
+  // "newest" today. The branch is here so that persisting a web operator's
+  // read position starts working without touching this function.
+  function seedBaseline() {
+    if (state.lastSeenId) return;
+    // reduce(), not Math.max(...spread) — a long channel would exceed the
+    // argument limit and throw RangeError.
+    const newest = [...state.messageDomById.keys()]
+      .reduce((a, b) => (b > a ? b : a), 0);
+    const me = state.members.get(state.operator.id);
+    const serverLastRead = me ? (me.last_read || 0) : 0;
+    state.lastSeenId = serverLastRead > 0 ? Math.min(serverLastRead, newest) : newest;
+    refreshUnreadDivider();
+  }
+
+  // The user caught up — advance the watermark over the messages they could
+  // actually have read, and clear the divider.
+  //
+  // lastSeenId is a single high-water mark, so it must never jump OVER an
+  // unread message the user has not seen. Two kinds of hidden message need
+  // opposite treatment:
+  //   • filtered-out — the user's own filter is hiding it temporarily. Stop
+  //     here. Advancing past it would mark it read because they searched for
+  //     something else, and clearing the filter would silently lose it.
+  //   • dm-hidden — structurally not part of this view at all. Skip it; if it
+  //     blocked the walk the watermark could never advance past it again.
+  function markCaughtUp() {
+    let mark = state.lastSeenId;
+    for (const id of [...state.messageDomById.keys()].sort((a, b) => a - b)) {
+      if (id <= state.lastSeenId) continue;
+      const dom = state.messageDomById.get(id);
+      if (dom.classList.contains('filtered-out')) break;
+      mark = id;
+    }
+    state.lastSeenId = mark;
+    if (!unreadCountVisible()) {
+      const bar = document.getElementById('unread-divider');
+      if (bar) bar.remove();
+    }
+    updateNewBar();
+  }
+  // Top "N new messages" bar — the conventional jump-to-first-unread affordance.
+  // Shown whenever an unread divider exists; clicking scrolls up to it.
+  function updateNewBar() {
+    if (!newBar) return;
+    if (!document.getElementById('unread-divider')) { newBar.classList.remove('show'); return; }
+    // "N new messages below" is meaningless when you are already at the bottom
+    // looking at them. This happens two ways: the jump-to-unread clamps here
+    // when the unread block is shorter than the viewport (and then there is no
+    // scroll left to attribute, so nothing marks), and a filter can leave the
+    // walk unable to advance past a hidden message beneath a visible one.
+    // Hiding the claim is honest in both; the watermark is deliberately
+    // untouched, so nothing is marked read on the user's behalf.
+    if (chat.scrollHeight - chat.clientHeight - chat.scrollTop < 80) {
+      newBar.classList.remove('show');
+      return;
+    }
+    const n = unreadCountVisible();
+    newBar.textContent = '↓ ' + n + ' new message' + (n === 1 ? '' : 's');
+    newBar.classList.add('show');
+  }
+
   function updateJumpButton() {
     const atBottom = chat.scrollHeight - chat.clientHeight - chat.scrollTop < 80;
     if (atBottom) {
       state.jumpUnread = 0;
       jumpBtn.classList.remove('show');
       jumpCount.style.display = 'none';
+      // Only a scroll the USER performed means "I have read to here". A
+      // scroll event alone does not say who caused it, and the page issues
+      // several of its own (the post-burst settle, the jump-to-unread), so
+      // attribute the scroll to a recent real gesture instead of racing it
+      // against a timer.
+      if (!document.hidden && scrollIsUsers()) markCaughtUp();
+      return;
+    }
+    jumpBtn.classList.add('show');
+    if (state.jumpUnread > 0) {
+      jumpCount.style.display = '';
+      jumpCount.textContent = state.jumpUnread;
     } else {
-      jumpBtn.classList.add('show');
-      if (state.jumpUnread > 0) {
-        jumpCount.style.display = '';
-        jumpCount.textContent = state.jumpUnread;
-      } else {
-        jumpCount.style.display = 'none';
-      }
+      jumpCount.style.display = 'none';
     }
   }
   // ── "You are here" indicator — operator's emoji on topmost visible
@@ -4690,11 +5266,61 @@ INDEX_HTML = r"""<!doctype html>
     pin.title = `you are here — the ${a.name}`;
     container.appendChild(pin);
   }
-  chat.addEventListener('scroll', () => { updateJumpButton(); scheduleHereUpdate(); });
+  // A scroll is "the user's" when a real input gesture on the scroller
+  // preceded it. Programmatic scrolls (settle, jump-to-unread) have none, so
+  // they can never mark messages read. Bound to the scroller, not the
+  // document, so clicking the "new messages" bar is not mistaken for intent.
+  function noteIntent() { state.userIntentAt = Date.now(); }
+  // True when a scroll happening right now is attributable to the user.
+  function scrollIsUsers() { return Date.now() - state.userIntentAt < USER_INTENT_MS; }
+  // A scroll the PAGE issues is never the user's, however recently they moved.
+  // Called immediately before every programmatic scrollTop assignment: without
+  // it a wheel in the preceding USER_INTENT_MS donates its attribution to the
+  // animation, and sustainIntent then carries that donation to the bottom.
+  function disownScroll() { state.userIntentAt = 0; }
+  // Keep an already-attributed scroll attributed while it is still moving.
+  // Cannot bootstrap: an unattributed scroll starts stale and stays stale.
+  function sustainIntent() { if (scrollIsUsers()) noteIntent(); }
+  for (const ev of ['wheel', 'touchstart', 'touchmove', 'pointerdown', 'mousedown']) {
+    chat.addEventListener(ev, noteIntent, { passive: true });
+  }
+  document.addEventListener('keydown', (e) => {
+    // Only keys that could plausibly have scrolled the chat. Typing in the
+    // composer must not count: boot focuses #input, so a space typed while a
+    // programmatic scroll is still gliding would hand it the user's
+    // attribution and let it mark the unread read.
+    if (e.target && e.target.closest &&
+        e.target.closest('input, textarea, select, [contenteditable]')) return;
+    if (['PageDown', 'PageUp', 'End', 'Home', 'ArrowDown', 'ArrowUp', ' '].includes(e.key)) noteIntent();
+  }, { passive: true });
+  chat.addEventListener('scroll', () => {
+    // A scroll that is ALREADY the user's keeps its attribution for as long as
+    // it keeps moving — iOS momentum routinely runs 1-3s past touchend, and a
+    // long smooth scroll can outlast USER_INTENT_MS on its own. This cannot
+    // bootstrap a programmatic scroll into attribution: that one starts stale,
+    // so the condition is false on its very first frame and stays false.
+    sustainIntent();
+    updateJumpButton();
+    scheduleHereUpdate();
+  });
   jumpBtn.addEventListener('click', () => {
     chat.scrollTop = chat.scrollHeight;
     state.jumpUnread = 0;
+    if (!document.hidden) markCaughtUp();
     updateJumpButton();
+  });
+  // Top bar: scroll UP to the first unread message (the divider). Does not mark
+  // caught-up — you're going TO the unread, not past it.
+  newBar.addEventListener('click', () => {
+    const dom = firstVisibleUnreadDom();
+    if (!dom) return;
+    // #chat is scroll-behavior: smooth, so this starts an animation lasting
+    // well over a second on a long channel, and the browser clamps it to the
+    // bottom whenever the unread block is shorter than one viewport. Neither
+    // is a scroll the user performed, so neither may count as catching up —
+    // see USER_INTENT_MS.
+    disownScroll();
+    chat.scrollTop = Math.max(0, dom.offsetTop - 8);
   });
 
   // ── Title / tab badge ──
@@ -4706,6 +5332,12 @@ INDEX_HTML = r"""<!doctype html>
     if (!document.hidden) {
       state.unreadCount = 0;
       updateTitle();
+      // Returning to the tab: if already at the bottom, they've caught up;
+      // otherwise surface the "new messages" divider for what arrived while away.
+      const atBottom = chat.scrollHeight - chat.clientHeight - chat.scrollTop < 80;
+      if (atBottom) markCaughtUp();
+      else refreshUnreadDivider();
+      updateJumpButton();
     }
   });
   window.addEventListener('focus', () => {
@@ -4814,6 +5446,11 @@ INDEX_HTML = r"""<!doctype html>
 
   function applyOperator(op) {
     state.operator = op;
+    // The server refuses a cull from anything but a local shell or a
+    // Tailscale-verified peer. Mirror that here so an identity the server
+    // would reject never sees the control at all, rather than being walked
+    // through a confirm dialog into a 403.
+    CAN_CULL = (op && (op.source === 'loopback' || op.source === 'tailscale'));
     const opAnimal = animalFor(op);
     const srcTag = op.source === 'tailscale' ? '[tailnet]' :
                    op.source === 'loopback'  ? '[local]'   :
@@ -4870,6 +5507,90 @@ INDEX_HTML = r"""<!doctype html>
     const el = document.getElementById('fatal-banner');
     if (el) el.style.display = 'none';
   }
+  // ── Full-history search (queries the server DB, not just loaded messages) ──
+  const btnSearch = document.getElementById('btn-search');
+  const searchPanel = document.getElementById('search-panel');
+  const searchInput = document.getElementById('search-input');
+  const searchClose = document.getElementById('search-close');
+  const searchStatus = document.getElementById('search-status');
+  const searchResults = document.getElementById('search-results');
+  let searchTimer = 0, searchSeq = 0;
+
+  function openSearch() {
+    searchPanel.hidden = false;
+    if (state.filter && !searchInput.value) searchInput.value = state.filter;
+    searchInput.focus(); searchInput.select();
+    if (searchInput.value.trim().length >= 2) runSearch();
+  }
+  function closeSearch() { searchPanel.hidden = true; }
+  async function runSearch() {
+    const q = searchInput.value.trim();
+    searchResults.innerHTML = '';
+    if (q.length < 2) { searchStatus.textContent = 'type at least 2 characters'; return; }
+    searchStatus.textContent = 'searching…';
+    const seq = ++searchSeq;
+    try {
+      // API_QS carries ?channel=<code> in landing mode and is empty in
+      // single-channel mode, so pick the right query-string joiner.
+      const r = await fetch('/api/search' + (API_QS ? API_QS + '&' : '?')
+                            + 'q=' + encodeURIComponent(q));
+      const d = await r.json().catch(() => ({}));
+      if (seq !== searchSeq) return;   // a newer query superseded this one
+      if (!r.ok || !d.ok) { searchStatus.textContent = 'search failed: ' + (d.error || r.status); return; }
+      renderSearchResults(d.results || []);
+    } catch (e) {
+      if (seq === searchSeq) searchStatus.textContent = 'search failed: ' + e.message;
+    }
+  }
+  function renderSearchResults(results) {
+    const capped = results.length >= 200;
+    searchStatus.textContent = results.length
+      ? (results.length + (capped ? '+' : '') + ' match' + (results.length === 1 ? '' : 'es')
+         + ' — newest first')
+      : 'no matches';
+    const frag = document.createDocumentFragment();
+    for (const m of results) {
+      const hit = document.createElement('div');
+      hit.className = 'search-hit';
+      const meta = document.createElement('div');
+      meta.className = 'sh-meta';
+      const author = document.createElement('span');
+      author.className = 'sh-author';
+      author.textContent = m.member_name;
+      author.style.color = colorFor(m.member_id);
+      meta.appendChild(author);
+      meta.appendChild(document.createTextNode('  ·  ' + formatTime(m.created_at)));
+      const body = document.createElement('div');
+      body.className = 'sh-body';
+      body.textContent = humanizeIdSigils(m.content || '');
+      hit.appendChild(meta);
+      hit.appendChild(body);
+      // If the match is in the loaded timeline, jump + flash it; otherwise the
+      // panel row is the result (it's outside the in-memory window).
+      hit.addEventListener('click', () => {
+        const dom = state.messageDomById.get(m.id);
+        if (dom) {
+          closeSearch();
+          dom.scrollIntoView({ block: 'center' });
+          dom.classList.add('flash');
+          setTimeout(() => dom.classList.remove('flash'), 1500);
+        }
+      });
+      frag.appendChild(hit);
+    }
+    searchResults.appendChild(frag);
+  }
+  btnSearch.addEventListener('click', openSearch);
+  searchClose.addEventListener('click', closeSearch);
+  searchInput.addEventListener('input', () => {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(runSearch, 250);
+  });
+  searchInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') { closeSearch(); }
+    else if (e.key === 'Enter') { clearTimeout(searchTimer); runSearch(); }
+  });
+
   function afterBoot() {
     // API_QS is only set in landing mode. In single-channel mode "/" IS this
     // page, so the home link would just reload and its tooltip would be a lie.

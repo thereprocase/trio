@@ -336,12 +336,25 @@ def get_db() -> sqlite3.Connection:
             last_seen       TEXT NOT NULL,
             last_read       INTEGER NOT NULL DEFAULT 0,
             revoked_at      TEXT,
+            last_turn_end   TEXT,
             FOREIGN KEY (channel) REFERENCES channels(code)
         )
     """)
+    # last_turn_end: stamped by the nth_turn_hook Stop/StopFailure hook when a
+    # Claude turn ends, so the dashboard can tell "working" (acted since the last
+    # turn end) from "idle" (turn ended, waiting). Added here too for DBs that
+    # predate the column (the CREATE above only fires for a fresh sessions table).
+    try:
+        conn.execute("ALTER TABLE sessions ADD COLUMN last_turn_end TEXT")
+    except sqlite3.OperationalError:
+        pass  # column already exists
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_sessions_member
         ON sessions (channel, member_id)
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_sessions_fingerprint
+        ON sessions (fingerprint, revoked_at)
     """)
     # v7.3: fleet check-ins. One row per (hostname, transport) — a machine
     # running both a stdio server and a monitor gets two rows. Spoke rows
@@ -549,6 +562,31 @@ def _mint_session_token(db, member_id: str, channel: str,
     return token
 
 
+SESSION_REAP_STALE_SECONDS = 7 * 24 * 60 * 60
+
+
+def _reap_sessions(db, now: datetime | None = None) -> None:
+    """Bound accumulated reconnect sessions without expiring live work.
+
+    A token unused for a week is revoked first, so a stale client gets a clear
+    invalid-token response and reconnects rather than silently acting under an
+    old identity. Previously revoked rows are retained for the same interval
+    for audit/cull diagnostics, then removed on a later connect.
+    """
+    current = now or datetime.now(timezone.utc)
+    cutoff = (current - timedelta(seconds=SESSION_REAP_STALE_SECONDS)).isoformat()
+    current_iso = current.isoformat()
+    db.execute(
+        "UPDATE sessions SET revoked_at = ? "
+        "WHERE revoked_at IS NULL AND last_seen < ?",
+        (current_iso, cutoff),
+    )
+    db.execute(
+        "DELETE FROM sessions WHERE revoked_at IS NOT NULL AND revoked_at < ?",
+        (cutoff,),
+    )
+
+
 def _get_session(db, channel: str, session_token: str):
     """Look up a session. Returns row or None. Rejects revoked tokens."""
     if not session_token:
@@ -649,6 +687,7 @@ def nth_connect(
     db = get_db()
 
     try:
+        _reap_sessions(db)
         existing = _get_channel(db, channel)
 
         if existing:
@@ -2927,6 +2966,13 @@ def nth_cull(channel: str, member_id: str, target_member_id: str) -> str:
         db.execute(
             "DELETE FROM members WHERE id = ? AND channel = ?",
             (target_member_id, channel),
+        )
+        # Revoke their sessions so a lingering token can't be reused if the same
+        # member_id ever re-joins (defence-in-depth; also stops row build-up).
+        db.execute(
+            "UPDATE sessions SET revoked_at = ? WHERE channel = ? AND member_id = ? "
+            "AND revoked_at IS NULL",
+            (now, channel, target_member_id),
         )
 
         released_ids = [t["id"] for t in released_tasks]

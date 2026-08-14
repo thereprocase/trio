@@ -23,7 +23,13 @@ Events (one JSON line per fire):
     {"event": "cadence", "gap_seconds": N}
     {"event": "channel_ended", "ended_by": "..."}
     {"event": "channel_gone"}
+    {"event": "culled", "member_id": "...", "channel": "..."}
     {"event": "error", "msg": "..."}
+
+The `culled` event is TERMINAL, like `channel_ended`/`channel_gone`: the
+member row disappeared AFTER we'd seen it present (an operator cull hard-
+DELETEs the row), so the script exits. A missing row we've never yet seen
+is treated as the transient join race instead (`error` + retry).
 
 Filter modes (pick ONE; default = all):
 
@@ -189,6 +195,7 @@ def should_wake(member_id, mentions_raw, refs_raw, bangs_raw, filter_mode):
 def monitor(channel, member_id, filter_mode="all", _db_path=None):
     local_hwm = None
     member_missing_streak = 0
+    member_seen = False
     cadence_fired = False
     keepalive_fired = False
     last_heartbeat_mono = 0.0
@@ -221,10 +228,22 @@ def monitor(channel, member_id, filter_mode="all", _db_path=None):
                 ).fetchone()
 
                 if not member:
-                    # A missing member usually means the WRONG DB, not a race:
-                    # a quartet spoke pointed the hub-style monitor at its
-                    # local (often stub) DB. Exit with a pointer instead of
-                    # waking the agent every 10s forever.
+                    # A missing member row has three possible causes, and
+                    # they need opposite handling:
+                    #   * cull — the operator DELETEd our row. We were present
+                    #     before, so this is permanent: we have been removed.
+                    #   * join race — launched before nth_connect committed our
+                    #     row. Transient; retry.
+                    #   * wrong DB — a quartet spoke pointed the hub-style
+                    #     monitor at its own (often stub) database, so the row
+                    #     will never appear.
+                    # Having seen ourselves present distinguishes the first from
+                    # the other two; a repeat count distinguishes the last two.
+                    if member_seen:
+                        emit({"event": "culled",
+                              "member_id": member_id,
+                              "channel": channel})
+                        return
                     member_missing_streak += 1
                     if member_missing_streak >= 3:
                         emit({
@@ -241,6 +260,10 @@ def monitor(channel, member_id, filter_mode="all", _db_path=None):
                     time.sleep(10)
                     continue
                 member_missing_streak = 0
+
+                # We've observed our own row at least once. Any later
+                # disappearance is a cull, not the startup join race.
+                member_seen = True
 
                 ch = db.execute(
                     "SELECT status, ended_by FROM channels WHERE code = ?",

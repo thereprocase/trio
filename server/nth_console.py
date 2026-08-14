@@ -19,6 +19,7 @@ channel activity.
 """
 import argparse
 import os
+import re
 import signal
 import sqlite3
 import sys
@@ -31,9 +32,19 @@ from nth_constants import animal_for, animal_for_channel
 
 DB_PATH = Path.home() / ".claude" / "nth" / "nth.db"
 POLL_INTERVAL = 0.5
-SYSTEM_PREFIXES = ("[claimed ", "[done ", "[cancelled ", "[released ",
-                   "[retracted ", "[joined ", "[left ", "[ended ",
-                   "[locked ", "[unlocked ", "[status ", "[pinned ")
+# System events are bracket-tagged: "[word] …" (joined/pinned/renamed/culled/…)
+# or "[word #id] …" (claimed/done/…). Match the leading token against the word
+# set — the old trailing-space prefix tuple silently missed every "[word]" form.
+SYSTEM_WORDS = frozenset({
+    "claimed", "done", "cancelled", "released", "retracted", "joined", "left",
+    "ended", "locked", "unlocked", "status", "pinned", "renamed", "culled", "objective",
+})
+_SYSTEM_RE = re.compile(r"^\[([a-z]+)(?:\s|\](?:\s|$))")
+
+
+def _is_system_content(content: str) -> bool:
+    m = _SYSTEM_RE.match(content or "")
+    return bool(m) and m.group(1) in SYSTEM_WORDS
 
 
 class Colour:
@@ -118,7 +129,7 @@ def render(row, show_channel, avatars=None):
     content = row["content"] or ""
     mentions = parse_mentions(row["mentions"] if "mentions" in row.keys() else "")
 
-    is_system = content.startswith(SYSTEM_PREFIXES)
+    is_system = _is_system_content(content)
     is_retracted = content.startswith("[RETRACTED:")
 
     parts = [f"{Colour.TIME}{ts}{Colour.RESET}"]
