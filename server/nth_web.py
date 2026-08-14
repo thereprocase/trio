@@ -2052,6 +2052,20 @@ INDEX_HTML = r"""<!doctype html>
   #jump-btn:hover { background: var(--accent-hi); }
   #jump-btn .count { background: var(--err); color: white;
                      border-radius: 10px; padding: 1px 6px; margin-left: 4px; font-size: 10px; }
+  /* top "N new messages" bar — jump to the first unread */
+  #new-bar { position: absolute; left: 50%; top: 10px; transform: translateX(-50%);
+             background: var(--mention); color: var(--bg); border: none; z-index: 6;
+             padding: 5px 14px; border-radius: 16px; font-size: 11px; font-weight: 600;
+             cursor: pointer; box-shadow: 0 4px 14px rgba(0,0,0,0.5); display: none;
+             user-select: none; }
+  #new-bar.show { display: block; }
+  #new-bar:hover { filter: brightness(1.1); }
+  /* "new messages" divider before the first unread message */
+  .unread-divider { display: flex; align-items: center; gap: 8px; margin: 10px 4px;
+                    color: var(--mention); font-size: 10px; font-weight: 600;
+                    text-transform: uppercase; letter-spacing: 0.6px; }
+  .unread-divider::before, .unread-divider::after { content: ""; flex: 1; height: 1px;
+                    background: var(--mention); }
 
   /* ── Roster sidebar ── */
   #side { grid-row: 2 / 3; grid-column: 2 / 3;
@@ -2349,6 +2363,7 @@ INDEX_HTML = r"""<!doctype html>
 
   <div id="mobile-scrim"></div>
   <div id="chat-wrap">
+    <div id="new-bar" title="jump to the first unread message"></div>
     <div id="chat"></div>
     <button id="jump-btn">↓ latest<span class="count" id="jump-count" style="display:none">0</span></button>
   </div>
@@ -2423,6 +2438,7 @@ INDEX_HTML = r"""<!doctype html>
   const fontPicker = document.getElementById('font-picker');
   const jumpBtn = document.getElementById('jump-btn');
   const jumpCount = document.getElementById('jump-count');
+  const newBar = document.getElementById('new-bar');
   const targetBar = document.getElementById('target-bar');
 
   // Message-font picker — persists per-origin via localStorage.
@@ -2530,6 +2546,9 @@ INDEX_HTML = r"""<!doctype html>
   const API_QS = /*__API_QS__*/'';
 
   // ── State ──
+  // How recently a real gesture must have happened for a scroll to count as
+  // the user's. Covers a smooth-scroll animation started by a real drag.
+  const USER_INTENT_MS = 1500;
   const state = {
     channel: '',
     operator: { id: '', name: '' },
@@ -2555,6 +2574,9 @@ INDEX_HTML = r"""<!doctype html>
     notifyWhen: 'hidden',     // 'hidden' | 'always'
     unreadCount: 0,                 // for tab title while hidden
     jumpUnread: 0,                  // messages arrived while user was scrolled up
+    lastSeenId: 0,                  // highest msg id the user has caught up to
+    userIntentAt: 0,                // timestamp of the last real scroll gesture
+                                    // (session-based; drives the unread divider)
     rateBins: new Map(),            // bin_epoch_10s → count
     startedAt: Date.now(),
     originalTitle: 'nth_web',
@@ -3078,7 +3100,8 @@ INDEX_HTML = r"""<!doctype html>
     _initialSettleTimer = setTimeout(() => {
       _initialSettleTimer = null;
       state.initialLoad = false;
-      requestAnimationFrame(() => { chat.scrollTop = chat.scrollHeight; });
+      seedBaseline();
+      requestAnimationFrame(() => { disownScroll(); chat.scrollTop = chat.scrollHeight; });
     }, 250);
   }
 
@@ -3177,15 +3200,39 @@ INDEX_HTML = r"""<!doctype html>
       // history burst, then do one final settle after layout reflows.
       chat.scrollTop = chat.scrollHeight;
       scheduleInitialSettle();
-    } else if (nearBottom) {
+    } else if (nearBottom && !document.hidden) {
+      // Only auto-pin to the bottom when the tab is VISIBLE. Pinning while
+      // hidden would leave us at the bottom on return, so the "new messages"
+      // divider for what arrived while away would be marked caught-up and lost.
       chat.scrollTop = chat.scrollHeight;
     } else {
-      state.jumpUnread++;
+      // Same rule as the divider: your own message is not something you have
+      // yet to read. Without this, sending while scrolled up raises the
+      // jump-to-latest badge as well as the divider — two separate claims that
+      // there is something new, both of them about you.
+      if (!isMine) state.jumpUnread++;
       updateJumpButton();
     }
 
+    // Unread divider: if the user is keeping up (tab visible + at/near bottom),
+    // they've seen this message; otherwise it's unread since they looked away or
+    // scrolled up, and a "new messages" divider is drawn before the first such.
+    if (state.initialLoad) {
+      // History burst. The baseline is set once in seedBaseline() when the
+      // burst settles; advancing per-message here would race a hidden tab.
+    } else if (!document.hidden && nearBottom && !isHiddenMsg(div)) {
+      // Only messages the user can actually see count as read on arrival, and
+      // the advance has to be the same ascending walk markCaughtUp does — a
+      // bare Math.max would jump the watermark over earlier messages a filter
+      // is hiding, which is the very thing that walk exists to prevent. One
+      // function owns the invariant.
+      markCaughtUp();
+    } else {
+      refreshUnreadDivider();
+    }
+
     // Tab-title badge when hidden
-    if (document.hidden) {
+    if (document.hidden && !isMine) {
       state.unreadCount++;
       updateTitle();
     }
@@ -3992,8 +4039,13 @@ INDEX_HTML = r"""<!doctype html>
   }
   function applyFilterToAll() {
     for (const node of chat.children) applyFilterToNode(node);
+    // Re-anchor the unread divider to the first still-visible unread message
+    // (a filter may have hidden the one it was sitting before).
+    refreshUnreadDivider();
   }
   function applyFilterToNode(node) {
+    // Skip non-message children (e.g. the unread divider) — they have no msgId.
+    if (!node.dataset || node.dataset.msgId === undefined) return;
     if (!state.filter) { node.classList.remove('filtered-out'); return; }
     const hit = (node.dataset.search || '').includes(state.filter);
     node.classList.toggle('filtered-out', !hit);
@@ -4263,20 +4315,145 @@ INDEX_HTML = r"""<!doctype html>
   });
 
   // ── Jump-to-latest + unread counter ──
+  // ── Unread divider ──
+  // Count / locate unread (id > lastSeenId), skipping filtered/DM-hidden nodes
+  // so the divider + "new" bar stay in sync with what's actually shown.
+  function isHiddenMsg(dom) {
+    return dom.classList.contains('filtered-out') || dom.classList.contains('dm-hidden');
+  }
+  // You cannot have unread your own message. Sending while scrolled up used to
+  // raise a "new messages" divider above your own post and add it to the
+  // counter, because unread was decided purely by id > lastSeenId.
+  //
+  // Skipped at the point of COUNTING rather than by advancing lastSeenId past
+  // it. The watermark is a single high-water mark: moving it over your own
+  // message would also mark every earlier message read, so a peer's message
+  // that arrived while you were scrolled up would vanish from the divider
+  // merely because you replied to something else.
+  function isOwnMsg(dom) {
+    return !!state.operator.id && dom.dataset.sender === state.operator.id;
+  }
+  function firstVisibleUnreadDom() {
+    for (const id of [...state.messageDomById.keys()].sort((a, b) => a - b)) {
+      if (id <= state.lastSeenId) continue;
+      const dom = state.messageDomById.get(id);
+      if (dom && !isHiddenMsg(dom) && !isOwnMsg(dom)) return dom;
+    }
+    return null;
+  }
+  function unreadCountVisible() {
+    let n = 0;
+    for (const [id, dom] of state.messageDomById) {
+      if (id > state.lastSeenId && !isHiddenMsg(dom) && !isOwnMsg(dom)) n++;
+    }
+    return n;
+  }
+  // Draw a "new messages" line before the first *visible* unread message.
+  function refreshUnreadDivider() {
+    const old = document.getElementById('unread-divider');
+    if (old) old.remove();
+    if (state.lastSeenId) {
+      const dom = firstVisibleUnreadDom();
+      if (dom) {
+        const bar = document.createElement('div');
+        bar.id = 'unread-divider';
+        bar.className = 'unread-divider';
+        bar.textContent = 'new messages';
+        chat.insertBefore(bar, dom);
+      }
+    }
+    updateNewBar();
+  }
+  // Establish the read watermark once, when the history burst settles — the
+  // only place that works when the channel was opened in a background tab,
+  // which landing mode makes the normal way in.
+  //
+  // Everything already on screen counts as seen, so you arrive caught up
+  // rather than staring at a divider above the entire history. If the server
+  // has a last_read for this operator it wins, but note that nth_web.py does
+  // not currently write members.last_read for web operators (ensure_operator_row
+  // inserts 0 and only last_seen is updated), so in practice this resolves to
+  // "newest" today. The branch is here so that persisting a web operator's
+  // read position starts working without touching this function.
+  function seedBaseline() {
+    if (state.lastSeenId) return;
+    // reduce(), not Math.max(...spread) — a long channel would exceed the
+    // argument limit and throw RangeError.
+    const newest = [...state.messageDomById.keys()]
+      .reduce((a, b) => (b > a ? b : a), 0);
+    const me = state.members.get(state.operator.id);
+    const serverLastRead = me ? (me.last_read || 0) : 0;
+    state.lastSeenId = serverLastRead > 0 ? Math.min(serverLastRead, newest) : newest;
+    refreshUnreadDivider();
+  }
+
+  // The user caught up — advance the watermark over the messages they could
+  // actually have read, and clear the divider.
+  //
+  // lastSeenId is a single high-water mark, so it must never jump OVER an
+  // unread message the user has not seen. Two kinds of hidden message need
+  // opposite treatment:
+  //   • filtered-out — the user's own filter is hiding it temporarily. Stop
+  //     here. Advancing past it would mark it read because they searched for
+  //     something else, and clearing the filter would silently lose it.
+  //   • dm-hidden — structurally not part of this view at all. Skip it; if it
+  //     blocked the walk the watermark could never advance past it again.
+  function markCaughtUp() {
+    let mark = state.lastSeenId;
+    for (const id of [...state.messageDomById.keys()].sort((a, b) => a - b)) {
+      if (id <= state.lastSeenId) continue;
+      const dom = state.messageDomById.get(id);
+      if (dom.classList.contains('filtered-out')) break;
+      mark = id;
+    }
+    state.lastSeenId = mark;
+    if (!unreadCountVisible()) {
+      const bar = document.getElementById('unread-divider');
+      if (bar) bar.remove();
+    }
+    updateNewBar();
+  }
+  // Top "N new messages" bar — the conventional jump-to-first-unread affordance.
+  // Shown whenever an unread divider exists; clicking scrolls up to it.
+  function updateNewBar() {
+    if (!newBar) return;
+    if (!document.getElementById('unread-divider')) { newBar.classList.remove('show'); return; }
+    // "N new messages below" is meaningless when you are already at the bottom
+    // looking at them. This happens two ways: the jump-to-unread clamps here
+    // when the unread block is shorter than the viewport (and then there is no
+    // scroll left to attribute, so nothing marks), and a filter can leave the
+    // walk unable to advance past a hidden message beneath a visible one.
+    // Hiding the claim is honest in both; the watermark is deliberately
+    // untouched, so nothing is marked read on the user's behalf.
+    if (chat.scrollHeight - chat.clientHeight - chat.scrollTop < 80) {
+      newBar.classList.remove('show');
+      return;
+    }
+    const n = unreadCountVisible();
+    newBar.textContent = '↓ ' + n + ' new message' + (n === 1 ? '' : 's');
+    newBar.classList.add('show');
+  }
+
   function updateJumpButton() {
     const atBottom = chat.scrollHeight - chat.clientHeight - chat.scrollTop < 80;
     if (atBottom) {
       state.jumpUnread = 0;
       jumpBtn.classList.remove('show');
       jumpCount.style.display = 'none';
+      // Only a scroll the USER performed means "I have read to here". A
+      // scroll event alone does not say who caused it, and the page issues
+      // several of its own (the post-burst settle, the jump-to-unread), so
+      // attribute the scroll to a recent real gesture instead of racing it
+      // against a timer.
+      if (!document.hidden && scrollIsUsers()) markCaughtUp();
+      return;
+    }
+    jumpBtn.classList.add('show');
+    if (state.jumpUnread > 0) {
+      jumpCount.style.display = '';
+      jumpCount.textContent = state.jumpUnread;
     } else {
-      jumpBtn.classList.add('show');
-      if (state.jumpUnread > 0) {
-        jumpCount.style.display = '';
-        jumpCount.textContent = state.jumpUnread;
-      } else {
-        jumpCount.style.display = 'none';
-      }
+      jumpCount.style.display = 'none';
     }
   }
   // ── "You are here" indicator — operator's emoji on topmost visible
@@ -4317,11 +4494,61 @@ INDEX_HTML = r"""<!doctype html>
     pin.title = `you are here — the ${a.name}`;
     container.appendChild(pin);
   }
-  chat.addEventListener('scroll', () => { updateJumpButton(); scheduleHereUpdate(); });
+  // A scroll is "the user's" when a real input gesture on the scroller
+  // preceded it. Programmatic scrolls (settle, jump-to-unread) have none, so
+  // they can never mark messages read. Bound to the scroller, not the
+  // document, so clicking the "new messages" bar is not mistaken for intent.
+  function noteIntent() { state.userIntentAt = Date.now(); }
+  // True when a scroll happening right now is attributable to the user.
+  function scrollIsUsers() { return Date.now() - state.userIntentAt < USER_INTENT_MS; }
+  // A scroll the PAGE issues is never the user's, however recently they moved.
+  // Called immediately before every programmatic scrollTop assignment: without
+  // it a wheel in the preceding USER_INTENT_MS donates its attribution to the
+  // animation, and sustainIntent then carries that donation to the bottom.
+  function disownScroll() { state.userIntentAt = 0; }
+  // Keep an already-attributed scroll attributed while it is still moving.
+  // Cannot bootstrap: an unattributed scroll starts stale and stays stale.
+  function sustainIntent() { if (scrollIsUsers()) noteIntent(); }
+  for (const ev of ['wheel', 'touchstart', 'touchmove', 'pointerdown', 'mousedown']) {
+    chat.addEventListener(ev, noteIntent, { passive: true });
+  }
+  document.addEventListener('keydown', (e) => {
+    // Only keys that could plausibly have scrolled the chat. Typing in the
+    // composer must not count: boot focuses #input, so a space typed while a
+    // programmatic scroll is still gliding would hand it the user's
+    // attribution and let it mark the unread read.
+    if (e.target && e.target.closest &&
+        e.target.closest('input, textarea, select, [contenteditable]')) return;
+    if (['PageDown', 'PageUp', 'End', 'Home', 'ArrowDown', 'ArrowUp', ' '].includes(e.key)) noteIntent();
+  }, { passive: true });
+  chat.addEventListener('scroll', () => {
+    // A scroll that is ALREADY the user's keeps its attribution for as long as
+    // it keeps moving — iOS momentum routinely runs 1-3s past touchend, and a
+    // long smooth scroll can outlast USER_INTENT_MS on its own. This cannot
+    // bootstrap a programmatic scroll into attribution: that one starts stale,
+    // so the condition is false on its very first frame and stays false.
+    sustainIntent();
+    updateJumpButton();
+    scheduleHereUpdate();
+  });
   jumpBtn.addEventListener('click', () => {
     chat.scrollTop = chat.scrollHeight;
     state.jumpUnread = 0;
+    if (!document.hidden) markCaughtUp();
     updateJumpButton();
+  });
+  // Top bar: scroll UP to the first unread message (the divider). Does not mark
+  // caught-up — you're going TO the unread, not past it.
+  newBar.addEventListener('click', () => {
+    const dom = firstVisibleUnreadDom();
+    if (!dom) return;
+    // #chat is scroll-behavior: smooth, so this starts an animation lasting
+    // well over a second on a long channel, and the browser clamps it to the
+    // bottom whenever the unread block is shorter than one viewport. Neither
+    // is a scroll the user performed, so neither may count as catching up —
+    // see USER_INTENT_MS.
+    disownScroll();
+    chat.scrollTop = Math.max(0, dom.offsetTop - 8);
   });
 
   // ── Title / tab badge ──
@@ -4333,6 +4560,12 @@ INDEX_HTML = r"""<!doctype html>
     if (!document.hidden) {
       state.unreadCount = 0;
       updateTitle();
+      // Returning to the tab: if already at the bottom, they've caught up;
+      // otherwise surface the "new messages" divider for what arrived while away.
+      const atBottom = chat.scrollHeight - chat.clientHeight - chat.scrollTop < 80;
+      if (atBottom) markCaughtUp();
+      else refreshUnreadDivider();
+      updateJumpButton();
     }
   });
   window.addEventListener('focus', () => {
