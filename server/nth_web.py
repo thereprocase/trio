@@ -76,6 +76,12 @@ def attach_dir_for(db_path: Path) -> Path:
     """Attachment root for a given database file."""
     return Path(db_path).resolve().parent / "attachments"
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024     # 10 MB hard cap per image
+# Total attachment bytes one member may hold in one channel. The per-image cap
+# bounds a single request; nothing bounded the SUM, so any identity allowed to
+# upload could fill the disk one legal 10 MB image at a time. sweep_attachments
+# only reclaims UNLINKED rows, so anything linked to a message is permanent --
+# this quota is the only bound on an upload right.
+MAX_MEMBER_ATTACH_BYTES = int(os.environ.get("NTH_ATTACH_QUOTA_BYTES", 200 * 1024 * 1024))
 # Attachment GC. An upload creates its row UNLINKED and /api/send links it, so
 # anything still unlinked long afterwards was abandoned — a paste thought better
 # of, a closed tab, a failed send. Nothing ever collected those, so they
@@ -1439,8 +1445,37 @@ class NthWebHandler(BaseHTTPRequestHandler):
         else:
             self._error(404, "not found")
 
+    def _reject_cross_site(self) -> bool:
+        """True (and an error already sent) when this POST looks cross-site.
+
+        _resolve_identity() derives trust from the source IP, not from the
+        session cookie: a cookie-less request from a browser still resolves as
+        the loopback/tailnet operator. SameSite is therefore not a CSRF control
+        here, because the cookie is not the credential. A cross-origin fetch
+        with a CORS-safelisted Content-Type skips preflight, so the write lands
+        even though the response is opaque to the attacker.
+
+        Origin is the load-bearing half: browsers set it on every cross-origin
+        request and page script cannot forge it. Sec-Fetch-Site is defence in
+        depth and is absent on older/non-Chromium clients, so its absence must
+        be allowed. Compare Origin against the request's own Host rather than a
+        configured value -- the same hub is reached by tailnet name and by
+        tailnet IP, and those are different origins.
+        """
+        origin = self.headers.get("Origin")
+        if origin:
+            if urlparse(origin).netloc != self.headers.get("Host", ""):
+                self._error(403, "cross-origin POST rejected")
+                return True
+        if self.headers.get("Sec-Fetch-Site") not in (None, "same-origin", "none"):
+            self._error(403, "cross-site POST rejected")
+            return True
+        return False
+
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
+        if self._reject_cross_site():
+            return
         if parsed.path == "/api/send":
             self._handle_send()
         elif parsed.path == "/api/identify":
@@ -1899,8 +1934,14 @@ class NthWebHandler(BaseHTTPRequestHandler):
         validate by magic bytes, store on disk, and create an unlinked
         attachments row. The subsequent /api/send links it to a message."""
         token, ident, _is_new = self._resolve_identity()
-        if ident.source == IDENTITY_SOURCE_PENDING:
-            self._error(403, "identity required — POST /api/identify first")
+        # Writing files into the operator's home directory is the same class of
+        # action as revealing a path there, so it takes the same tier as
+        # /api/reveal and /api/path/validate. A self-declared guest is the
+        # weakest identity this server mints -- under --tailnet (the deployed
+        # mode) that is anyone who can reach the port and type a name. Gating
+        # only on PENDING let them write 10 MB per request, unmetered.
+        if ident.source not in LOCAL_PATH_ALLOWED_SOURCES:
+            self._error(403, "only a trusted operator (local or tailnet) can upload")
             return
         # Same reason as _serve_attachment: the channel comes from the request,
         # not from a process-wide attribute that landing mode never sets.
@@ -1944,6 +1985,16 @@ class NthWebHandler(BaseHTTPRequestHandler):
             db.execute("PRAGMA busy_timeout=5000")
             ensure_attachments_table(db)
             op_id, _op_name = ensure_operator_row(db, ch, ident)
+            # The gate above says WHO may upload; this says HOW MUCH. Both are
+            # needed: the gate does not stop a cross-site POST, which executes
+            # as the trusted local operator and therefore passes it.
+            used = db.execute(
+                "SELECT COALESCE(SUM(bytes), 0) AS b FROM attachments "
+                " WHERE channel = ? AND member_id = ?", (ch, op_id),
+            ).fetchone()["b"]
+            if used + len(data) > MAX_MEMBER_ATTACH_BYTES:
+                self._error(413, "attachment quota exceeded")
+                return
             now = now_iso()
             cur = db.execute(
                 "INSERT INTO attachments "
