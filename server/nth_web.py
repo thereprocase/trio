@@ -1592,8 +1592,22 @@ INDEX_HTML = r"""<!doctype html>
   :root[data-theme="bluebubble"] #composer {
     background: #1c1c1e; border-top: 0.5px solid rgba(255,255,255,0.08); padding: 8px 10px;
   }
+  /* The textarea is transparent here, so the stack carries the bubble fill. */
+  :root[data-theme="bluebubble"] #input-stack {
+    background: #2c2c2e; border-radius: 18px;
+  }
+  /* The mirror must follow every metric this theme sets on #input, and #input's
+     glyphs must stay transparent — this selector out-specifies the base rule,
+     so without re-asserting it the real text is drawn opaque ON TOP of the
+     mirror in a different font and size. */
+  :root[data-theme="bluebubble"] #input-highlight {
+    border: 0.5px solid transparent; border-radius: 18px;
+    padding: 8px 14px; font-size: 17px; line-height: 1.28;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display",
+      "Helvetica Neue", "Helvetica", "Arial", sans-serif;
+  }
   :root[data-theme="bluebubble"] #input {
-    background: #2c2c2e; color: #fff; border: 0.5px solid #48484a; border-radius: 18px;
+    background: transparent; color: transparent; caret-color: #fff; border: 0.5px solid #48484a; border-radius: 18px;
     padding: 8px 14px; font-size: 17px; line-height: 1.28;
     font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display",
       "Helvetica Neue", "Helvetica", "Arial", sans-serif;
@@ -1872,9 +1886,9 @@ INDEX_HTML = r"""<!doctype html>
                                   margin-right: 2px; }
   .msg .mentions-bar .mchip { display: inline-flex; align-items: center; gap: 3px;
                                padding: 1px 7px 1px 5px; border-radius: 10px;
-                               background: rgba(255, 196, 116, 0.15);
+                               background: color-mix(in srgb, var(--mention) 15%, transparent);
                                color: var(--mention);
-                               border: 1px solid rgba(255, 196, 116, 0.3);
+                               border: 1px solid color-mix(in srgb, var(--mention) 30%, transparent);
                                font-weight: 600; }
   .msg .mentions-bar .mchip .manimal { font-size: 13px; line-height: 1; }
   /* #pound references bar — "about" someone, not "to" them. Muted vs. @ pings. */
@@ -1907,6 +1921,86 @@ INDEX_HTML = r"""<!doctype html>
   .msg .bangs-bar .mchip .manimal { font-size: 13px; line-height: 1; }
   .msg .body { word-wrap: break-word; overflow-wrap: break-word; }
   .msg .body.plain { white-space: pre-wrap; }
+  /* Valid @mentions stay visible in the prose itself, not only in the
+     routing bar above the message. The member-colored inset makes adjacent
+     mentions distinguishable while the shared mention color preserves the
+     meaning across themes. */
+  /* Text-forward mention: a member-colored dot + member-tinted text, faint
+     tint behind. The dot carries the "who" color pop; text stays legible on
+     every theme via color-mix toward the theme foreground. @all falls back to
+     the theme --mention color (no per-member color is set for it). */
+  .msg .body .inline-mention {
+    display: inline-block; padding: 0 5px; margin: 0 1px; border-radius: 5px;
+    background: color-mix(in srgb, var(--mention-member-color, var(--mention)) 11%, transparent);
+    /* Mix mostly toward --fg so contrast tracks the theme's own body text.
+       Mixing mostly toward the pastel palette colour reads fine on dark
+       themes and measured as low as 1.30:1 on the light ones — the words
+       carrying the routing meaning were the only unreadable thing on screen. */
+    color: color-mix(in srgb, var(--mention-member-color, var(--mention)) 30%, var(--fg));
+    font-weight: 700; overflow-wrap: anywhere;
+  }
+  .msg .body .inline-mention::before {
+    content: ""; display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+    background: var(--mention-member-color, var(--mention));
+    margin-right: 4px; vertical-align: 1px;
+  }
+  /* @all broadcast — a celebratory rainbow shimmer so "ping everyone" reads
+     louder than a single-member @mention. The gradient is clipped to the glyphs
+     and slowly panned; the dot is a static rainbow bead. Targets the pseudo-
+     member id "all" that decorateInlineSigil sets on the span. Motion is
+     disabled under prefers-reduced-motion (the static rainbow still reads). */
+  .msg .body .inline-mention[data-member-id="all"] {
+    background: linear-gradient(90deg,
+      #ff5f5f, #ffb347, #ffe66d, #7ede7e, #62d7ef, #8eb9ff, #d070d7, #ff5f5f);
+    background-size: 200% 100%;
+    /* A BACKING PLATE, not the glyphs. Clipping the gradient to the text made
+       @all unreadable on every light theme (measured 1.02-1.17:1 at the pale
+       stops) — the loudest signal in the product was the least visible thing on
+       screen. Text stays --fg so the word is legible in all 18 themes. */
+    color: var(--fg);
+    text-shadow: 0 0 3px var(--bg);
+    animation: at-all-shimmer 3s linear infinite;
+    font-weight: 800;
+  }
+  .msg .body .inline-mention[data-member-id="all"]::before {
+    background: conic-gradient(#ff5f5f, #ffb347, #ffe66d, #7ede7e,
+      #62d7ef, #8eb9ff, #d070d7, #ff5f5f);
+  }
+  @keyframes at-all-shimmer {
+    0%   { background-position:   0% 50%; }
+    100% { background-position: 200% 50%; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .msg .body .inline-mention[data-member-id="all"] { animation: none; }
+  }
+  /* #pound reference inline — same chip+dot mechanism as @, but tinted from the
+     muted "about" green (matches .refs-bar) and lighter weight so it reads
+     quieter than an @ping. Dot stays member-colored to keep the "who". */
+  .msg .body .inline-ref {
+    display: inline-block; padding: 0 5px; margin: 0 1px; border-radius: 5px;
+    background: rgba(126, 222, 126, 0.08);
+    color: color-mix(in srgb, #9ccf9c, var(--fg) 32%);
+    font-weight: 500; white-space: nowrap;
+  }
+  .msg .body .inline-ref::before {
+    content: ""; display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+    background: var(--mention-member-color, #9ccf9c);
+    margin-right: 4px; vertical-align: 1px;
+  }
+  /* !bang alert inline — same mechanism, tinted from the loud coral (matches
+     .bangs-bar) with heavier weight so it reads louder than an @ping. Dot stays
+     member-colored to keep the "who". */
+  .msg .body .inline-bang {
+    display: inline-block; padding: 0 5px; margin: 0 1px; border-radius: 5px;
+    background: rgba(255, 132, 112, 0.16);
+    color: color-mix(in srgb, #ff8470, var(--fg) 18%);
+    font-weight: 800; white-space: nowrap;
+  }
+  .msg .body .inline-bang::before {
+    content: ""; display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+    background: var(--mention-member-color, #ff8470);
+    margin-right: 4px; vertical-align: 1px;
+  }
   .msg .body > *:first-child { margin-top: 0; }
   .msg .body > *:last-child { margin-bottom: 0; }
   .msg .body p { margin: 4px 0; white-space: pre-wrap; }
@@ -2115,10 +2209,59 @@ INDEX_HTML = r"""<!doctype html>
   #target-bar .tb-pill.tb-all.on { border-style: solid; }
   body.dm-mode #target-bar { display: none; }
   #input-row { display: flex; gap: 8px; align-items: flex-end; position: relative; }
-  #input { flex: 1; background: var(--bg); color: var(--fg); border: 1px solid var(--border);
-           padding: 8px 10px; border-radius: var(--input-radius); font-family: inherit; font-size: 13px;
+  #input-stack { flex: 1; position: relative; min-width: 0; background: var(--bg);
+                 border-radius: var(--input-radius); }
+  #input-highlight {
+    position: absolute; inset: 0; z-index: 0; pointer-events: none;
+    padding: 8px 10px; border: 1px solid transparent; border-radius: var(--input-radius);
+    font-family: inherit; font-size: 13px; line-height: 1.45;
+    white-space: pre-wrap; overflow-wrap: break-word; overflow: hidden;
+    /* Reserve the gutter the textarea's scrollbar takes once the draft
+       exceeds max-height, or the two wrap at different columns wherever
+       scrollbars are classic rather than overlay. */
+    scrollbar-gutter: stable;
+    color: var(--fg);
+  }
+  /* The highlight mirrors the textarea 1:1, so it must NOT change text metrics —
+     background/colour only. Anything that adds width or shifts the baseline
+     (padding, border, underline, a leading dot) makes the overlay drift from
+     the typed glyphs. Member colour is wired in per-token by
+     renderComposerMentionHighlights(). */
+  #input-highlight.composing { visibility: hidden; }
+  #input-highlight .composer-mention {
+    color: var(--mention-member-color, var(--mention));
+    box-shadow: inset 0 -2px 0 var(--mention-member-color, var(--mention));
+  }
+  /* @all in the composer gets the same rainbow shimmer as the rendered chip,
+     so typing "@all" previews the broadcast. Reuses the at-all-shimmer keyframe. */
+  #input-highlight .composer-mention-all {
+    background: linear-gradient(90deg,
+      #ff5f5f, #ffb347, #ffe66d, #7ede7e, #62d7ef, #8eb9ff, #d070d7, #ff5f5f);
+    background-size: 200% 100%;
+    color: var(--fg); text-shadow: 0 0 3px var(--bg);
+    box-shadow: none;
+    animation: at-all-shimmer 3s linear infinite;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    #input-highlight .composer-mention-all { animation: none; }
+  }
+  /* The textarea's own glyphs are hidden (color: transparent) so the colored
+     #input-highlight mirror behind it is what the user reads; caret-color keeps
+     the caret visible. Placeholder + selection are restored explicitly since
+     they'd otherwise inherit the transparent text color. */
+  /* The textarea's own glyphs are transparent so the coloured mirror behind it
+     is what the user reads; caret-color keeps the caret visible. line-height is
+     pinned because the mirror must match it exactly. */
+  #input { scrollbar-gutter: stable; position: relative; z-index: 1; width: 100%; display: block;
+           background: transparent; color: transparent; caret-color: var(--fg);
+           border: 1px solid var(--border);
+           padding: 8px 10px; border-radius: var(--input-radius);
+           font-family: inherit; font-size: 13px; line-height: 1.45;
            resize: none; min-height: 36px; max-height: 160px; }
   #input:focus { outline: none; border-color: var(--accent); }
+  #input::placeholder { color: var(--dim); opacity: 1; }
+  /* Translucent selection so the colored mirror text stays readable through it. */
+  #input::selection { background: color-mix(in srgb, var(--accent) 32%, transparent); }
   #send-btn { background: var(--accent); color: var(--bg); border: none;
               padding: 0 18px; height: 36px; border-radius: 4px; cursor: pointer;
               font-weight: 600; font-family: inherit; font-size: 13px; }
@@ -2175,7 +2318,9 @@ INDEX_HTML = r"""<!doctype html>
 
     /* Composer: touch-friendly */
     #composer { padding: 6px 8px; }
-    #input { font-size: 16px; min-height: 40px; }  /* ≥16px prevents iOS zoom */
+    /* The mirror must take EVERY metric override the textarea takes, or the
+       coloured text drifts off the caret. >=16px also prevents iOS zoom. */
+    #input, #input-highlight { font-size: 16px; min-height: 40px; }
     #send-btn { height: 40px; padding: 0 14px; }
     #hint { display: none; }
     #target-bar { gap: 4px; }
@@ -2295,7 +2440,7 @@ INDEX_HTML = r"""<!doctype html>
     <span class="pill on" id="btn-msgnum" title="show each message's #number in the left margin">#nums</span>
     <span class="pill" id="btn-compact" title="clamp every message body to 3 lines">compact</span>
     <span class="pill" id="btn-notify" title="desktop notifications on @you">🔔 off</span>
-    <span class="pill" id="btn-sound" title="play a chime on any new message">🔊 off</span>
+    <span class="pill" id="btn-sound" title="play a chime on new messages (scope in settings when on)">🔊 off</span>
     <span class="pill" id="btn-settings" title="settings">⚙ settings</span>
     <span class="pill" id="btn-mobile-roster" title="show roster &amp; context">☰</span>
     <span class="pill conn bad" id="h-conn">● disconnected</span>
@@ -2331,7 +2476,10 @@ INDEX_HTML = r"""<!doctype html>
     <div id="target-bar"></div>
     <div id="input-row">
       <div id="completions"></div>
-      <textarea id="input" rows="1" placeholder="Message — @ to mention, Enter to send"></textarea>
+      <div id="input-stack">
+        <div id="input-highlight" aria-hidden="true"></div>
+        <textarea id="input" rows="1" placeholder="Message — @ to mention, Enter to send"></textarea>
+      </div>
       <button id="send-btn">Send</button>
     </div>
     <div id="hint">
@@ -2363,6 +2511,7 @@ INDEX_HTML = r"""<!doctype html>
   const hMeta = document.getElementById('h-meta');
   const hConn = document.getElementById('h-conn');
   const input = document.getElementById('input');
+  const inputHighlight = document.getElementById('input-highlight');
   const sendBtn = document.getElementById('send-btn');
   const preview = document.getElementById('preview');
   const compEl = document.getElementById('completions');
@@ -2503,6 +2652,10 @@ INDEX_HTML = r"""<!doctype html>
     initialLoad: true,              // pin to newest until the history burst settles
     soundEnabled: false,
     chimeVolume: 0.33,
+    soundScope: 'all',        // 'mention' | 'all' — chime scope, INDEPENDENT of
+                              // notifyScope. Defaults to 'all' to preserve the
+                              // historical "chime on any new message" behavior
+                              // for operators who already had the chime on.
     notifyScope: 'mention',   // 'mention' | 'all'
     notifyWhen: 'hidden',     // 'hidden' | 'always'
     unreadCount: 0,                 // for tab title while hidden
@@ -2829,11 +2982,18 @@ INDEX_HTML = r"""<!doctype html>
     return Math.floor(s / 86400) + 'd';
   }
 
-  const SYSTEM_PREFIXES = ['[claimed ', '[done ', '[cancelled ', '[released ',
-                           '[retracted ', '[joined ', '[left ', '[ended ',
-                           '[locked ', '[unlocked ', '[status ', '[pinned ',
-                           '[renamed '];
-  function isSystemContent(s) { return SYSTEM_PREFIXES.some(p => s.startsWith(p)); }
+  const SYSTEM_WORDS = new Set(['claimed', 'done', 'cancelled', 'released',
+    'retracted', 'joined', 'left', 'ended', 'locked', 'unlocked', 'status',
+    'pinned', 'renamed']);
+  // System notices come in two shapes: "[word #id] ..." (the task family) and
+  // "[word] ..." (join/pin/lock/unlock/rename). A plain startsWith('[word ')
+  // only ever matched the first, so the second rendered as ordinary markdown.
+  // Requiring a space-or-end after the "]" keeps a markdown link such as
+  // [done](url) from being muted as a system notice.
+  function isSystemContent(s) {
+    const m = /^\[([a-z]+)(?:\s|\](?:\s|$))/.exec(s || '');
+    return !!m && SYSTEM_WORDS.has(m[1]);
+  }
 
   // Rewrite @<member_id> / #<member_id> / !<member_id> to @<friendly-name>
   // in message bodies before rendering. The raw id-sigil form is valid
@@ -2857,6 +3017,113 @@ INDEX_HTML = r"""<!doctype html>
       const name = mem && mem.name ? escapeHtml(mem.name) : id;
       return sigil + name;
     });
+  }
+
+  function mentionMemberForToken(token, allowedIds) {
+    const lower = (token || '').toLowerCase();
+    if (lower === 'all') return { id: 'all', name: 'all' };
+    for (const mem of state.members.values()) {
+      if (allowedIds && !allowedIds.has(mem.id)) continue;
+      if ((mem.id || '').toLowerCase() === lower ||
+          (mem.name || '').toLowerCase() === lower) return mem;
+    }
+    return null;
+  }
+
+  // Find only syntactically complete, roster-resolved @mentions. Unknown
+  // @words stay unadorned, which doubles as feedback that they will not ping
+  // a participant.
+  function collectMentionMatches(text, allowedIds) {
+    const matches = [];
+    const re = /(^|[^A-Za-z0-9_])@([A-Za-z0-9_.-]+)/g;
+    let hit;
+    while ((hit = re.exec(text || ''))) {
+      // The token class greedily swallows trailing sentence punctuation
+      // (".", "-") — e.g. "thanks @Claude." captures "Claude.". Resolve the
+      // full token first (so names that legitimately contain "."/"-" like
+      // jen.chen / gabe-guest still match), then trim trailing "."/"-" and
+      // retry so the mention still highlights, matching the server's routing.
+      let token = hit[2];
+      let member = mentionMemberForToken(token, allowedIds);
+      while (!member && (token.endsWith('.') || token.endsWith('-'))) {
+        token = token.slice(0, -1);
+        member = mentionMemberForToken(token, allowedIds);
+      }
+      if (!member) continue;
+      const start = hit.index + hit[1].length;
+      matches.push({ start, end: start + token.length + 1, member });
+    }
+    return matches;
+  }
+
+  function decorateInlineMentions(root, mentionIds) {
+    if (!root || !mentionIds || !mentionIds.length) return;
+    const allowed = new Set(mentionIds);
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    const nodes = [];
+    while (walker.nextNode()) {
+      const node = walker.currentNode;
+      const parent = node.parentElement;
+      if (!parent || parent.closest('code, pre, a, .inline-mention')) continue;
+      if (collectMentionMatches(node.nodeValue || '', allowed).length) nodes.push(node);
+    }
+    for (const node of nodes) {
+      const text = node.nodeValue || '';
+      const matches = collectMentionMatches(text, allowed);
+      if (!matches.length) continue;
+      const frag = document.createDocumentFragment();
+      let cursor = 0;
+      for (const match of matches) {
+        frag.appendChild(document.createTextNode(text.slice(cursor, match.start)));
+        const span = document.createElement('span');
+        span.className = 'inline-mention';
+        span.textContent = text.slice(match.start, match.end);
+        span.dataset.memberId = match.member.id;
+        span.title = match.member.id === 'all'
+          ? 'Mentions every participant'
+          : 'Mentions ' + (match.member.name || match.member.id);
+        if (match.member.id !== 'all') {
+          span.style.setProperty('--mention-member-color', colorFor(match.member.id));
+        }
+        frag.appendChild(span);
+        cursor = match.end;
+      }
+      frag.appendChild(document.createTextNode(text.slice(cursor)));
+      node.replaceWith(frag);
+    }
+  }
+
+  // Pure: draft text -> mirror HTML. Split out from the DOM write so the
+  // escaping can actually be tested — this is the one path that builds markup
+  // from raw user input, so a missed escape here is exploitable by typing.
+  function composerMentionHtml(text) {
+    text = text || '';
+    const matches = collectMentionMatches(text, null);
+    let html = '';
+    let cursor = 0;
+    for (const match of matches) {
+      html += escapeHtml(text.slice(cursor, match.start));
+      // colorFor returns a fixed palette hex (injection-safe); @all has no
+      // per-member color and falls back to the rainbow shimmer via its own class.
+      const isAll = match.member.id === 'all';
+      const mc = isAll ? '' : colorFor(match.member.id);
+      const styleAttr = mc ? ' style="--mention-member-color:' + mc + '"' : '';
+      const cls = isAll ? 'composer-mention composer-mention-all' : 'composer-mention';
+      html += '<span class="' + cls + '"' + styleAttr + '>' +
+              escapeHtml(text.slice(match.start, match.end)) + '</span>';
+      cursor = match.end;
+    }
+    html += escapeHtml(text.slice(cursor));
+    // Preserve a final blank line so the mirror stays aligned with textarea
+    // scrollHeight and wrapping behavior.
+    return html + (text.endsWith('\n') ? '\n ' : '');
+  }
+
+  function renderComposerMentionHighlights() {
+    if (!inputHighlight) return;
+    inputHighlight.innerHTML = composerMentionHtml(input.value || '');
+    inputHighlight.scrollTop = input.scrollTop;
+    inputHighlight.scrollLeft = input.scrollLeft;
   }
 
   // ── Per-member agent stats (client-side aggregate, derived from event stream) ──
@@ -3025,13 +3292,23 @@ INDEX_HTML = r"""<!doctype html>
   // (markdown/fonts reflow taller after the synchronous appends) and switch to
   // normal "follow only if near bottom" behavior for live messages.
   let _initialSettleTimer = null;
+  let _initialSettleDeadline = 0;
+  function settleInitialLoad() {
+    _initialSettleTimer = null;
+    _initialSettleDeadline = 0;
+    state.initialLoad = false;
+    requestAnimationFrame(() => { chat.scrollTop = chat.scrollHeight; });
+  }
   function scheduleInitialSettle() {
+    // The quiet gap is rescheduled on each append, so a burst spaced under
+    // 250ms would hold initialLoad open for its whole duration — and the chime
+    // is gated on that flag, so it would be muted exactly during an agent
+    // flurry. Cap the total wait so a dense burst still settles.
+    const now = Date.now();
+    if (!_initialSettleDeadline) _initialSettleDeadline = now + 3000;
     if (_initialSettleTimer) clearTimeout(_initialSettleTimer);
-    _initialSettleTimer = setTimeout(() => {
-      _initialSettleTimer = null;
-      state.initialLoad = false;
-      requestAnimationFrame(() => { chat.scrollTop = chat.scrollHeight; });
-    }, 250);
+    const wait = Math.max(0, Math.min(250, _initialSettleDeadline - now));
+    _initialSettleTimer = setTimeout(settleInitialLoad, wait);
   }
 
   function appendMessage(m) {
@@ -3043,6 +3320,11 @@ INDEX_HTML = r"""<!doctype html>
     const isMine = m.member_id === state.operator.id;
     const isSystem = isSystemContent(m.content || '');
     const mentionsOperator = (m.mentions || []).includes(state.operator.id);
+    // '!' sigils land in a separate `bangs` column, never in `mentions`.
+    // A bang is the last-resort signal an agent cannot be opted out of, so
+    // it must reach a mention-scoped chime too — otherwise the one message
+    // that paints a red BANG bar is the one message that makes no sound.
+    const bangsOperator = (m.bangs || []).includes(state.operator.id);
 
     const div = document.createElement('div');
     div.className = 'msg' + (isMine ? ' mine' : '') + (isSystem ? ' system' : '')
@@ -3112,6 +3394,7 @@ INDEX_HTML = r"""<!doctype html>
       body.textContent = humanizeIdSigils(m.content || '');
     } else {
       body.innerHTML = renderMarkdown(m.content || '');
+      decorateInlineMentions(body, m.mentions || []);
     }
     div.appendChild(body);
 
@@ -3181,8 +3464,23 @@ INDEX_HTML = r"""<!doctype html>
       } catch (e) { /* ignore */ }
     }
 
-    // In-page chime on any new message from someone else (opt-in, focus-agnostic).
-    if (state.soundEnabled && !isMine && !isSystem) playChime();
+    // In-page chime for a new peer message (opt-in, focus-agnostic). The scope
+    // (soundScope) is kept independent of the desktop-notify scope, so a quiet
+    // chime on all messages can coexist with a popup only on @mentions, or vice
+    // versa. Reuses the same mentionsOperator predicate the notify block uses.
+    // Skip the primed-history burst on load/reconnect — chime only for LIVE
+    // messages once state.initialLoad has settled. Without this, a refresh plays
+    // every historical chime at once (overlapping waveforms = loud + phasey).
+    // In a DM view every channel message is still appended and merely
+    // CSS-hidden, so without this the operator hears a chime for a message
+    // they cannot see — an audible event with no visible cause.
+    if (shouldChime({
+          initialLoad: state.initialLoad, soundEnabled: state.soundEnabled,
+          isMine, isSystem,
+          dmVisible: (!state.dmTargetId || isRelevantInDm(m)),
+          scope: state.soundScope,
+          addressed: mentionsOperator || bangsOperator,
+        })) playChime();
   }
 
   // Existing message names may change (rename) — update author labels + mention
@@ -3207,6 +3505,7 @@ INDEX_HTML = r"""<!doctype html>
         } else {
           body.classList.remove('plain');
           body.innerHTML = renderMarkdown(m.content || '');
+          decorateInlineMentions(body, m.mentions || []);
         }
       }
       function rebuildBar(bar, ids, sigil) {
@@ -3403,6 +3702,9 @@ INDEX_HTML = r"""<!doctype html>
     rosterHeading.textContent = `Members (${members.length})`;
 
     renderComposerTargets();
+    // A roster arrival/rename can turn an existing @token from unresolved to
+    // valid without another keystroke, so refresh the composer mirror too.
+    updatePreview();
     updateAllAckBadges();
     renderWatermarkPins();
     scheduleHereUpdate();
@@ -3810,6 +4112,7 @@ INDEX_HTML = r"""<!doctype html>
   function resolveRefs(text)     { return resolveSigilTokens(text, '#'); }
   function resolveBangs(text)    { return resolveSigilTokens(text, '!'); }
   function updatePreview() {
+    renderComposerMentionHighlights();
     const pings = resolveMentions(input.value);
     const refs  = resolveRefs(input.value);
     const bangs = resolveBangs(input.value);
@@ -3841,6 +4144,11 @@ INDEX_HTML = r"""<!doctype html>
   function autoResizeInput() {
     input.style.height = 'auto';
     input.style.height = Math.min(160, Math.max(36, input.scrollHeight)) + 'px';
+    if (inputHighlight) {
+      inputHighlight.style.height = input.style.height;
+      inputHighlight.scrollTop = input.scrollTop;
+      inputHighlight.scrollLeft = input.scrollLeft;
+    }
   }
 
   // ── Send ──
@@ -3952,6 +4260,27 @@ INDEX_HTML = r"""<!doctype html>
     refreshCompletions();
     updatePreview();
   });
+  input.addEventListener('scroll', () => {
+    if (!inputHighlight) return;
+    inputHighlight.scrollTop = input.scrollTop;
+    inputHighlight.scrollLeft = input.scrollLeft;
+  });
+  // IME / dead-key / emoji composition: the provisional (pre-commit) glyphs are
+  // drawn by the browser in the textarea itself, which is normally transparent
+  // (the colored mirror is what shows). Reveal the textarea and hide the mirror
+  // for the duration of composition so the preview is visible; on commit, revert
+  // and re-render the mirror from the now-updated value.
+  input.addEventListener('compositionstart', () => {
+    input.style.color = 'var(--fg)';
+    // visibility, not colour: a mention chip sets its own colour, so it would
+    // stay painted over the revealed textarea and double the token.
+    if (inputHighlight) inputHighlight.classList.add('composing');
+  });
+  input.addEventListener('compositionend', () => {
+    input.style.color = '';
+    if (inputHighlight) inputHighlight.classList.remove('composing');
+    updatePreview();
+  });
   sendBtn.addEventListener('click', sendMessage);
 
   // ── Filter ──
@@ -4052,9 +4381,37 @@ INDEX_HTML = r"""<!doctype html>
     } catch (_) { _audioCtx = null; }
     return _audioCtx;
   }
+  // Does a peer message qualify for the chime under the current scope?
+  //   'all'     → every peer message chimes.
+  //   'mention' → only messages that @mention the operator chime.
+  // Pure (no DOM/state) so it can be unit-tested via the harness hook. The
+  // on/off master is state.soundEnabled + the btn-sound pill; this only refines
+  // an already-enabled chime, and stays independent of notifyScope.
+  function chimeScopeAllows(scope, mentionsOperator) {
+    return scope === 'all' ? true : !!mentionsOperator;
+  }
+  // The whole chime decision, pure and testable. The gate that actually
+  // matters is not the scope predicate but the conditions around it: the
+  // history burst, your own messages, system notices, and a DM view where the
+  // message is appended but hidden.
+  function shouldChime(o) {
+    if (!o || o.initialLoad) return false;      // primed history, not live
+    if (!o.soundEnabled) return false;
+    if (o.isMine || o.isSystem) return false;
+    if (!o.dmVisible) return false;             // appended but CSS-hidden
+    return chimeScopeAllows(o.scope, o.addressed);
+  }
+  let _lastChimeAt = 0;
   function playChime() {
     const ctx = ensureAudio();
     if (!ctx) return;
+    // Coalesce. A reconnect drains the whole offline backlog through one
+    // synchronous handler, and each call ramps a fresh gain to full volume at
+    // essentially the same currentTime — forty of those sum into clipping
+    // rather than forty chimes. One sound per burst is the useful signal.
+    const nowMs = Date.now();
+    if (nowMs - _lastChimeAt < 400) return;
+    _lastChimeAt = nowMs;
     if (ctx.state === 'suspended') { try { ctx.resume(); } catch (_) {} }
     const vol = Math.max(0, Math.min(1, state.chimeVolume));
     if (vol <= 0) return;
@@ -4077,7 +4434,8 @@ INDEX_HTML = r"""<!doctype html>
     } catch (_) { /* ignore */ }
   }
 
-  // ── Sound (chime) toggle — off by default; chimes on any new peer message ──
+  // ── Sound (chime) toggle — off by default; the pill is the on/off master and
+  //    state.soundScope (settings drawer) refines which peer messages chime. ──
   btnSound.addEventListener('click', () => {
     state.soundEnabled = !state.soundEnabled;
     btnSound.textContent = state.soundEnabled ? '🔊 on' : '🔊 off';
@@ -4187,6 +4545,36 @@ INDEX_HTML = r"""<!doctype html>
     return row;
   }
 
+  // Build a <select> preloaded with `options` ([value, label] pairs) and the
+  // `current` value pre-selected. Shared by the chime + notification prefs.
+  function prefSelect(options, current) {
+    const sel = document.createElement('select');
+    options.forEach(([val, label]) => {
+      const o = document.createElement('option');
+      o.value = val; o.textContent = label;
+      if (val === current) o.selected = true;
+      sel.appendChild(o);
+    });
+    return sel;
+  }
+
+  // Chime scope — off is the btn-sound pill; this refines an enabled chime to
+  // fire on every message or only @mentions. Independent of the notify scope.
+  try {
+    const ss = localStorage.getItem('trio.soundScope'); if (ss) state.soundScope = ss;
+  } catch (_) {}
+  // Wording ('all messages' / '@mentions only') and the mention-first vs
+  // all-first default are matched to the notify-scope select so the two read as
+  // siblings; the title spells out that they're independent controls.
+  const soundScopeSel = prefSelect(
+    [['all', 'all messages'], ['mention', '@mentions only']], state.soundScope);
+  soundScopeSel.title = 'Chime scope — independent of desktop notifications';
+  soundScopeSel.addEventListener('change', () => {
+    state.soundScope = soundScopeSel.value;
+    try { localStorage.setItem('trio.soundScope', state.soundScope); } catch (_) {}
+  });
+  const soundScopeRow = addSettingRow('Chime for', soundScopeSel);
+
   // Chime volume slider — drives state.chimeVolume; previews on release.
   try {
     const sv = parseFloat(localStorage.getItem('trio.chimeVolume'));
@@ -4203,17 +4591,7 @@ INDEX_HTML = r"""<!doctype html>
   volSlider.addEventListener('change', () => { ensureAudio(); playChime(); });
   const chimeVolRow = addSettingRow('Chime volume', volSlider);
 
-  // Notification preference dropdowns.
-  function prefSelect(options, current) {
-    const sel = document.createElement('select');
-    options.forEach(([val, label]) => {
-      const o = document.createElement('option');
-      o.value = val; o.textContent = label;
-      if (val === current) o.selected = true;
-      sel.appendChild(o);
-    });
-    return sel;
-  }
+  // Notification preference dropdowns (reuse prefSelect defined above).
   try {
     const ns = localStorage.getItem('trio.notifyScope'); if (ns) state.notifyScope = ns;
     const nw = localStorage.getItem('trio.notifyWhen'); if (nw) state.notifyWhen = nw;
@@ -4235,6 +4613,7 @@ INDEX_HTML = r"""<!doctype html>
 
   // Sub-settings only show when their parent feature is enabled.
   function syncSettingVisibility() {
+    if (soundScopeRow) soundScopeRow.hidden = !state.soundEnabled;
     if (chimeVolRow) chimeVolRow.hidden = !state.soundEnabled;
     if (notifyScopeRow) notifyScopeRow.hidden = !state.notifyEnabled;
     if (notifyWhenRow) notifyWhenRow.hidden = !state.notifyEnabled;
@@ -4341,6 +4720,10 @@ INDEX_HTML = r"""<!doctype html>
     if (es) try { es.close(); } catch (e) {}
     es = new EventSource('/api/events' + API_QS);
     es.onopen = () => {
+      // A channel with no history primes zero messages, so appendMessage never
+      // fires and nothing would ever clear initialLoad — the first live message
+      // would arrive un-chimed. Arm the settle from the connection itself.
+      if (state.initialLoad) scheduleInitialSettle();
       hConn.textContent = '● connected';
       hConn.classList.remove('bad');
       hConn.classList.add('ok');
@@ -4500,6 +4883,27 @@ INDEX_HTML = r"""<!doctype html>
     updateChanStats();
   }
 
+  // __TRIO_TEST_HOOK_START__
+  // Test hook: when this script is loaded under the Node DOM harness
+  // (tests/dom-harness.js), expose the internal render/parse helpers for unit
+  // testing. This whole block (marker to marker) is STRIPPED from the served
+  // browser bundle at render time (see _strip_test_hook in the INDEX_HTML
+  // substitution below), so the internal state reference never ships to a
+  // browser at all. The runtime guard is a second line of defense in case the
+  // strip ever fails: the test global is only pre-seeded by the harness
+  // sandbox, never in production. Placed before boot() so the hooks are
+  // available even if boot() throws against the harness's minimal DOM.
+  if (typeof globalThis !== 'undefined' && globalThis.__TRIO_TEST__) {
+    globalThis.__TRIO_TEST__ = {
+      state,
+      renderMarkdown, escapeHtml, isSystemContent, humanizeIdSigils,
+      formatTime,
+      collectMentionMatches, mentionMemberForToken,
+      decorateInlineMentions, composerMentionHtml,
+      chimeScopeAllows, shouldChime,
+    };
+  }
+  // __TRIO_TEST_HOOK_END__
 
   boot();
 })();
@@ -4508,9 +4912,21 @@ INDEX_HTML = r"""<!doctype html>
 </html>
 """
 
+# Strip the test-only hook block (between the sentinel markers) from the served
+# browser bundle so the internal `state` reference is never exposed on a global
+# in production. The Node DOM harness reads the raw source file directly, so it
+# still sees the block. If the markers are ever renamed the block simply stays
+# in — no worse than the runtime __TRIO_TEST__ guard that also protects it.
+def _strip_test_hook(html: str) -> str:
+    return re.sub(
+        r"\n\s*// __TRIO_TEST_HOOK_START__.*?// __TRIO_TEST_HOOK_END__",
+        "", html, flags=re.DOTALL)
+
+
 # One-shot substitution at import time — inject the emoji list into the JS
-# so server-side animal_for() and client-side animalFor() stay in sync.
-INDEX_HTML = (
+# so server-side animal_for() and client-side animalFor() stay in sync, and
+# drop the test hook from the shipped bundle.
+INDEX_HTML = _strip_test_hook(
     INDEX_HTML
     .replace("/*__ANIMAL_EMOJIS__*/", json.dumps([e for _, e in ANIMAL_EMOJIS]))
     .replace("/*__ANIMAL_NAMES__*/",  json.dumps([n for n, _ in ANIMAL_EMOJIS]))
