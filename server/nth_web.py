@@ -83,6 +83,9 @@ IDENTITY_SOURCE_PENDING = "pending"
 #   "human — GUEST (self-declared)"   → untrusted self-declared identity
 # Neither replaces direct hub-console input.
 
+# Identity tiers allowed to perform destructive, roster-wide actions (cull).
+# A self-declared guest is deliberately excluded — see _handle_cull.
+CULL_ALLOWED_SOURCES = (IDENTITY_SOURCE_LOOPBACK, IDENTITY_SOURCE_TAILSCALE)
 
 def _is_loopback_ip(remote_ip: str) -> bool:
     """True iff remote_ip is a loopback address (127.0.0.0/8, ::1, or an
@@ -564,6 +567,67 @@ def ensure_operator_row(db: sqlite3.Connection, channel: str, ident: OperatorIde
         (ident.display_name, ident.summary, channel, ident.member_id),
     )
     return ident.member_id, ident.display_name
+
+
+def cull_member(db: sqlite3.Connection, channel: str, caller_id: str,
+                caller_name: str, target_id: str) -> Tuple[Optional[dict], Optional[str]]:
+    """Remove a member from a channel — mirrors nth_server.nth_cull so the web
+    dashboard can offer it directly. Deletes the target's row, releases their
+    claimed tasks back to open, drops their locks, and posts a [culled] system
+    message. Returns (result, error) with exactly one non-None. Must run inside
+    the caller's transaction."""
+    target = db.execute(
+        "SELECT id, name FROM members WHERE id = ? AND channel = ?",
+        (target_id, channel),
+    ).fetchone()
+    if not target:
+        return None, "member not found in this channel"
+    if target_id == caller_id:
+        return None, "you can't remove yourself"
+    now = now_iso()
+    target_name = target["name"]
+
+    released = db.execute(
+        "SELECT id FROM tasks WHERE channel = ? AND claimed_by = ? AND status = 'claimed'",
+        (channel, target_id),
+    ).fetchall()
+    db.execute(
+        "UPDATE tasks SET claimed_by = NULL, status = 'open', updated_at = ? "
+        "WHERE channel = ? AND claimed_by = ? AND status = 'claimed'",
+        (now, channel, target_id),
+    )
+    # Read the held locks before dropping them so the notice can name them —
+    # otherwise the operator gets no record of what was released.
+    released_locks = [r["resource"] for r in db.execute(
+        "SELECT resource FROM locks WHERE channel = ? AND held_by = ?",
+        (channel, target_id)).fetchall()]
+    db.execute("DELETE FROM locks WHERE channel = ? AND held_by = ?", (channel, target_id))
+    db.execute("DELETE FROM members WHERE id = ? AND channel = ?", (target_id, channel))
+    # Revoke their sessions so a lingering token can't be reused if the same
+    # member_id ever re-joins (defence-in-depth; also stops row build-up).
+    db.execute(
+        "UPDATE sessions SET revoked_at = ? WHERE channel = ? AND member_id = ? "
+        "AND revoked_at IS NULL",
+        (now, channel, target_id),
+    )
+
+    released_ids = [r["id"] for r in released]
+    # Name the operator: this renders as an author-less system line, so without
+    # it someone returning to the channel can see a member was removed but not
+    # by whom — for an irreversible action that is the first thing they ask.
+    msg = f"[culled] {target_name} ({target_id}) removed from channel by {caller_name}"
+    if released_ids:
+        msg += " — released tasks: " + ", ".join(f"#{t}" for t in released_ids)
+    if released_locks:
+        msg += " — released locks: " + ", ".join(released_locks)
+    db.execute(
+        "INSERT INTO messages (channel, member_id, member_name, content, created_at) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (channel, caller_id, caller_name, msg, now),
+    )
+    return {"culled": target_name, "culled_id": target_id,
+            "released_tasks": released_ids,
+            "released_locks": released_locks}, None
 
 
 # ───────── EventHub: polls DB, fans out SSE events ─────────
@@ -1227,6 +1291,8 @@ class NthWebHandler(BaseHTTPRequestHandler):
             self._handle_send()
         elif parsed.path == "/api/identify":
             self._handle_identify()
+        elif parsed.path == "/api/cull":
+            self._handle_cull()
         else:
             self._error(404, "not found")
 
@@ -1506,6 +1572,71 @@ class NthWebHandler(BaseHTTPRequestHandler):
 
         self._json({"ok": True, "id": msg_id})
 
+    def _handle_cull(self) -> None:
+        """Remove a member from the channel at the operator's request — the
+        dashboard's roster remove (×) button. Mirrors trio_cull: releases the
+        target's tasks/locks and posts a [culled] system message."""
+        body = self._read_json_body(max_bytes=2048)
+        if body is None:
+            return
+        # _read_json_body only guarantees valid JSON, not a dict of strings —
+        # guard both before .get()/.strip() so bad input is a clean 400, not an
+        # AttributeError that drops the connection.
+        if not isinstance(body, dict):
+            self._error(400, "invalid body")
+            return
+        target_id = body.get("target_member_id")
+        if not isinstance(target_id, str) or not target_id.strip():
+            self._error(400, "target_member_id required")
+            return
+        target_id = target_id.strip()
+        _token, ident, _is_new = self._resolve_identity()
+        if ident.source == IDENTITY_SOURCE_PENDING:
+            self._error(403, "identity required — POST /api/identify first")
+            return
+        # Removing a member is destructive and roster-wide — restrict it to
+        # trusted identities (a local shell or a Tailscale-verified peer). A
+        # self-declared guest, the weakest tier, must not be able to rip out
+        # agents or other participants (esp. under --tailnet's 0.0.0.0 bind).
+        if ident.source not in CULL_ALLOWED_SOURCES:
+            self._error(403, "only a trusted operator (local or tailnet) can remove members")
+            return
+        db = None
+        try:
+            db = sqlite3.connect(str(self.db_path), timeout=5, isolation_level=None)
+            db.row_factory = sqlite3.Row
+            db.execute("PRAGMA busy_timeout=5000")
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                op_id, op_name = ensure_operator_row(db, self.channel, ident)
+                result, err = cull_member(db, self.channel, op_id, op_name, target_id)
+                if err:
+                    db.execute("ROLLBACK")
+                    self._error(400, err)
+                    return
+                db.execute("COMMIT")
+            except sqlite3.Error:
+                try:
+                    db.execute("ROLLBACK")
+                except sqlite3.Error:
+                    pass
+                raise
+        except sqlite3.Error as e:
+            # This handler is new in this branch, so shipping the pattern
+            # would INTRODUCE the leak rather than inherit it. sqlite's text
+            # names tables and columns, and cull is reachable by anyone the
+            # server will accept a POST from.
+            sys.stderr.write(f"[nth_web] cull db error: {e}\n")
+            self._error(500, "remove failed")
+            return
+        finally:
+            if db is not None:
+                try:
+                    db.close()
+                except sqlite3.Error:
+                    pass
+        self._json({"ok": True, **(result or {})})
+
 
 # ───────── HTML / JS / CSS (served as /) ─────────
 INDEX_HTML = r"""<!doctype html>
@@ -1707,6 +1838,14 @@ INDEX_HTML = r"""<!doctype html>
   :root[data-theme="bluebubble"] .member + .member { border-top: 0.5px solid rgba(255,255,255,0.08); }
   :root[data-theme="bluebubble"] .member .dm-btn {
     background: rgba(10,132,255,0.15); color: #0a84ff; border: none; border-radius: 14px;
+  }
+  /* Match the theme's pill shape so the remove control isn't a sharp grey box
+     beside a rounded blue one — destructive, so it keeps the red family. */
+  :root[data-theme="bluebubble"] .member .rm-btn {
+    background: rgba(255,69,58,0.15); color: #ff453a; border: none; border-radius: 14px;
+  }
+  :root[data-theme="bluebubble"] .member .rm-btn:hover:not(:disabled) {
+    background: #ff453a; color: #fff;
   }
   /* Composer — dark keyboard area */
   :root[data-theme="bluebubble"] #composer {
@@ -2145,6 +2284,21 @@ INDEX_HTML = r"""<!doctype html>
                      background: var(--bg2); color: var(--dim); margin-left: 4px; }
   .member .ctx-pct.warm { background: #4a3a20; color: #e5d35e; }
   .member .ctx-pct.hot  { background: #4a2420; color: var(--bang-chip); }
+  .member .member-actions { display: none; padding: 6px 0 2px 16px; }
+  .member.expanded .member-actions { display: flex; }
+  /* Destructive, so it carries --err rather than the amber --mention hue that
+     means "someone said your name" everywhere else in this UI. */
+  /* Sized off .dm-btn on purpose: the routine control and the destructive one
+     sit in the same expanded row, and the destructive one should not be the
+     bigger target. */
+  .member .rm-btn { font: inherit; font-size: 9px; line-height: 1.2;
+                    padding: 2px 6px; border-radius: 3px;
+                    background: var(--bg2); color: var(--err); border: 1px solid var(--border);
+                    cursor: pointer; flex-shrink: 0; user-select: none;
+                    text-transform: uppercase; letter-spacing: 0.5px; }
+  .member .rm-btn:hover:not(:disabled) { background: var(--err); color: var(--bg);
+                          border-color: var(--err); }
+  .member .rm-btn:disabled { opacity: 0.6; cursor: default; }
   .member .fmode { font-size: 9px; padding: 1px 5px; border-radius: 3px;
                    flex-shrink: 0; user-select: none;
                    text-transform: uppercase; letter-spacing: 0.5px;
@@ -2612,6 +2766,7 @@ INDEX_HTML = r"""<!doctype html>
   // How recently a real gesture must have happened for a scroll to count as
   // the user's. Covers a smooth-scroll animation started by a real drag.
   const USER_INTENT_MS = 1500;
+  let CAN_CULL = false;
   const state = {
     channel: '',
     operator: { id: '', name: '' },
@@ -2962,11 +3117,18 @@ INDEX_HTML = r"""<!doctype html>
     return Math.floor(s / 86400) + 'd';
   }
 
-  const SYSTEM_PREFIXES = ['[claimed ', '[done ', '[cancelled ', '[released ',
-                           '[retracted ', '[joined ', '[left ', '[ended ',
-                           '[locked ', '[unlocked ', '[status ', '[pinned ',
-                           '[renamed '];
-  function isSystemContent(s) { return SYSTEM_PREFIXES.some(p => s.startsWith(p)); }
+  const SYSTEM_WORDS = new Set(['claimed', 'done', 'cancelled', 'released',
+    'retracted', 'joined', 'left', 'ended', 'locked', 'unlocked', 'status',
+    'pinned', 'renamed', 'culled']);
+  // System notices come in two shapes: "[word #id] ..." (the task family) and
+  // "[word] ..." (join/pin/lock/unlock/rename). A plain startsWith('[word ')
+  // only ever matched the first, so the second rendered as ordinary markdown.
+  // Requiring a space-or-end after the "]" keeps a markdown link such as
+  // [done](url) from being muted as a system notice.
+  function isSystemContent(s) {
+    const m = /^\[([a-z]+)(?:\s|\](?:\s|$))/.exec(s || '');
+    return !!m && SYSTEM_WORDS.has(m[1]);
+  }
 
   // Rewrite @<member_id> / #<member_id> / !<member_id> to @<friendly-name>
   // in message bodies before rendering. The raw id-sigil form is valid
@@ -3515,6 +3677,13 @@ INDEX_HTML = r"""<!doctype html>
       state.members.set(m.id, m);
       if (old && old.name !== m.name) rename_from.set(m.id, { from: old.name, to: m.name });
     }
+    // Drop members the roster no longer lists. state.members backs the composer
+    // target chips (and their Alt+N hotkeys), @-autocomplete, ack badges and
+    // watermark pins — without this a culled member stays selectable until reload.
+    const liveIds = new Set(members.map(m => m.id));
+    for (const id of [...state.members.keys()]) {
+      if (!liveIds.has(id)) state.members.delete(id);
+    }
 
     if (rename_from.size > 0) {
       // Patch cached message records so author label follows the current alias.
@@ -3604,6 +3773,47 @@ INDEX_HTML = r"""<!doctype html>
     }
   }
 
+  // Remove a member from the channel (roster × button). Confirms first — it
+  // releases their claimed tasks + locks and posts a [culled] message. The SSE
+  // roster refresh drops them from the sidebar; it does not stop a live agent's
+  // process (it would just start erroring and could reconnect).
+  async function cullMember(id, name, btn) {
+    // Single backslash-n. This script is embedded in a Python raw string, so a
+    // doubled backslash survives to the browser verbatim and the dialog would
+    // display the escape sequence as literal text.
+    if (!confirm('Remove ' + name + ' from the channel?\n\n'
+        + 'This cannot be undone. Their claimed tasks and held locks are '
+        + 'released, their sessions are revoked, and a [culled] notice is '
+        + 'posted to the channel.\n\n'
+        + 'It does not stop a running process — it only removes them here.')) return;
+    // Disable while in flight and bound the wait. Without this the button gives
+    // no signal at all after you have confirmed an irreversible action — and a
+    // request CAN hang indefinitely: several dashboard tabs consume the
+    // browser's per-origin connection cap with their SSE streams, and the DM
+    // button opens tabs, so reaching the cap is a normal thing to do.
+    const label = btn ? btn.textContent : null;
+    if (btn) { btn.disabled = true; btn.textContent = 'Removing…'; }
+    try {
+      const r = await fetch('/api/cull' + API_QS, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ target_member_id: id }),
+        signal: (AbortSignal && AbortSignal.timeout) ? AbortSignal.timeout(15000) : undefined,
+      });
+      if (!r.ok) {
+        const err = await r.json().catch(() => ({ error: 'unknown' }));
+        alert('remove failed: ' + (err.error || r.status));
+      }
+    } catch (e) {
+      alert(e.name === 'TimeoutError'
+        ? 'remove timed out — the dashboard did not get a reply, so ' + name
+          + ' may or may not have been removed. Reload to check.'
+        : 'remove failed: ' + e.message);
+    } finally {
+      if (btn) { btn.disabled = false; btn.textContent = label; }
+    }
+  }
+
   function renderMemberRow(m) {
     const { name: animalName, emoji } = animalFor(m);
     const row = document.createElement('div');
@@ -3681,6 +3891,24 @@ INDEX_HTML = r"""<!doctype html>
     stats.className = 'stats';
     stats.innerHTML = renderMemberStatsHTML(m);
     row.appendChild(stats);
+
+    // Remove control — revealed only when the row is expanded, so it can't be
+    // mis-clicked from the collapsed roster (on a phone the old always-visible
+    // × sat 53px from the drawer's own close ×, same glyph, at a sub-44px
+    // target). Hidden entirely for identities the server would refuse, rather
+    // than walking them through two dialogs into a 403.
+    if (!DM_MODE && m.id !== state.operator.id && CAN_CULL) {
+      const actions = document.createElement('div');
+      actions.className = 'member-actions';
+      const rm = document.createElement('button');
+      rm.type = 'button';
+      rm.className = 'rm-btn';
+      rm.textContent = 'Remove';
+      rm.title = `Remove ${m.name} from this channel — releases their tasks and locks, and cannot be undone`;
+      rm.addEventListener('click', (e) => { e.stopPropagation(); cullMember(m.id, m.name, rm); });
+      actions.appendChild(rm);
+      row.appendChild(actions);
+    }
 
     row.addEventListener('click', (e) => {
       // Clicking the name on a mention-capable row? On shift-click → filter.
@@ -4733,6 +4961,11 @@ INDEX_HTML = r"""<!doctype html>
 
   function applyOperator(op) {
     state.operator = op;
+    // The server refuses a cull from anything but a local shell or a
+    // Tailscale-verified peer. Mirror that here so an identity the server
+    // would reject never sees the control at all, rather than being walked
+    // through a confirm dialog into a 403.
+    CAN_CULL = (op && (op.source === 'loopback' || op.source === 'tailscale'));
     const opAnimal = animalFor(op);
     const srcTag = op.source === 'tailscale' ? '[tailnet]' :
                    op.source === 'loopback'  ? '[local]'   :
