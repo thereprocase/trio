@@ -55,8 +55,8 @@ if [ "${1:-}" = "hub-service" ] || [ "${1:-}" = "upgrade" ]; then
 
     echo "Deploying server files: repo -> $HUB_DIR (backups: *.bak-$STAMP)"
     for f in nth_server.py nth_monitor.py nth_spoke_monitor.py nth_console.py \
-             nth_dashboard.py nth_web.py quartet_server.py nth_constants.py \
-             nth_doctor.py codex_context_publisher.py; do
+             nth_dashboard.py nth_web.py nth_stt_worker.py quartet_server.py \
+             nth_constants.py nth_doctor.py codex_context_publisher.py; do
         if [ -f "$HUB_DIR/$f" ] && ! cmp -s "$SCRIPT_DIR/server/$f" "$HUB_DIR/$f"; then
             cp "$HUB_DIR/$f" "$HUB_DIR/$f.bak-$STAMP"
         fi
@@ -391,6 +391,9 @@ cp "$SCRIPT_DIR/server/nth_monitor.py" "$SERVER_DIR/nth_monitor.py"
 cp "$SCRIPT_DIR/server/nth_console.py" "$SERVER_DIR/nth_console.py"
 cp "$SCRIPT_DIR/server/nth_dashboard.py" "$SERVER_DIR/nth_dashboard.py"
 cp "$SCRIPT_DIR/server/nth_web.py" "$SERVER_DIR/nth_web.py"
+# The optional dictation sidecar. nth_web.py resolves it as a sibling of itself,
+# so omitting it here leaves the mic button present but the engine missing.
+cp "$SCRIPT_DIR/server/nth_stt_worker.py" "$SERVER_DIR/nth_stt_worker.py"
 cp "$SCRIPT_DIR/server/quartet_server.py" "$SERVER_DIR/quartet_server.py"
 cp "$SCRIPT_DIR/server/nth_constants.py" "$SERVER_DIR/nth_constants.py"
 cp "$SCRIPT_DIR/server/nth_doctor.py" "$SERVER_DIR/nth_doctor.py"
