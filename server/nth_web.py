@@ -45,11 +45,11 @@ import errno
 import time
 import unicodedata
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 sys.path.insert(0, str(Path(__file__).parent))
 from nth_constants import (ANIMAL_EMOJIS, animal_for, animal_for_channel,
@@ -63,6 +63,37 @@ DB_POLL_INTERVAL = 0.5
 HISTORY_LIMIT = 200          # messages sent to a client on /api/history
 HUB_IDLE_REAP_S = 300        # retire a channel's EventHub after this long unwatched
 SSE_HEARTBEAT_SEC = 20       # keep-alive comment interval
+
+# ── Image attachments (Phase-1 prototype) ──
+# Attachments live beside the database they belong to, NOT at a fixed path.
+# A hardcoded location means --db does not isolate anything: pointing the server
+# at a scratch DB still reads and DELETES files belonging to the real one, which
+# is a live footgun for anyone testing the GC below.
+ATTACH_DIR = Path.home() / ".claude" / "nth" / "attachments"
+
+
+def attach_dir_for(db_path: Path) -> Path:
+    """Attachment root for a given database file."""
+    return Path(db_path).resolve().parent / "attachments"
+MAX_UPLOAD_BYTES = 10 * 1024 * 1024     # 10 MB hard cap per image
+# Total attachment bytes one member may hold in one channel. The per-image cap
+# bounds a single request; nothing bounded the SUM, so any identity allowed to
+# upload could fill the disk one legal 10 MB image at a time. sweep_attachments
+# only reclaims UNLINKED rows, so anything linked to a message is permanent --
+# this quota is the only bound on an upload right.
+MAX_MEMBER_ATTACH_BYTES = int(os.environ.get("NTH_ATTACH_QUOTA_BYTES", 200 * 1024 * 1024))
+# Attachment GC. An upload creates its row UNLINKED and /api/send links it, so
+# anything still unlinked long afterwards was abandoned — a paste thought better
+# of, a closed tab, a failed send. Nothing ever collected those, so they
+# accumulated on disk for the life of the install.
+ATTACH_GC_GRACE_S = 24 * 3600      # an unlinked upload is abandoned after this
+ATTACH_GC_MIN_INTERVAL_S = 600     # at most one sweep per process per 10 min
+ATTACH_GC_MAX_DELETES = 500        # deletions per sweep
+ATTACH_GC_MAX_SCAN = 2000          # files stat'd per sweep, resumed round-robin
+ALLOWED_IMAGE_MIME = {
+    "image/png": ".png", "image/jpeg": ".jpg",
+    "image/gif": ".gif", "image/webp": ".webp",
+}
 STALE_SECONDS = 300          # fresh heartbeat threshold
 DEAD_SECONDS = 900           # no heartbeat this long → dead
 SLEEPING_KEYWORDS = ("idle", "standing by", "tier 3", "agent-monitor")
@@ -86,6 +117,10 @@ IDENTITY_SOURCE_PENDING = "pending"
 # Identity tiers allowed to perform destructive, roster-wide actions (cull).
 # A self-declared guest is deliberately excluded — see _handle_cull.
 CULL_ALLOWED_SOURCES = (IDENTITY_SOURCE_LOOPBACK, IDENTITY_SOURCE_TAILSCALE)
+# Identity tiers allowed to inspect or reveal paths on the operator's own
+# filesystem. A self-declared guest is excluded: these endpoints answer
+# questions about local disk, and the server can bind 0.0.0.0 under --tailnet.
+LOCAL_PATH_ALLOWED_SOURCES = (IDENTITY_SOURCE_LOOPBACK, IDENTITY_SOURCE_TAILSCALE)
 
 def _is_loopback_ip(remote_ip: str) -> bool:
     """True iff remote_ip is a loopback address (127.0.0.0/8, ::1, or an
@@ -630,6 +665,246 @@ def cull_member(db: sqlite3.Connection, channel: str, caller_id: str,
             "released_locks": released_locks}, None
 
 
+def sniff_image_mime(data: bytes) -> Optional[str]:
+    """Real image MIME from magic bytes, or None if not a supported image.
+    We trust the sniffed type over the client-declared Content-Type."""
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    if data[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    if data[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    return None
+
+
+_last_attach_gc = 0.0
+_attach_gc_cursor = 0        # resume point for the bounded orphan walk
+_attach_gc_lock = threading.Lock()
+
+
+def _unlink_quietly(path: Path) -> bool:
+    """Delete a file, but only if it lives under the CURRENT attachment root.
+
+    attachments.path stores an absolute path, so a database pointed at by --db
+    can name files belonging to a different install. Without this check, running
+    the server against a scratch copy of a DB deletes the REAL files its rows
+    happen to reference — which is exactly how this check came to be written.
+    """
+    try:
+        resolved = Path(path).resolve()
+        if not resolved.is_relative_to(ATTACH_DIR.resolve()):
+            return False
+        resolved.unlink()
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def sweep_attachments(db_path: Path, force: bool = False) -> Dict[str, int]:
+    """Collect attachments nothing can reach any more.
+
+    Three kinds, all of which leaked before this existed:
+      * abandoned uploads — still unlinked ATTACH_GC_GRACE_S after creation.
+      * attachments of a channel that no longer exists — nth_cleanup deletes a
+        channel's messages and members but never its attachments.
+      * orphan files — a crash between writing the file and inserting its row
+        leaves bytes on disk that nothing references.
+
+    Rows are deleted BEFORE their files: a crash in between leaves an orphan
+    file, which the third sweep reclaims. The other order would leave a row
+    pointing at nothing, which is a visibly broken image instead.
+
+    Opportunistic — called from the upload path and at startup, rate-limited so
+    a burst of uploads does not sweep repeatedly. Mirrors the idle-hub reaper
+    rather than adding a thread. Returns counts for logging/tests.
+    """
+    global _last_attach_gc
+    now = time.time()
+    with _attach_gc_lock:
+        if not force and (now - _last_attach_gc) < ATTACH_GC_MIN_INTERVAL_S:
+            return {"skipped": 1}
+        _last_attach_gc = now
+
+    stats = {"abandoned": 0, "dead_channel": 0, "orphan_files": 0}
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=ATTACH_GC_GRACE_S)
+    cutoff_iso = cutoff.isoformat()
+    db = None
+    try:
+        db = sqlite3.connect(str(db_path), timeout=5, isolation_level=None)
+        db.row_factory = sqlite3.Row
+        db.execute("PRAGMA busy_timeout=3000")
+        ensure_attachments_table(db)
+
+        # Two independent queries with their own budgets. A single UNION ALL
+        # with one LIMIT let the first branch consume the whole budget, so a
+        # dead channel's disk was never freed while any abandoned backlog
+        # existed — and a row matching BOTH predicates came back twice.
+        half = max(1, ATTACH_GC_MAX_DELETES // 2)
+        doomed = [
+            (r["id"], r["path"], "abandoned") for r in db.execute(
+                "SELECT id, path FROM attachments "
+                " WHERE message_id IS NULL AND created_at < ? LIMIT ?",
+                (cutoff_iso, half)).fetchall()
+        ]
+        seen = {d[0] for d in doomed}
+        for r in db.execute(
+                "SELECT a.id AS id, a.path AS path FROM attachments a "
+                " LEFT JOIN channels c ON c.code = a.channel "
+                " WHERE c.code IS NULL LIMIT ?",
+                (ATTACH_GC_MAX_DELETES - len(doomed),)).fetchall():
+            if r["id"] not in seen:
+                doomed.append((r["id"], r["path"], "dead_channel"))
+
+        # One transaction for the batch. Autocommitting each delete took the WAL
+        # writer lock up to 500 times per sweep, interleaved with unlink()
+        # syscalls — measured as ~770ms tail latency on unrelated concurrent
+        # writes (message sends, task claims) for as long as the sweep ran.
+        # Rows still go before files: the commit lands first, then the unlinks,
+        # so a crash in between leaves an orphan file the walk reclaims.
+        if doomed:
+            # Compare-and-swap on the state that made each row doomed. The
+            # select and the delete are separate statements, so a row can be
+            # LINKED by a concurrent /api/send in between — and _handle_send
+            # holds BEGIN IMMEDIATE, so an unconditional delete does not race
+            # it, it queues behind it and then destroys the attachment the user
+            # just successfully posted. Only rows still in the observed state
+            # are deleted, and only rows we actually deleted get their file
+            # unlinked.
+            confirmed = []
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                for att_id, att_path, why in doomed:
+                    if why == "abandoned":
+                        cur = db.execute(
+                            "DELETE FROM attachments "
+                            " WHERE id = ? AND message_id IS NULL", (att_id,))
+                    else:
+                        cur = db.execute(
+                            "DELETE FROM attachments WHERE id = ? AND NOT EXISTS "
+                            " (SELECT 1 FROM channels c WHERE c.code = "
+                            "  (SELECT channel FROM attachments WHERE id = ?))",
+                            (att_id, att_id))
+                    if cur.rowcount:
+                        confirmed.append((att_path, why))
+                db.execute("COMMIT")
+            except sqlite3.Error:
+                db.execute("ROLLBACK")
+                raise
+            # Files only after the rows are durably gone.
+            for att_path, why in confirmed:
+                _unlink_quietly(Path(att_path))
+                stats[why] += 1
+
+        # Orphan files, only ones older than the grace period. NB the upload
+        # path inserts its row FIRST (with an empty path), then writes the file,
+        # then fills the path in — so the window this guards is not "file
+        # written before its row exists" but the gap between the `known`
+        # snapshot below and the walk that follows it. That is seconds; the
+        # grace covers it by orders of magnitude.
+        #
+        # Walk a BOUNDED slice of the tree per sweep, resuming where the last
+        # one stopped. Loading every path and stat'ing every file made the cost
+        # scale with total historical attachments rather than with garbage —
+        # measured at ~1.2s on a 150k-attachment install that had nothing to
+        # collect. Coverage is still complete, just spread over several sweeps.
+        global _attach_gc_cursor
+        try:
+            chan_dirs = sorted(d for d in ATTACH_DIR.iterdir() if d.is_dir())
+        except OSError:
+            chan_dirs = []
+        if chan_dirs:
+            start = _attach_gc_cursor % len(chan_dirs)
+            order = chan_dirs[start:] + chan_dirs[:start]
+            scanned = 0
+            deletes = ATTACH_GC_MAX_DELETES
+            visited = 0
+            for chan_dir in order:
+                if scanned >= ATTACH_GC_MAX_SCAN or deletes <= 0:
+                    break
+                visited += 1
+                # Only this channel's paths, so the set stays proportional to
+                # the slice being walked (indexed by channel).
+                known = {r["path"] for r in db.execute(
+                    "SELECT path FROM attachments WHERE channel = ?",
+                    (chan_dir.name,))}
+                try:
+                    entries = list(chan_dir.iterdir())
+                except OSError:
+                    continue
+                for f in entries:
+                    if scanned >= ATTACH_GC_MAX_SCAN or deletes <= 0:
+                        break
+                    scanned += 1
+                    if str(f) in known:
+                        continue
+                    try:
+                        if not f.is_file():
+                            continue
+                        if (now - f.stat().st_mtime) < ATTACH_GC_GRACE_S:
+                            continue
+                    except OSError:
+                        continue
+                    if _unlink_quietly(f):
+                        stats["orphan_files"] += 1
+                        deletes -= 1
+            _attach_gc_cursor = (start + visited) % len(chan_dirs)
+    except sqlite3.Error:
+        return stats
+    finally:
+        if db is not None:
+            try:
+                db.close()
+            except sqlite3.Error:
+                pass
+    return stats
+
+
+def ensure_attachments_table(db: sqlite3.Connection) -> None:
+    """Create the attachments table on demand. The web side owns this for the
+    prototype so it works before the MCP server ships the canonical CREATE —
+    both use IF NOT EXISTS, so it stays safe once the server half lands."""
+    db.execute(
+        "CREATE TABLE IF NOT EXISTS attachments ("
+        " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        " channel TEXT NOT NULL,"
+        " message_id INTEGER,"
+        " member_id TEXT NOT NULL,"
+        " mime TEXT NOT NULL,"
+        " filename TEXT,"
+        " width INTEGER, height INTEGER, bytes INTEGER,"
+        " path TEXT NOT NULL,"
+        " created_at TEXT NOT NULL)"
+    )
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_attachments_channel "
+        "ON attachments(channel)"
+    )
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_attachments_unlinked "
+        "ON attachments(created_at) WHERE message_id IS NULL"
+    )
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_attachments_message "
+        "ON attachments(message_id)"
+    )
+
+
+def attachments_for_message(db: sqlite3.Connection, msg_id: int) -> List[Dict[str, Any]]:
+    """[{id, mime, filename}] for a message. Defensive: returns [] if the
+    attachments table doesn't exist yet (no uploads have happened)."""
+    try:
+        rows = db.execute(
+            "SELECT id, mime, filename FROM attachments "
+            "WHERE message_id = ? ORDER BY id", (msg_id,),
+        ).fetchall()
+    except sqlite3.Error:
+        return []
+    return [{"id": r["id"], "mime": r["mime"], "filename": r["filename"] or ""}
+            for r in rows]
+
+
 # ───────── EventHub: polls DB, fans out SSE events ─────────
 class EventHub:
     """Single background thread watches the DB and pushes JSON events to any
@@ -699,6 +974,7 @@ class EventHub:
                     "refs": parse_mentions_json(r["refs"] if "refs" in r.keys() else ""),
                     "bangs": parse_mentions_json(r["bangs"] if "bangs" in r.keys() else ""),
                     "created_at": r["created_at"],
+                    "attachments": attachments_for_message(db, r["id"]),
                 }))
         except (sqlite3.Error, queue.Full):
             pass
@@ -884,6 +1160,7 @@ class EventHub:
                             "refs": parse_mentions_json(r["refs"] if "refs" in r.keys() else ""),
                             "bangs": parse_mentions_json(r["bangs"] if "bangs" in r.keys() else ""),
                             "created_at": r["created_at"],
+                            "attachments": attachments_for_message(db, r["id"]),
                         })
                         self.last_msg_id = r["id"]
 
@@ -1282,17 +1559,54 @@ class NthWebHandler(BaseHTTPRequestHandler):
             self._serve_sse(self._hub_for_channel(ch))
         elif path == "/api/search":
             self._handle_search(parsed)
+        elif path.startswith("/api/attachment/"):
+            self._serve_attachment(path)
         else:
             self._error(404, "not found")
 
+    def _reject_cross_site(self) -> bool:
+        """True (and an error already sent) when this POST looks cross-site.
+
+        _resolve_identity() derives trust from the source IP, not from the
+        session cookie: a cookie-less request from a browser still resolves as
+        the loopback/tailnet operator. SameSite is therefore not a CSRF control
+        here, because the cookie is not the credential. A cross-origin fetch
+        with a CORS-safelisted Content-Type skips preflight, so the write lands
+        even though the response is opaque to the attacker.
+
+        Origin is the load-bearing half: browsers set it on every cross-origin
+        request and page script cannot forge it. Sec-Fetch-Site is defence in
+        depth and is absent on older/non-Chromium clients, so its absence must
+        be allowed. Compare Origin against the request's own Host rather than a
+        configured value -- the same hub is reached by tailnet name and by
+        tailnet IP, and those are different origins.
+        """
+        origin = self.headers.get("Origin")
+        if origin:
+            if urlparse(origin).netloc != self.headers.get("Host", ""):
+                self._error(403, "cross-origin POST rejected")
+                return True
+        if self.headers.get("Sec-Fetch-Site") not in (None, "same-origin", "none"):
+            self._error(403, "cross-site POST rejected")
+            return True
+        return False
+
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
+        if self._reject_cross_site():
+            return
         if parsed.path == "/api/send":
             self._handle_send()
         elif parsed.path == "/api/identify":
             self._handle_identify()
         elif parsed.path == "/api/cull":
             self._handle_cull()
+        elif parsed.path == "/api/path/validate":
+            self._handle_path_validate()
+        elif parsed.path == "/api/reveal":
+            self._handle_reveal()
+        elif parsed.path == "/api/upload":
+            self._handle_upload()
         else:
             self._error(404, "not found")
 
@@ -1365,7 +1679,9 @@ class NthWebHandler(BaseHTTPRequestHandler):
         try:
             raw = self.rfile.read(length)
             return json.loads(raw.decode("utf-8"))
-        except (ValueError, UnicodeDecodeError):
+        except (ValueError, UnicodeDecodeError, RecursionError):
+            # RecursionError guards against a deeply-nested-JSON DoS (json.loads
+            # recurses); it is not a ValueError subclass, so name it explicitly.
             self._error(400, "invalid JSON")
             return None
 
@@ -1468,9 +1784,27 @@ class NthWebHandler(BaseHTTPRequestHandler):
             return
 
         content = (body.get("content") or "").strip()
-        if not content:
+        raw_ids = body.get("attachment_ids") or []
+        if not isinstance(raw_ids, list):
+            self._error(400, "invalid attachment_ids")
+            return
+        # Strict integer contract: reject floats, bools, and numeric strings
+        # (type(True) is bool, so booleans are rejected here too).
+        if not all(type(a) is int and a > 0 for a in raw_ids):
+            self._error(400, "invalid attachment_ids")
+            return
+        attachment_ids = list(raw_ids)
+        if len(attachment_ids) > 8:
+            self._error(400, "too many attachments (max 8)")
+            return
+        if len(set(attachment_ids)) != len(attachment_ids):
+            self._error(400, "duplicate attachment id")
+            return
+        if not content and not attachment_ids:
             self._error(400, "empty content")
             return
+        if not content and attachment_ids:
+            content = "[image]"
         if len(content) > 4000:
             self._error(400, "content too long (max 4000 chars)")
             return
@@ -1497,6 +1831,23 @@ class NthWebHandler(BaseHTTPRequestHandler):
             try:
                 op_id, op_name = ensure_operator_row(db, send_channel, ident)
                 now = now_iso()
+
+                # Validate attachments up front: every requested id must be
+                # this operator's own, unlinked, in-channel row — else abort,
+                # so an image-only send can't post a false "[image]" with no
+                # image actually attached.
+                if attachment_ids:
+                    ensure_attachments_table(db)
+                    placeholders = ",".join("?" * len(attachment_ids))
+                    owned = db.execute(
+                        f"SELECT id FROM attachments WHERE id IN ({placeholders}) "
+                        "AND channel = ? AND member_id = ? AND message_id IS NULL",
+                        (*attachment_ids, send_channel, op_id),
+                    ).fetchall()
+                    if {r["id"] for r in owned} != set(attachment_ids):
+                        db.execute("ROLLBACK")
+                        self._error(400, "invalid or already-linked attachment id")
+                        return
 
                 # Leading "$task " marks this as a claimable task — same
                 # table + status flow as trio_send(task=True). The prefix
@@ -1542,6 +1893,14 @@ class NthWebHandler(BaseHTTPRequestHandler):
                      json.dumps(bang_ids)    if bang_ids    else ""),
                 )
                 msg_id = cursor.lastrowid
+                # Link any uploaded attachments to this message (own, unlinked).
+                if attachment_ids:
+                    db.executemany(
+                        "UPDATE attachments SET message_id = ? "
+                        "WHERE id = ? AND channel = ? AND member_id = ? "
+                        "AND message_id IS NULL",
+                        [(msg_id, aid, send_channel, op_id) for aid in attachment_ids],
+                    )
                 db.execute(
                     "UPDATE members SET last_seen = ? WHERE channel = ? AND id = ?",
                     (now, send_channel, op_id),
@@ -1569,7 +1928,6 @@ class NthWebHandler(BaseHTTPRequestHandler):
                     db.close()
                 except sqlite3.Error:
                     pass
-
         self._json({"ok": True, "id": msg_id})
 
     def _handle_cull(self) -> None:
@@ -1643,6 +2001,380 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 except sqlite3.Error:
                     pass
         self._json({"ok": True, **(result or {})})
+
+    # ── file-path validate / reveal ──
+    # The client detects path-LIKE tokens in message bodies broadly, then asks
+    # the server which ones actually exist on disk; only real files get linked
+    # (validation, not pattern-matching, gates linkification). A linked path can
+    # then be revealed in Finder. There is NO access gating on these endpoints
+    # (operator's explicit choice), so injection-safety is enforced structurally:
+    # reveal never runs a shell and never plain-`open`s a file (which would
+    # launch its default app) — it only `open -R` (reveal/select in Finder).
+    _PATH_VALIDATE_CAP = 200          # max candidates per validate request
+    _PATH_MAX_LEN = 4096              # ignore absurdly long candidates
+
+    @staticmethod
+    def _expand_path(candidate: str) -> str:
+        """Expand a leading ~ (and ~user), then require the result to be
+        ABSOLUTE. Returns "" for anything relative.
+
+        A relative token has no agreed meaning here. It would resolve against
+        the SERVER's working directory, which is wherever the dashboard happened
+        to be launched — not the cwd of the agent that wrote the message. In a
+        fleet whose agents work in different checkouts (the normal case) that
+        means "see server/nth_web.py" links to whichever copy the dashboard was
+        started next to, reveals it with a success flash, and renders
+        differently for two operators reading the same message. A confident link
+        to the wrong file is worse than no link, so relative tokens stay plain
+        text and the reader keeps the literal string the agent wrote."""
+        expanded = os.path.expanduser(candidate)
+        return expanded if os.path.isabs(expanded) else ""
+
+    @staticmethod
+    def _is_trivial_root(expanded: str) -> bool:
+        """True for a filesystem root or pure-separator token ('/', '//', '/..',
+        a bare Windows/volume drive root). These EXIST on disk yet are never a
+        meaningful file link — treating a lone '/' as one is exactly what made a
+        slash used as prose punctuation ('reload / incognito', '#' / '!') pick
+        up a folder icon. Rejected in both validate and reveal (defense in depth
+        alongside the client's filename-segment filter). Real paths UNDER a root
+        ('/Users/…') contain more than separators, so they're unaffected."""
+        if not expanded or not expanded.strip("/\\ \t"):
+            return True                       # empty or only slashes/whitespace
+        try:
+            norm = os.path.normpath(expanded)
+        except (ValueError, TypeError):
+            return False
+        if norm in (os.sep, "/", "//"):       # POSIX root (normpath preserves '//')
+            return True
+        drive, tail = os.path.splitdrive(norm)
+        if drive and tail in ("", os.sep, "/", "\\"):   # bare drive root 'C:\'
+            return True
+        return False
+
+    def _resolve_existing(self, raw: str) -> Optional[str]:
+        """Return the expanded on-disk target for `raw`, or None if it doesn't
+        exist (or is a trivial root — see _is_trivial_root). Tries the candidate
+        as-is first, then with a trailing :line[:col] (editor/grep/Claude-Code
+        form) stripped — so both validate and reveal agree on what a `path:line`
+        token resolves to. Uses lexists so broken symlinks (still revealable)
+        count. Never raises (a NUL/bad path is just 'not found')."""
+        for cand in (raw, re.sub(r":\d+(?::\d+)?$", "", raw)):
+            expanded = self._expand_path(cand)
+            if self._is_trivial_root(expanded):
+                continue                      # '/' & bare roots are not linkable
+            try:
+                if expanded and os.path.lexists(expanded):
+                    return expanded
+            except (ValueError, OSError):
+                continue
+        return None
+
+    def _handle_path_validate(self) -> None:
+        """POST /api/path/validate — body {"paths": [...]}. Returns
+        {"exists": {candidate: bool}} keyed by the ORIGINAL candidate string
+        (so client cache keys line up). A `path:line[:col]` token counts as
+        existing when the bare file exists. Capped at _PATH_VALIDATE_CAP."""
+        # These two endpoints read and act on the OPERATOR'S OWN filesystem, so
+        # they are restricted to the same trusted tiers as other destructive
+        # controls: a local shell, or a Tailscale-verified peer. The fork left
+        # them ungated, which was defensible when the server bound loopback and
+        # served one channel; upstream can bind 0.0.0.0 (--tailnet) and serves a
+        # channel-less landing surface, where ungated meant any reachable peer
+        # could enumerate the operator's filesystem and pop Finder windows on
+        # their screen without knowing any channel code.
+        _token, ident, _is_new = self._resolve_identity()
+        if ident.source not in LOCAL_PATH_ALLOWED_SOURCES:
+            self._error(403, "only a trusted operator (local or tailnet) can inspect local paths")
+            return
+        # Bodies can carry up to 200 paths; allow a generous cap over the default.
+        body = self._read_json_body(max_bytes=256 * 1024)
+        if body is None:
+            return
+        if not isinstance(body, dict):
+            self._error(400, "invalid body")
+            return
+        paths = body.get("paths")
+        if not isinstance(paths, list):
+            self._error(400, "paths must be a list")
+            return
+        exists: Dict[str, bool] = {}
+        for cand in paths[: self._PATH_VALIDATE_CAP]:
+            if not isinstance(cand, str) or not cand or len(cand) > self._PATH_MAX_LEN:
+                continue
+            if cand in exists:
+                continue
+            exists[cand] = self._resolve_existing(cand) is not None
+        self._json({"exists": exists})
+
+    def _handle_reveal(self) -> None:
+        """POST /api/reveal — body {"path": "..."}. Reveal (select) the file in
+        Finder. SECURITY: no shell, arg-list only, `open -R` (reveal) never plain
+        `open` (which would launch the default app), and a leading `--` so a
+        path beginning with `-` can't be read as a flag. Existence is verified
+        first (404 otherwise), so a bogus/injection-style value never reaches a
+        launch. A `path:line[:col]` suffix (Claude-Code form) is stripped so the
+        file itself is revealed."""
+        # These two endpoints read and act on the OPERATOR'S OWN filesystem, so
+        # they are restricted to the same trusted tiers as other destructive
+        # controls: a local shell, or a Tailscale-verified peer. The fork left
+        # them ungated, which was defensible when the server bound loopback and
+        # served one channel; upstream can bind 0.0.0.0 (--tailnet) and serves a
+        # channel-less landing surface, where ungated meant any reachable peer
+        # could enumerate the operator's filesystem and pop Finder windows on
+        # their screen without knowing any channel code.
+        _token, ident, _is_new = self._resolve_identity()
+        if ident.source not in LOCAL_PATH_ALLOWED_SOURCES:
+            self._error(403, "only a trusted operator (local or tailnet) can inspect local paths")
+            return
+        body = self._read_json_body(max_bytes=8192)
+        if body is None:
+            return
+        if not isinstance(body, dict):
+            self._error(400, "invalid body")
+            return
+        raw = body.get("path")
+        if not isinstance(raw, str) or not raw.strip():
+            self._error(400, "path required")
+            return
+        raw = raw.strip()
+        if len(raw) > self._PATH_MAX_LEN:
+            self._error(400, "path too long")
+            return
+
+        # Resolve to an existing target (as-is, else with a :line[:col] suffix
+        # stripped). Same resolver validate uses, so the UI and the reveal agree.
+        target = self._resolve_existing(raw)
+        if target is None:
+            self._error(404, "path not found on disk")
+            return
+
+        abspath = os.path.abspath(target)
+        plat = sys.platform
+        try:
+            if plat == "darwin":
+                # Reveal (select) in Finder. ARG LIST + `--`: no shell, no flag
+                # injection. `-R` reveals; it never launches the file's app.
+                cp = subprocess.run(
+                    ["open", "-R", "--", abspath],
+                    capture_output=True, text=True, timeout=10,
+                )
+            elif plat.startswith("linux"):
+                # Best-effort: open the containing folder (no reliable "select").
+                folder = abspath if os.path.isdir(abspath) else os.path.dirname(abspath)
+                cp = subprocess.run(
+                    ["xdg-open", "--", folder],
+                    capture_output=True, text=True, timeout=10,
+                )
+            elif plat.startswith("win"):
+                cp = subprocess.run(
+                    ["explorer", "/select,", abspath],
+                    capture_output=True, text=True, timeout=10,
+                )
+            else:
+                self._json({"ok": False, "error": f"unsupported platform: {plat}"},
+                           status=501)
+                return
+        except FileNotFoundError:
+            self._json({"ok": False, "error": "reveal tool not available"}, status=501)
+            return
+        except subprocess.TimeoutExpired:
+            self._error(504, "reveal timed out")
+            return
+        if cp.returncode != 0:
+            msg = (cp.stderr or cp.stdout or "").strip() or f"exit {cp.returncode}"
+            self._error(502, f"reveal failed: {msg}")
+            return
+        self._json({"ok": True, "path": abspath})
+
+    def _handle_upload(self) -> None:
+        """Accept a raw image body (Content-Type = mime, X-Filename header),
+        validate by magic bytes, store on disk, and create an unlinked
+        attachments row. The subsequent /api/send links it to a message."""
+        token, ident, _is_new = self._resolve_identity()
+        # Writing files into the operator's home directory is the same class of
+        # action as revealing a path there, so it takes the same tier as
+        # /api/reveal and /api/path/validate. A self-declared guest is the
+        # weakest identity this server mints -- under --tailnet (the deployed
+        # mode) that is anyone who can reach the port and type a name. Gating
+        # only on PENDING let them write 10 MB per request, unmetered.
+        if ident.source not in LOCAL_PATH_ALLOWED_SOURCES:
+            self._error(403, "only a trusted operator (local or tailnet) can upload")
+            return
+        # Same reason as _serve_attachment: the channel comes from the request,
+        # not from a process-wide attribute that landing mode never sets.
+        ch = self._channel_for_request(urlparse(self.path))
+        if ch is None:
+            self._error(400, "channel query param required")
+            return
+        if self.landing_mode and not self._channel_exists(ch):
+            self._error(404, f"no such channel: {ch}")
+            return
+        try:
+            length = int(self.headers.get("Content-Length", "0") or 0)
+        except (TypeError, ValueError):
+            self._error(400, "invalid Content-Length")
+            return
+        if length <= 0 or length > MAX_UPLOAD_BYTES:
+            self._error(400, "image is missing or larger than the 10 MB limit")
+            return
+        try:
+            data = self.rfile.read(length)
+        except OSError:
+            self._error(400, "read failed")
+            return
+        if len(data) != length:
+            self._error(400, "incomplete upload")
+            return
+        mime = sniff_image_mime(data)
+        if mime not in ALLOWED_IMAGE_MIME:
+            self._error(400, "unsupported image type (png/jpeg/gif/webp only)")
+            return
+        ext = ALLOWED_IMAGE_MIME[mime]
+        # X-Filename is percent-encoded by the client (HTTP headers must be
+        # ISO-8859-1, but filenames — e.g. macOS screenshots — carry Unicode).
+        raw_name = unquote(self.headers.get("X-Filename", "") or "")
+        filename = re.sub(r"[^\w.\- ]", "_", raw_name)[:120] or ("image" + ext)
+
+        db = None
+        try:
+            db = sqlite3.connect(str(self.db_path), timeout=5, isolation_level=None)
+            db.row_factory = sqlite3.Row
+            db.execute("PRAGMA busy_timeout=5000")
+            ensure_attachments_table(db)
+            op_id, _op_name = ensure_operator_row(db, ch, ident)
+            # The gate above says WHO may upload; this says HOW MUCH. Both are
+            # needed: the gate does not stop a cross-site POST, which executes
+            # as the trusted local operator and therefore passes it.
+            used = db.execute(
+                "SELECT COALESCE(SUM(bytes), 0) AS b FROM attachments "
+                " WHERE channel = ? AND member_id = ?", (ch, op_id),
+            ).fetchone()["b"]
+            if used + len(data) > MAX_MEMBER_ATTACH_BYTES:
+                self._error(413, "attachment quota exceeded")
+                return
+            now = now_iso()
+            cur = db.execute(
+                "INSERT INTO attachments "
+                "(channel, message_id, member_id, mime, filename, bytes, path, created_at) "
+                "VALUES (?, NULL, ?, ?, ?, ?, '', ?)",
+                (ch, op_id, mime, filename, len(data), now),
+            )
+            att_id = cur.lastrowid
+            fpath = None
+            try:
+                chan_dir = ATTACH_DIR / re.sub(r"[^\w.\-]", "_", ch)
+                chan_dir.mkdir(parents=True, exist_ok=True)
+                fpath = chan_dir / f"{att_id}{ext}"
+                fpath.write_bytes(data)
+                db.execute("UPDATE attachments SET path = ? WHERE id = ?",
+                           (str(fpath), att_id))
+            except (OSError, sqlite3.Error):
+                # Roll back BOTH sides so no orphan row or file survives.
+                try:
+                    db.execute("DELETE FROM attachments WHERE id = ?", (att_id,))
+                except sqlite3.Error:
+                    pass
+                if fpath is not None:
+                    try:
+                        fpath.unlink()
+                    except OSError:
+                        pass
+                raise
+        except (sqlite3.Error, OSError) as e:
+            self._error(500, f"upload error: {e}")
+            return
+        finally:
+            if db is not None:
+                try:
+                    db.close()
+                except sqlite3.Error:
+                    pass
+        self._json({"ok": True, "id": att_id, "mime": mime,
+                    "filename": filename})   # client builds the URL with its channel
+        # Opportunistic GC: uploading is exactly when abandoned uploads accrue,
+        # and it is already a slow path. Rate-limited internally, and after the
+        # response so it can never delay the client.
+        sweep_attachments(self.db_path)
+
+    def _serve_attachment(self, path: str) -> None:
+        tail = path.rsplit("/", 1)[-1]
+        if not tail.isdigit():
+            self._error(404, "not found")
+            return
+        att_id = int(tail)
+        # Attachment bytes are channel content, so they get the same bar as
+        # every other read: a resolved identity and the channel taken from the
+        # REQUEST. Binding the process-wide self.channel would serve nothing in
+        # landing mode (it is "" there) and, worse, would ignore which channel
+        # the caller actually asked for. The upstream original had no gate at
+        # all; the fork's gate keyed on a DM visibility engine that does not
+        # exist here, so this is re-derived rather than ported.
+        parsed = urlparse(self.path)
+        ch = self._channel_for_request(parsed)
+        if ch is None:
+            self._error(400, "channel query param required")
+            return
+        if self.landing_mode and not self._channel_exists(ch):
+            self._error(404, f"no such channel: {ch}")
+            return
+        _token, ident, _is_new = self._resolve_identity()
+        if ident.source == IDENTITY_SOURCE_PENDING:
+            self._error(403, "identity required — POST /api/identify first")
+            return
+        row = None
+        db = None
+        try:
+            db = sqlite3.connect(str(self.db_path), timeout=5, isolation_level=None)
+            db.row_factory = sqlite3.Row
+            db.execute("PRAGMA busy_timeout=2000")
+            op_id, _op_name = ensure_operator_row(db, ch, ident)
+            row = db.execute(
+                # An attachment is readable once it is PUBLISHED (linked to a
+                # message everyone in the channel can see). Before that it is
+                # still in someone's composer, so only its uploader may fetch
+                # it. Ids are small sequential integers, so without this an
+                # image pasted and then thought better of stays readable by
+                # anyone who guesses its id. The fork's gate keyed this on a DM
+                # visibility engine that does not exist upstream; the
+                # uploader-only half is not DM-specific and is re-derived here.
+                "SELECT mime, path FROM attachments "
+                " WHERE id = ? AND channel = ? "
+                "   AND (message_id IS NOT NULL OR member_id = ?)",
+                (att_id, ch, op_id),
+            ).fetchone()
+        except sqlite3.Error:
+            row = None
+        finally:
+            if db is not None:
+                try:
+                    db.close()
+                except sqlite3.Error:
+                    pass
+        if not row:
+            self._error(404, "not found")
+            return
+        try:
+            chan_root = (ATTACH_DIR / re.sub(r"[^\w.\-]", "_", ch)).resolve()
+            resolved = Path(row["path"]).resolve()
+            # Defense in depth: only serve files under THIS channel's dir.
+            if not resolved.is_relative_to(chan_root):
+                self._error(404, "not found")
+                return
+            data = resolved.read_bytes()
+        except OSError:
+            self._error(404, "file missing")
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", row["mime"])
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "public, max-age=31536000, immutable")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        try:
+            self.wfile.write(data)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
 
 
 # ───────── HTML / JS / CSS (served as /) ─────────
@@ -2301,6 +3033,28 @@ INDEX_HTML = r"""<!doctype html>
                           font-family: ui-monospace, Menlo, Monaco, monospace; font-size: 0.9em;
                           white-space: pre-wrap; overflow-x: auto; }
   .msg .body strong { font-weight: 700; }
+  /* Validated file paths — clickable "reveal in Finder" links. Distinct from
+     plain links: code-tinted chip + a subtle 📁 affordance, dotted underline. */
+  #chat .msg .body a.file-link {
+    color: var(--accent); text-decoration: underline; text-decoration-style: dotted;
+    text-underline-offset: 2px; cursor: pointer;
+    background: rgba(var(--ov),0.06); border-radius: 3px; padding: 0 3px;
+    transition: background 0.12s ease, color 0.12s ease;
+  }
+  .file-links-unavailable { padding: 6px 12px; font-size: 11px; color: var(--dim);
+                            background: var(--bg2); border-bottom: 1px solid var(--border); }
+  .file-link-note { font-size: 0.85em; color: var(--err); white-space: normal; }
+  /* Game Boy's --err is identical to --accent and to the body text colour, so
+     colour alone cannot signal failure. The strike-through is a shape cue that
+     survives any palette. */
+  #chat .msg .body a.file-link.file-link-err { text-decoration-line: line-through underline; }
+  #chat .msg .body a.file-link::after { content: " 📁"; font-size: 0.82em; opacity: 0.65; }
+  #chat .msg .body a.file-link:hover { background: rgba(var(--ov),0.12); }
+  #chat .msg .body a.file-link:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
+  #chat .msg .body a.file-link.file-link-ok  { background: rgba(var(--ok-rgb, 80,200,120),0.22); }
+  #chat .msg .body a.file-link.file-link-err {
+    color: var(--err); background: rgba(var(--ov),0.10); text-decoration-style: wavy;
+  }
   .msg .body em { font-style: italic; }
   .msg .body del { opacity: 0.7; }
   .msg .body a { color: var(--accent2); text-decoration: underline; }
@@ -2595,6 +3349,39 @@ INDEX_HTML = r"""<!doctype html>
               font-weight: 600; font-family: inherit; font-size: 13px; }
   #send-btn:hover { background: var(--accent-hi); }
   #send-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  #attach-btn { background: var(--panel); color: var(--fg); border: 1px solid var(--border);
+                height: 36px; min-width: 38px; border-radius: 4px; cursor: pointer;
+                font-size: 16px; line-height: 1; }
+  #attach-btn:hover { border-color: var(--accent); }
+  #attach-strip { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 6px; }
+  #attach-strip:empty { display: none; }
+  .attach-thumb { position: relative; width: 60px; height: 60px; border-radius: 4px;
+                  overflow: hidden; border: 1px solid var(--border); background: var(--bg); }
+  .attach-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .attach-thumb .rm { position: absolute; top: 1px; right: 1px; width: 16px; height: 16px;
+                      border-radius: 50%; background: rgba(0,0,0,0.65); color: #fff;
+                      border: none; cursor: pointer; font-size: 11px; line-height: 16px;
+                      padding: 0; text-align: center; }
+  .attach-thumb.uploading { opacity: 0.5; }
+  #composer.dragover { outline: 2px dashed var(--accent); outline-offset: -4px; }
+  /* Compact clamps .body, but attachments are a SIBLING of it — without
+     this an image message stayed 250-380px tall while plain ones clamped
+     to ~57px, so the setting did almost nothing on a channel with images. */
+  .msg.compact .msg-attachments { max-height: 64px; overflow: hidden; }
+  .msg.compact .msg-img { max-height: 64px; }
+  .msg .msg-attachments { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px;
+                          min-width: 0; max-width: 100%; }
+  .msg .msg-attachments > a { min-width: 0; max-width: 100%; }
+  /* min() not a bare 320px: as a flex item with min-width:auto the link
+     refused to shrink, so an image tore through the bubble's rounded corner
+     and off the viewport at every phone width (measured 75px past the edge
+     at 390px in Walled Garden, and 23px at 320px in the default themes). */
+  .msg-img-missing { display: inline-block; font-size: 12px; color: var(--dim);
+                     padding: 6px 10px; border: 1px dashed var(--border);
+                     border-radius: 6px; }
+  .msg .msg-img { max-width: min(320px, 100%); max-height: 320px;
+                  height: auto; border-radius: 6px;
+                  border: 1px solid var(--border); cursor: pointer; display: block; }
   #hint { font-size: 10px; color: var(--dimmer); margin-top: 2px; }
   #hint kbd { background: var(--panel); border: 1px solid var(--border); padding: 1px 5px;
               border-radius: 2px; font-size: 10px; color: var(--dim); }
@@ -2804,8 +3591,11 @@ INDEX_HTML = r"""<!doctype html>
   <div id="composer">
     <div id="preview">(broadcast — all connected members receive this)</div>
     <div id="target-bar"></div>
+    <div id="attach-strip"></div>
+    <input type="file" id="file-input" accept="image/png,image/jpeg,image/gif,image/webp" multiple style="display:none">
     <div id="input-row">
       <div id="completions"></div>
+      <button id="attach-btn" title="attach image (or paste / drop into the box)">🖼</button>
       <div id="input-stack">
         <div id="input-highlight" aria-hidden="true"></div>
         <textarea id="input" rows="1" placeholder="Message — @ to mention, Enter to send"></textarea>
@@ -2823,6 +3613,7 @@ INDEX_HTML = r"""<!doctype html>
       <kbd>Alt+A</kbd> all
       <kbd>Alt+0</kbd> clear
       <kbd>Ctrl+B</kbd> roster
+      <kbd>paste / drop</kbd> image
       <span style="margin-left:14px;color:var(--dim)">click a message to expand/collapse in compact mode</span>
     </div>
   </div>
@@ -3001,6 +3792,7 @@ INDEX_HTML = r"""<!doctype html>
                               // for operators who already had the chime on.
     notifyScope: 'mention',   // 'mention' | 'all'
     notifyWhen: 'hidden',     // 'hidden' | 'always'
+    pendingAttachments: [],   // images uploaded but not yet attached to a send
     unreadCount: 0,                 // for tab title while hidden
     jumpUnread: 0,                  // messages arrived while user was scrolled up
     lastSeenId: 0,                  // highest msg id the user has caught up to
@@ -3067,14 +3859,214 @@ INDEX_HTML = r"""<!doctype html>
   function escapeHtml(s) { return s.replace(/[&<>"']/g, c =>
     ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]); }
 
-  // Markdown → HTML. Server is stdlib-only; render on the client.
-  // Block-level: ATX headings (# … ######), fenced code (```lang), lists
-  // (ul/ol, nested by indent), GFM task lists (- [ ] / - [x]), blockquotes
-  // (nested with renderMarkdown recursion), thematic breaks (---, ***, ___),
-  // GFM pipe tables (with :---: alignment), paragraphs.
-  // Inline: **bold**, *italic*/_italic_, ~~strike~~, `inline code`,
-  // [text](url), autolinked http(s). Soft line breaks inside a paragraph
-  // become <br>.
+  // A single character-class run + optional :line[:col] — a flat quantifier
+  // (no nested `(…+…)+`), so it scans in LINEAR time and can't be driven into
+  // catastrophic/quadratic backtracking (ReDoS) by a long slash-free blob.
+  // Candidates are then post-filtered: a real path must contain a '/'.
+  const FILE_PATH_RUN_RE = /[A-Za-z0-9_.~/-]+(?::\d+(?::\d+)?)?/g;
+  const FILE_PATH_MAX_LEN = 4096;
+  // Per-path validation cache (path token → exists bool). Shared across every
+  // message so re-renders and repeated paths never re-hit the endpoint.
+  // Bounded: keys are every distinct path-like token ever seen, including inert
+  // look-alikes, on a tab that may live for days. Oldest-out at the cap.
+  const FILE_PATH_CACHE_MAX = 5000;
+  const filePathCache = new Map();
+  function cacheFilePath(token, ok) {
+    if (filePathCache.size >= FILE_PATH_CACHE_MAX) {
+      const oldest = filePathCache.keys().next();
+      if (!oldest.done) filePathCache.delete(oldest.value);
+    }
+    filePathCache.set(token, ok);
+  }
+  // Said once per page: without it the feature simply is not there for a viewer
+  // the server will not trust, which is indistinguishable from "none of those
+  // files exist".
+  let _fileLinksNoticeShown = false;
+  function noteFileLinksUnavailable() {
+    if (_fileLinksNoticeShown) return;
+    _fileLinksNoticeShown = true;
+    const bar = document.createElement('div');
+    bar.className = 'file-links-unavailable';
+    bar.setAttribute('role', 'status');
+    bar.textContent = 'File paths are not clickable here — reveal-in-Finder is '
+                    + 'limited to the machine running the dashboard.';
+    if (chat && chat.parentNode) chat.parentNode.insertBefore(bar, chat);
+  }
+
+  function detectFilePathCandidates(text) {
+    const out = [];
+    if (!text) return out;
+    FILE_PATH_RUN_RE.lastIndex = 0;
+    let m;
+    while ((m = FILE_PATH_RUN_RE.exec(text)) !== null) {
+      let tok = m[0];
+      const start = m.index;
+      if (tok.indexOf('/') === -1) continue;               // not path-like (no separator)
+      // Require a real FILENAME SEGMENT, not just separators: a candidate must
+      // carry at least one name character ([A-Za-z0-9_]). This rejects a BARE
+      // '/' (and pure-punctuation runs like '//', './', '-/-') that a slash used
+      // as prose punctuation produces — "reload / incognito", "high / low",
+      // "#" / "!". Those would otherwise validate against on-disk roots ('/'
+      // exists!) and wrongly pick up a folder link. Slash-joined WORDS ('and/or',
+      // 'high/medium/low') still pass here but are gated by real existence, so
+      // they only link if they genuinely resolve. (Server rejects roots too —
+      // defense in depth.)
+      if (!/[A-Za-z0-9_]/.test(tok)) continue;
+      // Drop a single trailing sentence period ("…/c.py." → "…/c.py"); never a
+      // ".." tail. Trailing trim only, so the start offset stays valid.
+      tok = tok.replace(/([^.\/])\.$/, '$1');
+      if (!tok || tok.length > FILE_PATH_MAX_LEN) continue;
+      out.push({ start, end: start + tok.length, token: tok });
+    }
+    return out;
+  }
+
+  // Wrap candidate tokens the caller marks valid (isValid(token) === true) in a
+  // .file-link. Skips code/pre/existing links, the @/#/! sigil spans, and
+  // already-linkified paths, so we never double-wrap or touch literal code.
+  // onClick (optional) is attached to each created link.
+  function linkifyValidatedPaths(root, isValid, onClick) {
+    if (!root) return;
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    const nodes = [];
+    while (walker.nextNode()) {
+      const node = walker.currentNode;
+      const parent = node.parentElement;
+      if (!parent || parent.closest(
+        'code, pre, a, .inline-mention, .inline-ref, .inline-bang, .file-link')) continue;
+      if (detectFilePathCandidates(node.nodeValue || '').some(c => isValid(c.token)))
+        nodes.push(node);
+    }
+    for (const node of nodes) {
+      const text = node.nodeValue || '';
+      const cands = detectFilePathCandidates(text).filter(c => isValid(c.token));
+      if (!cands.length) continue;
+      const frag = document.createDocumentFragment();
+      let cursor = 0;
+      for (const c of cands) {
+        if (c.start < cursor) continue;   // defensive: skip any overlap
+        frag.appendChild(document.createTextNode(text.slice(cursor, c.start)));
+        const link = document.createElement('a');
+        link.className = 'file-link';
+        link.textContent = c.token;
+        link.dataset.path = c.token;
+        link.setAttribute('role', 'button');
+        link.setAttribute('tabindex', '0');
+        link.title = 'Reveal in Finder';
+        if (typeof onClick === 'function') {
+          link.addEventListener('click', (e) => { e.preventDefault(); onClick(c.token, link); });
+          link.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick(c.token, link); }
+          });
+        }
+        frag.appendChild(link);
+        cursor = c.end;
+      }
+      frag.appendChild(document.createTextNode(text.slice(cursor)));
+      node.replaceWith(frag);
+    }
+  }
+
+  // Brief inline state on a file link after a reveal attempt (no navigation,
+  // no modal). Success/failure both auto-revert; failures surface the reason
+  // in the tooltip.
+  function flashFileLink(link, ok, msg) {
+    if (!link || !link.classList) return;
+    const cls = ok ? 'file-link-ok' : 'file-link-err';
+    link.classList.add(cls);
+    // A failure reason written to link.title is unreadable: the pointer is
+    // already over the link when you click, so the native tooltip does not
+    // re-fire, and touch has no tooltip at all. Show it inline instead, and
+    // announce it, so the reason survives long enough to be read.
+    if (!ok && msg) {
+      const prev = link.parentNode && link.parentNode.querySelector('.file-link-note');
+      if (prev) prev.remove();
+      const note = document.createElement('span');
+      note.className = 'file-link-note';
+      note.setAttribute('role', 'status');
+      note.textContent = ' — ' + msg;
+      if (link.parentNode) link.parentNode.insertBefore(note, link.nextSibling);
+      setTimeout(() => { note.remove(); }, 6000);
+    }
+    setTimeout(() => { link.classList.remove(cls); }, 1500);
+  }
+
+  async function revealPath(path, link) {
+    if (typeof fetch !== 'function') return;
+    try {
+      const r = await fetch('/api/reveal', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path }),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (r.ok && data && data.ok) flashFileLink(link, true);
+      else flashFileLink(link, false, (data && data.error) || ('reveal failed (' + r.status + ')'));
+    } catch (e) {
+      flashFileLink(link, false, 'reveal failed: ' + e.message);
+    }
+  }
+
+  // Detect candidate paths in a rendered message body, validate the uncached
+  // ones against the server (batched into one request per message), then
+  // linkify only those confirmed to exist. Fire-and-forget from paintBody.
+  // Relative candidates are resolved by the server against ITS cwd (best
+  // effort); if they don't resolve there, they simply stay unlinked.
+  // Validation is batched across every body painted in the same tick. A
+  // 200-message history burst otherwise fired ~130 separate POSTs (measured
+  // 317ms of pure per-request overhead against 1.8ms for the same candidates
+  // sent once); the filesystem work was never the cost. Each caller registers
+  // its root, one flush resolves every outstanding token, then each root is
+  // linkified from the shared cache.
+  let _pendingRoots = [];
+  let _pendingTokens = new Set();
+  let _flushTimer = null;
+
+  async function _flushFilePathValidation() {
+    _flushTimer = null;
+    const roots = _pendingRoots; _pendingRoots = [];
+    const tokens = _pendingTokens; _pendingTokens = new Set();
+    const need = [...tokens].filter(t => !filePathCache.has(t));
+    for (let i = 0; i < need.length; i += 200) {   // server caps at 200/req
+      const chunk = need.slice(i, i + 200);
+      try {
+        const r = await fetch('/api/path/validate', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ paths: chunk }),
+        });
+        if (r.ok) {
+          const data = await r.json().catch(() => ({}));
+          const ex = (data && data.exists) || {};
+          for (const t of chunk) cacheFilePath(t, ex[t] === true);
+        } else if (r.status === 403) {
+          noteFileLinksUnavailable();
+          for (const t of chunk) cacheFilePath(t, false);
+        }
+      } catch (e) { /* leave uncached — just won't linkify this pass */ }
+    }
+    for (const root of roots) {
+      if (!root.isConnected) continue;     // message re-rendered or removed
+      linkifyValidatedPaths(root, (t) => filePathCache.get(t) === true, revealPath);
+    }
+  }
+
+  function decorateFilePaths(root) {
+    if (!root || typeof fetch !== 'function') return;
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    let found = false;
+    while (walker.nextNode()) {
+      const node = walker.currentNode;
+      const parent = node.parentElement;
+      if (!parent || parent.closest(
+        'code, pre, a, .inline-mention, .inline-ref, .inline-bang, .file-link')) continue;
+      for (const c of detectFilePathCandidates(node.nodeValue || '')) {
+        _pendingTokens.add(c.token); found = true;
+      }
+    }
+    if (!found) return;
+    _pendingRoots.push(root);
+    if (_flushTimer === null) _flushTimer = setTimeout(_flushFilePathValidation, 0);
+  }
+
   function renderMarkdown(text) {
     if (!text) return '';
     text = text.replace(/\u0000/g, '');
@@ -3751,8 +4743,51 @@ INDEX_HTML = r"""<!doctype html>
     } else {
       body.innerHTML = renderMarkdown(m.content || '');
       decorateInlineMentions(body, m.mentions || []);
+      // Async: validate path-like tokens with the server and linkify the real
+      // ones (reveal-in-Finder). Fire-and-forget so paint stays synchronous.
+      decorateFilePaths(body);
     }
     div.appendChild(body);
+
+    // Image attachments — inline thumbnails, click opens full size in a new tab.
+    if (m.attachments && m.attachments.length) {
+      const wrap = document.createElement('div');
+      wrap.className = 'msg-attachments';
+      for (const att of m.attachments) {
+        // API_QS carries ?channel=<code> in landing mode; without it the
+        // server cannot tell which channel's attachment is being asked for.
+        const url = '/api/attachment/' + att.id + API_QS;
+        const a = document.createElement('a');
+        a.href = url; a.target = '_blank'; a.rel = 'noopener';
+        const img = document.createElement('img');
+        img.className = 'msg-img';
+        img.src = url;
+        img.alt = att.filename || 'image';
+        img.loading = 'lazy';
+        // Late-loading images reflow taller; keep us pinned if near bottom.
+        img.addEventListener('load', () => {
+          const nb = chat.scrollHeight - chat.clientHeight - chat.scrollTop < 120;
+          if (state.initialLoad || nb) chat.scrollTop = chat.scrollHeight;
+        });
+        // A failing image otherwise collapses to a bare broken-image glyph:
+        // the viewer cannot tell whether it was deleted, whether they are not
+        // allowed to see it (the read endpoint requires a resolved identity),
+        // or whether the network hiccupped.
+        img.addEventListener('error', () => {
+          const note = document.createElement('span');
+          note.className = 'msg-img-missing';
+          note.textContent = '🖼 image unavailable — ' + (att.filename || 'attachment');
+          note.title = 'It may have been removed, or you may not have access '
+                     + 'to attachments on this machine.';
+          if (a.parentNode) a.parentNode.replaceChild(note, a);
+        });
+        // Opening the image should not also toggle the message's compact state.
+        a.addEventListener('click', (e) => { e.stopPropagation(); });
+        a.appendChild(img);
+        wrap.appendChild(a);
+      }
+      div.appendChild(wrap);
+    }
 
     // Watermark pins — animals of agents whose last_read == this message id.
     const pins = document.createElement('div');
@@ -3886,6 +4921,7 @@ INDEX_HTML = r"""<!doctype html>
           body.classList.remove('plain');
           body.innerHTML = renderMarkdown(m.content || '');
           decorateInlineMentions(body, m.mentions || []);
+          decorateFilePaths(body);
         }
       }
       function rebuildBar(bar, ids, sigil) {
@@ -4598,9 +5634,134 @@ INDEX_HTML = r"""<!doctype html>
   }
 
   // ── Send ──
+  // ── Image attachments (composer upload) ──
+  const attachBtn = document.getElementById('attach-btn');
+  const fileInput = document.getElementById('file-input');
+  const attachStrip = document.getElementById('attach-strip');
+  const composerEl = document.getElementById('composer');
+
+  function renderAttachStrip() {
+    attachStrip.innerHTML = '';
+    state.pendingAttachments.forEach((att, i) => {
+      const t = document.createElement('div');
+      t.className = 'attach-thumb' + (att.uploading ? ' uploading' : '');
+      if (att.url) {
+        const img = document.createElement('img');
+        img.src = att.url;
+        t.appendChild(img);
+      }
+      if (!att.uploading) {
+        const rm = document.createElement('button');
+        rm.className = 'rm'; rm.textContent = '×'; rm.title = 'remove';
+        rm.addEventListener('click', () => {
+          dropSlot(att);
+          renderAttachStrip();
+        });
+        t.appendChild(rm);
+      }
+      attachStrip.appendChild(t);
+    });
+  }
+
+  function revokeBlob(att) {
+    if (att && att.url && att.url.indexOf('blob:') === 0) URL.revokeObjectURL(att.url);
+  }
+  function dropSlot(slot) {
+    revokeBlob(slot);
+    const idx = state.pendingAttachments.indexOf(slot);
+    if (idx >= 0) state.pendingAttachments.splice(idx, 1);
+  }
+
+  // Mirrors MAX_UPLOAD_BYTES in this file's Python half, so a huge file is
+  // refused before it is pushed over the wire. A literal rather than a
+  // substitution, so the served bundle carries no placeholder the test
+  // harness would need to know about; the server still enforces the real
+  // limit, so drift can only make the client stricter, never unsafe.
+  const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
+
+  async function uploadImage(file) {
+    if (!file) return;
+    if (!file.type || !/^image\//.test(file.type)) {
+      // The composer flashes an accepting outline on dragover, so returning
+      // silently here tells the user the drop landed and then does nothing.
+      // Drag-and-drop also bypasses the file picker's accept= filter entirely.
+      alert('"' + (file.name || 'that file') + '" is not an image. '
+            + 'PNG, JPEG, GIF and WebP can be attached.');
+      return;
+    }
+    if (file.size > MAX_UPLOAD_BYTES) {
+      // Checked here as well as server-side so a 40MB photo is not pushed over
+      // the wire before being refused, and so the number is human-sized.
+      const mb = (n) => (n / (1024 * 1024)).toFixed(1).replace(/\.0$/, '');
+      alert('"' + (file.name || 'that image') + '" is ' + mb(file.size)
+            + ' MB — the limit is ' + mb(MAX_UPLOAD_BYTES) + ' MB.');
+      return;
+    }
+    if (state.pendingAttachments.length >= 8) { alert('max 8 images per message'); return; }
+    const slot = { uploading: true, url: URL.createObjectURL(file) };
+    state.pendingAttachments.push(slot);
+    renderAttachStrip();
+    try {
+      const r = await fetch('/api/upload' + API_QS, {
+        method: 'POST',
+        headers: { 'Content-Type': file.type, 'X-Filename': encodeURIComponent(file.name || 'image') },
+        body: file,
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok || !data.ok) {
+        alert('upload failed: ' + (data.error || r.status));
+        dropSlot(slot);
+      } else {
+        revokeBlob(slot);                       // free the local preview blob
+        slot.id = data.id;
+        slot.uploading = false;
+        slot.url = '/api/attachment/' + data.id + API_QS;
+      }
+    } catch (e) {
+      alert('upload failed: ' + e.message);
+      dropSlot(slot);
+    }
+    renderAttachStrip();
+  }
+
+  attachBtn.addEventListener('click', () => fileInput.click());
+  fileInput.addEventListener('change', () => {
+    for (const f of fileInput.files) uploadImage(f);
+    fileInput.value = '';
+  });
+  input.addEventListener('paste', (e) => {
+    const items = (e.clipboardData || {}).items || [];
+    for (const it of items) {
+      if (it.kind === 'file' && /^image\//.test(it.type)) {
+        const f = it.getAsFile();
+        if (f) { e.preventDefault(); uploadImage(f); }
+      }
+    }
+  });
+  ['dragover', 'dragenter'].forEach(ev => composerEl.addEventListener(ev, (e) => {
+    e.preventDefault(); composerEl.classList.add('dragover');
+  }));
+  ['dragleave', 'drop'].forEach(ev => composerEl.addEventListener(ev, (e) => {
+    e.preventDefault(); composerEl.classList.remove('dragover');
+  }));
+  composerEl.addEventListener('drop', (e) => {
+    const files = (e.dataTransfer || {}).files || [];
+    for (const f of files) uploadImage(f);
+  });
+
+  // Remove specific slots, preserving anything added since.
+  function dropAttachments(slots) {
+    const gone = new Set(slots);
+    state.pendingAttachments = state.pendingAttachments.filter(a => !gone.has(a));
+  }
+
   async function sendMessage() {
     let text = input.value.trim();
-    if (!text) return;
+    const readyAtt = state.pendingAttachments.filter(a => a.id && !a.uploading);
+    if (state.pendingAttachments.some(a => a.uploading)) {
+      alert('wait for image upload to finish'); return;
+    }
+    if (!text && readyAtt.length === 0) return;
     const resolved = resolveMentions(input.value);
     const mentionIds = resolved.map(m => m.id);
     // DM mode: always include the DM target so the agent sees the message
@@ -4637,14 +5798,33 @@ INDEX_HTML = r"""<!doctype html>
       const r = await fetch('/api/send' + API_QS, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ content: text, mentions: mentionIds }),
+        body: JSON.stringify({ content: text, mentions: mentionIds,
+                               attachment_ids: readyAtt.map(a => a.id) }),
       });
       if (!r.ok) {
         const err = await r.json().catch(() => ({ error: 'unknown' }));
-        alert('send failed: ' + (err.error || r.status));
+        // A rejected relink means the server already consumed these ids on an
+        // earlier attempt whose response we lost — the images DID post. Drop
+        // them rather than leaving a composer that can never send again and
+        // that invites the user to delete images they actually published.
+        if (/already-linked/.test(err.error || '')) {
+          dropAttachments(readyAtt);
+          renderAttachStrip();
+          alert('Those images were already posted — the earlier send did go '
+                + 'through even though it reported an error. Removed them from '
+                + 'the composer; your text is still here.');
+        } else {
+          alert('send failed: ' + (err.error || r.status));
+        }
         return;
       }
       input.value = '';
+      // Splice out exactly what we sent. Reassigning to [] would also destroy
+      // an image pasted DURING the in-flight send: its upload completes into a
+      // slot no longer in the array, so it vanishes from the strip with no
+      // error and is orphaned server-side.
+      dropAttachments(readyAtt);
+      renderAttachStrip();
       autoResizeInput();
       state.completion.visible = false;
       renderCompletions();
@@ -5622,6 +6802,7 @@ INDEX_HTML = r"""<!doctype html>
       collectMentionMatches, mentionMemberForToken,
       decorateInlineMentions, composerMentionHtml,
       chimeScopeAllows, shouldChime,
+      detectFilePathCandidates, linkifyValidatedPaths, decorateFilePaths,
     };
   }
   // __TRIO_TEST_HOOK_END__
@@ -5903,6 +7084,8 @@ def main() -> int:
     args = ap.parse_args()
 
     db_path = Path(args.db)
+    global ATTACH_DIR
+    ATTACH_DIR = attach_dir_for(db_path)
     if not db_path.exists():
         sys.stderr.write(
             f"nth.db not found at {db_path}\n"
@@ -5940,6 +7123,22 @@ def main() -> int:
         host = "0.0.0.0" if args.tailnet else "127.0.0.1"
 
     # Single-channel mode spins up its one event hub before serving.
+    # One sweep at startup so a long-running install reclaims whatever leaked
+    # while it was down, without waiting for someone to upload.
+    def _startup_sweep() -> None:
+        try:
+            _gc = sweep_attachments(db_path, force=True)
+            if any(_gc.get(k) for k in ("abandoned", "dead_channel", "orphan_files")):
+                print(f"attachments: reclaimed {_gc}", flush=True)
+        except Exception:
+            pass
+
+    # On a daemon thread: this ran inline before the socket was bound, so on a
+    # large install the dashboard, every channel and every API route were
+    # unreachable for the duration (measured ~1.2s at 150k attachments, and it
+    # grows with the install). Nothing downstream depends on its result.
+    threading.Thread(target=_startup_sweep, name="attach-gc", daemon=True).start()
+
     # Landing mode creates hubs lazily, one per channel actually viewed.
     hub = None
     if args.channel:
