@@ -336,9 +336,18 @@ def get_db() -> sqlite3.Connection:
             last_seen       TEXT NOT NULL,
             last_read       INTEGER NOT NULL DEFAULT 0,
             revoked_at      TEXT,
+            last_turn_end   TEXT,
             FOREIGN KEY (channel) REFERENCES channels(code)
         )
     """)
+    # last_turn_end: stamped by the nth_turn_hook Stop/StopFailure hook when a
+    # Claude turn ends, so the dashboard can tell "working" (acted since the last
+    # turn end) from "idle" (turn ended, waiting). Added here too for DBs that
+    # predate the column (the CREATE above only fires for a fresh sessions table).
+    try:
+        conn.execute("ALTER TABLE sessions ADD COLUMN last_turn_end TEXT")
+    except sqlite3.OperationalError:
+        pass  # column already exists
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_sessions_member
         ON sessions (channel, member_id)
