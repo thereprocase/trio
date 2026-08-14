@@ -226,6 +226,25 @@ try:
         finally:
             db.close()
         check("live: released task is open in DB", rr["status"] == "open" and rr["claimed_by"] is None)
+
+        # Landing mode serves many channels from one process. It intentionally
+        # leaves NthWebHandler.channel empty, so this catches endpoints that
+        # accidentally use process-wide state instead of ?channel=.
+        saved_channel = web.NthWebHandler.channel
+        web.NthWebHandler.landing_mode = True
+        web.NthWebHandler.channel = ""
+        try:
+            _c, landing_victim = connect("LandingVictim", channel=CH2)
+            st, resp = http(port, f"/api/cull?channel={CH2}", "POST",
+                            {"target_member_id": landing_victim})
+            check("landing: cull resolves channel from ?channel=",
+                  st == 200 and resp.get("culled_id") == landing_victim)
+            st, _ = http(port, "/api/cull", "POST",
+                         {"target_member_id": landing_victim})
+            check("landing: cull without channel -> 400", st == 400)
+        finally:
+            web.NthWebHandler.landing_mode = False
+            web.NthWebHandler.channel = saved_channel
 except OSError as e:
     skip("live cull", f"could not start server: {e}")
 

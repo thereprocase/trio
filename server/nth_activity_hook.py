@@ -55,6 +55,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 DB_PATH = Path(os.environ.get("NTH_DB_PATH", str(Path.home() / ".claude" / "nth" / "nth.db")))
+HOOK_DB_TIMEOUT_S = 0.05
 
 
 def _now_iso() -> str:
@@ -91,10 +92,13 @@ def main() -> int:
     now = _now_iso()
     conn = None
     try:
-        conn = sqlite3.connect(str(DB_PATH), timeout=5, isolation_level=None)
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=5000")
-        conn.execute("BEGIN IMMEDIATE")
+        # Hooks run before every tool call. A busy database is not a reason to
+        # delay the host session: this telemetry is best-effort and the next
+        # hook/MCP call will refresh it. One UPDATE is already atomic in
+        # autocommit mode, so do not acquire a writer lock in advance.
+        conn = sqlite3.connect(str(DB_PATH), timeout=HOOK_DB_TIMEOUT_S,
+                               isolation_level=None)
+        conn.execute("PRAGMA busy_timeout=50")
         conn.execute(
             "UPDATE sessions SET last_seen = ? "
             " WHERE fingerprint = ? AND revoked_at IS NULL"
@@ -117,7 +121,6 @@ def main() -> int:
             ,
             (now, session_id[:64], session_id[:64]),
         )
-        conn.execute("COMMIT")
     except Exception:
         return 0  # best-effort: never disturb the host session
     finally:

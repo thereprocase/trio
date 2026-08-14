@@ -352,6 +352,10 @@ def get_db() -> sqlite3.Connection:
         CREATE INDEX IF NOT EXISTS idx_sessions_member
         ON sessions (channel, member_id)
     """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_sessions_fingerprint
+        ON sessions (fingerprint, revoked_at)
+    """)
     # v7.3: fleet check-ins. One row per (hostname, transport) — a machine
     # running both a stdio server and a monitor gets two rows. Spoke rows
     # come from client-declared node_host on connect (the hub can't see a
@@ -558,6 +562,31 @@ def _mint_session_token(db, member_id: str, channel: str,
     return token
 
 
+SESSION_REAP_STALE_SECONDS = 7 * 24 * 60 * 60
+
+
+def _reap_sessions(db, now: datetime | None = None) -> None:
+    """Bound accumulated reconnect sessions without expiring live work.
+
+    A token unused for a week is revoked first, so a stale client gets a clear
+    invalid-token response and reconnects rather than silently acting under an
+    old identity. Previously revoked rows are retained for the same interval
+    for audit/cull diagnostics, then removed on a later connect.
+    """
+    current = now or datetime.now(timezone.utc)
+    cutoff = (current - timedelta(seconds=SESSION_REAP_STALE_SECONDS)).isoformat()
+    current_iso = current.isoformat()
+    db.execute(
+        "UPDATE sessions SET revoked_at = ? "
+        "WHERE revoked_at IS NULL AND last_seen < ?",
+        (current_iso, cutoff),
+    )
+    db.execute(
+        "DELETE FROM sessions WHERE revoked_at IS NOT NULL AND revoked_at < ?",
+        (cutoff,),
+    )
+
+
 def _get_session(db, channel: str, session_token: str):
     """Look up a session. Returns row or None. Rejects revoked tokens."""
     if not session_token:
@@ -658,6 +687,7 @@ def nth_connect(
     db = get_db()
 
     try:
+        _reap_sessions(db)
         existing = _get_channel(db, channel)
 
         if existing:

@@ -33,6 +33,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 DB_PATH = Path(os.environ.get("NTH_DB_PATH", str(Path.home() / ".claude" / "nth" / "nth.db")))
+HOOK_DB_TIMEOUT_S = 0.05
 
 
 def _now_iso() -> str:
@@ -69,12 +70,14 @@ def main() -> int:
     now = _now_iso()
     conn = None
     try:
-        conn = sqlite3.connect(str(DB_PATH), timeout=5, isolation_level=None)
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=5000")
-        conn.execute("BEGIN IMMEDIATE")
-        try:
-            conn.execute(
+        # A Stop hook is still on the host's critical path. Its timestamp is
+        # best-effort telemetry, so skip a busy database rather than making a
+        # completed turn wait behind another writer. The single UPDATE is atomic
+        # in autocommit mode; an explicit BEGIN IMMEDIATE only adds contention.
+        conn = sqlite3.connect(str(DB_PATH), timeout=HOOK_DB_TIMEOUT_S,
+                               isolation_level=None)
+        conn.execute("PRAGMA busy_timeout=50")
+        conn.execute(
                 "UPDATE sessions SET last_turn_end = ? "
                 " WHERE fingerprint = ? AND revoked_at IS NULL"
                 # Scope to the NEWEST live session per channel for this fingerprint.
@@ -95,34 +98,7 @@ def main() -> int:
                 "            AND s3.revoked_at IS NULL))"
                 ,
                 (now, session_id[:64], session_id[:64]),
-            )
-        except sqlite3.OperationalError:
-            # DB predates the column (server not restarted since the feature
-            # landed) — add it, then stamp, so we self-heal without a restart.
-            conn.execute("ALTER TABLE sessions ADD COLUMN last_turn_end TEXT")
-            conn.execute(
-                "UPDATE sessions SET last_turn_end = ? "
-                " WHERE fingerprint = ? AND revoked_at IS NULL"
-                # Scope to the NEWEST live session per channel for this fingerprint.
-                # A CLAUDE_CODE_SESSION_ID is not unique to a member: nth_connect
-                # mints a fresh member_id on every connect and never revokes the old
-                # row, so one fingerprint accumulates a row per reconnect. An
-                # unscoped UPDATE stamps them all, resurrecting long-dead members as
-                # "working" and corrupting effective_last_seen. Joining several
-                # channels from one session IS legitimate — one live member each —
-                # so scope per channel rather than to a single row.
-                "  AND session_token IN ("
-                "    SELECT s2.session_token FROM sessions s2"
-                "     WHERE s2.fingerprint = ? AND s2.revoked_at IS NULL"
-                "       AND s2.connected_at = ("
-                "         SELECT MAX(s3.connected_at) FROM sessions s3"
-                "          WHERE s3.fingerprint = s2.fingerprint"
-                "            AND s3.channel = s2.channel"
-                "            AND s3.revoked_at IS NULL))"
-                ,
-                (now, session_id[:64], session_id[:64]),
-            )
-        conn.execute("COMMIT")
+        )
     except Exception:
         return 0  # best-effort: never disturb the host session
     finally:

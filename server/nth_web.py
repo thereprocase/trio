@@ -1590,6 +1590,13 @@ class NthWebHandler(BaseHTTPRequestHandler):
             self._error(400, "target_member_id required")
             return
         target_id = target_id.strip()
+        cull_channel = self._channel_for_request(urlparse(self.path))
+        if cull_channel is None:
+            self._error(400, "channel query param required")
+            return
+        if self.landing_mode and not self._channel_exists(cull_channel):
+            self._error(404, f"no such channel: {cull_channel}")
+            return
         _token, ident, _is_new = self._resolve_identity()
         if ident.source == IDENTITY_SOURCE_PENDING:
             self._error(403, "identity required — POST /api/identify first")
@@ -1608,8 +1615,8 @@ class NthWebHandler(BaseHTTPRequestHandler):
             db.execute("PRAGMA busy_timeout=5000")
             db.execute("BEGIN IMMEDIATE")
             try:
-                op_id, op_name = ensure_operator_row(db, self.channel, ident)
-                result, err = cull_member(db, self.channel, op_id, op_name, target_id)
+                op_id, op_name = ensure_operator_row(db, cull_channel, ident)
+                result, err = cull_member(db, cull_channel, op_id, op_name, target_id)
                 if err:
                     db.execute("ROLLBACK")
                     self._error(400, err)
