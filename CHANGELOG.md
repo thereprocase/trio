@@ -9,7 +9,8 @@ than by the order they happened to be written in. Every finding below cites
 something someone actually ran.
 
 Minor rather than patch: this adds four user-facing features and five HTTP
-endpoints. Fourteen PRs landed; one was closed unmerged; the rest are subsumed.
+endpoints. Fifteen of the sixteen open PRs are now ancestors of `main`
+(verified with `git merge-base --is-ancestor`); #10 is the one that is not.
 
 ### Features
 

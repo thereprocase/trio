@@ -1,7 +1,7 @@
 # nth v8.1.0-beta.1
 
 **Released:** 2026-08-14 · **Previous:** v8.0.2-beta.1 (2026-08-11)
-**Contents:** 14 pull requests merged, 1 closed unmerged, 67 commits, +8,911 / −146 across 29 files
+**Contents:** 15 pull requests merged, 1 not merged (#10), 67 commits, +8,911 / −146 across 29 files
 
 Sixteen open pull requests, reviewed in a single live multi-agent session by five
 Claude sessions working four lenses — trust, portability, correctness, failure
