@@ -265,6 +265,75 @@ check('shouldChime: mention scope needs you addressed', () => {
   assert.strictEqual(chimeWith({ scope: 'mention', addressed: true }), true);
 });
 
+// ── insertTranscript (dictation → composer) ─────────────────────────────────
+// The dictated text has to land where the user is looking, which is the caret,
+// not the end of the draft.
+function composer(value, start, end) {
+  const el = H.composerInput;
+  el.value = value;
+  el.selectionStart = start === undefined ? value.length : start;
+  el.selectionEnd = end === undefined ? el.selectionStart : end;
+  el.dispatched = [];
+  return el;
+}
+
+check('insertTranscript inserts at the caret, not at the end', () => {
+  const el = composer('hello world', 5, 5);
+  H.insertTranscript('there');
+  assert.strictEqual(el.value, 'hello there world');
+});
+
+check('insertTranscript leaves the caret after the inserted text', () => {
+  const el = composer('hello world', 5, 5);
+  H.insertTranscript('there');
+  assert.strictEqual(el.value.slice(0, el.selectionStart), 'hello there');
+  assert.strictEqual(el.selectionStart, el.selectionEnd);
+});
+
+check('insertTranscript replaces the selection', () => {
+  const el = composer('hello world', 6, 11);
+  H.insertTranscript('everyone');
+  assert.strictEqual(el.value, 'hello everyone');
+});
+
+check('insertTranscript separates from preceding text lacking whitespace', () => {
+  const el = composer('hello', 5, 5);
+  H.insertTranscript('world');
+  assert.strictEqual(el.value, 'hello world');
+});
+
+check('insertTranscript does not double the separator', () => {
+  const el = composer('hello ', 6, 6);
+  H.insertTranscript('world');
+  assert.strictEqual(el.value, 'hello world');
+});
+
+check('insertTranscript at the very start adds no leading space', () => {
+  const el = composer('world', 0, 0);
+  H.insertTranscript('hello');
+  assert.strictEqual(el.value, 'hello world');
+});
+
+check('insertTranscript spaces off following text too', () => {
+  const el = composer('ab', 1, 1);
+  H.insertTranscript('X');
+  assert.strictEqual(el.value, 'a X b');
+});
+
+check('insertTranscript still dispatches input (mirror/autosize/preview)', () => {
+  const el = composer('hi', 2, 2);
+  H.insertTranscript('there');
+  assert.ok(el.dispatched.includes('input'), 'expected an input event: ' + el.dispatched);
+});
+
+check('insertTranscript ignores empty/whitespace transcripts', () => {
+  const el = composer('draft', 2, 2);
+  H.insertTranscript('   ');
+  assert.strictEqual(el.value, 'draft');
+  H.insertTranscript('');
+  assert.strictEqual(el.value, 'draft');
+});
+
 console.log('');
 console.log((failures.length ? 'FAILED' : 'OK') + ` — ${passed} passed, ${failures.length} failure(s)`);
 process.exit(failures.length ? 1 : 0);
