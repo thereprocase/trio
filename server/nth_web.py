@@ -2258,6 +2258,7 @@ INDEX_HTML = r"""<!doctype html>
         <option value="solarized">Solarized</option>
         <option value="synthwave">Synthwave</option>
         <option value="vaporwave">Vaporwave</option>
+        <option value="popart">Pop Art</option>
         <option value="lcars">LCARS</option>
         <option value="bluebubble">Walled Garden</option>
       </optgroup>
@@ -2265,7 +2266,6 @@ INDEX_HTML = r"""<!doctype html>
         <option value="light">Daylight</option>
         <option value="pve-light">Clean</option>
         <option value="paper">Paper</option>
-        <option value="popart">Pop Art</option>
       </optgroup>
       <optgroup label="Retro">
         <option value="crt">CRT Green</option>
@@ -2282,10 +2282,12 @@ INDEX_HTML = r"""<!doctype html>
       <option value='"Hack", ui-monospace, Menlo, monospace'>Hack</option>
       <option value='"IBM Plex Mono", ui-monospace, Menlo, monospace'>IBM Plex Mono</option>
       <option value='"Source Code Pro", ui-monospace, Menlo, monospace'>Source Code Pro</option>
+      <option value='"Iosevka", "Iosevka Term", "Iosevka Fixed", ui-monospace, Menlo, monospace'>Iosevka</option>
       <option value='Menlo, Monaco, ui-monospace, monospace'>Menlo</option>
       <option value='Monaco, Menlo, ui-monospace, monospace'>Monaco</option>
       <option value='Consolas, "Cascadia Mono", ui-monospace, monospace'>Consolas</option>
       <option value='"SF Mono", "SFMono-Regular", ui-monospace, Menlo, monospace'>SF Mono</option>
+      <option value='"Atkinson Hyperlegible Next", "Atkinson Hyperlegible", -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Arial, sans-serif'>Atkinson Hyperlegible</option>
       <option value='-apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "Helvetica Neue", "Helvetica", "Arial", sans-serif' disabled>Walled Garden</option>
     </select>
     <input id="filter" type="text" placeholder="filter messages…" spellcheck="false">
