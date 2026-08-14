@@ -226,7 +226,7 @@ which piece is missing.
 | `NTH_STT_MODEL` | `mlx-community/whisper-large-v3-turbo` | Whisper model for local dictation |
 | `NTH_STT_LANG` | `en` | Language code; `""` auto-detects |
 | `NTH_STT_MAX_CONCURRENT` | `2` | Simultaneous transcriptions |
-| `NTH_STT_SILENCE_RMS` | `0.02` | Below this RMS a clip counts as silence |
+| `NTH_STT_SILENCE_RMS` | `0.002` | Below this RMS a clip counts as silence |
 
 ## Environment Variables
 

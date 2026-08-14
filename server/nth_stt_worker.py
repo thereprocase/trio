@@ -21,6 +21,7 @@ nth_web.py only when local transcription is used; the core web server stays
 dependency-free and merely pipes audio paths to this process.
 """
 import json
+import math
 import os
 import sys
 import tempfile
@@ -47,7 +48,36 @@ DEFAULT_MODEL = "mlx-community/whisper-large-v3-turbo"
 # to 0.0025 RMS, it still transcribes accurately, so there is no accuracy reason
 # to demand a louder signal — only a hallucination reason to reject a silent one.
 # Raise it via the env var on a noisy machine that invents words from ambience.
-RMS_SILENCE_THRESHOLD = float(os.environ.get("NTH_STT_SILENCE_RMS", "0.002"))
+DEFAULT_RMS_SILENCE_THRESHOLD = 0.002
+
+
+def _silence_threshold_from_env(raw=None) -> float:
+    """Return a usable RMS silence floor, never an import-time failure.
+
+    RMS is a fraction.  Zero would disable the silence guard, while values
+    above one reject every possible clip; NaN also disables the comparison
+    silently.  A bad operator setting must therefore be rejected explicitly,
+    not allowed to turn the guard off or prevent this worker from reporting its
+    structured startup status.
+    """
+    if raw is None:
+        raw = os.environ.get("NTH_STT_SILENCE_RMS")
+    if raw is None or not str(raw).strip():
+        return DEFAULT_RMS_SILENCE_THRESHOLD
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        value = None
+    if value is None or not math.isfinite(value) or not (0.0 < value <= 1.0):
+        sys.stderr.write(
+            "[stt] NTH_STT_SILENCE_RMS must be a finite value in (0, 1]; "
+            f"using {DEFAULT_RMS_SILENCE_THRESHOLD}\n"
+        )
+        return DEFAULT_RMS_SILENCE_THRESHOLD
+    return value
+
+
+RMS_SILENCE_THRESHOLD = _silence_threshold_from_env()
 
 # Deliberately NO input gain here. It looked like the obvious fix for quiet
 # dictation, so it was built and measured: real speech attenuated to 0.0100,

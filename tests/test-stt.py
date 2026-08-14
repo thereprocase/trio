@@ -91,6 +91,23 @@ check("silence floor is below real quiet speech (0.0147 measured)",
       wk.RMS_SILENCE_THRESHOLD < 0.0147)
 check("silence floor still clears digital silence",
       wk.RMS_SILENCE_THRESHOLD > 0.0)
+check("silence floor: valid configured value is retained",
+      wk._silence_threshold_from_env("0.01") == 0.01)
+for _bad_floor in ("abc", "nan", "inf", "-inf", "-0.1", "0", "1.1"):
+    check(f"silence floor: rejects {_bad_floor!r} without import failure",
+          wk._silence_threshold_from_env(_bad_floor) == wk.DEFAULT_RMS_SILENCE_THRESHOLD)
+
+# The configuration is read while the worker module imports, before main() can
+# emit its ready:false JSON.  Test that malformed values no longer kill that
+# import; otherwise the normal structured unavailable-engine path is impossible.
+_bad_env = dict(os.environ, NTH_STT_SILENCE_RMS="nan", PYTHONPATH=str(SERVER))
+_probe = subprocess.run(
+    [sys.executable, "-c", "import nth_stt_worker as w; print(w.RMS_SILENCE_THRESHOLD)"],
+    capture_output=True, text=True, timeout=10, env=_bad_env,
+)
+check("silence floor: NaN configuration imports safely for structured startup",
+      _probe.returncode == 0 and _probe.stdout.strip() == "0.002"
+      and "Traceback" not in _probe.stderr)
 
 h = web.STT.health()
 check("health has required keys", {"available", "engine", "model", "warm", "detail"} <= set(h))

@@ -205,6 +205,23 @@ check('composer: the tail after the last mention is escaped too', () => {
   assert.ok(/bold/.test(html), 'but its text is preserved');
 });
 
+// ── local-STT unavailable → explicit browser fallback ───────────────────────
+// The real engine tier is intentionally skipped where mlx_whisper is absent.
+// This exercises the shipped dashboard's degradation path on those machines:
+// a missing engine must show an honest explanation and offer, never silently
+// enable, browser dictation.
+check('STT: unavailable local engine offers browser dictation explicitly', () => {
+  cx.window.SpeechRecognition = function SpeechRecognition() {};
+  H.offerWebFallback('speech engine (mlx_whisper) not installed');
+  const banner = H.sttBanner;
+  assert.strictEqual(banner.hidden, false, 'fallback banner must be visible');
+  assert.strictEqual(banner.className, 'warn');
+  assert.ok(banner.textContent.includes('On-device transcription unavailable'), banner.textContent);
+  assert.ok(banner.textContent.includes('speech engine is not installed'), banner.textContent);
+  assert.ok(banner.textContent.includes('Use browser dictation instead'), banner.textContent);
+  assert.ok(banner.textContent.includes('sends your audio to your browser vendor'), banner.textContent);
+});
+
 // ── chimeScopeAllows: mention-scoped chime predicate (feature #7) ─────────────
 // The chime's scope gate. Pure, and independent of notifyScope: 'all' chimes on
 // every peer message; 'mention' only when the operator is @'d.

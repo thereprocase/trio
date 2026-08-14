@@ -7122,6 +7122,7 @@ INDEX_HTML = r"""<!doctype html>
       decorateInlineMentions, composerMentionHtml,
       chimeScopeAllows, shouldChime,
       detectFilePathCandidates, linkifyValidatedPaths, decorateFilePaths,
+      offerWebFallback, sttBanner,
       // insertTranscript writes through the composer element it closed over,
       // so the element ships with it or the test has nothing to inspect.
       insertTranscript, composerInput: input,
