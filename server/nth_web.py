@@ -35,21 +35,23 @@ import os
 import queue
 import re
 import secrets
+import shutil
 import signal
 import socket
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import threading
 import errno
 import time
 import unicodedata
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 sys.path.insert(0, str(Path(__file__).parent))
 from nth_constants import (ANIMAL_EMOJIS, animal_for, animal_for_channel,
@@ -63,6 +65,82 @@ DB_POLL_INTERVAL = 0.5
 HISTORY_LIMIT = 200          # messages sent to a client on /api/history
 HUB_IDLE_REAP_S = 300        # retire a channel's EventHub after this long unwatched
 SSE_HEARTBEAT_SEC = 20       # keep-alive comment interval
+
+# ── Image attachments (Phase-1 prototype) ──
+# Attachments live beside the database they belong to, NOT at a fixed path.
+# A hardcoded location means --db does not isolate anything: pointing the server
+# at a scratch DB still reads and DELETES files belonging to the real one, which
+# is a live footgun for anyone testing the GC below.
+ATTACH_DIR = Path.home() / ".claude" / "nth" / "attachments"
+
+
+def attach_dir_for(db_path: Path) -> Path:
+    """Attachment root for a given database file."""
+    return Path(db_path).resolve().parent / "attachments"
+MAX_UPLOAD_BYTES = 10 * 1024 * 1024     # 10 MB hard cap per image
+# Total attachment bytes one member may hold in one channel. The per-image cap
+# bounds a single request; nothing bounded the SUM, so any identity allowed to
+# upload could fill the disk one legal 10 MB image at a time. sweep_attachments
+# only reclaims UNLINKED rows, so anything linked to a message is permanent --
+# this quota is the only bound on an upload right.
+MAX_MEMBER_ATTACH_BYTES = int(os.environ.get("NTH_ATTACH_QUOTA_BYTES", 200 * 1024 * 1024))
+# Attachment GC. An upload creates its row UNLINKED and /api/send links it, so
+# anything still unlinked long afterwards was abandoned — a paste thought better
+# of, a closed tab, a failed send. Nothing ever collected those, so they
+# accumulated on disk for the life of the install.
+ATTACH_GC_GRACE_S = 24 * 3600      # an unlinked upload is abandoned after this
+ATTACH_GC_MIN_INTERVAL_S = 600     # at most one sweep per process per 10 min
+ATTACH_GC_MAX_DELETES = 500        # deletions per sweep
+ATTACH_GC_MAX_SCAN = 2000          # files stat'd per sweep, resumed round-robin
+ALLOWED_IMAGE_MIME = {
+    "image/png": ".png", "image/jpeg": ".jpg",
+    "image/gif": ".gif", "image/webp": ".webp",
+}
+
+# ── Local speech-to-text (optional; powers /api/stt/*) ──
+# Transcription runs via a persistent nth_stt_worker.py sidecar that keeps the
+# whisper model warm, so each dictation costs only inference (~0.8s). The web
+# server itself stays stdlib-only and just pipes audio paths to that process.
+# mlx_whisper is NOT a dependency of this repo: if it is absent the sidecar
+# never starts, /api/stt/health reports unavailable, and the browser falls back
+# to its own speech recognition. Dictation degrades; nothing else notices.
+STT_MODEL = os.environ.get("NTH_STT_MODEL", "mlx-community/whisper-large-v3-turbo")
+STT_LANGUAGE = os.environ.get("NTH_STT_LANG", "en")   # "" = auto-detect
+MAX_STT_BYTES = 25 * 1024 * 1024        # 25 MB hard cap per audio clip
+# resolve() follows a symlinked install back to the tree it points at, so the
+# sidecar is found whether this file is deployed as a copy or a symlink.
+STT_WORKER = Path(__file__).resolve().with_name("nth_stt_worker.py")
+STT_WORKER_START_TIMEOUT = 180          # generous: first spawn may download ~1.5GB
+STT_TRANSCRIBE_TIMEOUT = 60             # per-clip inference ceiling
+STT_IMPORT_PROBE_TIMEOUT = 8            # cheap "is mlx_whisper importable" check
+STT_BODY_READ_TIMEOUT = 30              # a stalled upload must not hold a slot
+STT_PROBE_TTL_S = 60                    # cache the importability probe this long
+
+
+def _env_int(name: str, default: int, minimum: int) -> int:
+    """Read an int from the environment without letting a typo kill the server.
+
+    These are read at import time, so an unparseable value used to raise before
+    main() ever ran — taking the whole dashboard down over a misconfigured
+    dictation setting. A value below `minimum` is equally fatal in practice:
+    NTH_STT_MAX_CONCURRENT=0 makes a BoundedSemaphore that never acquires, so
+    every transcription returns 503 forever with nothing explaining why.
+    """
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        sys.stderr.write(f"[stt] {name}={raw!r} is not an integer; using {default}\n")
+        return default
+    if value < minimum:
+        sys.stderr.write(f"[stt] {name}={value} is below the minimum {minimum}; using {minimum}\n")
+        return minimum
+    return value
+
+
+STT_MAX_CONCURRENT = _env_int("NTH_STT_MAX_CONCURRENT", 2, 1)  # in-flight transcribes
 STALE_SECONDS = 300          # fresh heartbeat threshold
 DEAD_SECONDS = 900           # no heartbeat this long → dead
 SLEEPING_KEYWORDS = ("idle", "standing by", "tier 3", "agent-monitor")
@@ -83,6 +161,13 @@ IDENTITY_SOURCE_PENDING = "pending"
 #   "human — GUEST (self-declared)"   → untrusted self-declared identity
 # Neither replaces direct hub-console input.
 
+# Identity tiers allowed to perform destructive, roster-wide actions (cull).
+# A self-declared guest is deliberately excluded — see _handle_cull.
+CULL_ALLOWED_SOURCES = (IDENTITY_SOURCE_LOOPBACK, IDENTITY_SOURCE_TAILSCALE)
+# Identity tiers allowed to inspect or reveal paths on the operator's own
+# filesystem. A self-declared guest is excluded: these endpoints answer
+# questions about local disk, and the server can bind 0.0.0.0 under --tailnet.
+LOCAL_PATH_ALLOWED_SOURCES = (IDENTITY_SOURCE_LOOPBACK, IDENTITY_SOURCE_TAILSCALE)
 
 def _is_loopback_ip(remote_ip: str) -> bool:
     """True iff remote_ip is a loopback address (127.0.0.0/8, ::1, or an
@@ -348,22 +433,62 @@ def parse_mentions_json(raw: Optional[str]) -> List[str]:
         return []
 
 
-def member_status(last_seen_iso: Optional[str], status_text: str) -> str:
-    """Match the dashboard's status classification."""
-    if not last_seen_iso:
-        return "dead"
+def _iso_secs(iso: Optional[str]) -> Optional[float]:
+    """Parse an ISO 8601 timestamp to epoch seconds, or None if unusable."""
+    if not iso:
+        return None
     try:
-        ts = datetime.fromisoformat(last_seen_iso).timestamp()
+        return datetime.fromisoformat(iso).timestamp()
     except (ValueError, TypeError):
+        return None
+
+
+def member_status(last_seen_iso: Optional[str], status_text: str,
+                  session_activity_iso: Optional[str] = None,
+                  last_turn_end_iso: Optional[str] = None) -> str:
+    """Classify a member for the roster dot.
+
+    States: working / active / idle / stale / dead.
+      dead    — no heartbeat for DEAD_SECONDS (process gone).
+      stale   — heartbeat aging (> STALE_SECONDS).
+      idle    — alive, but its last turn has ended (nothing since) or it set a
+                sleeping status_text: "done / waiting on you".
+      working — alive AND it has acted since its last turn end (mid-turn). This
+                is the pulsing "keep chilling, it's on it" dot; it needs the
+                nth_turn_hook to have recorded a turn end. "Acted" means its
+                sessions.last_seen advanced past that turn end. With the
+                nth_activity_hook installed (PreToolUse + UserPromptSubmit),
+                *any* tool call or prompt bumps last_seen, so this holds for the
+                whole active turn — reasoning, a long Bash, a sub-agent — not
+                just from the agent's first trio call. Without the activity hook
+                only trio RPCs bump last_seen, so a turn that makes zero trio
+                calls would read idle until its Stop hook fires.
+      active  — alive but we have no turn data (hook not installed): the legacy
+                green dot, so hook-less deployments are unchanged.
+    """
+    ls = _iso_secs(last_seen_iso)
+    if ls is None:
         return "dead"
-    age = datetime.now(timezone.utc).timestamp() - ts
+    age = datetime.now(timezone.utc).timestamp() - ls
     if age > DEAD_SECONDS:
         return "dead"
     if age > STALE_SECONDS:
         return "stale"
     if status_text and any(kw in status_text.lower() for kw in SLEEPING_KEYWORDS):
         return "idle"
-    return "active"
+    # Turn-state split — only when the turn hook has recorded an end for this
+    # member. Acted since that end -> mid-turn -> working; otherwise finished.
+    end = _iso_secs(last_turn_end_iso)
+    if end is not None:
+        # A backward wall-clock step (NTP correction, host sleep/wake) can leave
+        # a Stop stamp in the future. No later activity can then exceed it, so
+        # the member would read idle while genuinely working. Treat a turn end
+        # that is ahead of now as no turn data at all.
+        if end > datetime.now(timezone.utc).timestamp() + 1:
+            return "active"
+        act = _iso_secs(session_activity_iso)
+        return "working" if (act is not None and act > end) else "idle"
+    return "active"  # no turn data (hook not installed) — legacy behavior
 
 
 _GUEST_SUFFIX_RE = re.compile(r"\s*\(\s*guest\s*\)\s*$", re.IGNORECASE)
@@ -526,6 +651,307 @@ def ensure_operator_row(db: sqlite3.Connection, channel: str, ident: OperatorIde
     return ident.member_id, ident.display_name
 
 
+def cull_member(db: sqlite3.Connection, channel: str, caller_id: str,
+                caller_name: str, target_id: str) -> Tuple[Optional[dict], Optional[str]]:
+    """Remove a member from a channel — mirrors nth_server.nth_cull so the web
+    dashboard can offer it directly. Deletes the target's row, releases their
+    claimed tasks back to open, drops their locks, and posts a [culled] system
+    message. Returns (result, error) with exactly one non-None. Must run inside
+    the caller's transaction."""
+    target = db.execute(
+        "SELECT id, name FROM members WHERE id = ? AND channel = ?",
+        (target_id, channel),
+    ).fetchone()
+    if not target:
+        return None, "member not found in this channel"
+    if target_id == caller_id:
+        return None, "you can't remove yourself"
+    now = now_iso()
+    target_name = target["name"]
+
+    released = db.execute(
+        "SELECT id FROM tasks WHERE channel = ? AND claimed_by = ? AND status = 'claimed'",
+        (channel, target_id),
+    ).fetchall()
+    db.execute(
+        "UPDATE tasks SET claimed_by = NULL, status = 'open', updated_at = ? "
+        "WHERE channel = ? AND claimed_by = ? AND status = 'claimed'",
+        (now, channel, target_id),
+    )
+    # Read the held locks before dropping them so the notice can name them —
+    # otherwise the operator gets no record of what was released.
+    released_locks = [r["resource"] for r in db.execute(
+        "SELECT resource FROM locks WHERE channel = ? AND held_by = ?",
+        (channel, target_id)).fetchall()]
+    db.execute("DELETE FROM locks WHERE channel = ? AND held_by = ?", (channel, target_id))
+    db.execute("DELETE FROM members WHERE id = ? AND channel = ?", (target_id, channel))
+    # Revoke their sessions so a lingering token can't be reused if the same
+    # member_id ever re-joins (defence-in-depth; also stops row build-up).
+    db.execute(
+        "UPDATE sessions SET revoked_at = ? WHERE channel = ? AND member_id = ? "
+        "AND revoked_at IS NULL",
+        (now, channel, target_id),
+    )
+
+    released_ids = [r["id"] for r in released]
+    # Name the operator: this renders as an author-less system line, so without
+    # it someone returning to the channel can see a member was removed but not
+    # by whom — for an irreversible action that is the first thing they ask.
+    msg = f"[culled] {target_name} ({target_id}) removed from channel by {caller_name}"
+    if released_ids:
+        msg += " — released tasks: " + ", ".join(f"#{t}" for t in released_ids)
+    if released_locks:
+        msg += " — released locks: " + ", ".join(released_locks)
+    db.execute(
+        "INSERT INTO messages (channel, member_id, member_name, content, created_at) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (channel, caller_id, caller_name, msg, now),
+    )
+    return {"culled": target_name, "culled_id": target_id,
+            "released_tasks": released_ids,
+            "released_locks": released_locks}, None
+
+
+def sniff_image_mime(data: bytes) -> Optional[str]:
+    """Real image MIME from magic bytes, or None if not a supported image.
+    We trust the sniffed type over the client-declared Content-Type."""
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    if data[:3] == b"\xff\xd8\xff":
+        return "image/jpeg"
+    if data[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    return None
+
+
+_last_attach_gc = 0.0
+_attach_gc_cursor = 0        # resume point for the bounded orphan walk
+_attach_gc_lock = threading.Lock()
+
+
+def _unlink_quietly(path: Path) -> bool:
+    """Delete a file, but only if it lives under the CURRENT attachment root.
+
+    attachments.path stores an absolute path, so a database pointed at by --db
+    can name files belonging to a different install. Without this check, running
+    the server against a scratch copy of a DB deletes the REAL files its rows
+    happen to reference — which is exactly how this check came to be written.
+    """
+    try:
+        resolved = Path(path).resolve()
+        if not resolved.is_relative_to(ATTACH_DIR.resolve()):
+            return False
+        resolved.unlink()
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def sweep_attachments(db_path: Path, force: bool = False) -> Dict[str, int]:
+    """Collect attachments nothing can reach any more.
+
+    Three kinds, all of which leaked before this existed:
+      * abandoned uploads — still unlinked ATTACH_GC_GRACE_S after creation.
+      * attachments of a channel that no longer exists — nth_cleanup deletes a
+        channel's messages and members but never its attachments.
+      * orphan files — a crash between writing the file and inserting its row
+        leaves bytes on disk that nothing references.
+
+    Rows are deleted BEFORE their files: a crash in between leaves an orphan
+    file, which the third sweep reclaims. The other order would leave a row
+    pointing at nothing, which is a visibly broken image instead.
+
+    Opportunistic — called from the upload path and at startup, rate-limited so
+    a burst of uploads does not sweep repeatedly. Mirrors the idle-hub reaper
+    rather than adding a thread. Returns counts for logging/tests.
+    """
+    global _last_attach_gc
+    now = time.time()
+    with _attach_gc_lock:
+        if not force and (now - _last_attach_gc) < ATTACH_GC_MIN_INTERVAL_S:
+            return {"skipped": 1}
+        _last_attach_gc = now
+
+    stats = {"abandoned": 0, "dead_channel": 0, "orphan_files": 0}
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=ATTACH_GC_GRACE_S)
+    cutoff_iso = cutoff.isoformat()
+    db = None
+    try:
+        db = sqlite3.connect(str(db_path), timeout=5, isolation_level=None)
+        db.row_factory = sqlite3.Row
+        db.execute("PRAGMA busy_timeout=3000")
+        ensure_attachments_table(db)
+
+        # Two independent queries with their own budgets. A single UNION ALL
+        # with one LIMIT let the first branch consume the whole budget, so a
+        # dead channel's disk was never freed while any abandoned backlog
+        # existed — and a row matching BOTH predicates came back twice.
+        half = max(1, ATTACH_GC_MAX_DELETES // 2)
+        doomed = [
+            (r["id"], r["path"], "abandoned") for r in db.execute(
+                "SELECT id, path FROM attachments "
+                " WHERE message_id IS NULL AND created_at < ? LIMIT ?",
+                (cutoff_iso, half)).fetchall()
+        ]
+        seen = {d[0] for d in doomed}
+        for r in db.execute(
+                "SELECT a.id AS id, a.path AS path FROM attachments a "
+                " LEFT JOIN channels c ON c.code = a.channel "
+                " WHERE c.code IS NULL LIMIT ?",
+                (ATTACH_GC_MAX_DELETES - len(doomed),)).fetchall():
+            if r["id"] not in seen:
+                doomed.append((r["id"], r["path"], "dead_channel"))
+
+        # One transaction for the batch. Autocommitting each delete took the WAL
+        # writer lock up to 500 times per sweep, interleaved with unlink()
+        # syscalls — measured as ~770ms tail latency on unrelated concurrent
+        # writes (message sends, task claims) for as long as the sweep ran.
+        # Rows still go before files: the commit lands first, then the unlinks,
+        # so a crash in between leaves an orphan file the walk reclaims.
+        if doomed:
+            # Compare-and-swap on the state that made each row doomed. The
+            # select and the delete are separate statements, so a row can be
+            # LINKED by a concurrent /api/send in between — and _handle_send
+            # holds BEGIN IMMEDIATE, so an unconditional delete does not race
+            # it, it queues behind it and then destroys the attachment the user
+            # just successfully posted. Only rows still in the observed state
+            # are deleted, and only rows we actually deleted get their file
+            # unlinked.
+            confirmed = []
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                for att_id, att_path, why in doomed:
+                    if why == "abandoned":
+                        cur = db.execute(
+                            "DELETE FROM attachments "
+                            " WHERE id = ? AND message_id IS NULL", (att_id,))
+                    else:
+                        cur = db.execute(
+                            "DELETE FROM attachments WHERE id = ? AND NOT EXISTS "
+                            " (SELECT 1 FROM channels c WHERE c.code = "
+                            "  (SELECT channel FROM attachments WHERE id = ?))",
+                            (att_id, att_id))
+                    if cur.rowcount:
+                        confirmed.append((att_path, why))
+                db.execute("COMMIT")
+            except sqlite3.Error:
+                db.execute("ROLLBACK")
+                raise
+            # Files only after the rows are durably gone.
+            for att_path, why in confirmed:
+                _unlink_quietly(Path(att_path))
+                stats[why] += 1
+
+        # Orphan files, only ones older than the grace period. NB the upload
+        # path inserts its row FIRST (with an empty path), then writes the file,
+        # then fills the path in — so the window this guards is not "file
+        # written before its row exists" but the gap between the `known`
+        # snapshot below and the walk that follows it. That is seconds; the
+        # grace covers it by orders of magnitude.
+        #
+        # Walk a BOUNDED slice of the tree per sweep, resuming where the last
+        # one stopped. Loading every path and stat'ing every file made the cost
+        # scale with total historical attachments rather than with garbage —
+        # measured at ~1.2s on a 150k-attachment install that had nothing to
+        # collect. Coverage is still complete, just spread over several sweeps.
+        global _attach_gc_cursor
+        try:
+            chan_dirs = sorted(d for d in ATTACH_DIR.iterdir() if d.is_dir())
+        except OSError:
+            chan_dirs = []
+        if chan_dirs:
+            start = _attach_gc_cursor % len(chan_dirs)
+            order = chan_dirs[start:] + chan_dirs[:start]
+            scanned = 0
+            deletes = ATTACH_GC_MAX_DELETES
+            visited = 0
+            for chan_dir in order:
+                if scanned >= ATTACH_GC_MAX_SCAN or deletes <= 0:
+                    break
+                visited += 1
+                # Only this channel's paths, so the set stays proportional to
+                # the slice being walked (indexed by channel).
+                known = {r["path"] for r in db.execute(
+                    "SELECT path FROM attachments WHERE channel = ?",
+                    (chan_dir.name,))}
+                try:
+                    entries = list(chan_dir.iterdir())
+                except OSError:
+                    continue
+                for f in entries:
+                    if scanned >= ATTACH_GC_MAX_SCAN or deletes <= 0:
+                        break
+                    scanned += 1
+                    if str(f) in known:
+                        continue
+                    try:
+                        if not f.is_file():
+                            continue
+                        if (now - f.stat().st_mtime) < ATTACH_GC_GRACE_S:
+                            continue
+                    except OSError:
+                        continue
+                    if _unlink_quietly(f):
+                        stats["orphan_files"] += 1
+                        deletes -= 1
+            _attach_gc_cursor = (start + visited) % len(chan_dirs)
+    except sqlite3.Error:
+        return stats
+    finally:
+        if db is not None:
+            try:
+                db.close()
+            except sqlite3.Error:
+                pass
+    return stats
+
+
+def ensure_attachments_table(db: sqlite3.Connection) -> None:
+    """Create the attachments table on demand. The web side owns this for the
+    prototype so it works before the MCP server ships the canonical CREATE —
+    both use IF NOT EXISTS, so it stays safe once the server half lands."""
+    db.execute(
+        "CREATE TABLE IF NOT EXISTS attachments ("
+        " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        " channel TEXT NOT NULL,"
+        " message_id INTEGER,"
+        " member_id TEXT NOT NULL,"
+        " mime TEXT NOT NULL,"
+        " filename TEXT,"
+        " width INTEGER, height INTEGER, bytes INTEGER,"
+        " path TEXT NOT NULL,"
+        " created_at TEXT NOT NULL)"
+    )
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_attachments_channel "
+        "ON attachments(channel)"
+    )
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_attachments_unlinked "
+        "ON attachments(created_at) WHERE message_id IS NULL"
+    )
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_attachments_message "
+        "ON attachments(message_id)"
+    )
+
+
+def attachments_for_message(db: sqlite3.Connection, msg_id: int) -> List[Dict[str, Any]]:
+    """[{id, mime, filename}] for a message. Defensive: returns [] if the
+    attachments table doesn't exist yet (no uploads have happened)."""
+    try:
+        rows = db.execute(
+            "SELECT id, mime, filename FROM attachments "
+            "WHERE message_id = ? ORDER BY id", (msg_id,),
+        ).fetchall()
+    except sqlite3.Error:
+        return []
+    return [{"id": r["id"], "mime": r["mime"], "filename": r["filename"] or ""}
+            for r in rows]
+
+
 # ───────── EventHub: polls DB, fans out SSE events ─────────
 class EventHub:
     """Single background thread watches the DB and pushes JSON events to any
@@ -595,6 +1021,7 @@ class EventHub:
                     "refs": parse_mentions_json(r["refs"] if "refs" in r.keys() else ""),
                     "bangs": parse_mentions_json(r["bangs"] if "bangs" in r.keys() else ""),
                     "created_at": r["created_at"],
+                    "attachments": attachments_for_message(db, r["id"]),
                 }))
         except (sqlite3.Error, queue.Full):
             pass
@@ -623,45 +1050,46 @@ class EventHub:
         # v6.2+ session-mode clients write sessions.last_read / last_seen
         # and never touch members.*. Reconcile like nth_monitor.py:171-183
         # so the web console sees real watermark + liveness movement.
-        # filter_mode (v7.2) is best-effort; older schemas fall back to 'all'.
-        try:
-            rows = db.execute(
-                "SELECT m.id AS id, m.name AS name, m.status_text AS status_text, "
-                "m.last_seen AS member_last_seen, m.last_read AS member_last_read, "
-                "m.messenger_heartbeat AS messenger_heartbeat, "
-                "m.watchdog_heartbeat AS watchdog_heartbeat, "
-                "m.filter_mode AS filter_mode, "
-                "m.context_json AS context_json, "
-                "COALESCE(MAX(s.last_read), 0) AS session_last_read, "
-                "MAX(s.last_seen) AS session_last_seen, "
-                "GROUP_CONCAT(s.fingerprint) AS fingerprints "
-                "FROM members m "
-                "LEFT JOIN sessions s "
-                "  ON s.channel = m.channel AND s.member_id = m.id "
-                "  AND s.revoked_at IS NULL "
-                "WHERE m.channel = ? "
-                "GROUP BY m.id, m.channel "
-                "ORDER BY m.joined_at",
-                (self.channel,),
-            ).fetchall()
-        except sqlite3.OperationalError:
-            rows = db.execute(
-                "SELECT m.id AS id, m.name AS name, m.status_text AS status_text, "
-                "m.last_seen AS member_last_seen, m.last_read AS member_last_read, "
-                "m.messenger_heartbeat AS messenger_heartbeat, "
-                "m.watchdog_heartbeat AS watchdog_heartbeat, "
-                "COALESCE(MAX(s.last_read), 0) AS session_last_read, "
-                "MAX(s.last_seen) AS session_last_seen, "
-                "GROUP_CONCAT(s.fingerprint) AS fingerprints "
-                "FROM members m "
-                "LEFT JOIN sessions s "
-                "  ON s.channel = m.channel AND s.member_id = m.id "
-                "  AND s.revoked_at IS NULL "
-                "WHERE m.channel = ? "
-                "GROUP BY m.id, m.channel "
-                "ORDER BY m.joined_at",
-                (self.channel,),
-            ).fetchall()
+        # Two independently-optional columns, so they get independent tiers:
+        # filter_mode/context_json (v7.2) and last_turn_end (this feature). The
+        # turn column is added by nth_server at MCP startup, but the dashboard
+        # can be launched standalone against a DB whose server has not restarted
+        # — folding both into one try/except would drop filter_mode and the
+        # context % for every member just because the turn column is missing.
+        def _roster_sql(turn: bool, v72: bool) -> str:
+            cols = [
+                "m.id AS id", "m.name AS name", "m.status_text AS status_text",
+                "m.last_seen AS member_last_seen", "m.last_read AS member_last_read",
+                "m.messenger_heartbeat AS messenger_heartbeat",
+                "m.watchdog_heartbeat AS watchdog_heartbeat",
+            ]
+            if v72:
+                cols += ["m.filter_mode AS filter_mode", "m.context_json AS context_json"]
+            cols += [
+                "COALESCE(MAX(s.last_read), 0) AS session_last_read",
+                "MAX(s.last_seen) AS session_last_seen",
+                "GROUP_CONCAT(s.fingerprint) AS fingerprints",
+            ]
+            if turn:
+                cols.append("MAX(s.last_turn_end) AS session_last_turn_end")
+            return ("SELECT " + ", ".join(cols) + " FROM members m "
+                    "LEFT JOIN sessions s "
+                    "  ON s.channel = m.channel AND s.member_id = m.id "
+                    "  AND s.revoked_at IS NULL "
+                    "WHERE m.channel = ? "
+                    "GROUP BY m.id, m.channel "
+                    "ORDER BY m.joined_at")
+
+        rows = None
+        for _turn, _v72 in ((True, True), (False, True), (False, False)):
+            try:
+                rows = db.execute(_roster_sql(_turn, _v72), (self.channel,)).fetchall()
+                break
+            except sqlite3.OperationalError:
+                continue
+        if rows is None:
+            rows = []
+
         # Collision-free avatars per channel. Sorted-id assignment in
         # animal_for_channel() makes the mapping stable across roster
         # refreshes as long as the member set is fixed; joins/leaves
@@ -702,6 +1130,8 @@ class EventHub:
                         context_full = ctx_usage[fp]
                         context_pct = float(context_full["used_pct"])
                         break
+            keys = r.keys()
+            s_turn_end = r["session_last_turn_end"] if "session_last_turn_end" in keys else None
             aname, aemoji = avatars.get(r["id"], animal_for(r["id"]))
             out.append({
                 "id": r["id"],
@@ -710,9 +1140,19 @@ class EventHub:
                 "last_seen": effective_last_seen,
                 "last_read": effective_last_read,
                 "filter_mode": fm or "all",
-                "status": member_status(effective_last_seen, r["status_text"] or ""),
                 "context_pct": context_pct,
                 "context": context_full,
+                # working/idle split uses the session's OWN activity (not the
+                # monitor-inflated effective_last_seen) vs. its last turn end.
+                # MAX(last_seen) and MAX(last_turn_end) are taken independently,
+                # which is correct under trio's one-primary-session-per-member
+                # invariant (nth_connect mints a single session per member id).
+                # If multi-session members are reintroduced, pair both values
+                # from the newest-last_seen session instead.
+                "status": member_status(
+                    effective_last_seen, r["status_text"] or "",
+                    session_activity_iso=(r["session_last_seen"] or None),
+                    last_turn_end_iso=s_turn_end),
                 "animal_name": aname,
                 "animal_emoji": aemoji,
             })
@@ -767,6 +1207,7 @@ class EventHub:
                             "refs": parse_mentions_json(r["refs"] if "refs" in r.keys() else ""),
                             "bangs": parse_mentions_json(r["bangs"] if "bangs" in r.keys() else ""),
                             "created_at": r["created_at"],
+                            "attachments": attachments_for_message(db, r["id"]),
                         })
                         self.last_msg_id = r["id"]
 
@@ -968,6 +1409,253 @@ def _landing_snapshot(db_path: Path) -> Dict[str, Any]:
     return out
 
 
+# ───────── Local speech-to-text worker ─────────
+def _stt_model_cached(model: str) -> bool:
+    """True if the HF weights for `model` appear to be on disk already, so the
+    UI can say 'ready' vs 'will download ~1.5GB on first use'."""
+    candidates = []
+    if os.environ.get("HUGGINGFACE_HUB_CACHE"):
+        candidates.append(Path(os.environ["HUGGINGFACE_HUB_CACHE"]))
+    if os.environ.get("HF_HOME"):
+        candidates.append(Path(os.environ["HF_HOME"]) / "hub")
+    candidates.append(Path.home() / ".cache" / "huggingface" / "hub")
+    folder = "models--" + model.replace("/", "--")
+    for hub in candidates:
+        d = hub / folder
+        try:
+            if d.is_dir() and any((d / "snapshots").glob("*/*")):
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def _stt_ext_for(content_type: str) -> str:
+    ct = (content_type or "").split(";")[0].strip().lower()
+    return {
+        "audio/webm": ".webm", "audio/ogg": ".ogg", "audio/wav": ".wav",
+        "audio/x-wav": ".wav", "audio/mp4": ".mp4", "audio/mpeg": ".mp3",
+        "audio/aac": ".aac", "audio/aiff": ".aiff", "audio/x-aiff": ".aiff",
+    }.get(ct, ".webm")
+
+
+class SttEngineError(RuntimeError):
+    """The engine itself failed on this clip (bad audio, decode failure, OOM).
+
+    Distinguished from SttWorker's own protocol errors because the engine's
+    text is relayed verbatim from mlx_whisper/ffmpeg: it runs to kilobytes and
+    carries absolute local paths, including the server's temp directory. That
+    is fine in the server log and must not reach the client, whereas the
+    protocol errors ("worker pipe broken", "transcription timed out") are
+    short, path-free, and are what the client's fallback banner reads.
+    """
+
+
+class SttWorker:
+    """Manages one persistent nth_stt_worker.py subprocess that holds the whisper
+    model in memory. Thread-safe: transcription requests are serialized behind a
+    lock (dictation is one-at-a-time). Spawns lazily; respawns on death; kills a
+    hung worker on timeout. The worker exits on stdin EOF, so it self-cleans when
+    this server dies."""
+
+    def __init__(self, model: str, language: str):
+        self.model = model
+        self.language = language
+        self._proc: Optional[subprocess.Popen] = None
+        self._q: "Optional[queue.Queue]" = None
+        self._lock = threading.Lock()
+
+    def _alive(self) -> bool:
+        return self._proc is not None and self._proc.poll() is None
+
+    def _reset(self) -> None:
+        if self._proc is not None:
+            try:
+                self._proc.kill()
+                self._proc.wait(timeout=2)   # reap so we don't leave a zombie
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+        self._proc = None
+        self._q = None
+
+    def _spawn(self) -> None:
+        # Checked explicitly: the command we spawn is sys.executable, which
+        # exists, so a missing sidecar would otherwise surface as the
+        # interpreter exiting during startup — reported to the user as "the
+        # engine restarted" when the truth is that it was never installed.
+        if not STT_WORKER.exists():
+            raise RuntimeError("speech worker not installed")
+        # sys.executable is the interpreter running this server; on the hub it is
+        # the env that has mlx_whisper installed.
+        try:
+            proc = subprocess.Popen(
+                [sys.executable, str(STT_WORKER), self.model],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL, text=True, bufsize=1,
+            )
+        except OSError:
+            # Most likely the sidecar was not installed alongside this file. Say
+            # so in the language the client's fallback banner understands, and
+            # without echoing the path we tried.
+            raise RuntimeError("speech worker not installed")
+        q: "queue.Queue" = queue.Queue()
+
+        def _reader() -> None:
+            try:
+                assert proc.stdout is not None
+                for line in proc.stdout:
+                    q.put(line)
+            except (OSError, ValueError):
+                pass
+            q.put(None)  # EOF sentinel
+
+        threading.Thread(target=_reader, daemon=True).start()
+        try:
+            first = q.get(timeout=STT_WORKER_START_TIMEOUT)
+        except queue.Empty:
+            self._reset_proc(proc)
+            # A first-ever start has to pull ~1.5GB inside this window. Saying
+            # "timed out" there blames the engine for a download still in
+            # progress, and the user has no way to tell the two apart.
+            if not _stt_model_cached(self.model):
+                raise RuntimeError("the speech model is still downloading — try again in a few minutes")
+            raise RuntimeError("worker start timed out")
+        if first is None:
+            self._reset_proc(proc)
+            raise RuntimeError("worker exited during startup")
+        try:
+            msg = json.loads(first)
+        except ValueError:
+            self._reset_proc(proc)
+            raise RuntimeError("worker sent malformed startup line")
+        if not msg.get("ready"):
+            self._reset_proc(proc)
+            err = str(msg.get("error") or "worker failed to load model")
+            # The worker relays Python's own import/loader text verbatim, which
+            # can carry local paths. Collapse the overwhelmingly common case to
+            # a stable phrase the client recognises and can act on — otherwise
+            # the single most likely failure on any machine without the engine
+            # reaches the user as "an unexpected error".
+            if "No module named" in err or "import failed" in err:
+                raise RuntimeError("speech engine (mlx_whisper) not installed")
+            sys.stderr.write(f"[stt] worker start failed: {err}\n")
+            raise RuntimeError("the speech engine failed to start")
+        self._proc = proc
+        self._q = q
+
+    @staticmethod
+    def _reset_proc(proc: subprocess.Popen) -> None:
+        try:
+            proc.kill()
+            proc.wait(timeout=2)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+
+    def transcribe(self, audio_path: str) -> Dict[str, Any]:
+        """Blocking; returns {'text', 'seconds'} or raises RuntimeError."""
+        with self._lock:
+            if not self._alive():
+                self._spawn()
+            assert self._proc is not None and self._proc.stdin is not None and self._q is not None
+            req: Dict[str, Any] = {"audio": audio_path}
+            if self.language:
+                req["language"] = self.language
+            try:
+                self._proc.stdin.write(json.dumps(req) + "\n")
+                self._proc.stdin.flush()
+            except (BrokenPipeError, OSError):
+                self._reset()
+                raise RuntimeError("worker pipe broken")
+            try:
+                line = self._q.get(timeout=STT_TRANSCRIBE_TIMEOUT)
+            except queue.Empty:
+                self._reset()   # kill the hung worker so the next call respawns
+                raise RuntimeError("transcription timed out")
+            if line is None:
+                self._reset()
+                raise RuntimeError("worker exited mid-request")
+            try:
+                msg = json.loads(line)
+            except ValueError:
+                self._reset()   # stdout desynced — kill so the next call respawns clean
+                raise RuntimeError("worker sent malformed response")
+            if not msg.get("ok"):
+                raise SttEngineError(msg.get("error") or "transcription failed")
+            return msg
+
+    def health(self) -> Dict[str, Any]:
+        """Fast availability check for the settings status line — never loads the
+        model into this process."""
+        base = {"engine": "mlx_whisper", "model": self.model}
+        proc = self._proc            # snapshot once — health() runs without the lock
+        if proc is not None and proc.poll() is None:
+            # A running worker has the weights loaded, so they are on disk by
+            # definition — no need to pay for the glob to say so.
+            return {**base, "available": True, "warm": True, "cached": True,
+                    "detail": "worker running — model is warm"}
+        if not STT_WORKER.exists():
+            return {**base, "available": False, "warm": False,
+                    "detail": "speech worker not installed"}
+        importable = self._probe_importable()
+        if importable is None:
+            # Deliberately generic — we don't echo exception text that can carry
+            # local filesystem paths / username.
+            return {**base, "available": False, "warm": False,
+                    "detail": "speech engine probe failed"}
+        if not importable:
+            return {**base, "available": False, "warm": False,
+                    "detail": "speech engine (mlx_whisper) not installed"}
+        # mlx_whisper decodes audio by shelling out to ffmpeg. Without it every
+        # transcription fails at load time while this endpoint still said
+        # "ready" — the Test page reported green and dictation never worked.
+        if shutil.which("ffmpeg") is None:
+            return {**base, "available": False, "warm": False,
+                    "detail": "ffmpeg not found — the engine cannot decode audio"}
+        cached = _stt_model_cached(self.model)
+        # `cached` is reported as its own field, not just prose: the composer's
+        # slow-transcription label reads it to decide whether "downloading the
+        # model (first run)" is an honest thing to say.
+        return {**base, "available": True, "warm": False, "cached": cached,
+                "detail": ("model cached — first use warms it (~2s)" if cached
+                           else "model will download (~1.5GB) on first use")}
+
+    @staticmethod
+    def _probe_importable() -> Optional[bool]:
+        """True/False if mlx_whisper imports; None if the probe itself failed.
+
+        Cached: the probe forks an interpreter and costs seconds of CPU, and
+        this answer changes only when someone installs a package.
+        """
+        global _stt_probe_cache
+        now = time.time()
+        stamp, value = _stt_probe_cache
+        if value is not None and (now - stamp) < STT_PROBE_TTL_S:
+            return value
+        with _stt_probe_lock:
+            stamp, value = _stt_probe_cache          # re-check inside the lock
+            if value is not None and (time.time() - stamp) < STT_PROBE_TTL_S:
+                return value
+            try:
+                r = subprocess.run(
+                    [sys.executable, "-c", "import mlx_whisper"],
+                    capture_output=True, timeout=STT_IMPORT_PROBE_TIMEOUT,
+                )
+            except (subprocess.TimeoutExpired, OSError):
+                return None
+            result = (r.returncode == 0)
+            _stt_probe_cache = (time.time(), result)
+            return result
+
+
+_stt_probe_cache: Tuple[float, Optional[bool]] = (0.0, None)
+_stt_probe_lock = threading.Lock()
+
+STT = SttWorker(STT_MODEL, STT_LANGUAGE)
+# Bounds in-flight /api/stt/transcribe requests so a burst of large uploads can't
+# buffer N×MAX_STT_BYTES in memory or pile up behind the single worker lock.
+STT_SLOTS = threading.BoundedSemaphore(STT_MAX_CONCURRENT)
+
+
 # ───────── HTTP handler ─────────
 CHANNEL_CODE_RE = re.compile(r"^[a-z0-9][a-z0-9\-]{0,31}$")
 
@@ -1163,15 +1851,69 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 self._error(404, f"no such channel: {ch}")
                 return
             self._serve_sse(self._hub_for_channel(ch))
+        elif path == "/api/search":
+            self._handle_search(parsed)
+        elif path == "/api/stt/health":
+            # Gated like every other /api route. Ungated, each hit forked an
+            # interpreter to probe for mlx_whisper — ~1.5s wall and 2.6s CPU
+            # apiece, uncached and unbounded — so a bare GET loop from any
+            # reachable peer turned into unbounded process spawns. The probe is
+            # now cached too; both together close it.
+            _token, ident, _is_new = self._resolve_identity()
+            if ident.source == IDENTITY_SOURCE_PENDING:
+                self._error(403, "identity required — POST /api/identify first")
+                return
+            self._json(STT.health())
+        elif path.startswith("/api/attachment/"):
+            self._serve_attachment(path)
         else:
             self._error(404, "not found")
 
+    def _reject_cross_site(self) -> bool:
+        """True (and an error already sent) when this POST looks cross-site.
+
+        _resolve_identity() derives trust from the source IP, not from the
+        session cookie: a cookie-less request from a browser still resolves as
+        the loopback/tailnet operator. SameSite is therefore not a CSRF control
+        here, because the cookie is not the credential. A cross-origin fetch
+        with a CORS-safelisted Content-Type skips preflight, so the write lands
+        even though the response is opaque to the attacker.
+
+        Origin is the load-bearing half: browsers set it on every cross-origin
+        request and page script cannot forge it. Sec-Fetch-Site is defence in
+        depth and is absent on older/non-Chromium clients, so its absence must
+        be allowed. Compare Origin against the request's own Host rather than a
+        configured value -- the same hub is reached by tailnet name and by
+        tailnet IP, and those are different origins.
+        """
+        origin = self.headers.get("Origin")
+        if origin:
+            if urlparse(origin).netloc != self.headers.get("Host", ""):
+                self._error(403, "cross-origin POST rejected")
+                return True
+        if self.headers.get("Sec-Fetch-Site") not in (None, "same-origin", "none"):
+            self._error(403, "cross-site POST rejected")
+            return True
+        return False
+
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
+        if self._reject_cross_site():
+            return
         if parsed.path == "/api/send":
             self._handle_send()
         elif parsed.path == "/api/identify":
             self._handle_identify()
+        elif parsed.path == "/api/cull":
+            self._handle_cull()
+        elif parsed.path == "/api/path/validate":
+            self._handle_path_validate()
+        elif parsed.path == "/api/reveal":
+            self._handle_reveal()
+        elif parsed.path == "/api/upload":
+            self._handle_upload()
+        elif parsed.path == "/api/stt/transcribe":
+            self._handle_transcribe()
         else:
             self._error(404, "not found")
 
@@ -1244,9 +1986,69 @@ class NthWebHandler(BaseHTTPRequestHandler):
         try:
             raw = self.rfile.read(length)
             return json.loads(raw.decode("utf-8"))
-        except (ValueError, UnicodeDecodeError):
+        except (ValueError, UnicodeDecodeError, RecursionError):
+            # RecursionError guards against a deeply-nested-JSON DoS (json.loads
+            # recurses); it is not a ValueError subclass, so name it explicitly.
             self._error(400, "invalid JSON")
             return None
+
+    def _handle_search(self, parsed) -> None:
+        """Full-history search: substring match over this channel's stored
+        messages (beyond the ~200 the dashboard keeps in memory)."""
+        # Landing mode serves many channels from one process, so the channel
+        # comes from the request, not from a process-wide attribute. Mirrors
+        # every other handler here; binding self.channel would match "" and
+        # silently return nothing.
+        ch = self._channel_for_request(parsed)
+        if ch is None:
+            self._error(400, "channel query param required")
+            return
+        if self.landing_mode and not self._channel_exists(ch):
+            self._error(404, f"no such channel: {ch}")
+            return
+        qs = parse_qs(parsed.query)
+        q = (qs.get("q", [""])[0] or "").strip()
+        if len(q) < 2:
+            self._error(400, "query too short (min 2 chars)")
+            return
+        q = q[:200]
+        _token, ident, _is_new = self._resolve_identity()
+        if ident.source == IDENTITY_SOURCE_PENDING:
+            self._error(403, "identity required — POST /api/identify first")
+            return
+        # Escape LIKE wildcards so a query like "50%" is a literal substring.
+        esc = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        like = f"%{esc}%"
+        db = None
+        try:
+            db = sqlite3.connect(str(self.db_path), timeout=5)
+            db.row_factory = sqlite3.Row
+            db.execute("PRAGMA busy_timeout=3000")
+            rows = db.execute(
+                "SELECT id, member_id, member_name, content, created_at FROM messages "
+                "WHERE channel = ? AND content LIKE ? ESCAPE '\\' "
+                "ORDER BY id DESC LIMIT 200",
+                (ch, like),
+            ).fetchall()
+            results = [{"id": r["id"], "member_id": r["member_id"],
+                        "member_name": r["member_name"] or r["member_id"],
+                        "content": r["content"] or "", "created_at": r["created_at"]}
+                       for r in rows]
+        except sqlite3.Error as e:
+            # sqlite3's message can carry table/column names and the db file
+            # path — internal shape the browser has no business seeing. Log
+            # the detail to the operator's journal, hand the client a short
+            # generic reason.
+            sys.stderr.write(f"[nth_web] search db error: {e}\n")
+            self._error(500, "search failed")
+            return
+        finally:
+            if db is not None:
+                try:
+                    db.close()
+                except sqlite3.Error:
+                    pass
+        self._json({"ok": True, "query": q, "count": len(results), "results": results})
 
     def _handle_identify(self) -> None:
         body = self._read_json_body(max_bytes=2048)
@@ -1289,9 +2091,27 @@ class NthWebHandler(BaseHTTPRequestHandler):
             return
 
         content = (body.get("content") or "").strip()
-        if not content:
+        raw_ids = body.get("attachment_ids") or []
+        if not isinstance(raw_ids, list):
+            self._error(400, "invalid attachment_ids")
+            return
+        # Strict integer contract: reject floats, bools, and numeric strings
+        # (type(True) is bool, so booleans are rejected here too).
+        if not all(type(a) is int and a > 0 for a in raw_ids):
+            self._error(400, "invalid attachment_ids")
+            return
+        attachment_ids = list(raw_ids)
+        if len(attachment_ids) > 8:
+            self._error(400, "too many attachments (max 8)")
+            return
+        if len(set(attachment_ids)) != len(attachment_ids):
+            self._error(400, "duplicate attachment id")
+            return
+        if not content and not attachment_ids:
             self._error(400, "empty content")
             return
+        if not content and attachment_ids:
+            content = "[image]"
         if len(content) > 4000:
             self._error(400, "content too long (max 4000 chars)")
             return
@@ -1318,6 +2138,23 @@ class NthWebHandler(BaseHTTPRequestHandler):
             try:
                 op_id, op_name = ensure_operator_row(db, send_channel, ident)
                 now = now_iso()
+
+                # Validate attachments up front: every requested id must be
+                # this operator's own, unlinked, in-channel row — else abort,
+                # so an image-only send can't post a false "[image]" with no
+                # image actually attached.
+                if attachment_ids:
+                    ensure_attachments_table(db)
+                    placeholders = ",".join("?" * len(attachment_ids))
+                    owned = db.execute(
+                        f"SELECT id FROM attachments WHERE id IN ({placeholders}) "
+                        "AND channel = ? AND member_id = ? AND message_id IS NULL",
+                        (*attachment_ids, send_channel, op_id),
+                    ).fetchall()
+                    if {r["id"] for r in owned} != set(attachment_ids):
+                        db.execute("ROLLBACK")
+                        self._error(400, "invalid or already-linked attachment id")
+                        return
 
                 # Leading "$task " marks this as a claimable task — same
                 # table + status flow as trio_send(task=True). The prefix
@@ -1363,6 +2200,14 @@ class NthWebHandler(BaseHTTPRequestHandler):
                      json.dumps(bang_ids)    if bang_ids    else ""),
                 )
                 msg_id = cursor.lastrowid
+                # Link any uploaded attachments to this message (own, unlinked).
+                if attachment_ids:
+                    db.executemany(
+                        "UPDATE attachments SET message_id = ? "
+                        "WHERE id = ? AND channel = ? AND member_id = ? "
+                        "AND message_id IS NULL",
+                        [(msg_id, aid, send_channel, op_id) for aid in attachment_ids],
+                    )
                 db.execute(
                     "UPDATE members SET last_seen = ? WHERE channel = ? AND id = ?",
                     (now, send_channel, op_id),
@@ -1375,7 +2220,14 @@ class NthWebHandler(BaseHTTPRequestHandler):
                     pass
                 raise
         except sqlite3.Error as e:
-            self._error(500, f"db error: {e}")
+            # Same reasoning as the search handler above: sqlite's text names
+            # tables and columns, and a client learns the schema one failed
+            # request at a time. It is also useless to the person who hit it —
+            # "no such column: bangs" after a missed migration tells them
+            # nothing they can act on, while the operator's log is exactly
+            # where that belongs.
+            sys.stderr.write(f"[nth_web] send db error: {e}\n")
+            self._error(500, "send failed")
             return
         finally:
             if db is not None:
@@ -1383,8 +2235,564 @@ class NthWebHandler(BaseHTTPRequestHandler):
                     db.close()
                 except sqlite3.Error:
                     pass
-
         self._json({"ok": True, "id": msg_id})
+
+    def _handle_cull(self) -> None:
+        """Remove a member from the channel at the operator's request — the
+        dashboard's roster remove (×) button. Mirrors trio_cull: releases the
+        target's tasks/locks and posts a [culled] system message."""
+        body = self._read_json_body(max_bytes=2048)
+        if body is None:
+            return
+        # _read_json_body only guarantees valid JSON, not a dict of strings —
+        # guard both before .get()/.strip() so bad input is a clean 400, not an
+        # AttributeError that drops the connection.
+        if not isinstance(body, dict):
+            self._error(400, "invalid body")
+            return
+        target_id = body.get("target_member_id")
+        if not isinstance(target_id, str) or not target_id.strip():
+            self._error(400, "target_member_id required")
+            return
+        target_id = target_id.strip()
+        cull_channel = self._channel_for_request(urlparse(self.path))
+        if cull_channel is None:
+            self._error(400, "channel query param required")
+            return
+        if self.landing_mode and not self._channel_exists(cull_channel):
+            self._error(404, f"no such channel: {cull_channel}")
+            return
+        _token, ident, _is_new = self._resolve_identity()
+        if ident.source == IDENTITY_SOURCE_PENDING:
+            self._error(403, "identity required — POST /api/identify first")
+            return
+        # Removing a member is destructive and roster-wide — restrict it to
+        # trusted identities (a local shell or a Tailscale-verified peer). A
+        # self-declared guest, the weakest tier, must not be able to rip out
+        # agents or other participants (esp. under --tailnet's 0.0.0.0 bind).
+        if ident.source not in CULL_ALLOWED_SOURCES:
+            self._error(403, "only a trusted operator (local or tailnet) can remove members")
+            return
+        db = None
+        try:
+            db = sqlite3.connect(str(self.db_path), timeout=5, isolation_level=None)
+            db.row_factory = sqlite3.Row
+            db.execute("PRAGMA busy_timeout=5000")
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                op_id, op_name = ensure_operator_row(db, cull_channel, ident)
+                result, err = cull_member(db, cull_channel, op_id, op_name, target_id)
+                if err:
+                    db.execute("ROLLBACK")
+                    self._error(400, err)
+                    return
+                db.execute("COMMIT")
+            except sqlite3.Error:
+                try:
+                    db.execute("ROLLBACK")
+                except sqlite3.Error:
+                    pass
+                raise
+        except sqlite3.Error as e:
+            # This handler is new in this branch, so shipping the pattern
+            # would INTRODUCE the leak rather than inherit it. sqlite's text
+            # names tables and columns, and cull is reachable by anyone the
+            # server will accept a POST from.
+            sys.stderr.write(f"[nth_web] cull db error: {e}\n")
+            self._error(500, "remove failed")
+            return
+        finally:
+            if db is not None:
+                try:
+                    db.close()
+                except sqlite3.Error:
+                    pass
+        self._json({"ok": True, **(result or {})})
+
+    # ── file-path validate / reveal ──
+    # The client detects path-LIKE tokens in message bodies broadly, then asks
+    # the server which ones actually exist on disk; only real files get linked
+    # (validation, not pattern-matching, gates linkification). A linked path can
+    # then be revealed in Finder. There is NO access gating on these endpoints
+    # (operator's explicit choice), so injection-safety is enforced structurally:
+    # reveal never runs a shell and never plain-`open`s a file (which would
+    # launch its default app) — it only `open -R` (reveal/select in Finder).
+    _PATH_VALIDATE_CAP = 200          # max candidates per validate request
+    _PATH_MAX_LEN = 4096              # ignore absurdly long candidates
+
+    @staticmethod
+    def _expand_path(candidate: str) -> str:
+        """Expand a leading ~ (and ~user), then require the result to be
+        ABSOLUTE. Returns "" for anything relative.
+
+        A relative token has no agreed meaning here. It would resolve against
+        the SERVER's working directory, which is wherever the dashboard happened
+        to be launched — not the cwd of the agent that wrote the message. In a
+        fleet whose agents work in different checkouts (the normal case) that
+        means "see server/nth_web.py" links to whichever copy the dashboard was
+        started next to, reveals it with a success flash, and renders
+        differently for two operators reading the same message. A confident link
+        to the wrong file is worse than no link, so relative tokens stay plain
+        text and the reader keeps the literal string the agent wrote."""
+        expanded = os.path.expanduser(candidate)
+        return expanded if os.path.isabs(expanded) else ""
+
+    @staticmethod
+    def _is_trivial_root(expanded: str) -> bool:
+        """True for a filesystem root or pure-separator token ('/', '//', '/..',
+        a bare Windows/volume drive root). These EXIST on disk yet are never a
+        meaningful file link — treating a lone '/' as one is exactly what made a
+        slash used as prose punctuation ('reload / incognito', '#' / '!') pick
+        up a folder icon. Rejected in both validate and reveal (defense in depth
+        alongside the client's filename-segment filter). Real paths UNDER a root
+        ('/Users/…') contain more than separators, so they're unaffected."""
+        if not expanded or not expanded.strip("/\\ \t"):
+            return True                       # empty or only slashes/whitespace
+        try:
+            norm = os.path.normpath(expanded)
+        except (ValueError, TypeError):
+            return False
+        if norm in (os.sep, "/", "//"):       # POSIX root (normpath preserves '//')
+            return True
+        drive, tail = os.path.splitdrive(norm)
+        if drive and tail in ("", os.sep, "/", "\\"):   # bare drive root 'C:\'
+            return True
+        return False
+
+    def _resolve_existing(self, raw: str) -> Optional[str]:
+        """Return the expanded on-disk target for `raw`, or None if it doesn't
+        exist (or is a trivial root — see _is_trivial_root). Tries the candidate
+        as-is first, then with a trailing :line[:col] (editor/grep/Claude-Code
+        form) stripped — so both validate and reveal agree on what a `path:line`
+        token resolves to. Uses lexists so broken symlinks (still revealable)
+        count. Never raises (a NUL/bad path is just 'not found')."""
+        for cand in (raw, re.sub(r":\d+(?::\d+)?$", "", raw)):
+            expanded = self._expand_path(cand)
+            if self._is_trivial_root(expanded):
+                continue                      # '/' & bare roots are not linkable
+            try:
+                if expanded and os.path.lexists(expanded):
+                    return expanded
+            except (ValueError, OSError):
+                continue
+        return None
+
+    def _handle_path_validate(self) -> None:
+        """POST /api/path/validate — body {"paths": [...]}. Returns
+        {"exists": {candidate: bool}} keyed by the ORIGINAL candidate string
+        (so client cache keys line up). A `path:line[:col]` token counts as
+        existing when the bare file exists. Capped at _PATH_VALIDATE_CAP."""
+        # These two endpoints read and act on the OPERATOR'S OWN filesystem, so
+        # they are restricted to the same trusted tiers as other destructive
+        # controls: a local shell, or a Tailscale-verified peer. The fork left
+        # them ungated, which was defensible when the server bound loopback and
+        # served one channel; upstream can bind 0.0.0.0 (--tailnet) and serves a
+        # channel-less landing surface, where ungated meant any reachable peer
+        # could enumerate the operator's filesystem and pop Finder windows on
+        # their screen without knowing any channel code.
+        _token, ident, _is_new = self._resolve_identity()
+        if ident.source not in LOCAL_PATH_ALLOWED_SOURCES:
+            self._error(403, "only a trusted operator (local or tailnet) can inspect local paths")
+            return
+        # Bodies can carry up to 200 paths; allow a generous cap over the default.
+        body = self._read_json_body(max_bytes=256 * 1024)
+        if body is None:
+            return
+        if not isinstance(body, dict):
+            self._error(400, "invalid body")
+            return
+        paths = body.get("paths")
+        if not isinstance(paths, list):
+            self._error(400, "paths must be a list")
+            return
+        exists: Dict[str, bool] = {}
+        for cand in paths[: self._PATH_VALIDATE_CAP]:
+            if not isinstance(cand, str) or not cand or len(cand) > self._PATH_MAX_LEN:
+                continue
+            if cand in exists:
+                continue
+            exists[cand] = self._resolve_existing(cand) is not None
+        self._json({"exists": exists})
+
+    def _handle_reveal(self) -> None:
+        """POST /api/reveal — body {"path": "..."}. Reveal (select) the file in
+        Finder. SECURITY: no shell, arg-list only, `open -R` (reveal) never plain
+        `open` (which would launch the default app), and a leading `--` so a
+        path beginning with `-` can't be read as a flag. Existence is verified
+        first (404 otherwise), so a bogus/injection-style value never reaches a
+        launch. A `path:line[:col]` suffix (Claude-Code form) is stripped so the
+        file itself is revealed."""
+        # These two endpoints read and act on the OPERATOR'S OWN filesystem, so
+        # they are restricted to the same trusted tiers as other destructive
+        # controls: a local shell, or a Tailscale-verified peer. The fork left
+        # them ungated, which was defensible when the server bound loopback and
+        # served one channel; upstream can bind 0.0.0.0 (--tailnet) and serves a
+        # channel-less landing surface, where ungated meant any reachable peer
+        # could enumerate the operator's filesystem and pop Finder windows on
+        # their screen without knowing any channel code.
+        _token, ident, _is_new = self._resolve_identity()
+        if ident.source not in LOCAL_PATH_ALLOWED_SOURCES:
+            self._error(403, "only a trusted operator (local or tailnet) can inspect local paths")
+            return
+        body = self._read_json_body(max_bytes=8192)
+        if body is None:
+            return
+        if not isinstance(body, dict):
+            self._error(400, "invalid body")
+            return
+        raw = body.get("path")
+        if not isinstance(raw, str) or not raw.strip():
+            self._error(400, "path required")
+            return
+        raw = raw.strip()
+        if len(raw) > self._PATH_MAX_LEN:
+            self._error(400, "path too long")
+            return
+
+        # Resolve to an existing target (as-is, else with a :line[:col] suffix
+        # stripped). Same resolver validate uses, so the UI and the reveal agree.
+        target = self._resolve_existing(raw)
+        if target is None:
+            self._error(404, "path not found on disk")
+            return
+
+        abspath = os.path.abspath(target)
+        plat = sys.platform
+        # Whether the child's exit status is a trustworthy success signal.
+        # It is on macOS and Linux; it is NOT on Windows -- see below.
+        check_rc = True
+        try:
+            if plat == "darwin":
+                # Reveal (select) in Finder. ARG LIST + `--`: no shell, no flag
+                # injection. `-R` reveals; it never launches the file's app.
+                # `--` IS correct here: /usr/bin/open documents and accepts it.
+                cp = subprocess.run(
+                    ["open", "-R", "--", abspath],
+                    capture_output=True, text=True, timeout=10,
+                )
+            elif plat.startswith("linux"):
+                # Best-effort: open the containing folder (no reliable "select").
+                folder = abspath if os.path.isdir(abspath) else os.path.dirname(abspath)
+                # NO `--`. xdg-open's main argument loop matches `-*` before any
+                # sentinel handling and calls exit_failure_syntax, so a `--` makes
+                # EVERY call fail with "unexpected option '--'". Measured against
+                # xdg-utils 1.2.1. abspath is absolute, so there is no
+                # leading-dash case for a sentinel to guard against anyway.
+                cp = subprocess.run(
+                    ["xdg-open", folder],
+                    capture_output=True, text=True, timeout=10,
+                )
+            elif plat.startswith("win"):
+                # ONE argv token: explorer parses "/select,<path>" as a unit, and
+                # a space after the comma makes it ignore the selector and open
+                # Documents instead.
+                cp = subprocess.run(
+                    ["explorer", f"/select,{abspath}"],
+                    capture_output=True, text=True, timeout=10,
+                )
+                # explorer.exe returns nonzero on SUCCESS as a matter of course,
+                # so treating its exit status as failure turns every working
+                # reveal into a 502.
+                check_rc = False
+            else:
+                self._json({"ok": False, "error": f"unsupported platform: {plat}"},
+                           status=501)
+                return
+        except FileNotFoundError:
+            self._json({"ok": False, "error": "reveal tool not available"}, status=501)
+            return
+        except subprocess.TimeoutExpired:
+            self._error(504, "reveal timed out")
+            return
+        if check_rc and cp.returncode != 0:
+            msg = (cp.stderr or cp.stdout or "").strip() or f"exit {cp.returncode}"
+            self._error(502, f"reveal failed: {msg}")
+            return
+        self._json({"ok": True, "path": abspath})
+
+    def _handle_upload(self) -> None:
+        """Accept a raw image body (Content-Type = mime, X-Filename header),
+        validate by magic bytes, store on disk, and create an unlinked
+        attachments row. The subsequent /api/send links it to a message."""
+        token, ident, _is_new = self._resolve_identity()
+        # Writing files into the operator's home directory is the same class of
+        # action as revealing a path there, so it takes the same tier as
+        # /api/reveal and /api/path/validate. A self-declared guest is the
+        # weakest identity this server mints -- under --tailnet (the deployed
+        # mode) that is anyone who can reach the port and type a name. Gating
+        # only on PENDING let them write 10 MB per request, unmetered.
+        if ident.source not in LOCAL_PATH_ALLOWED_SOURCES:
+            self._error(403, "only a trusted operator (local or tailnet) can upload")
+            return
+        # Same reason as _serve_attachment: the channel comes from the request,
+        # not from a process-wide attribute that landing mode never sets.
+        ch = self._channel_for_request(urlparse(self.path))
+        if ch is None:
+            self._error(400, "channel query param required")
+            return
+        if self.landing_mode and not self._channel_exists(ch):
+            self._error(404, f"no such channel: {ch}")
+            return
+        try:
+            length = int(self.headers.get("Content-Length", "0") or 0)
+        except (TypeError, ValueError):
+            self._error(400, "invalid Content-Length")
+            return
+        if length <= 0 or length > MAX_UPLOAD_BYTES:
+            self._error(400, "image is missing or larger than the 10 MB limit")
+            return
+        try:
+            data = self.rfile.read(length)
+        except OSError:
+            self._error(400, "read failed")
+            return
+        if len(data) != length:
+            self._error(400, "incomplete upload")
+            return
+        mime = sniff_image_mime(data)
+        if mime not in ALLOWED_IMAGE_MIME:
+            self._error(400, "unsupported image type (png/jpeg/gif/webp only)")
+            return
+        ext = ALLOWED_IMAGE_MIME[mime]
+        # X-Filename is percent-encoded by the client (HTTP headers must be
+        # ISO-8859-1, but filenames — e.g. macOS screenshots — carry Unicode).
+        raw_name = unquote(self.headers.get("X-Filename", "") or "")
+        filename = re.sub(r"[^\w.\- ]", "_", raw_name)[:120] or ("image" + ext)
+
+        db = None
+        try:
+            db = sqlite3.connect(str(self.db_path), timeout=5, isolation_level=None)
+            db.row_factory = sqlite3.Row
+            db.execute("PRAGMA busy_timeout=5000")
+            ensure_attachments_table(db)
+            op_id, _op_name = ensure_operator_row(db, ch, ident)
+            # The gate above says WHO may upload; this says HOW MUCH. Both are
+            # needed: the gate does not stop a cross-site POST, which executes
+            # as the trusted local operator and therefore passes it.
+            used = db.execute(
+                "SELECT COALESCE(SUM(bytes), 0) AS b FROM attachments "
+                " WHERE channel = ? AND member_id = ?", (ch, op_id),
+            ).fetchone()["b"]
+            if used + len(data) > MAX_MEMBER_ATTACH_BYTES:
+                self._error(413, "attachment quota exceeded")
+                return
+            now = now_iso()
+            cur = db.execute(
+                "INSERT INTO attachments "
+                "(channel, message_id, member_id, mime, filename, bytes, path, created_at) "
+                "VALUES (?, NULL, ?, ?, ?, ?, '', ?)",
+                (ch, op_id, mime, filename, len(data), now),
+            )
+            att_id = cur.lastrowid
+            fpath = None
+            try:
+                chan_dir = ATTACH_DIR / re.sub(r"[^\w.\-]", "_", ch)
+                chan_dir.mkdir(parents=True, exist_ok=True)
+                fpath = chan_dir / f"{att_id}{ext}"
+                fpath.write_bytes(data)
+                db.execute("UPDATE attachments SET path = ? WHERE id = ?",
+                           (str(fpath), att_id))
+            except (OSError, sqlite3.Error):
+                # Roll back BOTH sides so no orphan row or file survives.
+                try:
+                    db.execute("DELETE FROM attachments WHERE id = ?", (att_id,))
+                except sqlite3.Error:
+                    pass
+                if fpath is not None:
+                    try:
+                        fpath.unlink()
+                    except OSError:
+                        pass
+                raise
+        except (sqlite3.Error, OSError) as e:
+            self._error(500, f"upload error: {e}")
+            return
+        finally:
+            if db is not None:
+                try:
+                    db.close()
+                except sqlite3.Error:
+                    pass
+        self._json({"ok": True, "id": att_id, "mime": mime,
+                    "filename": filename})   # client builds the URL with its channel
+        # Opportunistic GC: uploading is exactly when abandoned uploads accrue,
+        # and it is already a slow path. Rate-limited internally, and after the
+        # response so it can never delay the client.
+        sweep_attachments(self.db_path)
+
+    def _handle_transcribe(self) -> None:
+        """Accept a raw audio body (webm/ogg/wav/…), transcribe locally with the
+        warm mlx_whisper worker, and return {ok, text, seconds}. Engine failures
+        return ok:false (HTTP 200) so the client can show its fallback banner.
+
+        Deliberately channel-agnostic: audio is transcribed and handed straight
+        back to the caller's composer, never stored or attributed to a channel,
+        so there is nothing here to scope by channel in landing mode."""
+        _token, ident, _is_new = self._resolve_identity()
+        if ident.source == IDENTITY_SOURCE_PENDING:
+            self._error(403, "identity required — POST /api/identify first")
+            return
+        # Bound concurrency before reading the (up to 25 MB) body, so a burst of
+        # uploads can't buffer N×MAX_STT_BYTES or pile up behind the worker lock.
+        if not STT_SLOTS.acquire(blocking=False):
+            self._json({"ok": False, "error": "transcription busy — try again in a moment"},
+                       status=503)
+            return
+        tmp = None
+        try:
+            try:
+                length = int(self.headers.get("Content-Length", "0") or 0)
+            except (TypeError, ValueError):
+                self._json({"ok": False, "error": "invalid Content-Length"}, status=400)
+                return
+            if length <= 0 or length > MAX_STT_BYTES:
+                self._json({"ok": False,
+                            "error": f"missing or oversized audio (max {MAX_STT_BYTES} bytes)"},
+                           status=400)
+                return
+            # Bound the read. The concurrency slot is already held at this
+            # point, and nothing in http.server sets a socket timeout, so a
+            # client that announces a Content-Length and then stalls holds its
+            # slot indefinitely. With the default of 2 slots, two stalled
+            # sockets — a few bytes each — deny dictation to every user of this
+            # server until the attacker disconnects.
+            prev_timeout = None
+            try:
+                prev_timeout = self.connection.gettimeout()
+                self.connection.settimeout(STT_BODY_READ_TIMEOUT)
+            except OSError:
+                pass
+            try:
+                data = self.rfile.read(length)
+            except OSError:   # socket.timeout is an OSError subclass
+                self._json({"ok": False, "error": "upload stalled or failed"}, status=408)
+                return
+            finally:
+                try:
+                    self.connection.settimeout(prev_timeout)
+                except OSError:
+                    pass
+            if len(data) != length:
+                self._json({"ok": False, "error": "incomplete upload"}, status=400)
+                return
+
+            ext = _stt_ext_for(self.headers.get("Content-Type", ""))
+            try:
+                fd, tmp = tempfile.mkstemp(prefix="nth_stt_", suffix=ext)
+                with os.fdopen(fd, "wb") as fh:
+                    fh.write(data)
+                result = STT.transcribe(tmp)
+                self._json({"ok": True, "text": result.get("text", ""),
+                            "seconds": result.get("seconds"),
+                            "no_speech": bool(result.get("no_speech")),
+                            # Surfaced so the client can tell "you said nothing"
+                            # from "you were too quiet to clear the gate" — the
+                            # difference between try-again and move-closer.
+                            "rms": result.get("rms"),
+                            "engine": "mlx_whisper", "model": STT_MODEL})
+            except SttEngineError as e:
+                # Engine text is verbatim ffmpeg/mlx output — kilobytes of it,
+                # carrying absolute local paths (this request's temp file among
+                # them). Log it here; hand the client a bounded, path-free
+                # reason, which is all its fallback banner renders anyway.
+                sys.stderr.write(f"[stt] engine error: {e}\n")
+                self._json({"ok": False, "error": "the audio could not be transcribed"})
+            except RuntimeError as e:
+                # Engine/worker failure — 200 with ok:false so the browser reads the
+                # reason and falls back to web speech (per the configured behavior).
+                self._json({"ok": False, "error": str(e)})
+            except OSError as e:
+                # Same rule as the engine branch above: an OSError's str()
+                # carries the path it failed on, which here is the server's
+                # private temp directory.
+                sys.stderr.write(f"[stt] audio write failed: {e}\n")
+                self._json({"ok": False, "error": "could not buffer the audio"}, status=500)
+        finally:
+            STT_SLOTS.release()
+            if tmp:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
+
+    def _serve_attachment(self, path: str) -> None:
+        tail = path.rsplit("/", 1)[-1]
+        if not tail.isdigit():
+            self._error(404, "not found")
+            return
+        att_id = int(tail)
+        # Attachment bytes are channel content, so they get the same bar as
+        # every other read: a resolved identity and the channel taken from the
+        # REQUEST. Binding the process-wide self.channel would serve nothing in
+        # landing mode (it is "" there) and, worse, would ignore which channel
+        # the caller actually asked for. The upstream original had no gate at
+        # all; the fork's gate keyed on a DM visibility engine that does not
+        # exist here, so this is re-derived rather than ported.
+        parsed = urlparse(self.path)
+        ch = self._channel_for_request(parsed)
+        if ch is None:
+            self._error(400, "channel query param required")
+            return
+        if self.landing_mode and not self._channel_exists(ch):
+            self._error(404, f"no such channel: {ch}")
+            return
+        _token, ident, _is_new = self._resolve_identity()
+        if ident.source == IDENTITY_SOURCE_PENDING:
+            self._error(403, "identity required — POST /api/identify first")
+            return
+        row = None
+        db = None
+        try:
+            db = sqlite3.connect(str(self.db_path), timeout=5, isolation_level=None)
+            db.row_factory = sqlite3.Row
+            db.execute("PRAGMA busy_timeout=2000")
+            op_id, _op_name = ensure_operator_row(db, ch, ident)
+            row = db.execute(
+                # An attachment is readable once it is PUBLISHED (linked to a
+                # message everyone in the channel can see). Before that it is
+                # still in someone's composer, so only its uploader may fetch
+                # it. Ids are small sequential integers, so without this an
+                # image pasted and then thought better of stays readable by
+                # anyone who guesses its id. The fork's gate keyed this on a DM
+                # visibility engine that does not exist upstream; the
+                # uploader-only half is not DM-specific and is re-derived here.
+                "SELECT mime, path FROM attachments "
+                " WHERE id = ? AND channel = ? "
+                "   AND (message_id IS NOT NULL OR member_id = ?)",
+                (att_id, ch, op_id),
+            ).fetchone()
+        except sqlite3.Error:
+            row = None
+        finally:
+            if db is not None:
+                try:
+                    db.close()
+                except sqlite3.Error:
+                    pass
+        if not row:
+            self._error(404, "not found")
+            return
+        try:
+            chan_root = (ATTACH_DIR / re.sub(r"[^\w.\-]", "_", ch)).resolve()
+            resolved = Path(row["path"]).resolve()
+            # Defense in depth: only serve files under THIS channel's dir.
+            if not resolved.is_relative_to(chan_root):
+                self._error(404, "not found")
+                return
+            data = resolved.read_bytes()
+        except OSError:
+            self._error(404, "file missing")
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", row["mime"])
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "public, max-age=31536000, immutable")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        try:
+            self.wfile.write(data)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
 
 
 # ───────── HTML / JS / CSS (served as /) ─────────
@@ -1588,12 +2996,34 @@ INDEX_HTML = r"""<!doctype html>
   :root[data-theme="bluebubble"] .member .dm-btn {
     background: rgba(10,132,255,0.15); color: #0a84ff; border: none; border-radius: 14px;
   }
+  /* Match the theme's pill shape so the remove control isn't a sharp grey box
+     beside a rounded blue one — destructive, so it keeps the red family. */
+  :root[data-theme="bluebubble"] .member .rm-btn {
+    background: rgba(255,69,58,0.15); color: #ff453a; border: none; border-radius: 14px;
+  }
+  :root[data-theme="bluebubble"] .member .rm-btn:hover:not(:disabled) {
+    background: #ff453a; color: #fff;
+  }
   /* Composer — dark keyboard area */
   :root[data-theme="bluebubble"] #composer {
     background: #1c1c1e; border-top: 0.5px solid rgba(255,255,255,0.08); padding: 8px 10px;
   }
+  /* The textarea is transparent here, so the stack carries the bubble fill. */
+  :root[data-theme="bluebubble"] #input-stack {
+    background: #2c2c2e; border-radius: 18px;
+  }
+  /* The mirror must follow every metric this theme sets on #input, and #input's
+     glyphs must stay transparent — this selector out-specifies the base rule,
+     so without re-asserting it the real text is drawn opaque ON TOP of the
+     mirror in a different font and size. */
+  :root[data-theme="bluebubble"] #input-highlight {
+    border: 0.5px solid transparent; border-radius: 18px;
+    padding: 8px 14px; font-size: 17px; line-height: 1.28;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display",
+      "Helvetica Neue", "Helvetica", "Arial", sans-serif;
+  }
   :root[data-theme="bluebubble"] #input {
-    background: #2c2c2e; color: #fff; border: 0.5px solid #48484a; border-radius: 18px;
+    background: transparent; color: transparent; caret-color: #fff; border: 0.5px solid #48484a; border-radius: 18px;
     padding: 8px 14px; font-size: 17px; line-height: 1.28;
     font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display",
       "Helvetica Neue", "Helvetica", "Arial", sans-serif;
@@ -1770,6 +3200,29 @@ INDEX_HTML = r"""<!doctype html>
   #app.side-collapsed { grid-template-columns: 1fr 0; }
   #app.side-collapsed #side { display: none; }
 
+  /* Full-history search panel */
+  #search-panel { position: fixed; top: 8%; left: 50%; transform: translateX(-50%);
+    width: min(680px, 92vw); max-height: 80vh; z-index: 70; display: flex; flex-direction: column;
+    background: var(--bg2); border: 1px solid var(--border); border-radius: 10px;
+    box-shadow: 0 12px 48px rgba(0,0,0,0.55); overflow: hidden; }
+  #search-panel[hidden] { display: none; }
+  .search-head { display: flex; gap: 8px; padding: 10px; border-bottom: 1px solid var(--border); }
+  #search-input { flex: 1; padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px;
+    background: var(--bg); color: var(--fg); font: inherit; }
+  #search-input:focus { outline: none; border-color: var(--accent); }
+  #search-close { background: none; border: none; color: var(--dim); font-size: 22px;
+    line-height: 1; cursor: pointer; padding: 0 8px; }
+  #search-close:hover { color: var(--fg); }
+  #search-status { padding: 6px 12px; font-size: 11px; color: var(--dim); }
+  #search-results { overflow-y: auto; padding: 4px 8px 10px; }
+  .search-hit { padding: 8px 10px; border-radius: 6px; cursor: pointer; border: 1px solid transparent; }
+  .search-hit:hover { background: rgba(var(--ov),0.06); border-color: rgba(var(--ov),0.15); }
+  .search-hit .sh-meta { font-size: 10px; color: var(--dim); margin-bottom: 2px; }
+  .search-hit .sh-author { font-weight: 600; }
+  .search-hit .sh-body { font-size: 12px; white-space: pre-wrap; word-break: break-word; }
+  .msg.flash { animation: flashmsg 1.4s ease-out; }
+  @keyframes flashmsg { 0% { background: var(--hover); } 100% { background: transparent; } }
+
   /* ── Header ── */
   header { grid-column: 1 / 3; background: var(--bg2); border-bottom: 1px solid var(--border);
            display: flex; align-items: center; padding: 0 16px; gap: 12px;
@@ -1824,6 +3277,40 @@ INDEX_HTML = r"""<!doctype html>
   /* ── Chat ── */
   #chat-wrap { grid-row: 2 / 3; grid-column: 1 / 2; position: relative; overflow: hidden; }
   #chat { height: 100%; overflow-y: auto; padding: 14px 16px; scroll-behavior: smooth; }
+  /* Message numbers (#N): a per-message left-margin tag, hidden unless #chat
+     carries .show-msg-nums. The number rests at the message's vertical centre;
+     via position:sticky it pins just inside the viewport edge once that centre
+     would scroll out of view, so it stays visible beside its message and then
+     leaves with the message once it's fully off-screen. Pure CSS — the gutter
+     spans the full message height and flex-centres the sticky number. */
+  .msg-num-gutter { display: none; }
+  /* position:relative is also set on .msg below for hover actions/pins; repeated
+     here so this gutter's absolute/full-height centring can't silently break if
+     that unrelated rule is ever changed. */
+  #chat.show-msg-nums .msg { padding-left: 52px; position: relative; }
+  #chat.show-msg-nums .msg-num-gutter {
+    display: flex; align-items: center; justify-content: flex-end;
+    position: absolute; left: 0; top: 0; height: 100%; width: 46px;
+    pointer-events: none; }
+  /* NB: no overflow:auto/hidden/scroll on .msg-num-gutter (or any ancestor up to
+     #chat) — that would make the gutter the sticky scroll-container and break the
+     number's position:sticky. The large-id overflow guard lives on the sticky
+     span itself (own-overflow is safe), not on an ancestor. */
+  #chat.show-msg-nums .msg-num {
+    position: sticky; top: 10px; bottom: 10px;
+    max-width: 100%; overflow: hidden; text-overflow: ellipsis;
+    font-size: 10px; line-height: 1.2; color: var(--dim);
+    font-variant-numeric: tabular-nums; white-space: nowrap;
+    pointer-events: auto; user-select: text; cursor: text; }
+  #chat.show-msg-nums .msg.targeted .msg-num { color: var(--accent); }
+  /* Walled Garden draws each message as a chat bubble (its own padding, an 18px
+     radius and a ::before tail), so padding the bubble would print the number
+     inside it. Indent the column instead and hang the gutter in that margin,
+     leaving the bubble geometry untouched. */
+  :root[data-theme="bluebubble"] #chat.show-msg-nums { padding-left: 46px; }
+  :root[data-theme="bluebubble"] #chat.show-msg-nums .msg { padding-left: 14px; }
+  :root[data-theme="bluebubble"] #chat.show-msg-nums .msg-num-gutter {
+    left: -42px; width: 36px; }
   .msg { margin-bottom: 12px; word-wrap: break-word; cursor: pointer; padding: 6px 10px 8px;
          border-radius: var(--card-radius); border-left: 3px solid transparent; margin-left: -10px; }
   .msg:hover { background: var(--hover); }
@@ -1838,9 +3325,9 @@ INDEX_HTML = r"""<!doctype html>
                                   margin-right: 2px; }
   .msg .mentions-bar .mchip { display: inline-flex; align-items: center; gap: 3px;
                                padding: 1px 7px 1px 5px; border-radius: 10px;
-                               background: rgba(255, 196, 116, 0.15);
+                               background: color-mix(in srgb, var(--mention) 15%, transparent);
                                color: var(--mention);
-                               border: 1px solid rgba(255, 196, 116, 0.3);
+                               border: 1px solid color-mix(in srgb, var(--mention) 30%, transparent);
                                font-weight: 600; }
   .msg .mentions-bar .mchip .manimal { font-size: 13px; line-height: 1; }
   /* #pound references bar — "about" someone, not "to" them. Muted vs. @ pings. */
@@ -1873,6 +3360,86 @@ INDEX_HTML = r"""<!doctype html>
   .msg .bangs-bar .mchip .manimal { font-size: 13px; line-height: 1; }
   .msg .body { word-wrap: break-word; overflow-wrap: break-word; }
   .msg .body.plain { white-space: pre-wrap; }
+  /* Valid @mentions stay visible in the prose itself, not only in the
+     routing bar above the message. The member-colored inset makes adjacent
+     mentions distinguishable while the shared mention color preserves the
+     meaning across themes. */
+  /* Text-forward mention: a member-colored dot + member-tinted text, faint
+     tint behind. The dot carries the "who" color pop; text stays legible on
+     every theme via color-mix toward the theme foreground. @all falls back to
+     the theme --mention color (no per-member color is set for it). */
+  .msg .body .inline-mention {
+    display: inline-block; padding: 0 5px; margin: 0 1px; border-radius: 5px;
+    background: color-mix(in srgb, var(--mention-member-color, var(--mention)) 11%, transparent);
+    /* Mix mostly toward --fg so contrast tracks the theme's own body text.
+       Mixing mostly toward the pastel palette colour reads fine on dark
+       themes and measured as low as 1.30:1 on the light ones — the words
+       carrying the routing meaning were the only unreadable thing on screen. */
+    color: color-mix(in srgb, var(--mention-member-color, var(--mention)) 30%, var(--fg));
+    font-weight: 700; overflow-wrap: anywhere;
+  }
+  .msg .body .inline-mention::before {
+    content: ""; display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+    background: var(--mention-member-color, var(--mention));
+    margin-right: 4px; vertical-align: 1px;
+  }
+  /* @all broadcast — a celebratory rainbow shimmer so "ping everyone" reads
+     louder than a single-member @mention. The gradient is clipped to the glyphs
+     and slowly panned; the dot is a static rainbow bead. Targets the pseudo-
+     member id "all" that decorateInlineSigil sets on the span. Motion is
+     disabled under prefers-reduced-motion (the static rainbow still reads). */
+  .msg .body .inline-mention[data-member-id="all"] {
+    background: linear-gradient(90deg,
+      #ff5f5f, #ffb347, #ffe66d, #7ede7e, #62d7ef, #8eb9ff, #d070d7, #ff5f5f);
+    background-size: 200% 100%;
+    /* A BACKING PLATE, not the glyphs. Clipping the gradient to the text made
+       @all unreadable on every light theme (measured 1.02-1.17:1 at the pale
+       stops) — the loudest signal in the product was the least visible thing on
+       screen. Text stays --fg so the word is legible in all 18 themes. */
+    color: var(--fg);
+    text-shadow: 0 0 3px var(--bg);
+    animation: at-all-shimmer 3s linear infinite;
+    font-weight: 800;
+  }
+  .msg .body .inline-mention[data-member-id="all"]::before {
+    background: conic-gradient(#ff5f5f, #ffb347, #ffe66d, #7ede7e,
+      #62d7ef, #8eb9ff, #d070d7, #ff5f5f);
+  }
+  @keyframes at-all-shimmer {
+    0%   { background-position:   0% 50%; }
+    100% { background-position: 200% 50%; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .msg .body .inline-mention[data-member-id="all"] { animation: none; }
+  }
+  /* #pound reference inline — same chip+dot mechanism as @, but tinted from the
+     muted "about" green (matches .refs-bar) and lighter weight so it reads
+     quieter than an @ping. Dot stays member-colored to keep the "who". */
+  .msg .body .inline-ref {
+    display: inline-block; padding: 0 5px; margin: 0 1px; border-radius: 5px;
+    background: rgba(126, 222, 126, 0.08);
+    color: color-mix(in srgb, #9ccf9c, var(--fg) 32%);
+    font-weight: 500; white-space: nowrap;
+  }
+  .msg .body .inline-ref::before {
+    content: ""; display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+    background: var(--mention-member-color, #9ccf9c);
+    margin-right: 4px; vertical-align: 1px;
+  }
+  /* !bang alert inline — same mechanism, tinted from the loud coral (matches
+     .bangs-bar) with heavier weight so it reads louder than an @ping. Dot stays
+     member-colored to keep the "who". */
+  .msg .body .inline-bang {
+    display: inline-block; padding: 0 5px; margin: 0 1px; border-radius: 5px;
+    background: rgba(255, 132, 112, 0.16);
+    color: color-mix(in srgb, #ff8470, var(--fg) 18%);
+    font-weight: 800; white-space: nowrap;
+  }
+  .msg .body .inline-bang::before {
+    content: ""; display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+    background: var(--mention-member-color, #ff8470);
+    margin-right: 4px; vertical-align: 1px;
+  }
   .msg .body > *:first-child { margin-top: 0; }
   .msg .body > *:last-child { margin-bottom: 0; }
   .msg .body p { margin: 4px 0; white-space: pre-wrap; }
@@ -1884,6 +3451,28 @@ INDEX_HTML = r"""<!doctype html>
                           font-family: ui-monospace, Menlo, Monaco, monospace; font-size: 0.9em;
                           white-space: pre-wrap; overflow-x: auto; }
   .msg .body strong { font-weight: 700; }
+  /* Validated file paths — clickable "reveal in Finder" links. Distinct from
+     plain links: code-tinted chip + a subtle 📁 affordance, dotted underline. */
+  #chat .msg .body a.file-link {
+    color: var(--accent); text-decoration: underline; text-decoration-style: dotted;
+    text-underline-offset: 2px; cursor: pointer;
+    background: rgba(var(--ov),0.06); border-radius: 3px; padding: 0 3px;
+    transition: background 0.12s ease, color 0.12s ease;
+  }
+  .file-links-unavailable { padding: 6px 12px; font-size: 11px; color: var(--dim);
+                            background: var(--bg2); border-bottom: 1px solid var(--border); }
+  .file-link-note { font-size: 0.85em; color: var(--err); white-space: normal; }
+  /* Game Boy's --err is identical to --accent and to the body text colour, so
+     colour alone cannot signal failure. The strike-through is a shape cue that
+     survives any palette. */
+  #chat .msg .body a.file-link.file-link-err { text-decoration-line: line-through underline; }
+  #chat .msg .body a.file-link::after { content: " 📁"; font-size: 0.82em; opacity: 0.65; }
+  #chat .msg .body a.file-link:hover { background: rgba(var(--ov),0.12); }
+  #chat .msg .body a.file-link:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
+  #chat .msg .body a.file-link.file-link-ok  { background: rgba(var(--ok-rgb, 80,200,120),0.22); }
+  #chat .msg .body a.file-link.file-link-err {
+    color: var(--err); background: rgba(var(--ov),0.10); text-decoration-style: wavy;
+  }
   .msg .body em { font-style: italic; }
   .msg .body del { opacity: 0.7; }
   .msg .body a { color: var(--accent2); text-decoration: underline; }
@@ -1962,6 +3551,20 @@ INDEX_HTML = r"""<!doctype html>
   #jump-btn:hover { background: var(--accent-hi); }
   #jump-btn .count { background: var(--err); color: white;
                      border-radius: 10px; padding: 1px 6px; margin-left: 4px; font-size: 10px; }
+  /* top "N new messages" bar — jump to the first unread */
+  #new-bar { position: absolute; left: 50%; top: 10px; transform: translateX(-50%);
+             background: var(--mention); color: var(--bg); border: none; z-index: 6;
+             padding: 5px 14px; border-radius: 16px; font-size: 11px; font-weight: 600;
+             cursor: pointer; box-shadow: 0 4px 14px rgba(0,0,0,0.5); display: none;
+             user-select: none; }
+  #new-bar.show { display: block; }
+  #new-bar:hover { filter: brightness(1.1); }
+  /* "new messages" divider before the first unread message */
+  .unread-divider { display: flex; align-items: center; gap: 8px; margin: 10px 4px;
+                    color: var(--mention); font-size: 10px; font-weight: 600;
+                    text-transform: uppercase; letter-spacing: 0.6px; }
+  .unread-divider::before, .unread-divider::after { content: ""; flex: 1; height: 1px;
+                    background: var(--mention); }
 
   /* ── Roster sidebar ── */
   #side { grid-row: 2 / 3; grid-column: 2 / 3;
@@ -1971,6 +3574,19 @@ INDEX_HTML = r"""<!doctype html>
   #side section:last-child { border-bottom: none; }
   #side h2 { font-size: 10px; text-transform: uppercase; color: var(--dim);
              letter-spacing: 0.08em; margin: 0 0 10px; font-weight: 600; }
+  /* Heading row: section title on the left, close control in the corner. */
+  #side .side-head { display: flex; align-items: center; justify-content: space-between;
+                     gap: 8px; margin: 0 0 10px; }
+  #side .side-head h2 { margin: 0; }
+  #side-close { flex: 0 0 auto; width: 22px; height: 22px; padding: 0;
+                display: flex; align-items: center; justify-content: center;
+                background: var(--bg2); color: var(--dim);
+                border: 1px solid var(--border); border-radius: var(--pill-radius);
+                font-family: inherit; font-size: 12px; line-height: 1; cursor: pointer; }
+  #side-close:hover { background: var(--accent); color: var(--bg);
+                      border-color: var(--accent); }
+  #side-close:focus-visible { outline: none; border-color: var(--accent);
+                              color: var(--fg); }
 
   .member { padding: 8px 0; cursor: pointer; }
   .member + .member { border-top: 1px solid var(--border); }
@@ -1988,6 +3604,21 @@ INDEX_HTML = r"""<!doctype html>
                      background: var(--bg2); color: var(--dim); margin-left: 4px; }
   .member .ctx-pct.warm { background: #4a3a20; color: #e5d35e; }
   .member .ctx-pct.hot  { background: #4a2420; color: var(--bang-chip); }
+  .member .member-actions { display: none; padding: 6px 0 2px 16px; }
+  .member.expanded .member-actions { display: flex; }
+  /* Destructive, so it carries --err rather than the amber --mention hue that
+     means "someone said your name" everywhere else in this UI. */
+  /* Sized off .dm-btn on purpose: the routine control and the destructive one
+     sit in the same expanded row, and the destructive one should not be the
+     bigger target. */
+  .member .rm-btn { font: inherit; font-size: 9px; line-height: 1.2;
+                    padding: 2px 6px; border-radius: 3px;
+                    background: var(--bg2); color: var(--err); border: 1px solid var(--border);
+                    cursor: pointer; flex-shrink: 0; user-select: none;
+                    text-transform: uppercase; letter-spacing: 0.5px; }
+  .member .rm-btn:hover:not(:disabled) { background: var(--err); color: var(--bg);
+                          border-color: var(--err); }
+  .member .rm-btn:disabled { opacity: 0.6; cursor: default; }
   .member .fmode { font-size: 9px; padding: 1px 5px; border-radius: 3px;
                    flex-shrink: 0; user-select: none;
                    text-transform: uppercase; letter-spacing: 0.5px;
@@ -2003,6 +3634,16 @@ INDEX_HTML = r"""<!doctype html>
   .member.expanded .caret { transform: rotate(90deg); }
   .member .id { color: var(--dimmer); font-size: 10px; margin-left: 2px; }
   .dot.active { background: var(--accent2); }
+  /* working = alive AND mid-turn: a breathing green dot, the "it's on it,
+     keep chilling" cue. Distinct from the solid green "active" (legacy /
+     hook-not-installed) and the grey "idle" (turn ended, waiting on you). */
+  .dot.working { background: var(--accent2); animation: workpulse 1.3s ease-in-out infinite; }
+  @keyframes workpulse {
+    0%   { opacity: 1;    transform: scale(1); }
+    50%  { opacity: 0.4;  transform: scale(0.72); }
+    100% { opacity: 1;    transform: scale(1); }
+  }
+  @media (prefers-reduced-motion: reduce) { .dot.working { animation: none; } }
   .dot.idle { background: var(--dimmer); }
   .dot.stale { background: var(--warn); }
   .dot.dead { background: var(--err); }
@@ -2068,15 +3709,175 @@ INDEX_HTML = r"""<!doctype html>
   #target-bar .tb-pill.tb-all.on { border-style: solid; }
   body.dm-mode #target-bar { display: none; }
   #input-row { display: flex; gap: 8px; align-items: flex-end; position: relative; }
-  #input { flex: 1; background: var(--bg); color: var(--fg); border: 1px solid var(--border);
-           padding: 8px 10px; border-radius: var(--input-radius); font-family: inherit; font-size: 13px;
+  #input-stack { flex: 1; position: relative; min-width: 0; background: var(--bg);
+                 border-radius: var(--input-radius); }
+  #input-highlight {
+    position: absolute; inset: 0; z-index: 0; pointer-events: none;
+    padding: 8px 10px; border: 1px solid transparent; border-radius: var(--input-radius);
+    font-family: inherit; font-size: 13px; line-height: 1.45;
+    white-space: pre-wrap; overflow-wrap: break-word; overflow: hidden;
+    /* Reserve the gutter the textarea's scrollbar takes once the draft
+       exceeds max-height, or the two wrap at different columns wherever
+       scrollbars are classic rather than overlay. */
+    scrollbar-gutter: stable;
+    color: var(--fg);
+  }
+  /* The highlight mirrors the textarea 1:1, so it must NOT change text metrics —
+     background/colour only. Anything that adds width or shifts the baseline
+     (padding, border, underline, a leading dot) makes the overlay drift from
+     the typed glyphs. Member colour is wired in per-token by
+     renderComposerMentionHighlights(). */
+  #input-highlight.composing { visibility: hidden; }
+  #input-highlight .composer-mention {
+    color: var(--mention-member-color, var(--mention));
+    box-shadow: inset 0 -2px 0 var(--mention-member-color, var(--mention));
+  }
+  /* @all in the composer gets the same rainbow shimmer as the rendered chip,
+     so typing "@all" previews the broadcast. Reuses the at-all-shimmer keyframe. */
+  #input-highlight .composer-mention-all {
+    background: linear-gradient(90deg,
+      #ff5f5f, #ffb347, #ffe66d, #7ede7e, #62d7ef, #8eb9ff, #d070d7, #ff5f5f);
+    background-size: 200% 100%;
+    color: var(--fg); text-shadow: 0 0 3px var(--bg);
+    box-shadow: none;
+    animation: at-all-shimmer 3s linear infinite;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    #input-highlight .composer-mention-all { animation: none; }
+  }
+  /* The textarea's own glyphs are hidden (color: transparent) so the colored
+     #input-highlight mirror behind it is what the user reads; caret-color keeps
+     the caret visible. Placeholder + selection are restored explicitly since
+     they'd otherwise inherit the transparent text color. */
+  /* The textarea's own glyphs are transparent so the coloured mirror behind it
+     is what the user reads; caret-color keeps the caret visible. line-height is
+     pinned because the mirror must match it exactly. */
+  #input { scrollbar-gutter: stable; position: relative; z-index: 1; width: 100%; display: block;
+           background: transparent; color: transparent; caret-color: var(--fg);
+           border: 1px solid var(--border);
+           padding: 8px 10px; border-radius: var(--input-radius);
+           font-family: inherit; font-size: 13px; line-height: 1.45;
            resize: none; min-height: 36px; max-height: 160px; }
   #input:focus { outline: none; border-color: var(--accent); }
+  #input::placeholder { color: var(--dim); opacity: 1; }
+  /* Translucent selection so the colored mirror text stays readable through it. */
+  #input::selection { background: color-mix(in srgb, var(--accent) 32%, transparent); }
   #send-btn { background: var(--accent); color: var(--bg); border: none;
               padding: 0 18px; height: 36px; border-radius: 4px; cursor: pointer;
               font-weight: 600; font-family: inherit; font-size: 13px; }
   #send-btn:hover { background: var(--accent-hi); }
   #send-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  #attach-btn { background: var(--panel); color: var(--fg); border: 1px solid var(--border);
+                height: 36px; min-width: 38px; border-radius: 4px; cursor: pointer;
+                font-size: 16px; line-height: 1; }
+  #attach-btn:hover { border-color: var(--accent); }
+  /* Dictation. #mic-btn borrows #attach-btn's metrics so the composer row stays
+     even, and uses a text glyph for the same reason the attach button does. */
+  #mic-btn { background: var(--panel); color: var(--fg); border: 1px solid var(--border);
+             height: 36px; min-width: 38px; cursor: pointer;
+             font-size: 16px; line-height: 1; }
+  #mic-btn:hover { border-color: var(--accent); }
+  /* Both composer buttons take the theme's input radius. Hardcoding 4px left
+     two square boxes beside a pill-shaped textarea and a round send button in
+     bluebubble, and mismatched corners in vaporwave/lcars/gameboy. */
+  #attach-btn, #mic-btn { display: inline-flex; align-items: center; justify-content: center;
+                          padding: 0; border-radius: var(--input-radius, 4px); }
+  #mic-btn.recording { border-color: var(--err); color: var(--err);
+                       animation: micpulse 1.2s ease-in-out infinite; }
+  /* Dimmed while busy — but 'cancelable' (transcribing) is still clickable, so
+     it must not also take the not-allowed cursor that reads as disabled. */
+  #mic-btn.working { opacity: 0.6; cursor: default; }
+  #mic-btn.working.cancelable { cursor: pointer; }
+  /* color-mix, not rgba(var(--x-rgb)): the themes define --err as a hex colour,
+     and there is no matching --err-rgb triplet to interpolate. */
+  @keyframes micpulse {
+    0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--err) 50%, transparent); }
+    50%      { box-shadow: 0 0 0 4px color-mix(in srgb, var(--err) 0%, transparent); }
+  }
+  #stt-banner { padding: 5px 9px; margin-bottom: 6px; font-size: 12px;
+                border-radius: var(--card-radius, 4px); }
+  #stt-banner[hidden] { display: none; }
+  .stt-banner-action { font: inherit; cursor: pointer; padding: 2px 8px; margin: 0 2px;
+                       background: var(--accent); color: var(--bg); border: none;
+                       border-radius: var(--input-radius, 4px); }
+  .stt-banner-action:hover { background: var(--accent-hi, var(--accent)); }
+  #stt-banner.warn { background: color-mix(in srgb, var(--mention) 14%, transparent);
+                     color: var(--fg);
+                     border: 1px solid color-mix(in srgb, var(--mention) 45%, transparent); }
+  #stt-banner.err  { background: color-mix(in srgb, var(--err) 14%, transparent);
+                     color: var(--fg);
+                     border: 1px solid color-mix(in srgb, var(--err) 50%, transparent); }
+  /* --accent2 rather than a fixed green: a mid green on the light themes
+     (Paper, Daylight, Clean, PVE Light) lands around 2.3:1 and is unreadable. */
+  .stt-status.ok { color: var(--accent2); }
+  .stt-status.err { color: var(--err); }
+  .stt-test-out { font-size: 11px; color: var(--dim); }
+  .stt-test-out.ok { color: var(--accent2); }
+  .stt-test-out.err { color: var(--err); }
+  #settings-panel button.pill { padding: 2px 9px; }
+  #settings-stt-page .pill { display: inline-flex; align-items: center; gap: 5px; }
+  .stt-mode-note { font-size: 10px; color: var(--dim); line-height: 1.35; }
+  /* STT recording waveform + transcription spinner */
+  .stt-spinner { width: 20px; height: 20px; border-radius: 50%; flex-shrink: 0;
+                 border: 3px solid rgba(var(--ov), 0.25); border-top-color: var(--accent);
+                 animation: sttspin 0.8s linear infinite; }
+  .stt-spinner[hidden] { display: none; }
+  @keyframes sttspin { to { transform: rotate(360deg); } }
+  /* Matches how the @all shimmer and composer mirror already behave. The
+     spinner keeps its ring (it still reads as "busy" without spinning). */
+  @media (prefers-reduced-motion: reduce) {
+    #mic-btn.recording { animation: none; }
+    .stt-spinner { animation: none; }
+  }
+  /* Wraps so the status label cannot be pushed off the edge of a narrow
+     composer — during a first-run model warm that label is the only
+     explanation the user gets for a multi-minute wait. */
+  #stt-viz { display: flex; align-items: center; gap: 8px; margin-bottom: 6px;
+             flex-wrap: wrap; }
+  #stt-viz[hidden] { display: none; }
+  #stt-wave { width: 300px; max-width: 100%; height: 30px; flex-shrink: 1; min-width: 0; }
+  #stt-wave[hidden] { display: none; }
+  #stt-viz-label, .stt-viz-label { font-size: 11px; color: var(--dim); }
+  /* Settings → local-transcription sub-page */
+  #settings-stt-page { display: none; }
+  #settings-panel.stt-page-open > :not(#settings-stt-page) { display: none; }
+  #settings-panel.stt-page-open > #settings-stt-page { display: block; }
+  #settings-stt-page .stt-back { background: none; border: none; color: var(--accent);
+                                 cursor: pointer; font-size: 12px; padding: 0 0 6px; }
+  #settings-stt-page h3 { margin: 2px 0 8px; }
+  #settings-stt-page .stt-status { margin-bottom: 8px; }
+  .stt-testviz { display: flex; align-items: center; gap: 8px; margin: 8px 0; }
+  .stt-testviz[hidden] { display: none; }
+  #stt-test-wave { width: 260px; max-width: 100%; height: 30px; }
+  #attach-strip { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 6px; }
+  #attach-strip:empty { display: none; }
+  .attach-thumb { position: relative; width: 60px; height: 60px; border-radius: 4px;
+                  overflow: hidden; border: 1px solid var(--border); background: var(--bg); }
+  .attach-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .attach-thumb .rm { position: absolute; top: 1px; right: 1px; width: 16px; height: 16px;
+                      border-radius: 50%; background: rgba(0,0,0,0.65); color: #fff;
+                      border: none; cursor: pointer; font-size: 11px; line-height: 16px;
+                      padding: 0; text-align: center; }
+  .attach-thumb.uploading { opacity: 0.5; }
+  #composer.dragover { outline: 2px dashed var(--accent); outline-offset: -4px; }
+  /* Compact clamps .body, but attachments are a SIBLING of it — without
+     this an image message stayed 250-380px tall while plain ones clamped
+     to ~57px, so the setting did almost nothing on a channel with images. */
+  .msg.compact .msg-attachments { max-height: 64px; overflow: hidden; }
+  .msg.compact .msg-img { max-height: 64px; }
+  .msg .msg-attachments { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px;
+                          min-width: 0; max-width: 100%; }
+  .msg .msg-attachments > a { min-width: 0; max-width: 100%; }
+  /* min() not a bare 320px: as a flex item with min-width:auto the link
+     refused to shrink, so an image tore through the bubble's rounded corner
+     and off the viewport at every phone width (measured 75px past the edge
+     at 390px in Walled Garden, and 23px at 320px in the default themes). */
+  .msg-img-missing { display: inline-block; font-size: 12px; color: var(--dim);
+                     padding: 6px 10px; border: 1px dashed var(--border);
+                     border-radius: 6px; }
+  .msg .msg-img { max-width: min(320px, 100%); max-height: 320px;
+                  height: auto; border-radius: 6px;
+                  border: 1px solid var(--border); cursor: pointer; display: block; }
   #hint { font-size: 10px; color: var(--dimmer); margin-top: 2px; }
   #hint kbd { background: var(--panel); border: 1px solid var(--border); padding: 1px 5px;
               border-radius: 2px; font-size: 10px; color: var(--dim); }
@@ -2113,15 +3914,10 @@ INDEX_HTML = r"""<!doctype html>
     #side { display: none !important; position: fixed; top: 0; bottom: 0; right: 0;
             width: calc(100vw - 60px); max-width: 320px; z-index: 20;
             grid-column: 1; grid-row: 2; border-left: 1px solid var(--border);
-            overflow-y: auto; padding-top: 48px; }
+            overflow-y: auto; padding-top: 12px; }
     #app.mobile-side-open #side { display: flex !important; }
-    /* Close button inside the sidebar on mobile */
-    #mobile-side-close { display: none; position: absolute; top: 10px; right: 10px;
-                         z-index: 21; background: var(--panel); border: 1px solid var(--border);
-                         color: var(--fg); font-size: 18px; width: 32px; height: 32px;
-                         border-radius: 50%; cursor: pointer; line-height: 1;
-                         display: flex; align-items: center; justify-content: center; }
-    #app.mobile-side-open #mobile-side-close { display: flex; }
+    /* Same corner control, sized for a fingertip. */
+    #side-close { width: 30px; height: 30px; font-size: 15px; }
     /* Scrim behind sidebar overlay */
     #mobile-scrim { display: none; position: fixed; inset: 0; z-index: 19;
                     background: rgba(0,0,0,0.5); }
@@ -2133,8 +3929,14 @@ INDEX_HTML = r"""<!doctype html>
 
     /* Composer: touch-friendly */
     #composer { padding: 6px 8px; }
-    #input { font-size: 16px; min-height: 40px; }  /* ≥16px prevents iOS zoom */
+    /* The mirror must take EVERY metric override the textarea takes, or the
+       coloured text drifts off the caret. >=16px also prevents iOS zoom. */
+    #input, #input-highlight { font-size: 16px; min-height: 40px; }
     #send-btn { height: 40px; padding: 0 14px; }
+    /* 300px of canvas does not fit a phone composer, and its max-width never
+       engaged because the container was narrower than the fixed width. */
+    #stt-wave { width: 200px; }
+    #stt-test-wave { width: 100%; }
     #hint { display: none; }
     #target-bar { gap: 4px; }
     #target-bar .tb-pill { padding: 4px 10px; font-size: 12px; }
@@ -2151,6 +3953,9 @@ INDEX_HTML = r"""<!doctype html>
   }
 
   @media (max-width: 480px) {
+    /* Shrink the message-number gutter on phones so it doesn't eat the body. */
+    #chat.show-msg-nums .msg { padding-left: 44px; }
+    #chat.show-msg-nums .msg-num-gutter { width: 38px; }
     header .meta { display: none; }
     .msg .head { font-size: 10px; }
     .msg .mentions-bar .mchip, .msg .refs-bar .mchip,
@@ -2213,6 +4018,7 @@ INDEX_HTML = r"""<!doctype html>
         <option value="solarized">Solarized</option>
         <option value="synthwave">Synthwave</option>
         <option value="vaporwave">Vaporwave</option>
+        <option value="popart">Pop Art</option>
         <option value="lcars">LCARS</option>
         <option value="bluebubble">Walled Garden</option>
       </optgroup>
@@ -2220,7 +4026,6 @@ INDEX_HTML = r"""<!doctype html>
         <option value="light">Daylight</option>
         <option value="pve-light">Clean</option>
         <option value="paper">Paper</option>
-        <option value="popart">Pop Art</option>
       </optgroup>
       <optgroup label="Retro">
         <option value="crt">CRT Green</option>
@@ -2237,17 +4042,21 @@ INDEX_HTML = r"""<!doctype html>
       <option value='"Hack", ui-monospace, Menlo, monospace'>Hack</option>
       <option value='"IBM Plex Mono", ui-monospace, Menlo, monospace'>IBM Plex Mono</option>
       <option value='"Source Code Pro", ui-monospace, Menlo, monospace'>Source Code Pro</option>
+      <option value='"Iosevka", "Iosevka Term", "Iosevka Fixed", ui-monospace, Menlo, monospace'>Iosevka</option>
       <option value='Menlo, Monaco, ui-monospace, monospace'>Menlo</option>
       <option value='Monaco, Menlo, ui-monospace, monospace'>Monaco</option>
       <option value='Consolas, "Cascadia Mono", ui-monospace, monospace'>Consolas</option>
       <option value='"SF Mono", "SFMono-Regular", ui-monospace, Menlo, monospace'>SF Mono</option>
+      <option value='"Atkinson Hyperlegible Next", "Atkinson Hyperlegible", -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Arial, sans-serif'>Atkinson Hyperlegible</option>
       <option value='-apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "Helvetica Neue", "Helvetica", "Arial", sans-serif' disabled>Walled Garden</option>
     </select>
     <input id="filter" type="text" placeholder="filter messages…" spellcheck="false">
+    <span class="pill" id="btn-search" title="search the full channel history">🔍 search</span>
     <span class="pill on" id="btn-side" title="show/hide the roster sidebar">roster</span>
+    <span class="pill on" id="btn-msgnum" title="show each message's #number in the left margin">#nums</span>
     <span class="pill" id="btn-compact" title="clamp every message body to 3 lines">compact</span>
     <span class="pill" id="btn-notify" title="desktop notifications on @you">🔔 off</span>
-    <span class="pill" id="btn-sound" title="play a chime on any new message">🔊 off</span>
+    <span class="pill" id="btn-sound" title="play a chime on new messages (scope in settings when on)">🔊 off</span>
     <span class="pill" id="btn-settings" title="settings">⚙ settings</span>
     <span class="pill" id="btn-mobile-roster" title="show roster &amp; context">☰</span>
     <span class="pill conn bad" id="h-conn">● disconnected</span>
@@ -2258,15 +4067,18 @@ INDEX_HTML = r"""<!doctype html>
 
   <div id="mobile-scrim"></div>
   <div id="chat-wrap">
+    <div id="new-bar" title="jump to the first unread message"></div>
     <div id="chat"></div>
     <button id="jump-btn">↓ latest<span class="count" id="jump-count" style="display:none">0</span></button>
   </div>
 
   <aside id="side">
-    <button id="mobile-side-close" aria-label="Close sidebar">✕</button>
     <section>
       <div id="filter-banner">filter active — showing matching messages only. click to clear.</div>
-      <h2 id="r-heading">Members</h2>
+      <div class="side-head">
+        <h2 id="r-heading">Members</h2>
+        <button id="side-close" aria-label="Close sidebar" title="Close sidebar">✕</button>
+      </div>
       <div id="r-list"></div>
     </section>
     <section id="chanstats-wrap">
@@ -2279,9 +4091,22 @@ INDEX_HTML = r"""<!doctype html>
   <div id="composer">
     <div id="preview">(broadcast — all connected members receive this)</div>
     <div id="target-bar"></div>
+    <div id="attach-strip"></div>
+    <div id="stt-banner" role="status" aria-live="polite" hidden></div>
+    <div id="stt-viz" hidden>
+      <canvas id="stt-wave" width="300" height="30"></canvas>
+      <div id="stt-spinner" class="stt-spinner" hidden></div>
+      <span id="stt-viz-label" role="status" aria-live="polite"></span>
+    </div>
+    <input type="file" id="file-input" accept="image/png,image/jpeg,image/gif,image/webp" multiple style="display:none">
     <div id="input-row">
       <div id="completions"></div>
-      <textarea id="input" rows="1" placeholder="Message — @ to mention, Enter to send"></textarea>
+      <button id="attach-btn" title="attach image (or paste / drop into the box)">🖼</button>
+      <button id="mic-btn" title="dictate (speech to text)" aria-label="dictate">🎤</button>
+      <div id="input-stack">
+        <div id="input-highlight" aria-hidden="true"></div>
+        <textarea id="input" rows="1" placeholder="Message — @ to mention, Enter to send"></textarea>
+      </div>
       <button id="send-btn">Send</button>
     </div>
     <div id="hint">
@@ -2295,11 +4120,20 @@ INDEX_HTML = r"""<!doctype html>
       <kbd>Alt+A</kbd> all
       <kbd>Alt+0</kbd> clear
       <kbd>Ctrl+B</kbd> roster
+      <kbd>paste / drop</kbd> image
       <span style="margin-left:14px;color:var(--dim)">click a message to expand/collapse in compact mode</span>
     </div>
   </div>
 </div>
 
+<div id="search-panel" hidden>
+  <div class="search-head">
+    <input id="search-input" type="text" placeholder="search all history…" autocomplete="off" spellcheck="false">
+    <button id="search-close" title="close (Esc)" aria-label="close search">×</button>
+  </div>
+  <div id="search-status"></div>
+  <div id="search-results"></div>
+</div>
 <script>
 (() => {
   // ── DOM handles ──
@@ -2313,9 +4147,11 @@ INDEX_HTML = r"""<!doctype html>
   const hMeta = document.getElementById('h-meta');
   const hConn = document.getElementById('h-conn');
   const input = document.getElementById('input');
+  const inputHighlight = document.getElementById('input-highlight');
   const sendBtn = document.getElementById('send-btn');
   const preview = document.getElementById('preview');
   const compEl = document.getElementById('completions');
+  const btnMsgNum = document.getElementById('btn-msgnum');
   const filterEl = document.getElementById('filter');
   const filterBanner = document.getElementById('filter-banner');
   const btnCompact = document.getElementById('btn-compact');
@@ -2324,6 +4160,7 @@ INDEX_HTML = r"""<!doctype html>
   const fontPicker = document.getElementById('font-picker');
   const jumpBtn = document.getElementById('jump-btn');
   const jumpCount = document.getElementById('jump-count');
+  const newBar = document.getElementById('new-bar');
   const targetBar = document.getElementById('target-bar');
 
   // Message-font picker — persists per-origin via localStorage.
@@ -2431,6 +4268,10 @@ INDEX_HTML = r"""<!doctype html>
   const API_QS = /*__API_QS__*/'';
 
   // ── State ──
+  // How recently a real gesture must have happened for a scroll to count as
+  // the user's. Covers a smooth-scroll animation started by a real drag.
+  const USER_INTENT_MS = 1500;
+  let CAN_CULL = false;
   const state = {
     channel: '',
     operator: { id: '', name: '' },
@@ -2452,10 +4293,20 @@ INDEX_HTML = r"""<!doctype html>
     initialLoad: true,              // pin to newest until the history burst settles
     soundEnabled: false,
     chimeVolume: 0.33,
+    soundScope: 'all',        // 'mention' | 'all' — chime scope, INDEPENDENT of
+                              // notifyScope. Defaults to 'all' to preserve the
+                              // historical "chime on any new message" behavior
+                              // for operators who already had the chime on.
     notifyScope: 'mention',   // 'mention' | 'all'
     notifyWhen: 'hidden',     // 'hidden' | 'always'
+    pendingAttachments: [],   // images uploaded but not yet attached to a send
+    sttMode: 'local',         // 'local' (Whisper sidecar) | 'web' (browser SpeechRecognition)
+    sttRecording: false,      // mic is actively capturing
     unreadCount: 0,                 // for tab title while hidden
     jumpUnread: 0,                  // messages arrived while user was scrolled up
+    lastSeenId: 0,                  // highest msg id the user has caught up to
+    userIntentAt: 0,                // timestamp of the last real scroll gesture
+                                    // (session-based; drives the unread divider)
     rateBins: new Map(),            // bin_epoch_10s → count
     startedAt: Date.now(),
     originalTitle: 'nth_web',
@@ -2517,14 +4368,214 @@ INDEX_HTML = r"""<!doctype html>
   function escapeHtml(s) { return s.replace(/[&<>"']/g, c =>
     ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]); }
 
-  // Markdown → HTML. Server is stdlib-only; render on the client.
-  // Block-level: ATX headings (# … ######), fenced code (```lang), lists
-  // (ul/ol, nested by indent), GFM task lists (- [ ] / - [x]), blockquotes
-  // (nested with renderMarkdown recursion), thematic breaks (---, ***, ___),
-  // GFM pipe tables (with :---: alignment), paragraphs.
-  // Inline: **bold**, *italic*/_italic_, ~~strike~~, `inline code`,
-  // [text](url), autolinked http(s). Soft line breaks inside a paragraph
-  // become <br>.
+  // A single character-class run + optional :line[:col] — a flat quantifier
+  // (no nested `(…+…)+`), so it scans in LINEAR time and can't be driven into
+  // catastrophic/quadratic backtracking (ReDoS) by a long slash-free blob.
+  // Candidates are then post-filtered: a real path must contain a '/'.
+  const FILE_PATH_RUN_RE = /[A-Za-z0-9_.~/-]+(?::\d+(?::\d+)?)?/g;
+  const FILE_PATH_MAX_LEN = 4096;
+  // Per-path validation cache (path token → exists bool). Shared across every
+  // message so re-renders and repeated paths never re-hit the endpoint.
+  // Bounded: keys are every distinct path-like token ever seen, including inert
+  // look-alikes, on a tab that may live for days. Oldest-out at the cap.
+  const FILE_PATH_CACHE_MAX = 5000;
+  const filePathCache = new Map();
+  function cacheFilePath(token, ok) {
+    if (filePathCache.size >= FILE_PATH_CACHE_MAX) {
+      const oldest = filePathCache.keys().next();
+      if (!oldest.done) filePathCache.delete(oldest.value);
+    }
+    filePathCache.set(token, ok);
+  }
+  // Said once per page: without it the feature simply is not there for a viewer
+  // the server will not trust, which is indistinguishable from "none of those
+  // files exist".
+  let _fileLinksNoticeShown = false;
+  function noteFileLinksUnavailable() {
+    if (_fileLinksNoticeShown) return;
+    _fileLinksNoticeShown = true;
+    const bar = document.createElement('div');
+    bar.className = 'file-links-unavailable';
+    bar.setAttribute('role', 'status');
+    bar.textContent = 'File paths are not clickable here — reveal-in-Finder is '
+                    + 'limited to the machine running the dashboard.';
+    if (chat && chat.parentNode) chat.parentNode.insertBefore(bar, chat);
+  }
+
+  function detectFilePathCandidates(text) {
+    const out = [];
+    if (!text) return out;
+    FILE_PATH_RUN_RE.lastIndex = 0;
+    let m;
+    while ((m = FILE_PATH_RUN_RE.exec(text)) !== null) {
+      let tok = m[0];
+      const start = m.index;
+      if (tok.indexOf('/') === -1) continue;               // not path-like (no separator)
+      // Require a real FILENAME SEGMENT, not just separators: a candidate must
+      // carry at least one name character ([A-Za-z0-9_]). This rejects a BARE
+      // '/' (and pure-punctuation runs like '//', './', '-/-') that a slash used
+      // as prose punctuation produces — "reload / incognito", "high / low",
+      // "#" / "!". Those would otherwise validate against on-disk roots ('/'
+      // exists!) and wrongly pick up a folder link. Slash-joined WORDS ('and/or',
+      // 'high/medium/low') still pass here but are gated by real existence, so
+      // they only link if they genuinely resolve. (Server rejects roots too —
+      // defense in depth.)
+      if (!/[A-Za-z0-9_]/.test(tok)) continue;
+      // Drop a single trailing sentence period ("…/c.py." → "…/c.py"); never a
+      // ".." tail. Trailing trim only, so the start offset stays valid.
+      tok = tok.replace(/([^.\/])\.$/, '$1');
+      if (!tok || tok.length > FILE_PATH_MAX_LEN) continue;
+      out.push({ start, end: start + tok.length, token: tok });
+    }
+    return out;
+  }
+
+  // Wrap candidate tokens the caller marks valid (isValid(token) === true) in a
+  // .file-link. Skips code/pre/existing links, the @/#/! sigil spans, and
+  // already-linkified paths, so we never double-wrap or touch literal code.
+  // onClick (optional) is attached to each created link.
+  function linkifyValidatedPaths(root, isValid, onClick) {
+    if (!root) return;
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    const nodes = [];
+    while (walker.nextNode()) {
+      const node = walker.currentNode;
+      const parent = node.parentElement;
+      if (!parent || parent.closest(
+        'code, pre, a, .inline-mention, .inline-ref, .inline-bang, .file-link')) continue;
+      if (detectFilePathCandidates(node.nodeValue || '').some(c => isValid(c.token)))
+        nodes.push(node);
+    }
+    for (const node of nodes) {
+      const text = node.nodeValue || '';
+      const cands = detectFilePathCandidates(text).filter(c => isValid(c.token));
+      if (!cands.length) continue;
+      const frag = document.createDocumentFragment();
+      let cursor = 0;
+      for (const c of cands) {
+        if (c.start < cursor) continue;   // defensive: skip any overlap
+        frag.appendChild(document.createTextNode(text.slice(cursor, c.start)));
+        const link = document.createElement('a');
+        link.className = 'file-link';
+        link.textContent = c.token;
+        link.dataset.path = c.token;
+        link.setAttribute('role', 'button');
+        link.setAttribute('tabindex', '0');
+        link.title = 'Reveal in Finder';
+        if (typeof onClick === 'function') {
+          link.addEventListener('click', (e) => { e.preventDefault(); onClick(c.token, link); });
+          link.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick(c.token, link); }
+          });
+        }
+        frag.appendChild(link);
+        cursor = c.end;
+      }
+      frag.appendChild(document.createTextNode(text.slice(cursor)));
+      node.replaceWith(frag);
+    }
+  }
+
+  // Brief inline state on a file link after a reveal attempt (no navigation,
+  // no modal). Success/failure both auto-revert; failures surface the reason
+  // in the tooltip.
+  function flashFileLink(link, ok, msg) {
+    if (!link || !link.classList) return;
+    const cls = ok ? 'file-link-ok' : 'file-link-err';
+    link.classList.add(cls);
+    // A failure reason written to link.title is unreadable: the pointer is
+    // already over the link when you click, so the native tooltip does not
+    // re-fire, and touch has no tooltip at all. Show it inline instead, and
+    // announce it, so the reason survives long enough to be read.
+    if (!ok && msg) {
+      const prev = link.parentNode && link.parentNode.querySelector('.file-link-note');
+      if (prev) prev.remove();
+      const note = document.createElement('span');
+      note.className = 'file-link-note';
+      note.setAttribute('role', 'status');
+      note.textContent = ' — ' + msg;
+      if (link.parentNode) link.parentNode.insertBefore(note, link.nextSibling);
+      setTimeout(() => { note.remove(); }, 6000);
+    }
+    setTimeout(() => { link.classList.remove(cls); }, 1500);
+  }
+
+  async function revealPath(path, link) {
+    if (typeof fetch !== 'function') return;
+    try {
+      const r = await fetch('/api/reveal', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path }),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (r.ok && data && data.ok) flashFileLink(link, true);
+      else flashFileLink(link, false, (data && data.error) || ('reveal failed (' + r.status + ')'));
+    } catch (e) {
+      flashFileLink(link, false, 'reveal failed: ' + e.message);
+    }
+  }
+
+  // Detect candidate paths in a rendered message body, validate the uncached
+  // ones against the server (batched into one request per message), then
+  // linkify only those confirmed to exist. Fire-and-forget from paintBody.
+  // Relative candidates are resolved by the server against ITS cwd (best
+  // effort); if they don't resolve there, they simply stay unlinked.
+  // Validation is batched across every body painted in the same tick. A
+  // 200-message history burst otherwise fired ~130 separate POSTs (measured
+  // 317ms of pure per-request overhead against 1.8ms for the same candidates
+  // sent once); the filesystem work was never the cost. Each caller registers
+  // its root, one flush resolves every outstanding token, then each root is
+  // linkified from the shared cache.
+  let _pendingRoots = [];
+  let _pendingTokens = new Set();
+  let _flushTimer = null;
+
+  async function _flushFilePathValidation() {
+    _flushTimer = null;
+    const roots = _pendingRoots; _pendingRoots = [];
+    const tokens = _pendingTokens; _pendingTokens = new Set();
+    const need = [...tokens].filter(t => !filePathCache.has(t));
+    for (let i = 0; i < need.length; i += 200) {   // server caps at 200/req
+      const chunk = need.slice(i, i + 200);
+      try {
+        const r = await fetch('/api/path/validate', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ paths: chunk }),
+        });
+        if (r.ok) {
+          const data = await r.json().catch(() => ({}));
+          const ex = (data && data.exists) || {};
+          for (const t of chunk) cacheFilePath(t, ex[t] === true);
+        } else if (r.status === 403) {
+          noteFileLinksUnavailable();
+          for (const t of chunk) cacheFilePath(t, false);
+        }
+      } catch (e) { /* leave uncached — just won't linkify this pass */ }
+    }
+    for (const root of roots) {
+      if (!root.isConnected) continue;     // message re-rendered or removed
+      linkifyValidatedPaths(root, (t) => filePathCache.get(t) === true, revealPath);
+    }
+  }
+
+  function decorateFilePaths(root) {
+    if (!root || typeof fetch !== 'function') return;
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    let found = false;
+    while (walker.nextNode()) {
+      const node = walker.currentNode;
+      const parent = node.parentElement;
+      if (!parent || parent.closest(
+        'code, pre, a, .inline-mention, .inline-ref, .inline-bang, .file-link')) continue;
+      for (const c of detectFilePathCandidates(node.nodeValue || '')) {
+        _pendingTokens.add(c.token); found = true;
+      }
+    }
+    if (!found) return;
+    _pendingRoots.push(root);
+    if (_flushTimer === null) _flushTimer = setTimeout(_flushFilePathValidation, 0);
+  }
+
   function renderMarkdown(text) {
     if (!text) return '';
     text = text.replace(/\u0000/g, '');
@@ -2778,11 +4829,18 @@ INDEX_HTML = r"""<!doctype html>
     return Math.floor(s / 86400) + 'd';
   }
 
-  const SYSTEM_PREFIXES = ['[claimed ', '[done ', '[cancelled ', '[released ',
-                           '[retracted ', '[joined ', '[left ', '[ended ',
-                           '[locked ', '[unlocked ', '[status ', '[pinned ',
-                           '[renamed '];
-  function isSystemContent(s) { return SYSTEM_PREFIXES.some(p => s.startsWith(p)); }
+  const SYSTEM_WORDS = new Set(['claimed', 'done', 'cancelled', 'released',
+    'retracted', 'joined', 'left', 'ended', 'locked', 'unlocked', 'status',
+    'pinned', 'renamed', 'culled']);
+  // System notices come in two shapes: "[word #id] ..." (the task family) and
+  // "[word] ..." (join/pin/lock/unlock/rename). A plain startsWith('[word ')
+  // only ever matched the first, so the second rendered as ordinary markdown.
+  // Requiring a space-or-end after the "]" keeps a markdown link such as
+  // [done](url) from being muted as a system notice.
+  function isSystemContent(s) {
+    const m = /^\[([a-z]+)(?:\s|\](?:\s|$))/.exec(s || '');
+    return !!m && SYSTEM_WORDS.has(m[1]);
+  }
 
   // Rewrite @<member_id> / #<member_id> / !<member_id> to @<friendly-name>
   // in message bodies before rendering. The raw id-sigil form is valid
@@ -2806,6 +4864,113 @@ INDEX_HTML = r"""<!doctype html>
       const name = mem && mem.name ? escapeHtml(mem.name) : id;
       return sigil + name;
     });
+  }
+
+  function mentionMemberForToken(token, allowedIds) {
+    const lower = (token || '').toLowerCase();
+    if (lower === 'all') return { id: 'all', name: 'all' };
+    for (const mem of state.members.values()) {
+      if (allowedIds && !allowedIds.has(mem.id)) continue;
+      if ((mem.id || '').toLowerCase() === lower ||
+          (mem.name || '').toLowerCase() === lower) return mem;
+    }
+    return null;
+  }
+
+  // Find only syntactically complete, roster-resolved @mentions. Unknown
+  // @words stay unadorned, which doubles as feedback that they will not ping
+  // a participant.
+  function collectMentionMatches(text, allowedIds) {
+    const matches = [];
+    const re = /(^|[^A-Za-z0-9_])@([A-Za-z0-9_.-]+)/g;
+    let hit;
+    while ((hit = re.exec(text || ''))) {
+      // The token class greedily swallows trailing sentence punctuation
+      // (".", "-") — e.g. "thanks @Claude." captures "Claude.". Resolve the
+      // full token first (so names that legitimately contain "."/"-" like
+      // jen.chen / gabe-guest still match), then trim trailing "."/"-" and
+      // retry so the mention still highlights, matching the server's routing.
+      let token = hit[2];
+      let member = mentionMemberForToken(token, allowedIds);
+      while (!member && (token.endsWith('.') || token.endsWith('-'))) {
+        token = token.slice(0, -1);
+        member = mentionMemberForToken(token, allowedIds);
+      }
+      if (!member) continue;
+      const start = hit.index + hit[1].length;
+      matches.push({ start, end: start + token.length + 1, member });
+    }
+    return matches;
+  }
+
+  function decorateInlineMentions(root, mentionIds) {
+    if (!root || !mentionIds || !mentionIds.length) return;
+    const allowed = new Set(mentionIds);
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    const nodes = [];
+    while (walker.nextNode()) {
+      const node = walker.currentNode;
+      const parent = node.parentElement;
+      if (!parent || parent.closest('code, pre, a, .inline-mention')) continue;
+      if (collectMentionMatches(node.nodeValue || '', allowed).length) nodes.push(node);
+    }
+    for (const node of nodes) {
+      const text = node.nodeValue || '';
+      const matches = collectMentionMatches(text, allowed);
+      if (!matches.length) continue;
+      const frag = document.createDocumentFragment();
+      let cursor = 0;
+      for (const match of matches) {
+        frag.appendChild(document.createTextNode(text.slice(cursor, match.start)));
+        const span = document.createElement('span');
+        span.className = 'inline-mention';
+        span.textContent = text.slice(match.start, match.end);
+        span.dataset.memberId = match.member.id;
+        span.title = match.member.id === 'all'
+          ? 'Mentions every participant'
+          : 'Mentions ' + (match.member.name || match.member.id);
+        if (match.member.id !== 'all') {
+          span.style.setProperty('--mention-member-color', colorFor(match.member.id));
+        }
+        frag.appendChild(span);
+        cursor = match.end;
+      }
+      frag.appendChild(document.createTextNode(text.slice(cursor)));
+      node.replaceWith(frag);
+    }
+  }
+
+  // Pure: draft text -> mirror HTML. Split out from the DOM write so the
+  // escaping can actually be tested — this is the one path that builds markup
+  // from raw user input, so a missed escape here is exploitable by typing.
+  function composerMentionHtml(text) {
+    text = text || '';
+    const matches = collectMentionMatches(text, null);
+    let html = '';
+    let cursor = 0;
+    for (const match of matches) {
+      html += escapeHtml(text.slice(cursor, match.start));
+      // colorFor returns a fixed palette hex (injection-safe); @all has no
+      // per-member color and falls back to the rainbow shimmer via its own class.
+      const isAll = match.member.id === 'all';
+      const mc = isAll ? '' : colorFor(match.member.id);
+      const styleAttr = mc ? ' style="--mention-member-color:' + mc + '"' : '';
+      const cls = isAll ? 'composer-mention composer-mention-all' : 'composer-mention';
+      html += '<span class="' + cls + '"' + styleAttr + '>' +
+              escapeHtml(text.slice(match.start, match.end)) + '</span>';
+      cursor = match.end;
+    }
+    html += escapeHtml(text.slice(cursor));
+    // Preserve a final blank line so the mirror stays aligned with textarea
+    // scrollHeight and wrapping behavior.
+    return html + (text.endsWith('\n') ? '\n ' : '');
+  }
+
+  function renderComposerMentionHighlights() {
+    if (!inputHighlight) return;
+    inputHighlight.innerHTML = composerMentionHtml(input.value || '');
+    inputHighlight.scrollTop = input.scrollTop;
+    inputHighlight.scrollLeft = input.scrollLeft;
   }
 
   // ── Per-member agent stats (client-side aggregate, derived from event stream) ──
@@ -2974,13 +5139,33 @@ INDEX_HTML = r"""<!doctype html>
   // (markdown/fonts reflow taller after the synchronous appends) and switch to
   // normal "follow only if near bottom" behavior for live messages.
   let _initialSettleTimer = null;
+  let _initialSettleDeadline = 0;
+  function settleInitialLoad() {
+    _initialSettleTimer = null;
+    _initialSettleDeadline = 0;
+    state.initialLoad = false;
+    // seedBaseline + disownScroll come from the unread-divider work: the
+    // baseline must be taken once the history burst has settled, and the
+    // programmatic scroll below must NOT count as user intent — otherwise
+    // opening a channel marks everything read before the reader has seen it.
+    seedBaseline();
+    requestAnimationFrame(() => { disownScroll(); chat.scrollTop = chat.scrollHeight; });
+  }
   function scheduleInitialSettle() {
+    // The quiet gap is rescheduled on each append, so a burst spaced under
+    // 250ms would hold initialLoad open for its whole duration — and the chime
+    // is gated on that flag, so it would be muted exactly during an agent
+    // flurry. Cap the total wait so a dense burst still settles.
+    const now = Date.now();
+    if (!_initialSettleDeadline) _initialSettleDeadline = now + 3000;
     if (_initialSettleTimer) clearTimeout(_initialSettleTimer);
-    _initialSettleTimer = setTimeout(() => {
-      _initialSettleTimer = null;
-      state.initialLoad = false;
-      requestAnimationFrame(() => { chat.scrollTop = chat.scrollHeight; });
-    }, 250);
+    // Both sides changed this scheduler. Kept: the renderer's CAPPED wait (a
+    // dense burst must still settle, or the chime stays muted through an agent
+    // flurry) driving the unread work's settle body, which now lives in
+    // settleInitialLoad() above. Taking either side alone would have silently
+    // dropped the other's fix.
+    const wait = Math.max(0, Math.min(250, _initialSettleDeadline - now));
+    _initialSettleTimer = setTimeout(settleInitialLoad, wait);
   }
 
   function appendMessage(m) {
@@ -2992,6 +5177,11 @@ INDEX_HTML = r"""<!doctype html>
     const isMine = m.member_id === state.operator.id;
     const isSystem = isSystemContent(m.content || '');
     const mentionsOperator = (m.mentions || []).includes(state.operator.id);
+    // '!' sigils land in a separate `bangs` column, never in `mentions`.
+    // A bang is the last-resort signal an agent cannot be opted out of, so
+    // it must reach a mention-scoped chime too — otherwise the one message
+    // that paints a red BANG bar is the one message that makes no sound.
+    const bangsOperator = (m.bangs || []).includes(state.operator.id);
 
     const div = document.createElement('div');
     div.className = 'msg' + (isMine ? ' mine' : '') + (isSystem ? ' system' : '')
@@ -3001,6 +5191,26 @@ INDEX_HTML = r"""<!doctype html>
     div.dataset.search = (m.content || '').toLowerCase() + ' '
                        + humanizeIdSigils(m.content || '').toLowerCase() + ' '
                        + (m.member_name || '').toLowerCase();
+
+    // Message-number gutter (#N) — visible only when #chat.show-msg-nums.
+    // Absolute + full-height so it centres on the whole message; the inner
+    // span is position:sticky (see CSS) so the number rides the visible slice.
+    const numGutter = document.createElement('div');
+    numGutter.className = 'msg-num-gutter';
+    // No ARIA here on purpose. The visible "#N" is real text inside the
+    // message's own subtree, ahead of the timestamp in DOM order, so a screen
+    // reader already reads the number then the message — the same order a
+    // sighted reader gets. A role/aria-label would duplicate that text and add
+    // one region boundary per message; aria-hidden would take it away entirely.
+    const numEl = document.createElement('span');
+    numEl.className = 'msg-num';
+    numEl.textContent = '#' + m.id;
+    numEl.title = 'message ' + m.id;
+    // The number is selectable/copyable; don't let a click on it also toggle
+    // the message's compact/expand state.
+    numEl.addEventListener('click', (e) => e.stopPropagation());
+    numGutter.appendChild(numEl);
+    div.appendChild(numGutter);
 
     const head = document.createElement('div');
     head.className = 'head';
@@ -3041,8 +5251,52 @@ INDEX_HTML = r"""<!doctype html>
       body.textContent = humanizeIdSigils(m.content || '');
     } else {
       body.innerHTML = renderMarkdown(m.content || '');
+      decorateInlineMentions(body, m.mentions || []);
+      // Async: validate path-like tokens with the server and linkify the real
+      // ones (reveal-in-Finder). Fire-and-forget so paint stays synchronous.
+      decorateFilePaths(body);
     }
     div.appendChild(body);
+
+    // Image attachments — inline thumbnails, click opens full size in a new tab.
+    if (m.attachments && m.attachments.length) {
+      const wrap = document.createElement('div');
+      wrap.className = 'msg-attachments';
+      for (const att of m.attachments) {
+        // API_QS carries ?channel=<code> in landing mode; without it the
+        // server cannot tell which channel's attachment is being asked for.
+        const url = '/api/attachment/' + att.id + API_QS;
+        const a = document.createElement('a');
+        a.href = url; a.target = '_blank'; a.rel = 'noopener';
+        const img = document.createElement('img');
+        img.className = 'msg-img';
+        img.src = url;
+        img.alt = att.filename || 'image';
+        img.loading = 'lazy';
+        // Late-loading images reflow taller; keep us pinned if near bottom.
+        img.addEventListener('load', () => {
+          const nb = chat.scrollHeight - chat.clientHeight - chat.scrollTop < 120;
+          if (state.initialLoad || nb) chat.scrollTop = chat.scrollHeight;
+        });
+        // A failing image otherwise collapses to a bare broken-image glyph:
+        // the viewer cannot tell whether it was deleted, whether they are not
+        // allowed to see it (the read endpoint requires a resolved identity),
+        // or whether the network hiccupped.
+        img.addEventListener('error', () => {
+          const note = document.createElement('span');
+          note.className = 'msg-img-missing';
+          note.textContent = '🖼 image unavailable — ' + (att.filename || 'attachment');
+          note.title = 'It may have been removed, or you may not have access '
+                     + 'to attachments on this machine.';
+          if (a.parentNode) a.parentNode.replaceChild(note, a);
+        });
+        // Opening the image should not also toggle the message's compact state.
+        a.addEventListener('click', (e) => { e.stopPropagation(); });
+        a.appendChild(img);
+        wrap.appendChild(a);
+      }
+      div.appendChild(wrap);
+    }
 
     // Watermark pins — animals of agents whose last_read == this message id.
     const pins = document.createElement('div');
@@ -3078,15 +5332,39 @@ INDEX_HTML = r"""<!doctype html>
       // history burst, then do one final settle after layout reflows.
       chat.scrollTop = chat.scrollHeight;
       scheduleInitialSettle();
-    } else if (nearBottom) {
+    } else if (nearBottom && !document.hidden) {
+      // Only auto-pin to the bottom when the tab is VISIBLE. Pinning while
+      // hidden would leave us at the bottom on return, so the "new messages"
+      // divider for what arrived while away would be marked caught-up and lost.
       chat.scrollTop = chat.scrollHeight;
     } else {
-      state.jumpUnread++;
+      // Same rule as the divider: your own message is not something you have
+      // yet to read. Without this, sending while scrolled up raises the
+      // jump-to-latest badge as well as the divider — two separate claims that
+      // there is something new, both of them about you.
+      if (!isMine) state.jumpUnread++;
       updateJumpButton();
     }
 
+    // Unread divider: if the user is keeping up (tab visible + at/near bottom),
+    // they've seen this message; otherwise it's unread since they looked away or
+    // scrolled up, and a "new messages" divider is drawn before the first such.
+    if (state.initialLoad) {
+      // History burst. The baseline is set once in seedBaseline() when the
+      // burst settles; advancing per-message here would race a hidden tab.
+    } else if (!document.hidden && nearBottom && !isHiddenMsg(div)) {
+      // Only messages the user can actually see count as read on arrival, and
+      // the advance has to be the same ascending walk markCaughtUp does — a
+      // bare Math.max would jump the watermark over earlier messages a filter
+      // is hiding, which is the very thing that walk exists to prevent. One
+      // function owns the invariant.
+      markCaughtUp();
+    } else {
+      refreshUnreadDivider();
+    }
+
     // Tab-title badge when hidden
-    if (document.hidden) {
+    if (document.hidden && !isMine) {
       state.unreadCount++;
       updateTitle();
     }
@@ -3110,8 +5388,23 @@ INDEX_HTML = r"""<!doctype html>
       } catch (e) { /* ignore */ }
     }
 
-    // In-page chime on any new message from someone else (opt-in, focus-agnostic).
-    if (state.soundEnabled && !isMine && !isSystem) playChime();
+    // In-page chime for a new peer message (opt-in, focus-agnostic). The scope
+    // (soundScope) is kept independent of the desktop-notify scope, so a quiet
+    // chime on all messages can coexist with a popup only on @mentions, or vice
+    // versa. Reuses the same mentionsOperator predicate the notify block uses.
+    // Skip the primed-history burst on load/reconnect — chime only for LIVE
+    // messages once state.initialLoad has settled. Without this, a refresh plays
+    // every historical chime at once (overlapping waveforms = loud + phasey).
+    // In a DM view every channel message is still appended and merely
+    // CSS-hidden, so without this the operator hears a chime for a message
+    // they cannot see — an audible event with no visible cause.
+    if (shouldChime({
+          initialLoad: state.initialLoad, soundEnabled: state.soundEnabled,
+          isMine, isSystem,
+          dmVisible: (!state.dmTargetId || isRelevantInDm(m)),
+          scope: state.soundScope,
+          addressed: mentionsOperator || bangsOperator,
+        })) playChime();
   }
 
   // Existing message names may change (rename) — update author labels + mention
@@ -3136,6 +5429,8 @@ INDEX_HTML = r"""<!doctype html>
         } else {
           body.classList.remove('plain');
           body.innerHTML = renderMarkdown(m.content || '');
+          decorateInlineMentions(body, m.mentions || []);
+          decorateFilePaths(body);
         }
       }
       function rebuildBar(bar, ids, sigil) {
@@ -3212,7 +5507,7 @@ INDEX_HTML = r"""<!doctype html>
     targetBar.innerHTML = '';
     // Build the ordered list of targetable members. Sort by active-first
     // then name so the numbering is stable-ish across renders.
-    const order = { active: 0, idle: 1, stale: 2, dead: 3 };
+    const order = { working: 0, active: 1, idle: 2, stale: 3, dead: 4 };
     const targetables = [...state.members.values()]
       .filter(isTargetable)
       .sort((a, b) => {
@@ -3306,6 +5601,13 @@ INDEX_HTML = r"""<!doctype html>
       state.members.set(m.id, m);
       if (old && old.name !== m.name) rename_from.set(m.id, { from: old.name, to: m.name });
     }
+    // Drop members the roster no longer lists. state.members backs the composer
+    // target chips (and their Alt+N hotkeys), @-autocomplete, ack badges and
+    // watermark pins — without this a culled member stays selectable until reload.
+    const liveIds = new Set(members.map(m => m.id));
+    for (const id of [...state.members.keys()]) {
+      if (!liveIds.has(id)) state.members.delete(id);
+    }
 
     if (rename_from.size > 0) {
       // Patch cached message records so author label follows the current alias.
@@ -3320,7 +5622,7 @@ INDEX_HTML = r"""<!doctype html>
 
     rosterEl.innerHTML = '';
     const sorted = members.slice().sort((a, b) => {
-      const order = { active: 0, idle: 1, stale: 2, dead: 3 };
+      const order = { working: 0, active: 1, idle: 2, stale: 3, dead: 4 };
       if (a.id === state.operator.id) return 1;
       if (b.id === state.operator.id) return -1;
       const oa = order[a.status] ?? 4;
@@ -3332,6 +5634,9 @@ INDEX_HTML = r"""<!doctype html>
     rosterHeading.textContent = `Members (${members.length})`;
 
     renderComposerTargets();
+    // A roster arrival/rename can turn an existing @token from unresolved to
+    // valid without another keystroke, so refresh the composer mirror too.
+    updatePreview();
     updateAllAckBadges();
     renderWatermarkPins();
     scheduleHereUpdate();
@@ -3392,6 +5697,47 @@ INDEX_HTML = r"""<!doctype html>
         pin.title += ` — context ${Math.round(cpct)}%`;
       }
       c.appendChild(pin);
+    }
+  }
+
+  // Remove a member from the channel (roster × button). Confirms first — it
+  // releases their claimed tasks + locks and posts a [culled] message. The SSE
+  // roster refresh drops them from the sidebar; it does not stop a live agent's
+  // process (it would just start erroring and could reconnect).
+  async function cullMember(id, name, btn) {
+    // Single backslash-n. This script is embedded in a Python raw string, so a
+    // doubled backslash survives to the browser verbatim and the dialog would
+    // display the escape sequence as literal text.
+    if (!confirm('Remove ' + name + ' from the channel?\n\n'
+        + 'This cannot be undone. Their claimed tasks and held locks are '
+        + 'released, their sessions are revoked, and a [culled] notice is '
+        + 'posted to the channel.\n\n'
+        + 'It does not stop a running process — it only removes them here.')) return;
+    // Disable while in flight and bound the wait. Without this the button gives
+    // no signal at all after you have confirmed an irreversible action — and a
+    // request CAN hang indefinitely: several dashboard tabs consume the
+    // browser's per-origin connection cap with their SSE streams, and the DM
+    // button opens tabs, so reaching the cap is a normal thing to do.
+    const label = btn ? btn.textContent : null;
+    if (btn) { btn.disabled = true; btn.textContent = 'Removing…'; }
+    try {
+      const r = await fetch('/api/cull' + API_QS, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ target_member_id: id }),
+        signal: (AbortSignal && AbortSignal.timeout) ? AbortSignal.timeout(15000) : undefined,
+      });
+      if (!r.ok) {
+        const err = await r.json().catch(() => ({ error: 'unknown' }));
+        alert('remove failed: ' + (err.error || r.status));
+      }
+    } catch (e) {
+      alert(e.name === 'TimeoutError'
+        ? 'remove timed out — the dashboard did not get a reply, so ' + name
+          + ' may or may not have been removed. Reload to check.'
+        : 'remove failed: ' + e.message);
+    } finally {
+      if (btn) { btn.disabled = false; btn.textContent = label; }
     }
   }
 
@@ -3472,6 +5818,24 @@ INDEX_HTML = r"""<!doctype html>
     stats.className = 'stats';
     stats.innerHTML = renderMemberStatsHTML(m);
     row.appendChild(stats);
+
+    // Remove control — revealed only when the row is expanded, so it can't be
+    // mis-clicked from the collapsed roster (on a phone the old always-visible
+    // × sat 53px from the drawer's own close ×, same glyph, at a sub-44px
+    // target). Hidden entirely for identities the server would refuse, rather
+    // than walking them through two dialogs into a 403.
+    if (!DM_MODE && m.id !== state.operator.id && CAN_CULL) {
+      const actions = document.createElement('div');
+      actions.className = 'member-actions';
+      const rm = document.createElement('button');
+      rm.type = 'button';
+      rm.className = 'rm-btn';
+      rm.textContent = 'Remove';
+      rm.title = `Remove ${m.name} from this channel — releases their tasks and locks, and cannot be undone`;
+      rm.addEventListener('click', (e) => { e.stopPropagation(); cullMember(m.id, m.name, rm); });
+      actions.appendChild(rm);
+      row.appendChild(actions);
+    }
 
     row.addEventListener('click', (e) => {
       // Clicking the name on a mention-capable row? On shift-click → filter.
@@ -3739,6 +6103,7 @@ INDEX_HTML = r"""<!doctype html>
   function resolveRefs(text)     { return resolveSigilTokens(text, '#'); }
   function resolveBangs(text)    { return resolveSigilTokens(text, '!'); }
   function updatePreview() {
+    renderComposerMentionHighlights();
     const pings = resolveMentions(input.value);
     const refs  = resolveRefs(input.value);
     const bangs = resolveBangs(input.value);
@@ -3770,12 +6135,622 @@ INDEX_HTML = r"""<!doctype html>
   function autoResizeInput() {
     input.style.height = 'auto';
     input.style.height = Math.min(160, Math.max(36, input.scrollHeight)) + 'px';
+    if (inputHighlight) {
+      inputHighlight.style.height = input.style.height;
+      inputHighlight.scrollTop = input.scrollTop;
+      inputHighlight.scrollLeft = input.scrollLeft;
+    }
   }
 
   // ── Send ──
+  // ── Image attachments (composer upload) ──
+  const attachBtn = document.getElementById('attach-btn');
+  const fileInput = document.getElementById('file-input');
+  const attachStrip = document.getElementById('attach-strip');
+  const composerEl = document.getElementById('composer');
+
+  function renderAttachStrip() {
+    attachStrip.innerHTML = '';
+    state.pendingAttachments.forEach((att, i) => {
+      const t = document.createElement('div');
+      t.className = 'attach-thumb' + (att.uploading ? ' uploading' : '');
+      if (att.url) {
+        const img = document.createElement('img');
+        img.src = att.url;
+        t.appendChild(img);
+      }
+      if (!att.uploading) {
+        const rm = document.createElement('button');
+        rm.className = 'rm'; rm.textContent = '×'; rm.title = 'remove';
+        rm.addEventListener('click', () => {
+          dropSlot(att);
+          renderAttachStrip();
+        });
+        t.appendChild(rm);
+      }
+      attachStrip.appendChild(t);
+    });
+  }
+
+  function revokeBlob(att) {
+    if (att && att.url && att.url.indexOf('blob:') === 0) URL.revokeObjectURL(att.url);
+  }
+  function dropSlot(slot) {
+    revokeBlob(slot);
+    const idx = state.pendingAttachments.indexOf(slot);
+    if (idx >= 0) state.pendingAttachments.splice(idx, 1);
+  }
+
+  // Mirrors MAX_UPLOAD_BYTES in this file's Python half, so a huge file is
+  // refused before it is pushed over the wire. A literal rather than a
+  // substitution, so the served bundle carries no placeholder the test
+  // harness would need to know about; the server still enforces the real
+  // limit, so drift can only make the client stricter, never unsafe.
+  const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
+
+  async function uploadImage(file) {
+    if (!file) return;
+    if (!file.type || !/^image\//.test(file.type)) {
+      // The composer flashes an accepting outline on dragover, so returning
+      // silently here tells the user the drop landed and then does nothing.
+      // Drag-and-drop also bypasses the file picker's accept= filter entirely.
+      alert('"' + (file.name || 'that file') + '" is not an image. '
+            + 'PNG, JPEG, GIF and WebP can be attached.');
+      return;
+    }
+    if (file.size > MAX_UPLOAD_BYTES) {
+      // Checked here as well as server-side so a 40MB photo is not pushed over
+      // the wire before being refused, and so the number is human-sized.
+      const mb = (n) => (n / (1024 * 1024)).toFixed(1).replace(/\.0$/, '');
+      alert('"' + (file.name || 'that image') + '" is ' + mb(file.size)
+            + ' MB — the limit is ' + mb(MAX_UPLOAD_BYTES) + ' MB.');
+      return;
+    }
+    if (state.pendingAttachments.length >= 8) { alert('max 8 images per message'); return; }
+    const slot = { uploading: true, url: URL.createObjectURL(file) };
+    state.pendingAttachments.push(slot);
+    renderAttachStrip();
+    try {
+      const r = await fetch('/api/upload' + API_QS, {
+        method: 'POST',
+        headers: { 'Content-Type': file.type, 'X-Filename': encodeURIComponent(file.name || 'image') },
+        body: file,
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok || !data.ok) {
+        alert('upload failed: ' + (data.error || r.status));
+        dropSlot(slot);
+      } else {
+        revokeBlob(slot);                       // free the local preview blob
+        slot.id = data.id;
+        slot.uploading = false;
+        slot.url = '/api/attachment/' + data.id + API_QS;
+      }
+    } catch (e) {
+      alert('upload failed: ' + e.message);
+      dropSlot(slot);
+    }
+    renderAttachStrip();
+  }
+
+  attachBtn.addEventListener('click', () => fileInput.click());
+  fileInput.addEventListener('change', () => {
+    for (const f of fileInput.files) uploadImage(f);
+    fileInput.value = '';
+  });
+  input.addEventListener('paste', (e) => {
+    const items = (e.clipboardData || {}).items || [];
+    for (const it of items) {
+      if (it.kind === 'file' && /^image\//.test(it.type)) {
+        const f = it.getAsFile();
+        if (f) { e.preventDefault(); uploadImage(f); }
+      }
+    }
+  });
+  ['dragover', 'dragenter'].forEach(ev => composerEl.addEventListener(ev, (e) => {
+    e.preventDefault(); composerEl.classList.add('dragover');
+  }));
+  ['dragleave', 'drop'].forEach(ev => composerEl.addEventListener(ev, (e) => {
+    e.preventDefault(); composerEl.classList.remove('dragover');
+  }));
+  composerEl.addEventListener('drop', (e) => {
+    const files = (e.dataTransfer || {}).files || [];
+    for (const f of files) uploadImage(f);
+  });
+
+  // Remove specific slots, preserving anything added since.
+  function dropAttachments(slots) {
+    const gone = new Set(slots);
+    state.pendingAttachments = state.pendingAttachments.filter(a => !gone.has(a));
+  }
+
+  // ── Speech-to-text: mic → composer ──
+  // Two modes (state.sttMode): 'local' records a clip and POSTs it to the warm
+  // Whisper sidecar (/api/stt/transcribe); 'web' uses the browser's streaming
+  // SpeechRecognition. If a LOCAL attempt fails, we auto-fall back to web and
+  // show a banner — never a silent failure. Neither endpoint takes a channel,
+  // so these fetches intentionally carry no API_QS.
+  const micBtn = document.getElementById('mic-btn');
+  const sttBanner = document.getElementById('stt-banner');
+  const sttViz = document.getElementById('stt-viz');
+  const sttWaveCanvas = document.getElementById('stt-wave');
+  const sttSpinner = document.getElementById('stt-spinner');
+  const sttVizLabel = document.getElementById('stt-viz-label');
+  // Glyphs match #attach-btn's text-glyph idiom. ICON_MIC is captured from the
+  // button's static markup so the glyph itself lives in exactly one place.
+  const ICON_STOP = '⏹';
+  const ICON_MIC = micBtn ? micBtn.innerHTML : '';
+  // Below this normalized peak amplitude a clip is treated as silent and never
+  // sent to Whisper (which otherwise hallucinates words from noise). Kept lenient
+  // so quiet speech still goes through; the server no_speech check is the backstop.
+  // Only has to reject a clip that captured nothing at all. Anything with real
+  // signal is the server's decision, made on a full RMS measurement rather than
+  // this coarse peak. It was 0.015, which quiet speech does not always reach.
+  const STT_SILENCE_PEAK = 0.004;
+  // Display-only amplification for the level meter (see makeWaveform).
+  const WAVE_DISPLAY_GAIN = 6;
+  const STT_FETCH_TIMEOUT_MS = 240000;   // backstop; cold start can download ~1.5GB
+  // Mirrors the server's NTH_STT_LANG so both dictation paths speak the same
+  // language. BCP-47 needs a region; a bare "en" is widely mishandled.
+  const STT_WEB_LANG = /*__STT_LANG__*/'en-US';
+  // Turn an internal engine reason into something a person can read.
+  // Map a server reason onto something a person can act on. Order matters:
+  // the "not installed" test runs before the generic ones because that is the
+  // single most likely failure — every machine without the engine — and it
+  // used to fall through to "an unexpected error", which tells nobody anything.
+  function humanizeSttError(reason) {
+    reason = String(reason || '');
+    if (/not installed|no module named|not importable|not available|import failed/i.test(reason))
+      return 'the speech engine is not installed';
+    if (/still downloading/i.test(reason)) return 'the speech model is still downloading';
+    if (/ffmpeg/i.test(reason)) return 'ffmpeg is missing on the server';
+    if (/timed out|timeout|stalled/i.test(reason)) return 'it timed out';
+    if (/busy/i.test(reason)) return 'it was busy';
+    if (/failed to start/i.test(reason)) return 'the engine could not start';
+    if (/pipe|exited|respawn|malformed/i.test(reason)) return 'the engine restarted';
+    if (/HTTP\s*\d/i.test(reason)) return 'the server returned an error';
+    if (/audio|transcrib/i.test(reason)) return 'the audio could not be read';
+    return 'an unexpected error';
+  }
+  try { const m = localStorage.getItem('trio.sttMode'); if (m === 'web' || m === 'local') state.sttMode = m; } catch (_) {}
+
+  function showSttBanner(msg, kind) {
+    if (!sttBanner) return;
+    sttBanner.textContent = msg;
+    sttBanner.className = kind || '';
+    sttBanner.hidden = false;
+  }
+  function hideSttBanner() { if (sttBanner) sttBanner.hidden = true; }
+
+  // Live audio waveform on a <canvas> from a MediaStream. Reusable across the
+  // composer and the settings test page. Returns { start(stream), stop() }.
+  function makeWaveform(canvas) {
+    let raf = null, audioCtx = null, analyser = null, source = null, data = null;
+    let peak = 0, sampled = false;   // loudest normalized sample seen this session (0..1)
+    function start(stream) {
+      stop();
+      peak = 0; sampled = false;
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC || !canvas || !stream) return;
+      try {
+        audioCtx = new AC();
+        if (audioCtx.state === 'suspended') { try { audioCtx.resume(); } catch (_) {} }
+        source = audioCtx.createMediaStreamSource(stream);
+        analyser = audioCtx.createAnalyser();
+        analyser.fftSize = 1024;
+        source.connect(analyser);
+        data = new Uint8Array(analyser.fftSize);
+      } catch (_) { stop(); return; }
+      const cx = canvas.getContext('2d');
+      const stroke = (getComputedStyle(document.documentElement)
+                      .getPropertyValue('--accent') || '#62d7ef').trim() || '#62d7ef';
+      function draw() {
+        raf = requestAnimationFrame(draw);
+        analyser.getByteTimeDomainData(data);
+        const w = canvas.width, h = canvas.height;
+        cx.clearRect(0, 0, w, h);
+        cx.lineWidth = 2;
+        cx.strokeStyle = stroke;
+        cx.beginPath();
+        const slice = w / data.length;
+        let x = 0, frameMax = 0;
+        for (let i = 0; i < data.length; i++) {
+          const dev = data[i] - 128;
+          if (Math.abs(dev) > frameMax) frameMax = Math.abs(dev);
+          // Drawn with gain: at true scale a normal speaking voice moves this
+          // line by a couple of pixels and a whisper not visibly at all, so it
+          // read as "the mic isn't hearing me" when the mic was fine. The gain
+          // is display-only — `peak` below stays the true measurement, because
+          // the silence gate must not be fooled by a scaled-up picture.
+          const shown = Math.max(-128, Math.min(127, dev * WAVE_DISPLAY_GAIN));
+          const y = ((shown + 128) / 128.0) * h / 2;   // 128 = silence midline
+          if (i === 0) cx.moveTo(x, y); else cx.lineTo(x, y);
+          x += slice;
+        }
+        sampled = true;
+        if (frameMax / 128 > peak) peak = frameMax / 128;   // energy proxy for silence detection
+        cx.stroke();
+      }
+      draw();
+    }
+    function stop() {
+      if (raf) { cancelAnimationFrame(raf); raf = null; }
+      if (source) { try { source.disconnect(); } catch (_) {} source = null; }
+      if (audioCtx) { try { audioCtx.close(); } catch (_) {} audioCtx = null; }
+      analyser = null; data = null;
+    }
+    // getPeak() returns -1 when no audio was ever sampled (analyser unavailable),
+    // so callers can distinguish "silent" from "couldn't measure".
+    return { start, stop, getPeak: () => (sampled ? peak : -1) };
+  }
+
+  const composerWave = makeWaveform(sttWaveCanvas);
+
+  // Composer visualizer: 'wave' while recording, 'spin' while transcribing.
+  function showViz(kind, label, stream) {
+    if (!sttViz) return;
+    sttViz.hidden = false;
+    if (sttVizLabel) sttVizLabel.textContent = label || '';
+    if (kind === 'wave') {
+      if (sttWaveCanvas) sttWaveCanvas.hidden = false;
+      if (sttSpinner) sttSpinner.hidden = true;
+      composerWave.start(stream);
+    } else {   // 'spin'
+      composerWave.stop();
+      if (sttWaveCanvas) sttWaveCanvas.hidden = true;
+      if (sttSpinner) sttSpinner.hidden = false;
+    }
+  }
+  function hideViz() {
+    composerWave.stop();
+    if (sttViz) sttViz.hidden = true;
+    if (sttWaveCanvas) sttWaveCanvas.hidden = false;
+    if (sttSpinner) sttSpinner.hidden = true;
+  }
+
+  // The mic is a state machine: idle → opening → recording → stopping →
+  // working → idle. 'opening' and 'stopping' exist because both ends of a take
+  // are ASYNCHRONOUS — getUserMedia resolves later, and MediaRecorder.onstop /
+  // SpeechRecognition.onend fire later. Tracking only "is recording" leaves
+  // those two windows re-enterable, and a click landing in one starts a SECOND
+  // capture while the first is still tearing down: two live recorders, and a
+  // MediaStream whose tracks nothing ever stops.
+  let micPhase = 'idle';
+  function setMicState(s) {   // 'idle' | 'opening' | 'recording' | 'stopping' | 'working'
+    micPhase = s;
+    state.sttRecording = (s === 'recording');
+    if (micBtn) {
+      micBtn.classList.toggle('recording', s === 'recording');
+      micBtn.classList.toggle('working', s === 'working' || s === 'stopping' || s === 'opening');
+      micBtn.classList.toggle('cancelable', s === 'working');
+      micBtn.innerHTML = (s === 'recording') ? ICON_STOP : ICON_MIC;
+      micBtn.title = (s === 'recording') ? 'stop dictation'
+                   : (s === 'opening') ? 'waiting for microphone permission…'
+                   : (s === 'stopping') ? 'finishing…'
+                   : (s === 'working') ? 'transcribing… (click to cancel)'
+                   : 'dictate (speech to text)';
+      micBtn.setAttribute('aria-label', micBtn.title);
+      micBtn.setAttribute('aria-pressed', String(s === 'recording'));
+    }
+    if (s === 'idle') hideViz();
+  }
+
+  // getUserMedia rejects for several reasons that are NOT permission problems.
+  // Reporting them all as "denied" sends people into OS privacy settings that
+  // were already correct.
+  function micErrorMessage(e) {
+    const n = (e && e.name) || '';
+    if (n === 'NotAllowedError' || n === 'SecurityError')
+      return 'Microphone access is blocked. Allow it from the mic icon in the address bar, then try again.';
+    if (n === 'NotFoundError' || n === 'OverconstrainedError')
+      return 'No microphone found. Connect one and try again.';
+    if (n === 'NotReadableError')
+      return 'The microphone is in use by another app (a call or recorder). Close it and try again.';
+    if (n === 'AbortError')
+      return 'The microphone was interrupted before recording started.';
+    return 'Could not open the microphone' + (n ? ' (' + n + ')' : '') + '.';
+  }
+
+  // The server reports the clip's measured energy. Near-zero means the mic
+  // captured nothing; low-but-present means it heard someone too quiet to
+  // clear the silence gate — which needs different advice from "try again".
+  function quietHint(rms) {
+    if (typeof rms === 'number' && rms > 0 && rms < 0.01) {
+      return 'That was very quiet — move closer to the microphone or raise its'
+           + ' input level, then try again.';
+    }
+    return 'No message detected — try again.';
+  }
+
+  function webSpeechAvailable() {
+    return !!(window.SpeechRecognition || window.webkitSpeechRecognition);
+  }
+
+  // OFFER the switch to the browser's speech service — never perform it. The
+  // user picked on-device; escalating their voice to a third party because a
+  // local attempt failed is not a decision to make on their behalf, and the
+  // mic must not be live before they have agreed to it.
+  function offerWebFallback(reason) {
+    setMicState('idle');
+    if (!sttBanner) return;
+    const why = humanizeSttError(reason);
+    sttBanner.textContent = 'On-device transcription unavailable (' + why + '). ';
+    if (/not installed/.test(why)) {
+      const fix = document.createElement('span');
+      fix.textContent = 'Install it on the server with “pip install mlx-whisper” (Apple silicon only). ';
+      sttBanner.appendChild(fix);
+    }
+    if (webSpeechAvailable()) {
+      const btn = document.createElement('button');
+      btn.className = 'stt-banner-action';
+      btn.textContent = 'Use browser dictation instead';
+      btn.title = 'sends your audio to your browser vendor';
+      btn.addEventListener('click', () => { hideSttBanner(); startWebDictation(); });
+      sttBanner.appendChild(btn);
+      const note = document.createElement('span');
+      note.textContent = ' — this sends your audio to your browser vendor.';
+      sttBanner.appendChild(note);
+    } else {
+      const note = document.createElement('span');
+      note.textContent = 'This browser has no built-in speech recognition either (try Chrome or Safari).';
+      sttBanner.appendChild(note);
+    }
+    sttBanner.className = 'warn';
+    sttBanner.hidden = false;
+  }
+
+  // Land the transcript where the caret is, replacing any selection, and leave
+  // the caret after it. Appending to the end was wrong for anyone who moved the
+  // cursor back to fix a word mid-draft: the dictated phrase arrived at the
+  // bottom of the message instead of where they were looking.
+  function insertTranscript(text) {
+    text = (text || '').trim();
+    if (!text) return;
+    const cur = input.value;
+    // selectionStart is null on elements that don't expose a caret; in that
+    // case fall back to the old append-at-end behaviour.
+    const hasCaret = typeof input.selectionStart === 'number';
+    const start = hasCaret ? input.selectionStart : cur.length;
+    const end = hasCaret ? input.selectionEnd : cur.length;
+    const before = cur.slice(0, start);
+    const after = cur.slice(end);
+    // Same spacing rule as before, applied at the insertion point rather than
+    // at the end — plus its mirror on the trailing side, which an append-only
+    // insert never had to think about.
+    const lead = (before && !/\s$/.test(before)) ? ' ' : '';
+    const trail = (after && !/^\s/.test(after)) ? ' ' : '';
+    input.value = before + lead + text + trail + after;
+    const caret = (before + lead + text).length;
+    input.dispatchEvent(new Event('input'));   // autosize + mention mirror + preview
+    input.focus();
+    if (hasCaret && input.setSelectionRange) input.setSelectionRange(caret, caret);
+  }
+
+  // Web SpeechRecognition (streaming; interim words appear live).
+  let webRec = null;
+  // Set while web dictation is live; sendMessage() calls it so the recognizer
+  // re-anchors to the emptied composer instead of typing the sent text back in.
+  let sttReanchor = null;
+  function startWebDictation() {
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) {
+      showSttBanner('Web speech recognition isn’t supported here (try Chrome or Safari).', 'err');
+      setMicState('idle');
+      return;
+    }
+    hideViz();   // web mode exposes no stream to visualize; the pulsing button conveys state
+    // Re-read the composer on every result rather than snapshotting it once:
+    // the user can keep typing during dictation, and can even send, and a
+    // stale snapshot would overwrite their typing or resurrect a sent message.
+    let anchor = input.value;
+    let finalTxt = '';
+    const rec = new SR();
+    webRec = rec;
+    // The local path's language comes from NTH_STT_LANG; mirror it here so a
+    // non-English deployment doesn't get English-only web recognition.
+    rec.lang = STT_WEB_LANG; rec.interimResults = true; rec.continuous = true;
+    rec.onresult = (e) => {
+      let interim = '';
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        if (e.results[i].isFinal) finalTxt += e.results[i][0].transcript;
+        else interim += e.results[i][0].transcript;
+      }
+      const sep = (anchor && !/\s$/.test(anchor)) ? ' ' : '';
+      input.value = anchor + sep + finalTxt + interim;
+      input.dispatchEvent(new Event('input'));
+    };
+    // sendMessage() empties the composer. Re-anchor to the now-empty box and
+    // drop what has already been transcribed, so the sent text is not typed
+    // back in behind the user.
+    sttReanchor = () => { anchor = ''; finalTxt = ''; };
+    rec.onerror = (e) => { showSttBanner('Web speech error: ' + (e.error || 'unknown'), 'err'); };
+    rec.onend = () => {
+      // A newer recognizer has already taken over — this one must not touch
+      // shared state or it will report idle while the new one is listening.
+      if (webRec !== rec) return;
+      // Chrome auto-ends on silence/timeout; while still recording, restart so
+      // long dictation keeps going.
+      if (micPhase === 'recording') { try { rec.start(); return; } catch (_) {} }
+      webRec = null;
+      sttReanchor = null;
+      setMicState('idle');
+    };
+    try { rec.start(); setMicState('recording'); }
+    catch (e) { showSttBanner('Could not start web speech: ' + e.message, 'err'); setMicState('idle'); }
+  }
+  function stopWebDictation() {
+    if (!webRec) return;
+    setMicState('stopping');   // onend is async — hold the gap shut until it fires
+    try { webRec.stop(); } catch (_) { webRec = null; setMicState('idle'); }
+  }
+
+  // Local dictation: record with MediaRecorder, POST the clip to the sidecar.
+  let mediaRec = null, mediaChunks = [], mediaStream = null;
+  let localStarting = false;   // synchronous guard: mic is opening (pre-getUserMedia resolve)
+  let composerAbort = null;    // AbortController for the in-flight transcribe fetch
+  // Always stop the stream you were given, not "the current one". A take's
+  // teardown can land after a later take has replaced mediaStream, and stopping
+  // the wrong one leaves the earlier microphone live with no way to release it.
+  function stopTracks(stream) {
+    const s = stream || mediaStream;
+    if (s) { try { s.getTracks().forEach(t => t.stop()); } catch (_) {} }
+    if (s === mediaStream) mediaStream = null;
+  }
+  async function startLocalDictation() {
+    if (localStarting) return;   // ignore a second click before the mic opens
+    localStarting = true;
+    setMicState('opening');      // the permission sheet can sit here indefinitely
+    // Browsers apply noise suppression and echo cancellation by default. Both
+    // are tuned for telephony, where the goal is suppressing anything that is
+    // not loud, tonal speech — which describes whispering, so a quiet voice
+    // gets attenuated before it ever reaches the recorder. Turn them off and
+    // leave AGC on, which is the piece that actually helps a quiet talker.
+    // Fall back to plain audio:true if a browser rejects the constraints.
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: true },
+      });
+    } catch (e) {
+      if (e && (e.name === 'OverconstrainedError' || e.name === 'NotSupportedError' || e.name === 'TypeError')) {
+        try { stream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
+        catch (e2) { localStarting = false; showSttBanner(micErrorMessage(e2), 'err'); setMicState('idle'); return; }
+      } else {
+        localStarting = false; showSttBanner(micErrorMessage(e), 'err'); setMicState('idle'); return;
+      }
+    }
+    const myStream = stream;     // this take's stream, captured for its own teardown
+    mediaStream = stream;
+    mediaChunks = [];
+    const mime = (window.MediaRecorder && MediaRecorder.isTypeSupported('audio/webm')) ? 'audio/webm' : '';
+    let rec;
+    try { rec = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined); }
+    catch (e) { stopTracks(myStream); localStarting = false; showSttBanner('Recording unsupported: ' + e.message, 'err'); setMicState('idle'); return; }
+    mediaRec = rec;
+    mediaChunks = [];
+    // The peak used by the silence gate is sampled inside requestAnimationFrame,
+    // which browsers pause in a hidden or occluded tab. Speaking while the tab
+    // is backgrounded therefore yields a near-zero peak from a perfectly good
+    // recording — so remember that it happened and skip the gate rather than
+    // telling the user they said nothing.
+    let hiddenDuringTake = document.hidden;
+    const visWatch = () => { if (document.hidden) hiddenDuringTake = true; };
+    document.addEventListener('visibilitychange', visWatch);
+    rec.ondataavailable = (e) => { if (e.data && e.data.size) mediaChunks.push(e.data); };
+    rec.onstop = async () => {
+      document.removeEventListener('visibilitychange', visWatch);
+      stopTracks(myStream);
+      const peak = composerWave.getPeak();
+      const blob = new Blob(mediaChunks, { type: rec.mimeType || 'audio/webm' });
+      if (!blob.size) {
+        setMicState('idle');
+        showSttBanner('Nothing was recorded — check that the right microphone is selected.', 'warn');
+        return;
+      }
+      if (!hiddenDuringTake && peak >= 0 && peak < STT_SILENCE_PEAK) {
+        setMicState('idle');   // essentially silent — don't feed Whisper
+        showSttBanner('No message detected — try again.', 'warn');
+        return;
+      }
+      setMicState('working');
+      showViz('spin', 'transcribing…');
+      composerAbort = new AbortController();
+      // Relabel if it's slow, but only claim what we can check. Saying "first
+      // run" unconditionally was false on every later slow take — the model is
+      // downloaded once. Start with wording that is true whenever the timer
+      // fires, then ask /api/stt/health, which reports `cached` straight off
+      // the weights on disk: cached === false at this instant means the
+      // download really is still in flight, so the stronger label is earned.
+      const slowTimer = setTimeout(() => {
+        const myAbort = composerAbort;
+        showViz('spin', 'still transcribing…');
+        fetch('/api/stt/health')
+          .then((r) => r.json())
+          .then((d) => {
+            // The take may have finished or been cancelled while we asked.
+            if (composerAbort !== myAbort || micPhase !== 'working') return;
+            if (d && d.available && d.cached === false)
+              showViz('spin', 'downloading the speech model (first run)…');
+          })
+          .catch(() => {});   // a failed health check just leaves the neutral label
+      }, 4000);
+      const killTimer = setTimeout(() => { try { composerAbort.abort('timeout'); } catch (_) {} }, STT_FETCH_TIMEOUT_MS);
+      try {
+        const r = await fetch('/api/stt/transcribe', {
+          method: 'POST',
+          headers: { 'Content-Type': blob.type || 'audio/webm' },
+          body: blob,
+          signal: composerAbort.signal,
+        });
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok || !data.ok) { offerWebFallback((data && data.error) || ('HTTP ' + r.status)); return; }
+        if (data.no_speech || !(data.text || '').trim()) {   // Whisper's own no-speech backstop
+          setMicState('idle');
+          // A clip that carried real energy but no words is a different problem
+          // from one the gate rejected, and "try again" is the wrong advice for
+          // someone who simply spoke too quietly.
+          showSttBanner(quietHint(data.rms), 'warn');
+          return;
+        }
+        hideSttBanner();
+        insertTranscript(data.text);
+        setMicState('idle');
+      } catch (e) {
+        if (e && e.name === 'AbortError') {
+          // A user cancel and a 4-minute timeout both surface as AbortError.
+          // Only the signal's reason tells them apart, and reporting a timeout
+          // as "cancelled" blames the user for something they did not do.
+          const why = composerAbort && composerAbort.signal && composerAbort.signal.reason;
+          setMicState('idle');
+          if (why === 'timeout') showSttBanner('Transcription timed out — the engine did not respond.', 'err');
+          else showSttBanner('Transcription cancelled.', 'warn');
+        } else {
+          offerWebFallback(e.message || 'network error');
+        }
+      } finally {
+        clearTimeout(slowTimer); clearTimeout(killTimer); composerAbort = null;
+      }
+    };
+    try {
+      rec.start();
+      setMicState('recording');
+      showViz('wave', 'listening…', myStream);
+    } catch (e) { stopTracks(myStream); showSttBanner('Could not start recording: ' + e.message, 'err'); setMicState('idle'); }
+    localStarting = false;   // recording is live (or failed) — allow the next action
+  }
+  function stopLocalDictation() {
+    if (!mediaRec || mediaRec.state === 'inactive') return;
+    setMicState('stopping');   // onstop is async — hold the gap shut until it fires
+    try { mediaRec.stop(); } catch (_) { stopTracks(); setMicState('idle'); }
+  }
+
+  function micToggle() {
+    if (micPhase === 'working') {   // transcribing → click cancels
+      if (composerAbort) { try { composerAbort.abort('cancel'); } catch (_) {} }
+      return;
+    }
+    // Teardown or the permission sheet is in flight. Both resolve
+    // asynchronously, and acting now starts a second capture on top of a take
+    // that has not finished releasing the microphone.
+    if (micPhase === 'stopping' || micPhase === 'opening' || localStarting) return;
+    if (micPhase === 'recording') { stopWebDictation(); stopLocalDictation(); return; }
+    hideSttBanner();
+    if (!window.isSecureContext) {
+      showSttBanner('Dictation needs HTTPS or localhost (this page is insecure). Use “tailscale serve” for HTTPS on your phone.', 'err');
+      return;
+    }
+    if (state.sttMode === 'web') startWebDictation();
+    else startLocalDictation();
+  }
+  if (micBtn) micBtn.addEventListener('click', micToggle);
+
   async function sendMessage() {
     let text = input.value.trim();
-    if (!text) return;
+    const readyAtt = state.pendingAttachments.filter(a => a.id && !a.uploading);
+    if (state.pendingAttachments.some(a => a.uploading)) {
+      alert('wait for image upload to finish'); return;
+    }
+    if (!text && readyAtt.length === 0) return;
     const resolved = resolveMentions(input.value);
     const mentionIds = resolved.map(m => m.id);
     // DM mode: always include the DM target so the agent sees the message
@@ -3812,14 +6787,37 @@ INDEX_HTML = r"""<!doctype html>
       const r = await fetch('/api/send' + API_QS, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ content: text, mentions: mentionIds }),
+        body: JSON.stringify({ content: text, mentions: mentionIds,
+                               attachment_ids: readyAtt.map(a => a.id) }),
       });
       if (!r.ok) {
         const err = await r.json().catch(() => ({ error: 'unknown' }));
-        alert('send failed: ' + (err.error || r.status));
+        // A rejected relink means the server already consumed these ids on an
+        // earlier attempt whose response we lost — the images DID post. Drop
+        // them rather than leaving a composer that can never send again and
+        // that invites the user to delete images they actually published.
+        if (/already-linked/.test(err.error || '')) {
+          dropAttachments(readyAtt);
+          renderAttachStrip();
+          alert('Those images were already posted — the earlier send did go '
+                + 'through even though it reported an error. Removed them from '
+                + 'the composer; your text is still here.');
+        } else {
+          alert('send failed: ' + (err.error || r.status));
+        }
         return;
       }
       input.value = '';
+      // Web dictation rebuilds the composer from its own anchor on every
+      // result. Without this it would re-type the message just sent, behind
+      // the user, into the now-empty box.
+      if (sttReanchor) sttReanchor();
+      // Splice out exactly what we sent. Reassigning to [] would also destroy
+      // an image pasted DURING the in-flight send: its upload completes into a
+      // slot no longer in the array, so it vanishes from the strip with no
+      // error and is orphaned server-side.
+      dropAttachments(readyAtt);
+      renderAttachStrip();
       autoResizeInput();
       state.completion.visible = false;
       renderCompletions();
@@ -3881,6 +6879,27 @@ INDEX_HTML = r"""<!doctype html>
     refreshCompletions();
     updatePreview();
   });
+  input.addEventListener('scroll', () => {
+    if (!inputHighlight) return;
+    inputHighlight.scrollTop = input.scrollTop;
+    inputHighlight.scrollLeft = input.scrollLeft;
+  });
+  // IME / dead-key / emoji composition: the provisional (pre-commit) glyphs are
+  // drawn by the browser in the textarea itself, which is normally transparent
+  // (the colored mirror is what shows). Reveal the textarea and hide the mirror
+  // for the duration of composition so the preview is visible; on commit, revert
+  // and re-render the mirror from the now-updated value.
+  input.addEventListener('compositionstart', () => {
+    input.style.color = 'var(--fg)';
+    // visibility, not colour: a mention chip sets its own colour, so it would
+    // stay painted over the revealed textarea and double the token.
+    if (inputHighlight) inputHighlight.classList.add('composing');
+  });
+  input.addEventListener('compositionend', () => {
+    input.style.color = '';
+    if (inputHighlight) inputHighlight.classList.remove('composing');
+    updatePreview();
+  });
   sendBtn.addEventListener('click', sendMessage);
 
   // ── Filter ──
@@ -3893,8 +6912,13 @@ INDEX_HTML = r"""<!doctype html>
   }
   function applyFilterToAll() {
     for (const node of chat.children) applyFilterToNode(node);
+    // Re-anchor the unread divider to the first still-visible unread message
+    // (a filter may have hidden the one it was sitting before).
+    refreshUnreadDivider();
   }
   function applyFilterToNode(node) {
+    // Skip non-message children (e.g. the unread divider) — they have no msgId.
+    if (!node.dataset || node.dataset.msgId === undefined) return;
     if (!state.filter) { node.classList.remove('filtered-out'); return; }
     const hit = (node.dataset.search || '').includes(state.filter);
     node.classList.toggle('filtered-out', !hit);
@@ -3928,6 +6952,22 @@ INDEX_HTML = r"""<!doctype html>
     state.compact = !state.compact;
     btnCompact.classList.toggle('on', state.compact);
     for (const [id, dom] of state.messageDomById) applyCompactClass(dom, id);
+  });
+
+  // ── Message-number toggle (#N in the left gutter) ──
+  // Persists per-origin via localStorage, default ON. Toggling just flips a
+  // class on #chat; pure-CSS sticky positioning handles the rest (see .msg-num).
+  let msgNumsOn = true;
+  try { msgNumsOn = localStorage.getItem('trio.msgNumbers') !== '0'; } catch (_) {}
+  function applyMsgNums() {
+    chat.classList.toggle('show-msg-nums', msgNumsOn);
+    btnMsgNum.classList.toggle('on', msgNumsOn);
+  }
+  applyMsgNums();
+  btnMsgNum.addEventListener('click', () => {
+    msgNumsOn = !msgNumsOn;
+    try { localStorage.setItem('trio.msgNumbers', msgNumsOn ? '1' : '0'); } catch (_) {}
+    applyMsgNums();
   });
 
   // ── Notify toggle ──
@@ -3965,9 +7005,37 @@ INDEX_HTML = r"""<!doctype html>
     } catch (_) { _audioCtx = null; }
     return _audioCtx;
   }
+  // Does a peer message qualify for the chime under the current scope?
+  //   'all'     → every peer message chimes.
+  //   'mention' → only messages that @mention the operator chime.
+  // Pure (no DOM/state) so it can be unit-tested via the harness hook. The
+  // on/off master is state.soundEnabled + the btn-sound pill; this only refines
+  // an already-enabled chime, and stays independent of notifyScope.
+  function chimeScopeAllows(scope, mentionsOperator) {
+    return scope === 'all' ? true : !!mentionsOperator;
+  }
+  // The whole chime decision, pure and testable. The gate that actually
+  // matters is not the scope predicate but the conditions around it: the
+  // history burst, your own messages, system notices, and a DM view where the
+  // message is appended but hidden.
+  function shouldChime(o) {
+    if (!o || o.initialLoad) return false;      // primed history, not live
+    if (!o.soundEnabled) return false;
+    if (o.isMine || o.isSystem) return false;
+    if (!o.dmVisible) return false;             // appended but CSS-hidden
+    return chimeScopeAllows(o.scope, o.addressed);
+  }
+  let _lastChimeAt = 0;
   function playChime() {
     const ctx = ensureAudio();
     if (!ctx) return;
+    // Coalesce. A reconnect drains the whole offline backlog through one
+    // synchronous handler, and each call ramps a fresh gain to full volume at
+    // essentially the same currentTime — forty of those sum into clipping
+    // rather than forty chimes. One sound per burst is the useful signal.
+    const nowMs = Date.now();
+    if (nowMs - _lastChimeAt < 400) return;
+    _lastChimeAt = nowMs;
     if (ctx.state === 'suspended') { try { ctx.resume(); } catch (_) {} }
     const vol = Math.max(0, Math.min(1, state.chimeVolume));
     if (vol <= 0) return;
@@ -3990,7 +7058,8 @@ INDEX_HTML = r"""<!doctype html>
     } catch (_) { /* ignore */ }
   }
 
-  // ── Sound (chime) toggle — off by default; chimes on any new peer message ──
+  // ── Sound (chime) toggle — off by default; the pill is the on/off master and
+  //    state.soundScope (settings drawer) refines which peer messages chime. ──
   btnSound.addEventListener('click', () => {
     state.soundEnabled = !state.soundEnabled;
     btnSound.textContent = state.soundEnabled ? '🔊 on' : '🔊 off';
@@ -4039,7 +7108,7 @@ INDEX_HTML = r"""<!doctype html>
   // ── Mobile sidebar: overlay with scrim ──
   const mobileScrim = document.getElementById('mobile-scrim');
   const btnMobileRoster = document.getElementById('btn-mobile-roster');
-  const btnMobileClose = document.getElementById('mobile-side-close');
+  const btnSideClose = document.getElementById('side-close');
   function closeMobileSidebar() {
     appEl.classList.remove('mobile-side-open');
     btnSide.classList.toggle('on', false);
@@ -4050,8 +7119,13 @@ INDEX_HTML = r"""<!doctype html>
     btnSide.classList.toggle('on', open);
     if (btnMobileRoster) btnMobileRoster.classList.toggle('on', open);
   }
+  // The in-sidebar close control picks the same path as the header pill.
+  function closeSidebar() {
+    if (window.innerWidth <= 768) { closeMobileSidebar(); }
+    else if (!_sideCollapsed) { toggleSidebar(); }
+  }
   if (btnMobileRoster) btnMobileRoster.addEventListener('click', toggleMobileSidebar);
-  if (btnMobileClose) btnMobileClose.addEventListener('click', closeMobileSidebar);
+  if (btnSideClose) btnSideClose.addEventListener('click', closeSidebar);
   if (mobileScrim) mobileScrim.addEventListener('click', closeMobileSidebar);
   // Auto-collapse sidebar on narrow viewports at load
   if (window.innerWidth <= 768) {
@@ -4068,6 +7142,7 @@ INDEX_HTML = r"""<!doctype html>
     ['Message font', 'font-picker'],
     ['Roster sidebar', 'btn-side'],
     ['Compact messages', 'btn-compact'],
+    ['Message numbers', 'btn-msgnum'],
     ['Desktop notifications', 'btn-notify'],
     ['Chime on new message', 'btn-sound'],
   ].forEach(([labelText, id]) => {
@@ -4094,6 +7169,36 @@ INDEX_HTML = r"""<!doctype html>
     return row;
   }
 
+  // Build a <select> preloaded with `options` ([value, label] pairs) and the
+  // `current` value pre-selected. Shared by the chime + notification prefs.
+  function prefSelect(options, current) {
+    const sel = document.createElement('select');
+    options.forEach(([val, label]) => {
+      const o = document.createElement('option');
+      o.value = val; o.textContent = label;
+      if (val === current) o.selected = true;
+      sel.appendChild(o);
+    });
+    return sel;
+  }
+
+  // Chime scope — off is the btn-sound pill; this refines an enabled chime to
+  // fire on every message or only @mentions. Independent of the notify scope.
+  try {
+    const ss = localStorage.getItem('trio.soundScope'); if (ss) state.soundScope = ss;
+  } catch (_) {}
+  // Wording ('all messages' / '@mentions only') and the mention-first vs
+  // all-first default are matched to the notify-scope select so the two read as
+  // siblings; the title spells out that they're independent controls.
+  const soundScopeSel = prefSelect(
+    [['all', 'all messages'], ['mention', '@mentions only']], state.soundScope);
+  soundScopeSel.title = 'Chime scope — independent of desktop notifications';
+  soundScopeSel.addEventListener('change', () => {
+    state.soundScope = soundScopeSel.value;
+    try { localStorage.setItem('trio.soundScope', state.soundScope); } catch (_) {}
+  });
+  const soundScopeRow = addSettingRow('Chime for', soundScopeSel);
+
   // Chime volume slider — drives state.chimeVolume; previews on release.
   try {
     const sv = parseFloat(localStorage.getItem('trio.chimeVolume'));
@@ -4110,17 +7215,7 @@ INDEX_HTML = r"""<!doctype html>
   volSlider.addEventListener('change', () => { ensureAudio(); playChime(); });
   const chimeVolRow = addSettingRow('Chime volume', volSlider);
 
-  // Notification preference dropdowns.
-  function prefSelect(options, current) {
-    const sel = document.createElement('select');
-    options.forEach(([val, label]) => {
-      const o = document.createElement('option');
-      o.value = val; o.textContent = label;
-      if (val === current) o.selected = true;
-      sel.appendChild(o);
-    });
-    return sel;
-  }
+  // Notification preference dropdowns (reuse prefSelect defined above).
   try {
     const ns = localStorage.getItem('trio.notifyScope'); if (ns) state.notifyScope = ns;
     const nw = localStorage.getItem('trio.notifyWhen'); if (nw) state.notifyWhen = nw;
@@ -4140,8 +7235,214 @@ INDEX_HTML = r"""<!doctype html>
   });
   const notifyWhenRow = addSettingRow('Notify when', notifyWhenSel);
 
+  // ── Transcription (speech-to-text) ──
+  // Main panel keeps a SINGLE control (the mode). Status + Test live on their
+  // own sub-page, opened via "Test ›".
+  try { const sm = localStorage.getItem('trio.sttMode'); if (sm === 'web' || sm === 'local') state.sttMode = sm; } catch (_) {}
+  // Labels stay short: the panel is max-width 320px and the longer wording
+  // pushed the Test button 39px outside it, wrapping "Test ›" onto two lines.
+  const sttModeSel = prefSelect(
+    [['local', 'local — on-device'], ['web', 'web — browser']], state.sttMode);
+  sttModeSel.addEventListener('change', () => {
+    state.sttMode = sttModeSel.value;
+    try { localStorage.setItem('trio.sttMode', state.sttMode); } catch (_) {}
+    updateSttEntry();
+    updateSttModeNote();
+  });
+  const sttOpenBtn = document.createElement('button');
+  sttOpenBtn.className = 'pill';
+  sttOpenBtn.textContent = 'Test ›';
+  sttOpenBtn.title = 'check local transcription works';
+  const sttDictWrap = document.createElement('div');
+  sttDictWrap.style.display = 'flex';
+  sttDictWrap.style.gap = '8px';
+  sttDictWrap.style.alignItems = 'center';
+  sttDictWrap.appendChild(sttModeSel);
+  sttDictWrap.appendChild(sttOpenBtn);
+  addSettingRow('Dictation', sttDictWrap);
+  // The only privacy warning used to live on the fallback path — the one the
+  // user did NOT choose. Someone who picks web mode deliberately deserves to
+  // know where their voice goes just as much.
+  const sttModeNote = document.createElement('div');
+  sttModeNote.className = 'stt-mode-note';
+  const sttModeNoteRow = addSettingRow('', sttModeNote);
+  function updateSttModeNote() {
+    sttModeNote.textContent = (state.sttMode === 'web')
+      ? 'Browser dictation sends your audio to your browser vendor.'
+      : 'Audio is transcribed on the server and never leaves it.';
+  }
+  updateSttModeNote();
+
+  // Sub-page: back link, status, test recorder (waveform → spinner → result).
+  const sttPage = document.createElement('div');
+  sttPage.id = 'settings-stt-page';
+  const sttBack = document.createElement('button');
+  sttBack.className = 'stt-back';
+  sttBack.textContent = '‹ Settings';
+  const sttPageTitle = document.createElement('h3');
+  sttPageTitle.textContent = 'Local transcription';
+  const sttStatus = document.createElement('div');
+  sttStatus.className = 'stt-status';
+  sttStatus.textContent = '…';
+  const sttTestBtn = document.createElement('button');
+  sttTestBtn.className = 'pill';
+  sttTestBtn.innerHTML = ICON_MIC + ' Test';
+  sttTestBtn.title = 'record a short clip and transcribe it locally';
+  const sttTestVizWrap = document.createElement('div');
+  sttTestVizWrap.className = 'stt-testviz';
+  sttTestVizWrap.hidden = true;
+  const sttTestWave = document.createElement('canvas');
+  sttTestWave.id = 'stt-test-wave'; sttTestWave.width = 260; sttTestWave.height = 30;
+  const sttTestSpin = document.createElement('div');
+  sttTestSpin.className = 'stt-spinner'; sttTestSpin.hidden = true;
+  const sttTestVizLabel = document.createElement('span');
+  sttTestVizLabel.className = 'stt-viz-label';
+  sttTestVizWrap.appendChild(sttTestWave);
+  sttTestVizWrap.appendChild(sttTestSpin);
+  sttTestVizWrap.appendChild(sttTestVizLabel);
+  const sttTestOut = document.createElement('div');
+  sttTestOut.className = 'stt-test-out';
+  sttPage.appendChild(sttBack);
+  sttPage.appendChild(sttPageTitle);
+  sttPage.appendChild(sttStatus);
+  sttPage.appendChild(sttTestBtn);
+  sttPage.appendChild(sttTestVizWrap);
+  sttPage.appendChild(sttTestOut);
+  settingsPanel.appendChild(sttPage);
+
+  const testWave = makeWaveform(sttTestWave);
+
+  function openSttPage() { settingsPanel.classList.add('stt-page-open'); refreshSttStatus(); }
+  function closeSttPage() { stopTestRecording(); settingsPanel.classList.remove('stt-page-open'); }
+  sttOpenBtn.addEventListener('click', openSttPage);
+  sttBack.addEventListener('click', closeSttPage);
+
+  // The test is local-only; hide its entry in web mode.
+  function updateSttEntry() { sttOpenBtn.hidden = (state.sttMode !== 'local'); }
+  updateSttEntry();
+
+  async function refreshSttStatus() {
+    sttStatus.textContent = 'checking…'; sttStatus.className = 'stt-status';
+    try {
+      const r = await fetch('/api/stt/health');
+      const d = await r.json();
+      if (d.available) {
+        sttStatus.textContent = (d.warm ? '✓ ready (warm) — ' : '✓ ready — ') + (d.model || '');
+        sttStatus.className = 'stt-status ok';
+      } else {
+        sttStatus.textContent = '✗ ' + (d.detail || 'unavailable');
+        sttStatus.className = 'stt-status err';
+      }
+    } catch (e) {
+      sttStatus.textContent = '✗ health check failed';
+      sttStatus.className = 'stt-status err';
+    }
+  }
+
+  // Test recorder: waveform while recording, spinner while transcribing.
+  let sttTestRec = null, sttTestChunks = [], sttTestStream = null, sttTestRecording = false;
+  let sttTestStarting = false, sttTestCancelled = false;
+  // Cancel an in-progress test (mic OFF, no transcription). Used when leaving the
+  // test page or closing the settings drawer so the microphone never stays hot.
+  function stopTestRecording() {
+    // sttTestStarting covers the window where getUserMedia has been called but
+    // not resolved — i.e. exactly while the permission sheet is up. Returning
+    // early there without setting the cancelled flag let the recorder start
+    // AFTER the drawer had closed, with no visible indicator anywhere.
+    if (sttTestStarting) sttTestCancelled = true;
+    if (!sttTestRecording && !sttTestStream && !sttTestStarting) return;
+    sttTestCancelled = true;
+    sttTestRecording = false;
+    testWave.stop();
+    if (sttTestRec && sttTestRec.state !== 'inactive') { try { sttTestRec.stop(); } catch (_) {} }
+    if (sttTestStream) { try { sttTestStream.getTracks().forEach(t => t.stop()); } catch (_) {} sttTestStream = null; }
+    sttTestVizWrap.hidden = true; sttTestSpin.hidden = true; sttTestWave.hidden = false; sttTestVizLabel.textContent = '';
+    sttTestBtn.innerHTML = ICON_MIC + ' Test';
+    sttTestOut.textContent = ''; sttTestOut.className = 'stt-test-out';
+  }
+  sttTestBtn.addEventListener('click', async () => {
+    if (sttTestRecording) {   // "Stop" → finalize + transcribe (the actual test)
+      sttTestRecording = false;
+      if (sttTestRec && sttTestRec.state !== 'inactive') { try { sttTestRec.stop(); } catch (_) {} }
+      return;
+    }
+    if (sttTestStarting) return;   // ignore a second click before the mic opens
+    sttTestStarting = true;
+    sttTestCancelled = false;
+    sttTestOut.textContent = ''; sttTestOut.className = 'stt-test-out';
+    if (!window.isSecureContext) { sttTestStarting = false; sttTestOut.textContent = 'Dictation needs HTTPS or localhost.'; sttTestOut.className = 'stt-test-out err'; return; }
+    try { sttTestStream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
+    catch (e) { sttTestStarting = false; sttTestOut.textContent = 'Microphone permission denied.'; sttTestOut.className = 'stt-test-out err'; return; }
+    if (sttTestCancelled) { sttTestStarting = false; try { sttTestStream.getTracks().forEach(t => t.stop()); } catch (_) {} sttTestStream = null; return; }
+    sttTestChunks = [];
+    try { sttTestRec = new MediaRecorder(sttTestStream); }
+    catch (e) { sttTestStarting = false; sttTestOut.textContent = 'Recording unsupported.'; sttTestOut.className = 'stt-test-out err'; sttTestStream.getTracks().forEach(t => t.stop()); sttTestStream = null; return; }
+    sttTestRec.ondataavailable = (e) => { if (e.data && e.data.size) sttTestChunks.push(e.data); };
+    sttTestRec.onstop = async () => {
+      if (sttTestCancelled) { sttTestCancelled = false; return; }   // cancelled → no transcription
+      if (sttTestStream) { try { sttTestStream.getTracks().forEach(t => t.stop()); } catch (_) {} sttTestStream = null; }
+      const peak = testWave.getPeak();
+      testWave.stop();
+      sttTestBtn.innerHTML = ICON_MIC + ' Test';
+      const blob = new Blob(sttTestChunks, { type: (sttTestRec && sttTestRec.mimeType) || 'audio/webm' });
+      if (peak >= 0 && peak < STT_SILENCE_PEAK) {   // silent — no round trip
+        sttTestVizWrap.hidden = true; sttTestSpin.hidden = true; sttTestWave.hidden = false; sttTestVizLabel.textContent = '';
+        sttTestOut.textContent = 'No message detected — try again.';
+        sttTestOut.className = 'stt-test-out err';
+        return;
+      }
+      sttTestWave.hidden = true; sttTestSpin.hidden = false; sttTestVizLabel.textContent = 'transcribing…';
+      sttTestOut.textContent = ''; sttTestOut.className = 'stt-test-out';
+      const ctrl = new AbortController();
+      const killTimer = setTimeout(() => { try { ctrl.abort('timeout'); } catch (_) {} }, STT_FETCH_TIMEOUT_MS);
+      try {
+        const r = await fetch('/api/stt/transcribe', { method: 'POST', headers: { 'Content-Type': blob.type || 'audio/webm' }, body: blob, signal: ctrl.signal });
+        const d = await r.json().catch(() => ({}));
+        if (r.ok && d.ok) {
+          if (d.no_speech || !(d.text || '').trim()) {
+            sttTestOut.textContent = 'No message detected — try again.';
+            sttTestOut.className = 'stt-test-out err';
+          } else {
+            sttTestOut.textContent = '✓ “' + d.text + '”' + (d.seconds != null ? ' (' + d.seconds + 's)' : '');
+            sttTestOut.className = 'stt-test-out ok';
+          }
+        } else {
+          // Same humanizer as the composer banner — otherwise the identical
+          // failure is described one way here and another way there.
+          sttTestOut.textContent = '✗ ' + humanizeSttError(d.error || ('HTTP ' + r.status));
+          sttTestOut.className = 'stt-test-out err';
+        }
+      } catch (e) {
+        sttTestOut.textContent = (e && e.name === 'AbortError') ? '✗ timed out' : ('✗ ' + (e.message || 'failed'));
+        sttTestOut.className = 'stt-test-out err';
+      } finally {
+        clearTimeout(killTimer);
+      }
+      sttTestVizWrap.hidden = true; sttTestSpin.hidden = true; sttTestWave.hidden = false; sttTestVizLabel.textContent = '';
+      refreshSttStatus();
+    };
+    // The one recorder start that used to run bare. A throw here (some mobile
+    // Safari builds raise NotSupportedError) left sttTestStarting latched true
+    // and the stream open: a dead Test button and a live microphone.
+    try { sttTestRec.start(); }
+    catch (e) {
+      sttTestStarting = false;
+      try { sttTestStream.getTracks().forEach(t => t.stop()); } catch (_) {}
+      sttTestStream = null;
+      sttTestOut.textContent = 'Recording unsupported here.';
+      sttTestOut.className = 'stt-test-out err';
+      return;
+    }
+    sttTestRecording = true; sttTestStarting = false;
+    sttTestBtn.innerHTML = ICON_STOP + ' Stop';
+    sttTestVizWrap.hidden = false; sttTestWave.hidden = false; sttTestSpin.hidden = true; sttTestVizLabel.textContent = 'listening…';
+    sttTestOut.textContent = '';
+    testWave.start(sttTestStream);
+  });
+
   // Sub-settings only show when their parent feature is enabled.
   function syncSettingVisibility() {
+    if (soundScopeRow) soundScopeRow.hidden = !state.soundEnabled;
     if (chimeVolRow) chimeVolRow.hidden = !state.soundEnabled;
     if (notifyScopeRow) notifyScopeRow.hidden = !state.notifyEnabled;
     if (notifyWhenRow) notifyWhenRow.hidden = !state.notifyEnabled;
@@ -4150,8 +7451,10 @@ INDEX_HTML = r"""<!doctype html>
 
   function toggleSettings(force) {
     const show = (force !== undefined) ? force : settingsPanel.hasAttribute('hidden');
-    if (show) { settingsPanel.removeAttribute('hidden'); btnSettings.classList.add('on'); }
-    else { settingsPanel.setAttribute('hidden', ''); btnSettings.classList.remove('on'); }
+    // Closing always cancels a running mic test — the drawer can be dismissed by
+    // Escape or an outside click, and neither should leave the microphone hot.
+    if (show) { settingsPanel.classList.remove('stt-page-open'); settingsPanel.removeAttribute('hidden'); btnSettings.classList.add('on'); }
+    else { stopTestRecording(); settingsPanel.setAttribute('hidden', ''); btnSettings.classList.remove('on'); }
   }
   btnSettings.addEventListener('click', (e) => { e.stopPropagation(); toggleSettings(); });
   document.addEventListener('click', (e) => {
@@ -4164,20 +7467,145 @@ INDEX_HTML = r"""<!doctype html>
   });
 
   // ── Jump-to-latest + unread counter ──
+  // ── Unread divider ──
+  // Count / locate unread (id > lastSeenId), skipping filtered/DM-hidden nodes
+  // so the divider + "new" bar stay in sync with what's actually shown.
+  function isHiddenMsg(dom) {
+    return dom.classList.contains('filtered-out') || dom.classList.contains('dm-hidden');
+  }
+  // You cannot have unread your own message. Sending while scrolled up used to
+  // raise a "new messages" divider above your own post and add it to the
+  // counter, because unread was decided purely by id > lastSeenId.
+  //
+  // Skipped at the point of COUNTING rather than by advancing lastSeenId past
+  // it. The watermark is a single high-water mark: moving it over your own
+  // message would also mark every earlier message read, so a peer's message
+  // that arrived while you were scrolled up would vanish from the divider
+  // merely because you replied to something else.
+  function isOwnMsg(dom) {
+    return !!state.operator.id && dom.dataset.sender === state.operator.id;
+  }
+  function firstVisibleUnreadDom() {
+    for (const id of [...state.messageDomById.keys()].sort((a, b) => a - b)) {
+      if (id <= state.lastSeenId) continue;
+      const dom = state.messageDomById.get(id);
+      if (dom && !isHiddenMsg(dom) && !isOwnMsg(dom)) return dom;
+    }
+    return null;
+  }
+  function unreadCountVisible() {
+    let n = 0;
+    for (const [id, dom] of state.messageDomById) {
+      if (id > state.lastSeenId && !isHiddenMsg(dom) && !isOwnMsg(dom)) n++;
+    }
+    return n;
+  }
+  // Draw a "new messages" line before the first *visible* unread message.
+  function refreshUnreadDivider() {
+    const old = document.getElementById('unread-divider');
+    if (old) old.remove();
+    if (state.lastSeenId) {
+      const dom = firstVisibleUnreadDom();
+      if (dom) {
+        const bar = document.createElement('div');
+        bar.id = 'unread-divider';
+        bar.className = 'unread-divider';
+        bar.textContent = 'new messages';
+        chat.insertBefore(bar, dom);
+      }
+    }
+    updateNewBar();
+  }
+  // Establish the read watermark once, when the history burst settles — the
+  // only place that works when the channel was opened in a background tab,
+  // which landing mode makes the normal way in.
+  //
+  // Everything already on screen counts as seen, so you arrive caught up
+  // rather than staring at a divider above the entire history. If the server
+  // has a last_read for this operator it wins, but note that nth_web.py does
+  // not currently write members.last_read for web operators (ensure_operator_row
+  // inserts 0 and only last_seen is updated), so in practice this resolves to
+  // "newest" today. The branch is here so that persisting a web operator's
+  // read position starts working without touching this function.
+  function seedBaseline() {
+    if (state.lastSeenId) return;
+    // reduce(), not Math.max(...spread) — a long channel would exceed the
+    // argument limit and throw RangeError.
+    const newest = [...state.messageDomById.keys()]
+      .reduce((a, b) => (b > a ? b : a), 0);
+    const me = state.members.get(state.operator.id);
+    const serverLastRead = me ? (me.last_read || 0) : 0;
+    state.lastSeenId = serverLastRead > 0 ? Math.min(serverLastRead, newest) : newest;
+    refreshUnreadDivider();
+  }
+
+  // The user caught up — advance the watermark over the messages they could
+  // actually have read, and clear the divider.
+  //
+  // lastSeenId is a single high-water mark, so it must never jump OVER an
+  // unread message the user has not seen. Two kinds of hidden message need
+  // opposite treatment:
+  //   • filtered-out — the user's own filter is hiding it temporarily. Stop
+  //     here. Advancing past it would mark it read because they searched for
+  //     something else, and clearing the filter would silently lose it.
+  //   • dm-hidden — structurally not part of this view at all. Skip it; if it
+  //     blocked the walk the watermark could never advance past it again.
+  function markCaughtUp() {
+    let mark = state.lastSeenId;
+    for (const id of [...state.messageDomById.keys()].sort((a, b) => a - b)) {
+      if (id <= state.lastSeenId) continue;
+      const dom = state.messageDomById.get(id);
+      if (dom.classList.contains('filtered-out')) break;
+      mark = id;
+    }
+    state.lastSeenId = mark;
+    if (!unreadCountVisible()) {
+      const bar = document.getElementById('unread-divider');
+      if (bar) bar.remove();
+    }
+    updateNewBar();
+  }
+  // Top "N new messages" bar — the conventional jump-to-first-unread affordance.
+  // Shown whenever an unread divider exists; clicking scrolls up to it.
+  function updateNewBar() {
+    if (!newBar) return;
+    if (!document.getElementById('unread-divider')) { newBar.classList.remove('show'); return; }
+    // "N new messages below" is meaningless when you are already at the bottom
+    // looking at them. This happens two ways: the jump-to-unread clamps here
+    // when the unread block is shorter than the viewport (and then there is no
+    // scroll left to attribute, so nothing marks), and a filter can leave the
+    // walk unable to advance past a hidden message beneath a visible one.
+    // Hiding the claim is honest in both; the watermark is deliberately
+    // untouched, so nothing is marked read on the user's behalf.
+    if (chat.scrollHeight - chat.clientHeight - chat.scrollTop < 80) {
+      newBar.classList.remove('show');
+      return;
+    }
+    const n = unreadCountVisible();
+    newBar.textContent = '↓ ' + n + ' new message' + (n === 1 ? '' : 's');
+    newBar.classList.add('show');
+  }
+
   function updateJumpButton() {
     const atBottom = chat.scrollHeight - chat.clientHeight - chat.scrollTop < 80;
     if (atBottom) {
       state.jumpUnread = 0;
       jumpBtn.classList.remove('show');
       jumpCount.style.display = 'none';
+      // Only a scroll the USER performed means "I have read to here". A
+      // scroll event alone does not say who caused it, and the page issues
+      // several of its own (the post-burst settle, the jump-to-unread), so
+      // attribute the scroll to a recent real gesture instead of racing it
+      // against a timer.
+      if (!document.hidden && scrollIsUsers()) markCaughtUp();
+      return;
+    }
+    jumpBtn.classList.add('show');
+    if (state.jumpUnread > 0) {
+      jumpCount.style.display = '';
+      jumpCount.textContent = state.jumpUnread;
     } else {
-      jumpBtn.classList.add('show');
-      if (state.jumpUnread > 0) {
-        jumpCount.style.display = '';
-        jumpCount.textContent = state.jumpUnread;
-      } else {
-        jumpCount.style.display = 'none';
-      }
+      jumpCount.style.display = 'none';
     }
   }
   // ── "You are here" indicator — operator's emoji on topmost visible
@@ -4218,11 +7646,61 @@ INDEX_HTML = r"""<!doctype html>
     pin.title = `you are here — the ${a.name}`;
     container.appendChild(pin);
   }
-  chat.addEventListener('scroll', () => { updateJumpButton(); scheduleHereUpdate(); });
+  // A scroll is "the user's" when a real input gesture on the scroller
+  // preceded it. Programmatic scrolls (settle, jump-to-unread) have none, so
+  // they can never mark messages read. Bound to the scroller, not the
+  // document, so clicking the "new messages" bar is not mistaken for intent.
+  function noteIntent() { state.userIntentAt = Date.now(); }
+  // True when a scroll happening right now is attributable to the user.
+  function scrollIsUsers() { return Date.now() - state.userIntentAt < USER_INTENT_MS; }
+  // A scroll the PAGE issues is never the user's, however recently they moved.
+  // Called immediately before every programmatic scrollTop assignment: without
+  // it a wheel in the preceding USER_INTENT_MS donates its attribution to the
+  // animation, and sustainIntent then carries that donation to the bottom.
+  function disownScroll() { state.userIntentAt = 0; }
+  // Keep an already-attributed scroll attributed while it is still moving.
+  // Cannot bootstrap: an unattributed scroll starts stale and stays stale.
+  function sustainIntent() { if (scrollIsUsers()) noteIntent(); }
+  for (const ev of ['wheel', 'touchstart', 'touchmove', 'pointerdown', 'mousedown']) {
+    chat.addEventListener(ev, noteIntent, { passive: true });
+  }
+  document.addEventListener('keydown', (e) => {
+    // Only keys that could plausibly have scrolled the chat. Typing in the
+    // composer must not count: boot focuses #input, so a space typed while a
+    // programmatic scroll is still gliding would hand it the user's
+    // attribution and let it mark the unread read.
+    if (e.target && e.target.closest &&
+        e.target.closest('input, textarea, select, [contenteditable]')) return;
+    if (['PageDown', 'PageUp', 'End', 'Home', 'ArrowDown', 'ArrowUp', ' '].includes(e.key)) noteIntent();
+  }, { passive: true });
+  chat.addEventListener('scroll', () => {
+    // A scroll that is ALREADY the user's keeps its attribution for as long as
+    // it keeps moving — iOS momentum routinely runs 1-3s past touchend, and a
+    // long smooth scroll can outlast USER_INTENT_MS on its own. This cannot
+    // bootstrap a programmatic scroll into attribution: that one starts stale,
+    // so the condition is false on its very first frame and stays false.
+    sustainIntent();
+    updateJumpButton();
+    scheduleHereUpdate();
+  });
   jumpBtn.addEventListener('click', () => {
     chat.scrollTop = chat.scrollHeight;
     state.jumpUnread = 0;
+    if (!document.hidden) markCaughtUp();
     updateJumpButton();
+  });
+  // Top bar: scroll UP to the first unread message (the divider). Does not mark
+  // caught-up — you're going TO the unread, not past it.
+  newBar.addEventListener('click', () => {
+    const dom = firstVisibleUnreadDom();
+    if (!dom) return;
+    // #chat is scroll-behavior: smooth, so this starts an animation lasting
+    // well over a second on a long channel, and the browser clamps it to the
+    // bottom whenever the unread block is shorter than one viewport. Neither
+    // is a scroll the user performed, so neither may count as catching up —
+    // see USER_INTENT_MS.
+    disownScroll();
+    chat.scrollTop = Math.max(0, dom.offsetTop - 8);
   });
 
   // ── Title / tab badge ──
@@ -4234,6 +7712,12 @@ INDEX_HTML = r"""<!doctype html>
     if (!document.hidden) {
       state.unreadCount = 0;
       updateTitle();
+      // Returning to the tab: if already at the bottom, they've caught up;
+      // otherwise surface the "new messages" divider for what arrived while away.
+      const atBottom = chat.scrollHeight - chat.clientHeight - chat.scrollTop < 80;
+      if (atBottom) markCaughtUp();
+      else refreshUnreadDivider();
+      updateJumpButton();
     }
   });
   window.addEventListener('focus', () => {
@@ -4248,6 +7732,10 @@ INDEX_HTML = r"""<!doctype html>
     if (es) try { es.close(); } catch (e) {}
     es = new EventSource('/api/events' + API_QS);
     es.onopen = () => {
+      // A channel with no history primes zero messages, so appendMessage never
+      // fires and nothing would ever clear initialLoad — the first live message
+      // would arrive un-chimed. Arm the settle from the connection itself.
+      if (state.initialLoad) scheduleInitialSettle();
       hConn.textContent = '● connected';
       hConn.classList.remove('bad');
       hConn.classList.add('ok');
@@ -4338,6 +7826,11 @@ INDEX_HTML = r"""<!doctype html>
 
   function applyOperator(op) {
     state.operator = op;
+    // The server refuses a cull from anything but a local shell or a
+    // Tailscale-verified peer. Mirror that here so an identity the server
+    // would reject never sees the control at all, rather than being walked
+    // through a confirm dialog into a 403.
+    CAN_CULL = (op && (op.source === 'loopback' || op.source === 'tailscale'));
     const opAnimal = animalFor(op);
     const srcTag = op.source === 'tailscale' ? '[tailnet]' :
                    op.source === 'loopback'  ? '[local]'   :
@@ -4394,6 +7887,90 @@ INDEX_HTML = r"""<!doctype html>
     const el = document.getElementById('fatal-banner');
     if (el) el.style.display = 'none';
   }
+  // ── Full-history search (queries the server DB, not just loaded messages) ──
+  const btnSearch = document.getElementById('btn-search');
+  const searchPanel = document.getElementById('search-panel');
+  const searchInput = document.getElementById('search-input');
+  const searchClose = document.getElementById('search-close');
+  const searchStatus = document.getElementById('search-status');
+  const searchResults = document.getElementById('search-results');
+  let searchTimer = 0, searchSeq = 0;
+
+  function openSearch() {
+    searchPanel.hidden = false;
+    if (state.filter && !searchInput.value) searchInput.value = state.filter;
+    searchInput.focus(); searchInput.select();
+    if (searchInput.value.trim().length >= 2) runSearch();
+  }
+  function closeSearch() { searchPanel.hidden = true; }
+  async function runSearch() {
+    const q = searchInput.value.trim();
+    searchResults.innerHTML = '';
+    if (q.length < 2) { searchStatus.textContent = 'type at least 2 characters'; return; }
+    searchStatus.textContent = 'searching…';
+    const seq = ++searchSeq;
+    try {
+      // API_QS carries ?channel=<code> in landing mode and is empty in
+      // single-channel mode, so pick the right query-string joiner.
+      const r = await fetch('/api/search' + (API_QS ? API_QS + '&' : '?')
+                            + 'q=' + encodeURIComponent(q));
+      const d = await r.json().catch(() => ({}));
+      if (seq !== searchSeq) return;   // a newer query superseded this one
+      if (!r.ok || !d.ok) { searchStatus.textContent = 'search failed: ' + (d.error || r.status); return; }
+      renderSearchResults(d.results || []);
+    } catch (e) {
+      if (seq === searchSeq) searchStatus.textContent = 'search failed: ' + e.message;
+    }
+  }
+  function renderSearchResults(results) {
+    const capped = results.length >= 200;
+    searchStatus.textContent = results.length
+      ? (results.length + (capped ? '+' : '') + ' match' + (results.length === 1 ? '' : 'es')
+         + ' — newest first')
+      : 'no matches';
+    const frag = document.createDocumentFragment();
+    for (const m of results) {
+      const hit = document.createElement('div');
+      hit.className = 'search-hit';
+      const meta = document.createElement('div');
+      meta.className = 'sh-meta';
+      const author = document.createElement('span');
+      author.className = 'sh-author';
+      author.textContent = m.member_name;
+      author.style.color = colorFor(m.member_id);
+      meta.appendChild(author);
+      meta.appendChild(document.createTextNode('  ·  ' + formatTime(m.created_at)));
+      const body = document.createElement('div');
+      body.className = 'sh-body';
+      body.textContent = humanizeIdSigils(m.content || '');
+      hit.appendChild(meta);
+      hit.appendChild(body);
+      // If the match is in the loaded timeline, jump + flash it; otherwise the
+      // panel row is the result (it's outside the in-memory window).
+      hit.addEventListener('click', () => {
+        const dom = state.messageDomById.get(m.id);
+        if (dom) {
+          closeSearch();
+          dom.scrollIntoView({ block: 'center' });
+          dom.classList.add('flash');
+          setTimeout(() => dom.classList.remove('flash'), 1500);
+        }
+      });
+      frag.appendChild(hit);
+    }
+    searchResults.appendChild(frag);
+  }
+  btnSearch.addEventListener('click', openSearch);
+  searchClose.addEventListener('click', closeSearch);
+  searchInput.addEventListener('input', () => {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(runSearch, 250);
+  });
+  searchInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') { closeSearch(); }
+    else if (e.key === 'Enter') { clearTimeout(searchTimer); runSearch(); }
+  });
+
   function afterBoot() {
     // API_QS is only set in landing mode. In single-channel mode "/" IS this
     // page, so the home link would just reload and its tooltip would be a lie.
@@ -4407,6 +7984,32 @@ INDEX_HTML = r"""<!doctype html>
     updateChanStats();
   }
 
+  // __TRIO_TEST_HOOK_START__
+  // Test hook: when this script is loaded under the Node DOM harness
+  // (tests/dom-harness.js), expose the internal render/parse helpers for unit
+  // testing. This whole block (marker to marker) is STRIPPED from the served
+  // browser bundle at render time (see _strip_test_hook in the INDEX_HTML
+  // substitution below), so the internal state reference never ships to a
+  // browser at all. The runtime guard is a second line of defense in case the
+  // strip ever fails: the test global is only pre-seeded by the harness
+  // sandbox, never in production. Placed before boot() so the hooks are
+  // available even if boot() throws against the harness's minimal DOM.
+  if (typeof globalThis !== 'undefined' && globalThis.__TRIO_TEST__) {
+    globalThis.__TRIO_TEST__ = {
+      state,
+      renderMarkdown, escapeHtml, isSystemContent, humanizeIdSigils,
+      formatTime,
+      collectMentionMatches, mentionMemberForToken,
+      decorateInlineMentions, composerMentionHtml,
+      chimeScopeAllows, shouldChime,
+      detectFilePathCandidates, linkifyValidatedPaths, decorateFilePaths,
+      offerWebFallback, sttBanner,
+      // insertTranscript writes through the composer element it closed over,
+      // so the element ships with it or the test has nothing to inspect.
+      insertTranscript, composerInput: input,
+    };
+  }
+  // __TRIO_TEST_HOOK_END__
 
   boot();
 })();
@@ -4415,12 +8018,45 @@ INDEX_HTML = r"""<!doctype html>
 </html>
 """
 
+# Strip the test-only hook block (between the sentinel markers) from the served
+# browser bundle so the internal `state` reference is never exposed on a global
+# in production. The Node DOM harness reads the raw source file directly, so it
+# still sees the block. If the markers are ever renamed the block simply stays
+# in — no worse than the runtime __TRIO_TEST__ guard that also protects it.
+def _strip_test_hook(html: str) -> str:
+    return re.sub(
+        r"\n\s*// __TRIO_TEST_HOOK_START__.*?// __TRIO_TEST_HOOK_END__",
+        "", html, flags=re.DOTALL)
+
+
+def _web_speech_lang(code: str) -> str:
+    """Map NTH_STT_LANG to a BCP-47 tag for the browser's SpeechRecognition.
+
+    Whisper takes a bare ISO-639-1 code ("en"); SpeechRecognition wants a
+    region ("en-US") and handles a bare code inconsistently. Anything that
+    already carries a region passes through untouched.
+    """
+    code = (code or "").strip()
+    if not code:
+        return "en-US"
+    if "-" in code:
+        return code
+    return {
+        "en": "en-US", "es": "es-ES", "fr": "fr-FR", "de": "de-DE",
+        "it": "it-IT", "pt": "pt-BR", "nl": "nl-NL", "ja": "ja-JP",
+        "ko": "ko-KR", "zh": "zh-CN", "ru": "ru-RU", "hi": "hi-IN",
+    }.get(code.lower(), code)
+
+
 # One-shot substitution at import time — inject the emoji list into the JS
-# so server-side animal_for() and client-side animalFor() stay in sync.
-INDEX_HTML = (
+# so server-side animal_for() and client-side animalFor() stay in sync, give
+# web dictation the same language as the local path, and drop the test hook
+# from the shipped bundle.
+INDEX_HTML = _strip_test_hook(
     INDEX_HTML
     .replace("/*__ANIMAL_EMOJIS__*/", json.dumps([e for _, e in ANIMAL_EMOJIS]))
     .replace("/*__ANIMAL_NAMES__*/",  json.dumps([n for n, _ in ANIMAL_EMOJIS]))
+    .replace("/*__STT_LANG__*/'en-US'", json.dumps(_web_speech_lang(STT_LANGUAGE)))
 )
 
 
@@ -4673,6 +8309,8 @@ def main() -> int:
     args = ap.parse_args()
 
     db_path = Path(args.db)
+    global ATTACH_DIR
+    ATTACH_DIR = attach_dir_for(db_path)
     if not db_path.exists():
         sys.stderr.write(
             f"nth.db not found at {db_path}\n"
@@ -4710,6 +8348,22 @@ def main() -> int:
         host = "0.0.0.0" if args.tailnet else "127.0.0.1"
 
     # Single-channel mode spins up its one event hub before serving.
+    # One sweep at startup so a long-running install reclaims whatever leaked
+    # while it was down, without waiting for someone to upload.
+    def _startup_sweep() -> None:
+        try:
+            _gc = sweep_attachments(db_path, force=True)
+            if any(_gc.get(k) for k in ("abandoned", "dead_channel", "orphan_files")):
+                print(f"attachments: reclaimed {_gc}", flush=True)
+        except Exception:
+            pass
+
+    # On a daemon thread: this ran inline before the socket was bound, so on a
+    # large install the dashboard, every channel and every API route were
+    # unreachable for the duration (measured ~1.2s at 150k attachments, and it
+    # grows with the install). Nothing downstream depends on its result.
+    threading.Thread(target=_startup_sweep, name="attach-gc", daemon=True).start()
+
     # Landing mode creates hubs lazily, one per channel actually viewed.
     hub = None
     if args.channel:

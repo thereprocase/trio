@@ -34,6 +34,7 @@ One server file (`nth_server.py`), two MCP registrations. The `NTH_SERVER_NAME` 
 - **Pinned objectives** — Pin a message as the channel objective for new joiners
 - **Stale member detection** — Server computes liveness from heartbeats (5 min stale, 15 min dead)
 - **Conversation export** — End a channel and export to markdown
+- **Dictation** — Mic button in the dashboard composer. Optional; see [Dictation](#dictation) for the one system dependency it needs
 - **Cross-platform** — Linux, macOS, and Windows. The MCP server needs the `mcp` SDK (plus `uvicorn` on hubs); the operator tools (`nth_web.py`, `nth_console.py`, `nth_doctor.py`) are stdlib-only
 
 ## Installation
@@ -193,6 +194,40 @@ The web dashboard shows per-member context window usage as badges in the roster.
 
 Themes persist per-browser via localStorage.
 
+## Dictation
+
+The dashboard composer has a mic button. It has two modes, chosen in
+**Settings → Dictation**:
+
+- **local** (default) — audio is transcribed by a sidecar process on the
+  machine running `nth_web.py` and never leaves it.
+- **web** — the browser's own speech recognition, which sends audio to your
+  browser vendor.
+
+Local mode is the only part of nth that is not stdlib-only, and its engine is
+**not** installed by `setup.sh`. It needs, on the machine serving the
+dashboard:
+
+```bash
+pip install mlx-whisper     # Apple silicon only — built on MLX
+brew install ffmpeg         # the engine shells out to ffmpeg to decode audio
+```
+
+The model (~1.5 GB) downloads on first use and is cached afterwards.
+
+**Without those, nothing breaks.** The sidecar never starts, the dashboard
+still runs, and the mic offers to switch you to browser dictation instead —
+it will not do so on its own, because that would send your voice to a third
+party you did not choose. **Settings → Dictation → Test ›** reports exactly
+which piece is missing.
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `NTH_STT_MODEL` | `mlx-community/whisper-large-v3-turbo` | Whisper model for local dictation |
+| `NTH_STT_LANG` | `en` | Language code; `""` auto-detects |
+| `NTH_STT_MAX_CONCURRENT` | `2` | Simultaneous transcriptions |
+| `NTH_STT_SILENCE_RMS` | `0.002` | Below this RMS a clip counts as silence |
+
 ## Environment Variables
 
 | Variable | Default | Purpose |
@@ -202,6 +237,8 @@ Themes persist per-browser via localStorage.
 | `NTH_HOST` | `127.0.0.1` | Bind address (SSE wrapper overrides to `0.0.0.0`) |
 | `NTH_PORT` | `8000` | Preferred port (auto-scans 18000-18019 if taken) |
 | `NTH_QUIET` | (empty) | Set to `1` to suppress console output |
+
+Dictation adds `NTH_STT_*`; see [Dictation](#dictation).
 
 ## Design Philosophy
 
@@ -214,8 +251,9 @@ nth is a conference call with a whiteboard, not a work queue.
 
 ## Version History
 
-Current: **v8.0.2-beta.1**
+Current: **v8.1.0-beta.1**
 
+- **v8.1** — File-path links with reveal-in-file-manager, image attachments with agent vision, local speech-to-text dictation, member removal from the roster, full-text message search, unread divider + jump-to-first-unread, working/idle indicator via Claude Code hooks
 - **v8.0** — Web dashboard with 14 themes, mobile responsive layout, context rings (statusline relay from spokes to hub), session ID auto-discovery, Walled Garden theme, operator identity (Tailscale whois / loopback / guest), per-member context badges with curated stats, cross-platform process tree walker (Linux/macOS/Windows)
 - **v7** — Monitor-based single-process design replaces the Haiku sentinel pair. Tuned polling (0.5s / 3s) with decoupled heartbeat writes under WAL + `synchronous=NORMAL`. Console + Dashboard read-only views for human operators
 - **v6.1** — Dual skills `/trio` + `/quartet` with dynamic tool prefixes

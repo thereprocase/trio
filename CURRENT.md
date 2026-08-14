@@ -1,11 +1,39 @@
-# Current State — nth v8.0.2-beta.1
+# Current State — nth v8.1.0-beta.1
 
-**Version:** v8.0.2-beta.1 (2026-08-11, GitHub release + tag)
-**Prior:** v8.0.1-beta.1 (2026-08-11), v8.0.0-beta.1 (2026-08-11), v7.3.1 (2026-08-11), v7.3 (2026-08-11), v7.2 (2026-04-20), v7.1 (2026-04-20), v7 (2026-04-19)
+**Version:** v8.1.0-beta.1 (2026-08-14, local tag — not yet pushed)
+**Prior:** v8.0.2-beta.1 (2026-08-11), v8.0.1-beta.1 (2026-08-11), v8.0.0-beta.1 (2026-08-11), v7.3.1 (2026-08-11), v7.3 (2026-08-11), v7.2 (2026-04-20), v7.1 (2026-04-20), v7 (2026-04-19)
 **Branch:** main
 **Remote:** `github.com:thereprocase/trio.git` (GitHub) + `gitlab.com:theReproCase/trio.git` (GitLab mirror — ⚠ not synced since pre-v8)
 
 ## What Just Shipped
+
+**v8.1.0-beta.1** — 16-PR integration (2026-08-14 night). Five Claude sessions
+reviewed all 16 open PRs across four lenses, then integrated them on five
+branches grouped by blast radius (`int/trivia`, `int/renderer`, `int/server`,
+`int/localfs`, `int/stt`) rather than merging 16 times into main.
+
+- **Features.** File-path links + reveal-in-file-manager; image attachments with
+  agent vision; local speech-to-text dictation; member removal; full-text
+  search; unread divider + jump-to-first-unread; working/idle indicator.
+- **Security.** Cross-site POST rejection (identity was IP-derived, so SameSite
+  was never a CSRF control — proven by executing the attack, which posted as the
+  operator with no cookie); `/api/upload` gated to trusted tiers, a guest could
+  previously write to the operator's home dir; per-member attachment quota; no
+  raw sqlite errors from cull/send/search.
+- **Correctness.** Reveal worked on 1 of 3 platforms (`xdg-open --` is rejected
+  outright; Windows had two independent bugs). Member removal was dead in
+  landing mode — the mode the hub runs in. The activity hook ran an unindexed
+  UPDATE on every tool call in every project, 127 ms at 20k rows, against a
+  table nothing reaped.
+- **Tests.** Four new suites — CSRF origin, upload authz/quota, real-tool reveal
+  smoke (skips loudly), decorator seam — plus argv assertions on all three
+  platforms in the reveal test that previously skipped everything off macOS.
+- **Not merged.** #10 (`@gabeayers`): 55 commits behind, must not be merged even
+  after conflict resolution; its `/workspace` panes are wanted and unduplicated,
+  and should be re-landed against current main.
+
+### Previously
+
 
 **v8.0.2-beta.1** — War Council hardening (2026-08-11 night). A 12-reviewer
 LOTC pass over the whole v8 diff, then integration. No new features.

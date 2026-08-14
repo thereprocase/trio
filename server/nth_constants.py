@@ -4,7 +4,7 @@
 # Single source of truth for the release version. Surfaces in the startup
 # banner, the hub's /healthz + /fleet endpoints, node check-ins, and
 # nth_doctor's local-vs-hub version match.
-NTH_VERSION = "8.0.2-beta.1"
+NTH_VERSION = "8.1.0-beta.1"
 
 SLEEPING_KEYWORDS = ("idle", "standing by", "tier 3", "agent-monitor")
 

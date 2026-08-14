@@ -55,8 +55,8 @@ if [ "${1:-}" = "hub-service" ] || [ "${1:-}" = "upgrade" ]; then
 
     echo "Deploying server files: repo -> $HUB_DIR (backups: *.bak-$STAMP)"
     for f in nth_server.py nth_monitor.py nth_spoke_monitor.py nth_console.py \
-             nth_dashboard.py nth_web.py quartet_server.py nth_constants.py \
-             nth_doctor.py codex_context_publisher.py; do
+             nth_dashboard.py nth_web.py nth_stt_worker.py quartet_server.py \
+             nth_constants.py nth_doctor.py codex_context_publisher.py; do
         if [ -f "$HUB_DIR/$f" ] && ! cmp -s "$SCRIPT_DIR/server/$f" "$HUB_DIR/$f"; then
             cp "$HUB_DIR/$f" "$HUB_DIR/$f.bak-$STAMP"
         fi
@@ -391,6 +391,9 @@ cp "$SCRIPT_DIR/server/nth_monitor.py" "$SERVER_DIR/nth_monitor.py"
 cp "$SCRIPT_DIR/server/nth_console.py" "$SERVER_DIR/nth_console.py"
 cp "$SCRIPT_DIR/server/nth_dashboard.py" "$SERVER_DIR/nth_dashboard.py"
 cp "$SCRIPT_DIR/server/nth_web.py" "$SERVER_DIR/nth_web.py"
+# The optional dictation sidecar. nth_web.py resolves it as a sibling of itself,
+# so omitting it here leaves the mic button present but the engine missing.
+cp "$SCRIPT_DIR/server/nth_stt_worker.py" "$SERVER_DIR/nth_stt_worker.py"
 cp "$SCRIPT_DIR/server/quartet_server.py" "$SERVER_DIR/quartet_server.py"
 cp "$SCRIPT_DIR/server/nth_constants.py" "$SERVER_DIR/nth_constants.py"
 cp "$SCRIPT_DIR/server/nth_doctor.py" "$SERVER_DIR/nth_doctor.py"
@@ -407,6 +410,8 @@ LAUNCHER
     chmod +x "${HOME}/.local/bin/nth-doctor"
     echo "Doctor: nth-doctor -> ~/.local/bin/nth-doctor"
 fi
+cp "$SCRIPT_DIR/server/nth_turn_hook.py" "$SERVER_DIR/nth_turn_hook.py"
+cp "$SCRIPT_DIR/server/nth_activity_hook.py" "$SERVER_DIR/nth_activity_hook.py"
 
 # Clean up deprecated files from earlier Haiku-subagent design
 rm -f "$SERVER_DIR/nth_sentinel.py" \
@@ -515,7 +520,9 @@ OLD_PATTERNS="roam-hive-mind nth-cluster nth-hive"
 "$PYTHON_CMD" -c "
 import json, os
 
-settings_path = r'$SETTINGS_JSON'
+# Triple-quoted so an apostrophe in the path (e.g. /Users/O'Brien) can't abort
+# the install with an unterminated string literal.
+settings_path = r'''$SETTINGS_JSON'''
 tools = $(printf '%s\n' "${ALL_TOOLS[@]}" | "$PYTHON_CMD" -c "import sys,json; print(json.dumps([l.strip() for l in sys.stdin]))")
 old_patterns = '$OLD_PATTERNS'.split()
 
@@ -566,6 +573,99 @@ os.replace(tmp_path, settings_path)
 print(f'Permissions: {added} tool(s) allowlisted, {len(removed)} old entries removed')
 "
 
+# ---------- 7b. Register the working-indicator hooks ----------
+# Two hooks:
+#   nth_turn_hook     (Stop + StopFailure)       -> stamps last_turn_end so the
+#                                                   dashboard shows working vs. idle.
+#   nth_activity_hook (PreToolUse + UserPromptSubmit) -> stamps last_seen on every
+#                                                   tool/prompt so 'working' spans
+#                                                   the whole turn, not just from
+#                                                   the first trio call.
+# Idempotent per (event, script) — re-running setup.sh never duplicates.
+native_path() {  # native_path <posix-path>
+    if [ "$PLATFORM" = "windows" ]; then
+        if command -v cygpath &>/dev/null; then cygpath -w "$1"
+        else echo "$1" | sed 's|^/\([a-zA-Z]\)/|\1:\\|' | sed 's|/|\\|g'; fi
+    else
+        echo "$1"
+    fi
+}
+TURN_NATIVE=$(native_path "$SERVER_DIR/nth_turn_hook.py")
+ACTIVITY_NATIVE=$(native_path "$SERVER_DIR/nth_activity_hook.py")
+
+"$PYTHON_CMD" -c "
+import json, os, tempfile
+# Triple-quoted raw strings so an apostrophe in the path (e.g. /Users/O'Brien)
+# doesn't produce an unterminated string literal and abort the install.
+settings_path = r'''$SETTINGS_JSON'''
+py = r'''$PYTHON_CMD'''
+turn  = r'''$TURN_NATIVE'''
+activity = r'''$ACTIVITY_NATIVE'''
+turn_cmd  = f'{py} \"{turn}\"'
+activity_cmd = f'{py} \"{activity}\"'
+
+# Match every StopFailure error type (not just the transient ones): the watchdog
+settings = {}
+if os.path.exists(settings_path):
+    try:
+        with open(settings_path) as f:
+            settings = json.load(f)
+    except (ValueError, OSError) as e:
+        # Don't abort the whole install on a malformed/unreadable settings.json —
+        # skip the hooks and tell the user to add them by hand (see CHANGELOG).
+        print(f'trio hooks: SKIPPED (could not read {settings_path}: {e})')
+        raise SystemExit(0)
+if not isinstance(settings, dict):
+    settings = {}
+
+hooks = settings.setdefault('hooks', {})
+if not isinstance(hooks, dict):
+    print('trio hooks: SKIPPED (settings.hooks is not an object)')
+    raise SystemExit(0)
+
+def register(event, marker, cmd):
+    arr = hooks.setdefault(event, [])
+    if not isinstance(arr, list):
+        print(f'trio hooks: SKIPPED ({event} is not a list)')
+        return False
+    if any(marker in json.dumps(e) for e in arr):
+        return False  # already present
+    arr.append({'hooks': [{'type': 'command', 'command': cmd}]})
+    return True
+
+changed = False
+# The turn hook must fire on EVERY turn end, including StopFailure error types
+# we have never seen — a scoped matcher would let a session that acted mid-turn
+# show a false 'working' forever — so both events are registered unscoped.
+changed |= register('Stop',        'nth_turn_hook.py',  turn_cmd)
+changed |= register('StopFailure', 'nth_turn_hook.py',  turn_cmd)
+# The activity hook stamps sessions.last_seen on every tool call and prompt so
+# the dashboard shows 'working' for the whole active turn (not just from the
+# agent's first trio call). Matcher-less on both events — every tool/prompt is
+# activity, regardless of kind.
+changed |= register('PreToolUse',       'nth_activity_hook.py', activity_cmd)
+changed |= register('UserPromptSubmit', 'nth_activity_hook.py', activity_cmd)
+
+if not changed:
+    print('trio hooks: already registered')
+else:
+    # Atomic write: a crash/disk-full mid-write must never truncate the user's
+    # settings.json and lose unrelated settings.
+    d = os.path.dirname(settings_path) or '.'
+    fd, tmp = tempfile.mkstemp(dir=d, prefix='.settings-', suffix='.json')
+    try:
+        with os.fdopen(fd, 'w') as f:
+            json.dump(settings, f, indent=2)
+            f.write('\n')
+        os.replace(tmp, settings_path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    print('trio hooks: registered (working indicator)')
+"
 # ---------- 8. Verify ----------
 
 echo ""
