@@ -163,14 +163,35 @@ try:
         check("reveal: subprocess called with an ARG LIST (no shell string)",
               isinstance(args, list))
         check("reveal: no shell=True", call["kwargs"].get("shell") in (None, False))
+        # Assert the argv on EVERY platform, not just darwin. The original
+        # version skipped everything here off macOS, which is exactly why two
+        # broken argv forms shipped: on Linux the `--` made every call fail, and
+        # on Windows "/select," and the path were separate tokens. A mocked test
+        # cannot tell you the OS accepts an argv -- that is what
+        # tests/test-reveal-realtool.py is for -- but it can and must pin the
+        # argv we intend to send.
         if sys.platform == "darwin":
             check("reveal: uses `open -R` (reveal, not launch)",
                   args[:2] == ["open", "-R"])
             check("reveal: `--` guards against flag injection", "--" in args)
             check("reveal: reveals the abspath of the real file",
                   args[-1] == os.path.abspath(real_file))
+        elif sys.platform.startswith("linux"):
+            check("reveal: uses xdg-open", args[0] == "xdg-open")
+            # Regression guard. xdg-open's arg loop matches "-*" first and
+            # rejects "--" outright, so its presence broke every Linux reveal.
+            check("reveal: NO `--` (xdg-open rejects it as an unknown option)",
+                  "--" not in args)
+            check("reveal: opens the containing folder of the real file",
+                  args[-1] == os.path.dirname(os.path.abspath(real_file)))
+        elif sys.platform.startswith("win"):
+            check("reveal: uses explorer", args[0] == "explorer")
+            # Regression guard. "/select," and the path must be ONE token; split
+            # across two, explorer ignores the selector and opens Documents.
+            check("reveal: `/select,<path>` is a SINGLE argv token",
+                  len(args) == 2 and args[1] == f"/select,{os.path.abspath(real_file)}")
         else:
-            skip("reveal: darwin arg assertions", f"platform is {sys.platform}")
+            skip("reveal: argv assertions", f"unsupported platform {sys.platform}")
     else:
         check("reveal: subprocess.run was invoked", False)
 
