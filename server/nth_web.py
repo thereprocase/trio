@@ -1893,10 +1893,14 @@ class NthWebHandler(BaseHTTPRequestHandler):
 
         abspath = os.path.abspath(target)
         plat = sys.platform
+        # Whether the child's exit status is a trustworthy success signal.
+        # It is on macOS and Linux; it is NOT on Windows -- see below.
+        check_rc = True
         try:
             if plat == "darwin":
                 # Reveal (select) in Finder. ARG LIST + `--`: no shell, no flag
                 # injection. `-R` reveals; it never launches the file's app.
+                # `--` IS correct here: /usr/bin/open documents and accepts it.
                 cp = subprocess.run(
                     ["open", "-R", "--", abspath],
                     capture_output=True, text=True, timeout=10,
@@ -1904,15 +1908,27 @@ class NthWebHandler(BaseHTTPRequestHandler):
             elif plat.startswith("linux"):
                 # Best-effort: open the containing folder (no reliable "select").
                 folder = abspath if os.path.isdir(abspath) else os.path.dirname(abspath)
+                # NO `--`. xdg-open's main argument loop matches `-*` before any
+                # sentinel handling and calls exit_failure_syntax, so a `--` makes
+                # EVERY call fail with "unexpected option '--'". Measured against
+                # xdg-utils 1.2.1. abspath is absolute, so there is no
+                # leading-dash case for a sentinel to guard against anyway.
                 cp = subprocess.run(
-                    ["xdg-open", "--", folder],
+                    ["xdg-open", folder],
                     capture_output=True, text=True, timeout=10,
                 )
             elif plat.startswith("win"):
+                # ONE argv token: explorer parses "/select,<path>" as a unit, and
+                # a space after the comma makes it ignore the selector and open
+                # Documents instead.
                 cp = subprocess.run(
-                    ["explorer", "/select,", abspath],
+                    ["explorer", f"/select,{abspath}"],
                     capture_output=True, text=True, timeout=10,
                 )
+                # explorer.exe returns nonzero on SUCCESS as a matter of course,
+                # so treating its exit status as failure turns every working
+                # reveal into a 502.
+                check_rc = False
             else:
                 self._json({"ok": False, "error": f"unsupported platform: {plat}"},
                            status=501)
@@ -1923,7 +1939,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
         except subprocess.TimeoutExpired:
             self._error(504, "reveal timed out")
             return
-        if cp.returncode != 0:
+        if check_rc and cp.returncode != 0:
             msg = (cp.stderr or cp.stdout or "").strip() or f"exit {cp.returncode}"
             self._error(502, f"reveal failed: {msg}")
             return

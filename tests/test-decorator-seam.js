@@ -101,6 +101,33 @@ check('decorateInlineMentions does NOT descend into an anchor (file-link is an <
   });
 });
 
+// The nastiest fixture: a path that itself contains an "@". Both sigils in one
+// message is easy; an "@" INSIDE the path is where the two decorators genuinely
+// compete for the same characters, because the mention scanner runs first and
+// could split the text node mid-path before the path scanner ever sees it.
+check('a path containing an @ is not shredded by the mention decorator', () => {
+  withMember('m1', 'alice', () => {
+    const body = bodyFrom('@alice check /home/example/mail@archive/x.txt please');
+    H.decorateInlineMentions(body, ['m1']);
+    H.decorateFilePaths(body);
+
+    assert.ok(body.querySelector('.inline-mention'), 'the real mention was lost');
+    assert.ok(/\/home\/example\/mail@archive\/x\.txt/.test(body.textContent),
+      'the path text was broken up: ' + body.textContent);
+  });
+});
+
+check('an @ inside a path is not itself decorated as a mention', () => {
+  withMember('m1', 'archive', () => {
+    const body = bodyFrom('see /home/example/mail@archive/x.txt');
+    H.decorateInlineMentions(body, ['m1']);
+    // "@archive" here is part of a filesystem path, not an address. A member
+    // named "archive" must not turn the middle of a path into a mention chip.
+    assert.ok(!body.querySelector('.inline-mention'),
+      '@archive inside a path was decorated as a mention: ' + body.textContent);
+  });
+});
+
 // ── the detector is unchanged by neighbouring decoration ────────────────────
 check('path detection is unaffected by an adjacent mention in the same text', () => {
   const withMention = H.detectFilePathCandidates('@alice /home/example/a/b.md');
