@@ -13,6 +13,7 @@ Three tiers, all driving the REAL modules against a throwaway DB:
 Usage: python tests/test-ask.py
 """
 import json
+import queue
 import sqlite3
 import tempfile
 import threading
@@ -552,6 +553,147 @@ finally:
     if server is not None:
         server.shutdown()
     hub.stop()
+
+
+# ── 4. The EventHub actually SELECTS the ask columns ─────────────────────────
+# Tier 3 above starts a real EventHub but never consumes an event from it —
+# every assertion there reads the row back from the DB. So nothing proved the
+# hub's own SQL carries choices/selection/reply_to, and dropping those three
+# columns from both of its SELECTs left the whole suite green. The dashboard is
+# the ONLY consumer of these fields, and the hub is its only supply.
+#
+# Both delivery paths are covered, because they are separate queries:
+#   * the reconnect burst  — _prime_subscriber's snapshot, for a client that
+#     connects when the ask and its answer are already in history;
+#   * the live tail        — the poll loop, for a client already connected when
+#     the answer arrives.
+def drain(q, timeout=1.5):
+    """Collect whatever is already queued, then stop."""
+    out, deadline = [], time.time() + timeout
+    while time.time() < deadline:
+        try:
+            out.append(q.get(timeout=0.2))
+        except queue.Empty:
+            break
+    return out
+
+
+def drain_until(q, want_id, timeout=6.0):
+    """Collect events until `want_id` appears, or time out.
+
+    NOT "until the queue goes quiet". The hub polls on an interval, so a
+    quiet-gap heuristic returns during the gap BEFORE the tick that carries
+    the message — the assertion then fails for a reason that has nothing to do
+    with the code under test. Wait for the thing being asserted on."""
+    out, deadline = [], time.time() + timeout
+    while time.time() < deadline:
+        if want_id in ask_events(out):
+            break
+        try:
+            out.append(q.get(timeout=0.25))
+        except queue.Empty:
+            continue
+    return out
+
+
+def ask_events(evs):
+    """Message events keyed by id. The hub queues JSON STRINGS, not dicts."""
+    by_id = {}
+    for ev in evs:
+        try:
+            payload = json.loads(ev) if isinstance(ev, str) else ev
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        # A snapshot carries a list; the live tail carries one message. Accept
+        # every shape the hub emits rather than pinning one, so this test keeps
+        # working if the envelope changes but the COLUMNS are what regress.
+        candidates = []
+        for key in ("messages", "history"):
+            if isinstance(payload.get(key), list):
+                candidates.extend(payload[key])
+        for key in ("message", "msg"):
+            if isinstance(payload.get(key), dict):
+                candidates.append(payload[key])
+        if payload.get("id") and "content" in payload:
+            candidates.append(payload)
+        for m in candidates:
+            if isinstance(m, dict) and m.get("id"):
+                by_id[m["id"]] = m
+    return by_id
+
+
+CH4, asker4 = connect("HubAsker", channel="asktest4")
+hub4 = web.EventHub(srv.DB_PATH, CH4)
+server4 = None
+try:
+    hub4.start()
+    web.NthWebHandler.hub = hub4
+    web.NthWebHandler.channel = CH4
+    web.NthWebHandler.db_path = srv.DB_PATH
+    server4 = web.QuietThreadingHTTPServer(("127.0.0.1", 0), web.NthWebHandler)
+    server4.daemon_threads = True
+    port4 = server4.server_address[1]
+    threading.Thread(target=server4.serve_forever, daemon=True).start()
+    time.sleep(0.2)
+
+    st, _ = http(port4, "/api/send", "POST", {"content": "hub tier: hello"})
+    check("hub: loopback send accepted", st == 200)
+    _db4 = srv.get_db()
+    try:
+        _h4 = _db4.execute(
+            "SELECT id FROM members WHERE channel=? AND kind='human'",
+            (CH4,)).fetchone()
+    finally:
+        _db4.close()
+    check("hub: loopback operator marked human", _h4 is not None)
+    human4 = _h4["id"] if _h4 else ""
+
+    q_ask = json.loads(srv.nth_ask(channel=CH4, member_id=asker4, target=human4,
+                                   question="Ship it?", options=["Yes", "No"],
+                                   mode="one"))
+    qid4 = q_ask.get("message_id")
+    check("hub: ask posted", bool(qid4))
+
+    # --- live tail: subscribe FIRST, then answer ---
+    live_q = hub4.subscribe()
+    drain(live_q)                      # discard the priming snapshot
+    st, ans = http(port4, "/api/send", "POST", {
+        "content": "Yes — ship it",
+        "reply_to": qid4,
+        "selection": {"answers": [{"picked": [0], "custom": []}]}})
+    check("hub: answer accepted", st == 200)
+    aid4 = ans.get("id")
+    live = ask_events(drain_until(live_q, aid4))
+    hub4.unsubscribe(live_q)
+
+    live_ans = live.get(aid4)
+    check("hub live tail: answer event delivered", live_ans is not None)
+    check("hub live tail: event carries reply_to",
+          bool(live_ans) and live_ans.get("reply_to") == qid4)
+    check("hub live tail: event carries selection",
+          bool(live_ans) and bool(live_ans.get("selection")))
+
+    # --- reconnect burst: subscribe AFTER, read the snapshot ---
+    burst_q = hub4.subscribe()
+    burst = ask_events(drain(burst_q))
+    hub4.unsubscribe(burst_q)
+
+    burst_ask = burst.get(qid4)
+    burst_ans = burst.get(aid4)
+    check("hub reconnect burst: the ask is in the snapshot", burst_ask is not None)
+    check("hub reconnect burst: the ask carries its choices",
+          bool(burst_ask) and bool(burst_ask.get("choices")))
+    check("hub reconnect burst: the answer carries selection + reply_to",
+          bool(burst_ans) and bool(burst_ans.get("selection"))
+          and burst_ans.get("reply_to") == qid4)
+except OSError as e:
+    check(f"hub tier: server started (got {e!r})", False)
+finally:
+    if server4 is not None:
+        server4.shutdown()
+    hub4.stop()
 
 
 shutil.rmtree(_tmp, ignore_errors=True)
