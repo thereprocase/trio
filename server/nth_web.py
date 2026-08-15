@@ -4009,15 +4009,25 @@ class NthWebHandler(BaseHTTPRequestHandler):
             db.row_factory = sqlite3.Row
             db.execute("PRAGMA busy_timeout=3000")
             rows = db.execute(
-                "SELECT id, member_id, member_name, content, created_at FROM messages "
+                "SELECT id, member_id, member_name, content, recipients, created_at "
+                "FROM messages "
                 "WHERE channel = ? AND content LIKE ? ESCAPE '\\' "
                 "ORDER BY id DESC LIMIT 200",
                 (ch, like),
             ).fetchall()
+            # Search is a read path like any other and must obey the same
+            # visibility rule. Without this the DM transport is a fixed,
+            # well-known channel code, so any identified viewer could search it
+            # for a substring and read other people's private messages back
+            # verbatim — a full bypass of the predicate every other path
+            # enforces.
             results = [{"id": r["id"], "member_id": r["member_id"],
                         "member_name": r["member_name"] or r["member_id"],
                         "content": r["content"] or "", "created_at": r["created_at"]}
-                       for r in rows]
+                       for r in rows
+                       if can_see(ident.member_id, None, r["member_id"],
+                                  r["recipients"] if "recipients" in r.keys() else "",
+                                  allow_all_seeing=is_all_seeing(ident.member_id))]
         except sqlite3.Error as e:
             # sqlite3's message can carry table/column names and the db file
             # path — internal shape the browser has no business seeing. Log
@@ -4808,18 +4818,28 @@ class NthWebHandler(BaseHTTPRequestHandler):
             op_id, _op_name = ensure_operator_row(db, ch, ident)
             row = db.execute(
                 # An attachment is readable once it is PUBLISHED (linked to a
-                # message everyone in the channel can see). Before that it is
-                # still in someone's composer, so only its uploader may fetch
-                # it. Ids are small sequential integers, so without this an
-                # image pasted and then thought better of stays readable by
-                # anyone who guesses its id. The fork's gate keyed this on a DM
-                # visibility engine that does not exist upstream; the
-                # uploader-only half is not DM-specific and is re-derived here.
-                "SELECT mime, path FROM attachments "
-                " WHERE id = ? AND channel = ? "
-                "   AND (message_id IS NOT NULL OR member_id = ?)",
+                # message) — but "published" is not the same as "public". The
+                # owning message carries the visibility, so join to it and
+                # apply the SAME predicate as every other read path. Without
+                # that, a DM's image was fetchable by anyone: attachment ids
+                # are small sequential integers and the DM transport is one
+                # fixed, well-known channel code, so guessing an id was enough.
+                # Before publication the attachment is still in someone's
+                # composer, so only its uploader may fetch it.
+                "SELECT a.mime AS mime, a.path AS path, a.member_id AS owner, "
+                "       a.message_id AS message_id, "
+                "       m.member_id AS sender, m.recipients AS recipients "
+                "  FROM attachments a "
+                "  LEFT JOIN messages m ON m.id = a.message_id "
+                " WHERE a.id = ? AND a.channel = ? "
+                "   AND (a.message_id IS NOT NULL OR a.member_id = ?)",
                 (att_id, ch, op_id),
             ).fetchone()
+            if row is not None and row["message_id"] is not None:
+                if not can_see(op_id, None, row["sender"],
+                               row["recipients"] if "recipients" in row.keys() else "",
+                               allow_all_seeing=is_all_seeing(op_id)):
+                    row = None
         except sqlite3.Error:
             row = None
         finally:

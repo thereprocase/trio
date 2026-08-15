@@ -348,6 +348,51 @@ finally:
     hub.stop()
     topic_hub.stop()
 
+# (f) the two dashboard HTTP read paths must apply the predicate too.
+# /api/search and /api/attachment are read paths like any other. The DM
+# transport is ONE fixed, well-known channel code and attachment ids are small
+# sequential integers, so an unfiltered search or a bare id was enough to read
+# someone else's private message or its image.
+#
+# Asserted through the predicate with a NON-operator reader rather than over
+# HTTP: a request from 127.0.0.1 resolves to a loopback operator, who is
+# all-seeing by design, so an HTTP probe on this machine cannot distinguish
+# "the filter works" from "the operator may see everything".
+_guest = "_op_g_eve_abc123"
+check("(f) a guest is not all-seeing", web.is_all_seeing(_guest) is False)
+check("(f) search predicate hides another pair's DM from a guest",
+      can_see(_guest, None, alice, json.dumps([bob]),
+              allow_all_seeing=web.is_all_seeing(_guest)) is False)
+check("(f) ...and admits it for its recipient",
+      can_see(bob, None, alice, json.dumps([bob]),
+              allow_all_seeing=web.is_all_seeing(bob)) is True)
+check("(f) ...and for the operator surface",
+      can_see("_op_l_host_gabe", None, alice, json.dumps([bob]),
+              allow_all_seeing=web.is_all_seeing("_op_l_host_gabe")) is True)
+check("(f) broadcasts stay visible to everyone in search",
+      can_see(_guest, None, alice, "[]",
+              allow_all_seeing=web.is_all_seeing(_guest)) is True)
+
+# The search handler must actually call it — a filter that exists but is not
+# wired is the same as no filter.
+import inspect as _inspect
+_src = _inspect.getsource(web.NthWebHandler._handle_search)
+check("(f) /api/search routes its rows through can_see", "can_see(" in _src)
+_asrc = _inspect.getsource(web.NthWebHandler._serve_attachment)
+check("(f) /api/attachment joins the owning message and applies can_see",
+      "can_see(" in _asrc and "message_id" in _asrc)
+
+
+# (g) the transport is not a room: it has no roster.
+# Every member of every channel has presence there, so listing it would hand
+# any caller the whole hub's cross-channel roster — who exists, who is online.
+_r = json.loads(srv.nth_roster(channel=AGENT_INBOX_CHANNEL))
+check("(g) roster refuses the DM transport", "error" in _r)
+check("(g) ...and does not list anyone", not _r.get("members"))
+_ok = json.loads(srv.nth_roster(channel=CH))
+check("(g) an ordinary channel roster still works", bool(_ok.get("members")))
+
+
 shutil.rmtree(_tmp, ignore_errors=True)
 print()
 print(f"{'FAILED' if failures else 'OK'} — {len(failures)} failure(s)")

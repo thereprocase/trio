@@ -3592,6 +3592,13 @@ def nth_roster(channel: str) -> str:
     Args:
         channel: Channel code
     """
+    # The DM transport is not a room, and every member of every channel has
+    # presence in it. Listing it would hand any caller the full cross-channel
+    # roster of the whole hub — who exists, who is online — which is exactly
+    # the disclosure the hidden transport is supposed to avoid.
+    if channel == AGENT_INBOX_CHANNEL:
+        return json.dumps({"error": "That transport has no roster."})
+
     err = validate_channel_code(channel)
     if err:
         return json.dumps({"error": err})
