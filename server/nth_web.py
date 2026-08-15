@@ -1462,6 +1462,8 @@ def ensure_ask_columns(db: sqlite3.Connection) -> None:
         ("messages", "selection", "TEXT NOT NULL DEFAULT ''"),
         ("messages", "reply_to",  "INTEGER"),
         ("messages", "recipients", "TEXT NOT NULL DEFAULT '[]'"),
+        ("messages", "edited_at",  "TEXT"),
+        ("messages", "deleted_at", "TEXT"),
     ):
         try:
             db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {defn}")
@@ -3128,7 +3130,11 @@ class NthWebHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         if self._reject_cross_site():
             return
-        if parsed.path == "/api/agents":
+        if parsed.path == "/api/edit":
+            self._handle_edit()
+        elif parsed.path == "/api/delete":
+            self._handle_delete()
+        elif parsed.path == "/api/agents":
             self._handle_agent_create()
         elif (parsed.path.startswith("/api/agents/")
               and parsed.path.count("/") == 4):
@@ -3303,6 +3309,174 @@ class NthWebHandler(BaseHTTPRequestHandler):
             "runtimes": runtimes,
             "supervisor": {"live_agents": len(get_supervisor().live_ids())},
         })
+
+    def _edit_target(self, db, mid, ident):
+        """Load an operator-editable message row, or (None, error). The caller
+        must be its author (member_id == op_id) and it must not be retracted."""
+        op_id, op_name = ensure_operator_row(db, self.channel, ident)
+        row = db.execute(
+            "SELECT member_id, retracted_at, recipients FROM messages WHERE id = ? AND channel = ?",
+            (mid, self.channel),
+        ).fetchone()
+        if not row:
+            return None, (op_id, op_name), "message not found"
+        if row["member_id"] != op_id:
+            return None, (op_id, op_name), "you can only change your own messages"
+        if row["retracted_at"]:
+            return None, (op_id, op_name), "message is already deleted"
+        return row, (op_id, op_name), None
+
+    def _handle_edit(self) -> None:
+        """Edit the text of a message the operator authored (sets edited_at and
+        re-parses @/#/! sigils so targeting stays correct)."""
+        body = self._read_json_body()
+        if body is None:
+            return
+        if not isinstance(body, dict):
+            self._error(400, "invalid body")
+            return
+        mid = body.get("message_id")
+        content = body.get("content")
+        if not (type(mid) is int and mid > 0):
+            self._error(400, "invalid message_id")
+            return
+        if not isinstance(content, str) or not content.strip():
+            self._error(400, "empty content")
+            return
+        content = content.strip()
+        if len(content) > 4000:
+            self._error(400, "content too long (max 4000 chars)")
+            return
+        _token, ident, _is_new = self._resolve_identity()
+        if ident.source == IDENTITY_SOURCE_PENDING:
+            self._error(403, "identity required — POST /api/identify first")
+            return
+        db = None
+        try:
+            db = sqlite3.connect(str(self.db_path), timeout=5, isolation_level=None)
+            db.row_factory = sqlite3.Row
+            db.execute("PRAGMA busy_timeout=5000")
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                row, _op, err = self._edit_target(db, mid, ident)
+                if err or row is None:
+                    db.execute("ROLLBACK")
+                    code = (404 if err == "message not found"
+                            else 403 if err and "your own" in err else 400)
+                    self._error(code, err or "message not found")
+                    return
+                m_ids, r_ids, b_ids = _parse_sigils_against_roster(db, self.channel, content)
+                # Preserve the wake⊆visibility invariant on edits too: if this
+                # message is a scoped DM, an @/#/! edited in that names a
+                # non-recipient must stay inert (narrow_wake), matching the send
+                # paths — otherwise an edit reintroduces the woken-but-blind bug
+                # (Aragorn). Broadcasts (empty recipients) are untouched.
+                recips = parse_recipients(row["recipients"] if "recipients" in row.keys() else "")
+                if recips:
+                    m_ids = narrow_wake(m_ids, recips, row["member_id"])
+                    r_ids = narrow_wake(r_ids, recips, row["member_id"])
+                    b_ids = narrow_wake(b_ids, recips, row["member_id"])
+                db.execute(
+                    "UPDATE messages SET content = ?, mentions = ?, refs = ?, bangs = ?, "
+                    "edited_at = ? WHERE id = ? AND channel = ?",
+                    (content,
+                     json.dumps(m_ids) if m_ids else "",
+                     json.dumps(r_ids) if r_ids else "",
+                     json.dumps(b_ids) if b_ids else "",
+                     now_iso(), mid, self.channel),
+                )
+                db.execute("COMMIT")
+            except sqlite3.Error:
+                try:
+                    db.execute("ROLLBACK")
+                except sqlite3.Error:
+                    pass
+                raise
+        except sqlite3.Error as e:
+            self._error(500, f"db error: {e}")
+            return
+        finally:
+            if db is not None:
+                try:
+                    db.close()
+                except sqlite3.Error:
+                    pass
+        self._json({"ok": True, "id": mid})
+
+
+    def _handle_delete(self) -> None:
+        """Delete (retract) a message the operator authored — marks it retracted
+        in place and posts a synthetic [retracted #N] line, matching trio_cull's
+        retract behavior so agents polling over MCP see it too."""
+        body = self._read_json_body(max_bytes=2048)
+        if body is None:
+            return
+        if not isinstance(body, dict):
+            self._error(400, "invalid body")
+            return
+        mid = body.get("message_id")
+        if not (type(mid) is int and mid > 0):
+            self._error(400, "invalid message_id")
+            return
+        _token, ident, _is_new = self._resolve_identity()
+        if ident.source == IDENTITY_SOURCE_PENDING:
+            self._error(403, "identity required — POST /api/identify first")
+            return
+        db = None
+        try:
+            db = sqlite3.connect(str(self.db_path), timeout=5, isolation_level=None)
+            db.row_factory = sqlite3.Row
+            db.execute("PRAGMA busy_timeout=5000")
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                row, op, err = self._edit_target(db, mid, ident)
+                if err:
+                    db.execute("ROLLBACK")
+                    code = (404 if err == "message not found"
+                            else 403 if "your own" in err else 400)
+                    self._error(code, err)
+                    return
+                op_id, op_name = op
+                now = now_iso()
+                reason = "deleted by the author"
+                db.execute(
+                    "UPDATE messages SET retracted_at = ?, retracted_by = ?, "
+                    "retraction_reason = ? WHERE id = ? AND channel = ?",
+                    (now, op_id, reason, mid, self.channel),
+                )
+                db.execute(
+                    "INSERT INTO messages (channel, member_id, member_name, content, created_at) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (self.channel, op_id, op_name, f"[retracted #{mid}] {reason}", now),
+                )
+                db.execute("COMMIT")
+            except sqlite3.Error:
+                try:
+                    db.execute("ROLLBACK")
+                except sqlite3.Error:
+                    pass
+                raise
+        except sqlite3.Error as e:
+            self._error(500, f"db error: {e}")
+            return
+        finally:
+            if db is not None:
+                try:
+                    db.close()
+                except sqlite3.Error:
+                    pass
+        self._json({"ok": True, "id": mid})
+
+    # ── file-path validate / reveal ──
+    # The client detects path-LIKE tokens in message bodies broadly, then asks
+    # the server which ones actually exist on disk; only real files get linked
+    # (validation, not pattern-matching, gates linkification). A linked path can
+    # then be revealed in Finder. There is NO access gating on these endpoints
+    # (operator's explicit choice), so injection-safety is enforced structurally:
+    # reveal never runs a shell and never plain-`open`s a file (which would
+    # launch its default app) — it only `open -R` (reveal/select in Finder).
+    _PATH_VALIDATE_CAP = 200          # max candidates per validate request
+    _PATH_MAX_LEN = 4096              # ignore absurdly long candidates
 
     def _handle_agents_list(self, parsed) -> None:
         """Roster of every managed (and external) agent + placements + live

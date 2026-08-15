@@ -413,6 +413,16 @@ def get_db() -> sqlite3.Connection:
         except sqlite3.OperationalError:
             pass  # column already exists
 
+    # edited_at / deleted_at: an operator can correct or withdraw their own
+    # message. Both are timestamps rather than a destructive UPDATE/DELETE, so
+    # the row survives for the audit trail and readers can be told the text
+    # changed under them.
+    for _col in ("edited_at", "deleted_at"):
+        try:
+            conn.execute(f"ALTER TABLE messages ADD COLUMN {_col} TEXT")
+        except sqlite3.OperationalError:
+            pass  # column already exists
+
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_sessions_member
         ON sessions (channel, member_id)
