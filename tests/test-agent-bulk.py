@@ -114,10 +114,10 @@ try:
     # ── happy path ──
     st, d = http(port, "/api/agents/bulk",
                  body={"agent_ids": ids, "action": "stop"})
-    check("stop across three agents: 200, all ok, none failed",
+    check("stop across three agents: 200, ok, every row succeeded",
           st == 200 and d["ok"] is True and d["count"] == 3
-          and d["failed"] == 0 and sorted(d["succeeded"]) == sorted(ids)
-          and all(r["ok"] for r in results(d)))
+          and all(r["ok"] for r in results(d))
+          and sorted(r["agent_id"] for r in results(d)) == sorted(ids))
     check("stop actually applied to every agent",
           all(row(a)["state"] == "stopped" for a in ids))
 
@@ -126,7 +126,7 @@ try:
                  body={"agent_ids": [ids[0], "no-such-agent"], "action": "stop"})
     by_id = {r["agent_id"]: r for r in results(d)}
     check("unknown agent: still 200, real agent succeeds, unknown reports 404",
-          st == 200 and d.get("failed") == 1
+          st == 200 and d["ok"] is False
           and by_id[ids[0]]["ok"] is True
           and by_id["no-such-agent"]["ok"] is False
           and by_id["no-such-agent"]["status"] == 404)
@@ -163,9 +163,67 @@ try:
         "agent_ids": [ids[0], ids[2]], "action": "wake-mode",
         "params": {"mode": "all"}})
     check("wake-mode via bulk: 200 and applied to every agent in the batch",
-          st == 200 and d["failed"] == 0
+          st == 200 and d["ok"] is True
           and row(ids[0])["wake_mode"] == "all"
           and row(ids[2])["wake_mode"] == "all")
+
+    # ── THE assertion for a bulk route: only the named agents are touched ──
+    # Without this a handler that ignores agent_ids entirely and applies the
+    # action to every row in `agents` — while still emitting one result row per
+    # requested id — passes every other check in this file. "Acted on the wrong
+    # set" is the one failure mode a bulk endpoint introduces that the shared
+    # single-agent applier does not already guard.
+    for a in ids:
+        http(port, f"/api/agents/{a}/wake-mode", body={"mode": "at"})
+    check("fixture: all three agents start at wake_mode 'at'",
+          all(row(a)["wake_mode"] == "at" for a in ids))
+    st, d = http(port, "/api/agents/bulk", body={
+        "agent_ids": [ids[0], ids[2]], "action": "wake-mode",
+        "params": {"mode": "all"}})
+    check("only the named agents are modified; the unnamed one is untouched",
+          st == 200 and row(ids[0])["wake_mode"] == "all"
+          and row(ids[2])["wake_mode"] == "all"
+          and row(ids[1])["wake_mode"] == "at")
+    # Same guard on a lifecycle action, where the collateral damage is worse.
+    st, d = http(port, "/api/agents/bulk",
+                 body={"agent_ids": [ids[0]], "action": "archive"})
+    check("archive touches only its own agent",
+          st == 200 and row(ids[0])["archived_at"] is not None
+          and row(ids[1])["archived_at"] is None
+          and row(ids[2])["archived_at"] is None)
+    http(port, f"/api/agents/{ids[0]}/unarchive")
+
+    # ── "already in that state" is NOT "agent not found" ──
+    # The applier returns a falsy ok for both, so reporting 404 for both made
+    # select-all -> wake on a healthy roster report every row as
+    # "agent not found" — wrong for 100% of rows, in the endpoint's headline
+    # use case, and futile to retry.
+    st, d = http(port, "/api/agents/bulk",
+                 body={"agent_ids": [ids[0]], "action": "wake"})
+    check("fixture: the agent is awake", st == 200)
+    st, d = http(port, "/api/agents/bulk",
+                 body={"agent_ids": [ids[0], "ghost-x"], "action": "wake"})
+    by_id = {r["agent_id"]: r for r in results(d)}
+    check("an already-awake agent reports 409, an unknown id reports 404 — "
+          "and the two are distinguishable",
+          by_id.get(ids[0], {}).get("status") == 409
+          and "already" in by_id.get(ids[0], {}).get("error", "")
+          and by_id.get("ghost-x", {}).get("status") == 404
+          and by_id.get("ghost-x", {}).get("error") == "agent not found")
+
+    # ── compact must not silently resurrect a stopped agent ──
+    # Through the single-agent route the implicit wake is one deliberate click.
+    # Across a roster it would restart and bill every sleeping agent.
+    http(port, "/api/agents/bulk", body={"agent_ids": ids, "action": "stop"})
+    time.sleep(0.2)
+    st, d = http(port, "/api/agents/bulk", body={
+        "agent_ids": ids, "action": "compact", "params": {"message": "tidy"}})
+    check("bulk compact refuses a stopped agent instead of waking it",
+          st in (200, 409) and results(d)
+          # .get, not []: a success row carries no `status`, and indexing it
+          # would abort the run instead of reporting this check as failed.
+          and all(r.get("status") == 409 for r in results(d))
+          and all(not web.get_supervisor().is_running(a) for a in ids))
 
     # A validation failure inside the action surfaces as that agent's row with
     # the status the single-agent route would have returned, not as a 4xx for
@@ -173,8 +231,8 @@ try:
     st, d = http(port, "/api/agents/bulk", body={
         "agent_ids": [ids[0]], "action": "wake-mode",
         "params": {"mode": "nonsense"}})
-    check("a per-agent validation failure is reported in its row, batch stays 200",
-          st == 200 and d["failed"] == 1
+    check("a per-agent validation failure is reported in its row",
+          d["ok"] is False
           and results(d) and results(d)[0]["status"] == 400
           and "all, about, or at" in results(d)[0]["error"])
 
@@ -209,8 +267,32 @@ try:
     at_limit = [f"ghost-{i}" for i in range(web.MAX_BULK_AGENTS)]
     st, d = http(port, "/api/agents/bulk",
                  body={"agent_ids": at_limit, "action": "stop"})
-    check("exactly MAX_BULK_AGENTS is accepted",
-          st == 200 and d["count"] == web.MAX_BULK_AGENTS)
+    # Accepted by the ceiling — and then answered 404, because NOTHING
+    # succeeded and every failure was the same client-side status. "You named
+    # a hundred agents and none exist" is a bad request, not a partial success,
+    # and a script with no JSON parser needs to be able to see that.
+    check("exactly MAX_BULK_AGENTS is accepted by the ceiling",
+          d["count"] == web.MAX_BULK_AGENTS)
+    check("a batch where nothing succeeded and all failures share one 4xx "
+          "returns that status, not 200",
+          st == 404 and d["ok"] is False)
+    st, d = http(port, "/api/agents/bulk",
+                 body={"agent_ids": [ids[0], "ghost-1"], "action": "stop"})
+    check("but a batch with even one success stays 200", st == 200)
+
+    # ── the process-spawning ceiling ──
+    # The loop is synchronous and spawn() blocks up to 10s per agent, so 100
+    # wakes is ~17 minutes inside one HTTP request — past every browser and
+    # proxy timeout, while the loop keeps starting processes.
+    many = [f"ghost-{i}" for i in range(web.MAX_BULK_SPAWNING_AGENTS + 1)]
+    st, d = http(port, "/api/agents/bulk",
+                 body={"agent_ids": many, "action": "wake"})
+    check(f"more than MAX_BULK_SPAWNING_AGENTS "
+          f"({web.MAX_BULK_SPAWNING_AGENTS}) rejected for a spawning action",
+          st == 400 and "synchronous" in str(d.get("error", "")))
+    st, d = http(port, "/api/agents/bulk",
+                 body={"agent_ids": many, "action": "stop"})
+    check("the same count is fine for a cheap action", st != 400)
 
     # ── routing ──
     # /api/agents/bulk must not be read as an agent literally named "bulk".
@@ -218,6 +300,108 @@ try:
                  body={"agent_ids": [ids[0]], "action": "stop"})
     check("the bulk route wins over the per-agent action route",
           st == 200 and "results" in d)
+
+    # ── the deliberate broad `except`, which had no test at all ──
+    # It exists so one agent in an unexpected state cannot sink the batch.
+    # Delete it and the rest of this file stays green, so it needs its own.
+    real_apply = web.NthWebHandler._apply_agent_action
+    victim = ids[1]
+
+    def _explode_one(self, agent_id, action, params, ident):
+        if agent_id == victim:
+            raise RuntimeError("provider transport died")
+        return real_apply(self, agent_id, action, params, ident)
+
+    web.NthWebHandler._apply_agent_action = _explode_one
+    try:
+        st, d = http(port, "/api/agents/bulk", body={
+            "agent_ids": ids, "action": "wake-mode", "params": {"mode": "about"}})
+        by_id = {r["agent_id"]: r for r in results(d)}
+        check("an unexpected exception is confined to its own row",
+              st == 200 and by_id.get(victim, {}).get("status") == 500
+              and "provider transport died" in by_id.get(victim, {}).get("error", ""))
+        check("its neighbours on both sides are still applied",
+              by_id.get(ids[0], {}).get("ok") is True
+              and by_id.get(ids[2], {}).get("ok") is True
+              and row(ids[0])["wake_mode"] == "about"
+              and row(ids[2])["wake_mode"] == "about")
+        check("and the failing agent was genuinely not modified",
+              row(victim)["wake_mode"] != "about")
+    finally:
+        web.NthWebHandler._apply_agent_action = real_apply
+
+    # ── a systemic failure is not N independent agent failures ──
+    # A locked database or a supervisor shutting down fails identically for
+    # every agent, and each one pays the same timeout to rediscover it.
+    def _explode_all(self, agent_id, action, params, ident):
+        raise RuntimeError("database is locked")
+
+    web.NthWebHandler._apply_agent_action = _explode_all
+    # The batch must be longer than the streak threshold, or there is nothing
+    # left to skip and aborting would be meaningless.
+    batch = ids + [f"more-{i}" for i in range(web.BULK_SYSTEMIC_STREAK)]
+    try:
+        st, d = http(port, "/api/agents/bulk", body={
+            "agent_ids": batch, "action": "wake-mode", "params": {"mode": "at"}})
+        rows = results(d)
+        tried = [r for r in rows if not r.get("skipped")]
+        skipped = [r for r in rows if r.get("skipped")]
+        check("identical repeated failures abort the batch as systemic",
+              bool(d.get("aborted")) and len(tried) == web.BULK_SYSTEMIC_STREAK)
+        check("the untried agents are reported as skipped, not as failures of "
+              "their own, so a client can retry exactly those",
+              len(skipped) == len(batch) - web.BULK_SYSTEMIC_STREAK
+              and all(r["status"] == 503 for r in skipped))
+        check("every agent still gets a row", len(rows) == len(batch))
+    finally:
+        web.NthWebHandler._apply_agent_action = real_apply
+
+    # A batch of DIFFERENT failures must NOT be mistaken for a systemic one.
+    seq = iter(range(100))
+
+    def _explode_differently(self, agent_id, action, params, ident):
+        raise RuntimeError(f"distinct failure {next(seq)}")
+
+    web.NthWebHandler._apply_agent_action = _explode_differently
+    try:
+        st, d = http(port, "/api/agents/bulk", body={
+            "agent_ids": batch, "action": "wake-mode", "params": {"mode": "at"}})
+        check("distinct failures are not treated as systemic — every agent is "
+              "still tried",
+              not d.get("aborted")
+              and not any(r.get("skipped") for r in results(d))
+              and len(results(d)) == len(batch))
+    finally:
+        web.NthWebHandler._apply_agent_action = real_apply
+
+    # ── placement: the one action with a BULK-SPECIFIC code path ──
+    # `_apply_agent_action` accepts a `channels` LIST that only this endpoint
+    # ever sends (the single-agent route sends one `channel`), so that branch
+    # is this endpoint's to test.
+    json.loads(srv.nth_connect(summary="t", name="Host2", channel="chan-c"))
+    st, d = http(port, "/api/agents/bulk", body={
+        "agent_ids": [ids[0]], "action": "placement",
+        "params": {"channels": ["chan-c"], "present": True}})
+    db = sqlite3.connect(str(srv.DB_PATH))
+    placed = {r[0] for r in db.execute(
+        "SELECT channel FROM agent_channels WHERE agent_id=?", (ids[0],))}
+    db.close()
+    check("placement accepts a channels LIST and applies it",
+          st == 200 and "chan-c" in placed)
+    st, d = http(port, "/api/agents/bulk", body={
+        "agent_ids": [ids[0]], "action": "placement",
+        "params": {"channels": ["chan-c", "no-such-channel"]}})
+    check("an unknown channel in the list is rejected for that agent",
+          results(d) and results(d)[0]["ok"] is False)
+    st, d = http(port, "/api/agents/bulk", body={
+        "agent_ids": [ids[0]], "action": "placement",
+        "params": {"channels": [srv.AGENT_INBOX_CHANNEL]}})
+    check("the private agent inbox cannot be changed through bulk either",
+          results(d) and results(d)[0]["status"] == 400)
+    st, d = http(port, "/api/agents/bulk", body={
+        "agent_ids": [ids[0]], "action": "placement", "params": {"channels": []}})
+    check("an empty channels list is rejected",
+          results(d) and results(d)[0]["status"] == 400)
 
     # ── the operator gate, asserted THROUGH the predicate ──
     # A loopback probe resolves to an all-seeing operator, so a request from
