@@ -8,6 +8,13 @@ NTH_VERSION = "8.1.1-beta.1"
 
 SLEEPING_KEYWORDS = ("idle", "standing by", "tier 3", "agent-monitor")
 
+# Hidden transport for managed agents. A supervised agent is launched with this
+# as its channel so the hub can talk to it (prompts in, output back) without
+# that traffic appearing in whatever room the agent is actually a member of.
+# nth_server scopes every message here to its addressee, so a model that
+# reaches for a plain broadcast cannot spill hub plumbing into a real channel.
+AGENT_INBOX_CHANNEL = "nth-agent-inbox"
+
 # ── Context snapshot projection ───────────────────────────────────────
 # Statusline/publisher snapshots carry far more than the UI renders:
 # transcript paths, working directories, project dirs and cumulative API
