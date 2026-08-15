@@ -214,6 +214,26 @@ def monitor(channel, member_id, filter_mode="all", _db_path=None):
     db.execute("PRAGMA synchronous=NORMAL")
     db.execute("PRAGMA busy_timeout=5000")
 
+    # Probe the schema ONCE rather than deciding per tick from an exception.
+    # Catching a bare OperationalError around the SELECT would also catch
+    # `database is locked`, and the fallback path silently uses a different
+    # (narrower) mode — so one transient lock would drop messages, and the
+    # watermark advances past them regardless, so they never come back.
+    try:
+        have_requested_col = any(
+            r["name"] == "filter_mode_requested"
+            for r in db.execute("PRAGMA table_info(members)").fetchall())
+    except sqlite3.Error:
+        have_requested_col = False
+
+    # The mode actually in force. Starts at the launch argument — a value
+    # chosen deliberately by whoever launched this agent, which is strictly
+    # better information than a hardcoded default — and is replaced by the
+    # operator's request whenever there is one.
+    effective_mode = filter_mode if filter_mode in FILTER_MODES else "all"
+    last_effective_mode = effective_mode
+    last_bad_request = None
+
     try:
         while True:
             # Default poll cadence. Reassigned below once we know whether the
@@ -223,8 +243,12 @@ def monitor(channel, member_id, filter_mode="all", _db_path=None):
             check_interval = ACTIVE_INTERVAL
             try:
                 member = db.execute(
-                    "SELECT last_seen, last_read, status_text "
-                    "FROM members WHERE channel = ? AND id = ?",
+                    ("SELECT last_seen, last_read, status_text, "
+                     "filter_mode_requested "
+                     "FROM members WHERE channel = ? AND id = ?")
+                    if have_requested_col else
+                    ("SELECT last_seen, last_read, status_text "
+                     "FROM members WHERE channel = ? AND id = ?"),
                     (channel, member_id),
                 ).fetchone()
 
@@ -261,6 +285,37 @@ def monitor(channel, member_id, filter_mode="all", _db_path=None):
                     time.sleep(10)
                     continue
                 member_missing_streak = 0
+
+                # Spec beats status. filter_mode_requested is the operator's
+                # override; NULL/blank means "no override, keep the launch
+                # arg". A value we do not recognise is IGNORED rather than
+                # obeyed and rather than reset to the most expensive mode:
+                # every spurious wake is a billed turn, so failing to `all`
+                # would make a typo cost money. Bangs are unfilterable, so the
+                # catastrophic "agent never hears anything" case is already
+                # covered without needing to fail wide here.
+                if have_requested_col:
+                    requested = (member["filter_mode_requested"] or "").strip().lower()
+                    if requested in FILTER_MODES:
+                        effective_mode = requested
+                    elif not requested:
+                        effective_mode = (filter_mode if filter_mode in FILTER_MODES
+                                          else "all")
+                    elif requested != last_bad_request:
+                        # Once per distinct bad value, not once per tick: this
+                        # loop runs twice a second and every emit is a
+                        # notification in the parent session.
+                        last_bad_request = requested
+                        emit({"event": "error",
+                              "msg": (f"unrecognised filter_mode_requested "
+                                      f"{requested!r}; keeping {effective_mode}")})
+                # Make an operator's change visible in the notification stream
+                # instead of leaving it to be inferred from behaviour.
+                if effective_mode != last_effective_mode:
+                    emit({"event": "filter_mode",
+                          "filter": effective_mode,
+                          "was": last_effective_mode})
+                    last_effective_mode = effective_mode
 
                 # We've observed our own row at least once. Any later
                 # disappearance is a cull, not the startup join race.
@@ -318,15 +373,19 @@ def monitor(channel, member_id, filter_mode="all", _db_path=None):
                 if (mono - last_heartbeat_mono >= HEARTBEAT_INTERVAL
                         or wall - last_heartbeat_wall >= HEARTBEAT_INTERVAL):
                     now_ts = now_iso()
-                    # Best-effort filter_mode write (added v7.2). Older DBs
-                    # without the column drop back to the pre-v7.2 heartbeat.
+                    # PUBLISH the effective mode. filter_mode is status, not
+                    # control: peers read it off the roster to decide whether
+                    # an ambient post will actually be heard before spending
+                    # the tokens to write it, so it has to say what this
+                    # monitor is really doing — which is effective_mode, not
+                    # the launch argument it may have been overridden by.
                     try:
                         db.execute(
                             "UPDATE members SET last_seen = ?, "
                             "messenger_heartbeat = ?, watchdog_heartbeat = ?, "
                             "filter_mode = ? "
                             "WHERE channel = ? AND id = ?",
-                            (now_ts, now_ts, now_ts, filter_mode, channel, member_id),
+                            (now_ts, now_ts, now_ts, effective_mode, channel, member_id),
                         )
                     except sqlite3.OperationalError:
                         db.execute(
@@ -467,7 +526,7 @@ def monitor(channel, member_id, filter_mode="all", _db_path=None):
 
                 if unread:
 
-                    mode = filter_mode if filter_mode in FILTER_MODES else "all"
+                    mode = effective_mode if effective_mode in FILTER_MODES else "all"
                     relevant = []
                     for m in unread:
                         mraw = m["mentions"] if "mentions" in m.keys() else ""

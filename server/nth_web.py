@@ -289,6 +289,10 @@ IDENTITY_SOURCE_PENDING = "pending"
 # Identity tiers allowed to perform destructive, roster-wide actions (cull).
 # A self-declared guest is deliberately excluded — see _handle_cull.
 CULL_ALLOWED_SOURCES = (IDENTITY_SOURCE_LOOPBACK, IDENTITY_SOURCE_TAILSCALE)
+# Wake filters an operator may request. Mirrors nth_monitor.FILTER_MODES;
+# duplicated rather than imported because nth_web must run standalone against
+# a database whose monitor is a different vintage.
+MONITOR_FILTER_MODES = ("all", "about", "at")
 # Identity tiers allowed to inspect or reveal paths on the operator's own
 # filesystem. A self-declared guest is excluded: these endpoints answer
 # questions about local disk, and the server can bind 0.0.0.0 under --tailnet.
@@ -3616,6 +3620,8 @@ class NthWebHandler(BaseHTTPRequestHandler):
             self._handle_identify()
         elif parsed.path == "/api/cull":
             self._handle_cull()
+        elif parsed.path == "/api/member/filter":
+            self._handle_member_filter(parsed)
         elif parsed.path == "/api/path/validate":
             self._handle_path_validate()
         elif parsed.path == "/api/reveal":
@@ -7523,6 +7529,75 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 except sqlite3.Error:
                     pass
         self._json({"ok": True, "id": msg_id})
+
+    def _handle_member_filter(self, parsed) -> None:
+        """Set (or clear) a member's REQUESTED listening mode.
+
+        This is the writer that makes members.filter_mode_requested a real
+        control surface. Without it the column is a source of truth nobody can
+        write, and the only way to retune an agent is to restart its Monitor.
+
+        Writes the spec, never the status: filter_mode is published by the
+        member's own Monitor and is overwritten on its next heartbeat, so
+        writing it here would be undone within ~10 seconds.
+        """
+        ch = self._channel_for_request(parsed)
+        if ch is None:
+            self._error(400, "channel query param required")
+            return
+        _token, ident, _is_new = self._resolve_identity()
+        # Same bar as cull: retuning another member's wake filter decides
+        # whether they hear anything at all, so a self-declared guest must not
+        # be able to silence an agent someone else is relying on.
+        if ident.source not in CULL_ALLOWED_SOURCES:
+            self._error(403, "a trusted identity is required to change a wake filter")
+            return
+        body = self._read_json_body(max_bytes=2048)
+        if body is None:
+            return
+        if not isinstance(body, dict):
+            self._error(400, "invalid body")
+            return
+        target_id = body.get("member_id")
+        if not isinstance(target_id, str) or not target_id.strip():
+            self._error(400, "member_id required")
+            return
+        target_id = target_id.strip()
+        mode = body.get("filter_mode")
+        if mode is None or (isinstance(mode, str) and not mode.strip()):
+            mode_value = None          # clear the override
+        elif isinstance(mode, str) and mode.strip().lower() in MONITOR_FILTER_MODES:
+            mode_value = mode.strip().lower()
+        else:
+            self._error(400, "filter_mode must be one of "
+                             + "|".join(MONITOR_FILTER_MODES) + ", or null to clear")
+            return
+        db = None
+        try:
+            db = sqlite3.connect(str(self.db_path), timeout=5)
+            db.execute("PRAGMA busy_timeout=3000")
+            with db:
+                cur = db.execute(
+                    "UPDATE members SET filter_mode_requested = ? "
+                    "WHERE channel = ? AND id = ?",
+                    (mode_value, ch, target_id))
+            if cur.rowcount == 0:
+                self._error(404, "member not found in this channel")
+                return
+        except sqlite3.Error as e:
+            self._error(500, f"db error: {e}")
+            return
+        finally:
+            if db is not None:
+                try:
+                    db.close()
+                except sqlite3.Error:
+                    pass
+        # Deliberately not echoed as the effective mode: the member's Monitor
+        # applies this on its next tick and publishes the result into
+        # filter_mode. Reporting it as already in force here would be a guess.
+        self._json({"ok": True, "member_id": target_id,
+                    "filter_mode_requested": mode_value})
 
     def _handle_cull(self) -> None:
         """Remove a member from the channel at the operator's request — the
