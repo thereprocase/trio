@@ -1025,12 +1025,21 @@ def _agent_is_live(is_running: bool, heartbeat_fresh: bool, working: bool,
 
 def member_status(last_seen_iso: Optional[str], status_text: str,
                   session_activity_iso: Optional[str] = None,
-                  last_turn_end_iso: Optional[str] = None) -> str:
+                  last_turn_end_iso: Optional[str] = None,
+                  blocked_since_iso: Optional[str] = None) -> str:
     """Classify a member for the roster dot.
 
-    States: working / active / idle / stale / dead.
+    States: blocked / working / active / idle / stale / dead.
       dead    — no heartbeat for DEAD_SECONDS (process gone).
       stale   — heartbeat aging (> STALE_SECONDS).
+      blocked — frozen on an interactive host prompt (AskUserQuestion,
+                ExitPlanMode) waiting for a human. Recorded by
+                nth_activity_hook as sessions.blocked_since; cleared by the
+                matching PostToolUse, a new prompt, or the turn hook at turn
+                end. Ranked directly below the liveness states and above
+                `working` because it is the one state a human must act on: the
+                session looks busy from outside (mid-turn, heartbeats fresh)
+                but will sit there indefinitely until somebody answers.
       idle    — alive, but its last turn has ended (nothing since) or it set a
                 sleeping status_text: "done / waiting on you".
       working — alive AND it has acted since its last turn end (mid-turn). This
@@ -1054,6 +1063,11 @@ def member_status(last_seen_iso: Optional[str], status_text: str,
         return "dead"
     if age > STALE_SECONDS:
         return "stale"
+    # Above the sleeping-status check: an agent that set a sleeping status_text
+    # and then hit an interactive prompt is still waiting on a human, and that
+    # is the more actionable fact.
+    if blocked_since_iso and _iso_secs(blocked_since_iso) is not None:
+        return "blocked"
     if status_text and any(kw in status_text.lower() for kw in SLEEPING_KEYWORDS):
         return "idle"
     # Turn-state split — only when the turn hook has recorded an end for this
@@ -1886,6 +1900,19 @@ class EventHub:
             ]
             if turn:
                 cols.append("MAX(s.last_turn_end) AS session_last_turn_end")
+                cols.append("MAX(s.blocked_since) AS session_blocked_since")
+                # The three tool columns are written together by one UPDATE, so
+                # they must be read back together. Aggregating each with its own
+                # MAX() would let a member with two live sessions show one
+                # session's tool NAME beside another's TARGET — a chip that
+                # never happened. Packing them behind the timestamp and taking a
+                # single MAX keeps the triple from one row: last_tool_at leads,
+                # and ISO-8601 sorts lexicographically, so the max string is the
+                # most recent row's whole triple.
+                cols.append(
+                    "MAX(COALESCE(s.last_tool_at,'') || char(31) || "
+                    "    COALESCE(s.last_tool_name,'') || char(31) || "
+                    "    COALESCE(s.last_tool_target,'')) AS session_tool_packed")
             return ("SELECT " + ", ".join(cols) + " FROM members m "
                     "LEFT JOIN sessions s "
                     "  ON s.channel = m.channel AND s.member_id = m.id "
@@ -1949,6 +1976,14 @@ class EventHub:
                         break
             keys = r.keys()
             s_turn_end = r["session_last_turn_end"] if "session_last_turn_end" in keys else None
+            s_blocked = r["session_blocked_since"] if "session_blocked_since" in keys else None
+            # Unpack the tool triple the query packed behind its timestamp so
+            # name and target are guaranteed to come from the same write.
+            tool_at = tool_name = tool_target = ""
+            if "session_tool_packed" in keys and r["session_tool_packed"]:
+                parts = str(r["session_tool_packed"]).split("\x1f")
+                if len(parts) == 3:
+                    tool_at, tool_name, tool_target = parts
             aname, aemoji = avatars.get(r["id"], animal_for(r["id"]))
             out.append({
                 "id": r["id"],
@@ -1975,7 +2010,15 @@ class EventHub:
                 "status": member_status(
                     effective_last_seen, r["status_text"] or "",
                     session_activity_iso=(r["session_last_seen"] or None),
-                    last_turn_end_iso=s_turn_end),
+                    last_turn_end_iso=s_turn_end,
+                    blocked_since_iso=s_blocked),
+                # What the member is doing right now, from nth_activity_hook.
+                # Empty strings when the hook is not installed, so a hook-less
+                # deployment renders exactly as before.
+                "last_tool_name": tool_name,
+                "last_tool_target": tool_target,
+                "last_tool_at": tool_at,
+                "blocked_since": s_blocked or "",
                 "animal_name": aname,
                 "animal_emoji": aemoji,
             })
