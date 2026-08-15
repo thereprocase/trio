@@ -306,6 +306,15 @@ def get_db() -> sqlite3.Connection:
         CREATE INDEX IF NOT EXISTS idx_messages_channel_member
         ON messages (channel, member_id)
     """)
+    # Index for time-windowed message-rate aggregates (the usage panel), which
+    # scan messages by created_at across ALL channels on every /api/usage poll.
+    # Both indexes above lead with `channel`, so neither can serve a
+    # channel-agnostic time range — without this the query full-scans the
+    # largest table in the schema, and that table has no retention policy.
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_messages_created_at
+        ON messages (created_at)
+    """)
     # Migration: add pinned_message_id column (v2 feature)
     for col, table, defn in [
         ("pinned_message_id", "channels", "INTEGER"),

@@ -59,6 +59,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 import nth_supervisor as nsup
 import nth_agent_manager as nam
 import nth_request_log as nrl
+import nth_usage as nusage
 from nth_constants import (ANIMAL_EMOJIS, animal_for, animal_for_channel,
                            NTH_VERSION, project_context, AGENT_INBOX_CHANNEL, can_see, is_all_seeing,
                            parse_recipients, narrow_wake)
@@ -71,6 +72,16 @@ DB_POLL_INTERVAL = 0.5
 HISTORY_LIMIT = 200          # messages sent to a client on /api/history
 HUB_IDLE_REAP_S = 300        # retire a channel's EventHub after this long unwatched
 SSE_HEARTBEAT_SEC = 20       # keep-alive comment interval
+
+# Claude Code's own statusline state — module-level so tests can point it at a
+# fixture instead of the real user's file.
+STATUSLINE_STATE_PATH = Path.home() / ".claude" / "statusline-state.json"
+# Claude's two account quota periods, used to cap each quota's lookback windows
+# at its own reset period. Hardcoded because neither source reports a window
+# length (unlike Codex, which sends `windowDurationMins`); a plan whose session
+# window is not five hours would get mis-capped windows.
+FIVE_HOUR_SECONDS = 5 * 3600.0
+SEVEN_DAY_SECONDS = 7 * 86400.0
 
 # ── Image attachments (Phase-1 prototype) ──
 # Attachments live beside the database they belong to, NOT at a fixed path.
@@ -268,6 +279,34 @@ def _is_loopback_ip(remote_ip: str) -> bool:
     if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
         return ip.ipv4_mapped.is_loopback
     return False
+
+
+def _message_rates(db: sqlite3.Connection, now: float) -> Dict[str, Dict[str, int]]:
+    """Message counts across all channels over 15m / 1h / 24h, split into
+    operator-sent (member_id begins `_op_`) vs received.
+
+    ONE scan of the widest window with conditional SUMs, not three separate
+    queries — the windows are nested, and this runs on every poll of a polled
+    endpoint against the largest table in the schema.
+    """
+    spans = (("m15", 900), ("h1", 3600), ("h24", 86400))
+    cutoffs = {name: datetime.fromtimestamp(now - span, timezone.utc).isoformat()
+               for name, span in spans}
+    row = db.execute(
+        "SELECT "
+        "  SUM(created_at >= :m15), SUM(created_at >= :m15 AND op), "
+        "  SUM(created_at >= :h1),  SUM(created_at >= :h1  AND op), "
+        "  SUM(created_at >= :h24), SUM(created_at >= :h24 AND op) "
+        "FROM (SELECT created_at, member_id GLOB :prefix AS op "
+        "      FROM messages WHERE created_at >= :h24)",
+        {**cutoffs, "prefix": f"{OPERATOR_MEMBER_ID_PREFIX}*"},
+    ).fetchone()
+    out: Dict[str, Dict[str, int]] = {}
+    for index, (name, _) in enumerate(spans):
+        total = row[index * 2] or 0
+        sent = row[index * 2 + 1] or 0
+        out[name] = {"total": total, "sent": sent, "received": total - sent}
+    return out
 
 
 # ───────── Helpers ─────────
@@ -3119,6 +3158,8 @@ class NthWebHandler(BaseHTTPRequestHandler):
             self._serve_html(body, set_cookie_token=token if is_new else None)
         elif path == "/api/health":
             self._handle_health()
+        elif path == "/api/usage":
+            self._handle_usage()
         elif path == "/api/usage/requests":
             self._handle_usage_requests(parsed)
         elif path == "/api/agents":
@@ -3354,6 +3395,218 @@ class NthWebHandler(BaseHTTPRequestHandler):
             self._error(404, "approval is missing or already resolved")
             return
         self._json({"ok": True, "approval_id": approval_id, "decision": decision})
+
+    def _handle_usage(self) -> None:
+        """Account-level quota, burn rate and token consumption for the home
+        screen.
+
+        Claude Code's own CLI maintains ~/.claude/statusline-state.json with
+        the five-hour/seven-day percentages it renders in the terminal
+        statusline; `claude -p "/usage"` gives fresher numbers when it has run
+        recently. Read both rather than re-deriving usage from transcripts.
+        Codex quota windows and daily token activity come from the documented
+        App Server account/rateLimits/read and account/usage/read methods, and
+        only when this workspace actually has a managed Codex agent.
+
+        The two Claude sources are tracked INDEPENDENTLY per quota — each of
+        the five-hour and seven-day figures carries its own value, reset time,
+        source tag and freshness. A partial `/usage` parse must not null a good
+        statusline reading, and a five-hour figure three hours stale must not
+        inherit the seven-day figure's five-second freshness label.
+        """
+        if self._require_operator() is None:
+            return
+        now = time.time()
+        # (percentage, resets_at, source, updated_at) per quota, kept apart all
+        # the way to the response body.
+        fh: List[Any] = [None, None, None, None]
+        sd: List[Any] = [None, None, None, None]
+        # Keep the account usage fresh even from the dashboard: kick a
+        # rate-gated, non-blocking `claude -p "/usage"` refresh.
+        nsup.maybe_refresh_usage_cli()
+        # Statusline file — the FALLBACK source. It only advances on an
+        # interactive render, so its mtime is genuinely its age.
+        try:
+            raw = json.loads(STATUSLINE_STATE_PATH.read_text())
+            limits = raw.get("_cached_rate_limits") or {}
+            five_hour = limits.get("five_hour") or {}
+            seven_day = limits.get("seven_day") or {}
+            if "used_percentage" in five_hour or "used_percentage" in seven_day:
+                mtime = STATUSLINE_STATE_PATH.stat().st_mtime
+                fh = [five_hour.get("used_percentage"),
+                      five_hour.get("resets_at"), "statusline", mtime]
+                sd = [seven_day.get("used_percentage"),
+                      seven_day.get("resets_at"), "statusline", mtime]
+        except (OSError, ValueError, AttributeError, TypeError,
+                json.JSONDecodeError):
+            pass
+        # Overlay the `/usage` CLI cache when present AND fresh (< 30 min — a
+        # stuck cache must not outrank the statusline forever). Each field
+        # overrides independently, carrying its own source and timestamp.
+        cli = nsup.load_usage_cli()
+        cli_at = cli.get("t") if isinstance(cli, dict) else None
+        # float() on an oversized JSON int raises OverflowError, and do_GET has
+        # no wrapping handler — that drops the connection with no response at
+        # all. `isinstance(t, (int, float))` inside load_usage_cli is not
+        # enough on its own.
+        if cli and nusage.num_ok(cli_at, allow_none=False) \
+                and now - float(cli_at) < 1800:
+            if cli.get("session_pct") is not None:
+                fh = [cli.get("session_pct"), cli.get("session_resets"),
+                      "cli", cli_at]
+            if cli.get("week_pct") is not None:
+                sd = [cli.get("week_pct"), cli.get("week_resets"),
+                      "cli", cli_at]
+        # Neither source is trusted to be numeric or in range: the statusline
+        # file is user-writable and the CLI cache is scraped text. An unclamped
+        # huge percentage divided by a 60-second baseline yields an Infinity
+        # RATE from finite inputs, and json.dumps re-emits it — which browsers'
+        # JSON.parse rejects, blanking the entire panel. Drop a bad reading
+        # together with its source tag, so the burn series never rates against
+        # a sample whose source it cannot name.
+        for quota in (fh, sd):
+            quota[0] = nusage.clamp_percentage(quota[0])
+            if quota[0] is None:
+                quota[1] = quota[2] = quota[3] = None
+            else:
+                quota[1] = nusage.sane_timestamp(quota[1], now)
+                if not nusage.num_ok(quota[3], allow_none=True):
+                    quota[3] = None
+        fh_pct, fh_resets, fh_src, fh_at = fh
+        sd_pct, sd_resets, sd_src, sd_at = sd
+
+        claude: Dict[str, Any] = {
+            "available": fh_pct is not None or sd_pct is not None}
+        if claude["available"]:
+            claude.update({
+                "five_hour": {"used_percentage": fh_pct, "resets_at": fh_resets,
+                              "source": fh_src, "updated_at": fh_at},
+                "seven_day": {"used_percentage": sd_pct, "resets_at": sd_resets,
+                              "source": sd_src, "updated_at": sd_at},
+                # Coarse labels, kept for a client that only wants one. The
+                # per-quota fields above are the accurate ones.
+                "source": "cli" if "cli" in (fh_src, sd_src) else fh_src or sd_src,
+                "updated_at": max([t for t in (fh_at, sd_at) if t is not None],
+                                  default=None),
+            })
+
+        # Codex account usage. Only start that provider process when this
+        # workspace actually has a managed Codex agent — this keeps Claude-only
+        # workspaces and tests from launching an otherwise-unused provider just
+        # to render the home page. Both the provider check and the DB probe sit
+        # inside the try: do_GET has no wrapping handler, so anything that
+        # escapes here costs the operator the whole response, including the
+        # Claude half that has nothing to do with Codex.
+        codex_account: Dict[str, Any] = {"available": False}
+        has_codex_agent = False
+        try:
+            # `providers()` is the allowlist the agent endpoints gate on. When
+            # nth_codex_runtime is absent, get_supervisor().codex is None, so
+            # this is what stops a stale codex row reaching None.account_usage()
+            # and reporting an AttributeError as if it were a quota problem.
+            if "codex" in get_supervisor().providers():
+                cdb = sqlite3.connect(str(self.db_path), timeout=5)
+                try:
+                    has_codex_agent = cdb.execute(
+                        "SELECT 1 FROM agents WHERE managed=1 AND archived_at IS NULL "
+                        "AND lower(COALESCE(runtime_provider,''))='codex' LIMIT 1"
+                    ).fetchone() is not None
+                finally:
+                    cdb.close()
+            if has_codex_agent:
+                codex_account = get_supervisor().codex.account_usage()
+        except Exception as exc:
+            # Surfaced in the response, but also worth a console line: the panel
+            # just shows Codex as unavailable, which looks the same as "no Codex
+            # agent" unless the operator reads the JSON.
+            sys.stderr.write(f"[nth_web] codex account usage unavailable: {exc}\n")
+            codex_account = {"available": False, "error": str(exc)}
+        codex_rows = nusage.quota_rows(codex_account, now)
+        codex_current = {row["key"]: row["used_percentage"] for row in codex_rows}
+
+        # Record source-tagged Claude and Codex samples, then derive %/hr trends
+        # and forecasts from the resulting series.
+        history = nusage.record_sample(
+            fh_pct, sd_pct, fh_src, sd_src, codex_current, now=now)
+        # Each quota's windows are capped at its own reset period.
+        burn_fh = nusage.burn_windows(history, "fh", fh_pct, now, fh_src,
+                                      max_span=FIVE_HOUR_SECONDS)
+        burn_sd = nusage.burn_windows(history, "sd", sd_pct, now, sd_src,
+                                      max_span=SEVEN_DAY_SECONDS)
+        burn: Dict[str, Any] = {
+            "five_hour": burn_fh,
+            "seven_day": burn_sd,
+            "projections": {
+                "five_hour": nusage.exhaust_projection(
+                    burn_fh, fh_pct, fh_resets, now),
+                "seven_day": nusage.exhaust_projection(
+                    burn_sd, sd_pct, sd_resets, now),
+            },
+            "daily_change": {
+                # A 24h lookback on the five-hour quota spans ~5 resets, so it
+                # is shortened rather than reporting the resets as usage.
+                "five_hour": nusage.change_over(
+                    history, "fh", 86400.0, fh_pct, now, fh_src,
+                    max_span=FIVE_HOUR_SECONDS),
+                "seven_day": nusage.change_over(
+                    history, "sd", 86400.0, sd_pct, now, sd_src,
+                    max_span=SEVEN_DAY_SECONDS),
+            },
+            "sampled_at": now,
+        }
+        # If the series cannot be persisted, every rate reads null forever —
+        # which is indistinguishable from "still collecting a baseline". Say so.
+        if nusage.write_error():
+            burn["error"] = nusage.write_error()
+
+        for row in codex_rows:
+            duration = row.get("window_duration_mins")
+            max_span = duration * 60.0 if duration else None
+            windows = nusage.codex_burn_windows(
+                history, row["key"], row["used_percentage"], now, max_span)
+            row["burn"] = windows
+            row["daily_change"] = nusage.codex_change_over(
+                history, row["key"], row["used_percentage"], now, max_span)
+            row["projection"] = nusage.exhaust_projection(
+                windows, row["used_percentage"], row["resets_at"], now)
+
+        # These blobs are re-emitted whole rather than parsed field by field,
+        # and the App Server's JSON may legally contain NaN/Infinity — one of
+        # which would make the browser reject the entire response.
+        activity = codex_account.get("token_activity")
+        codex: Dict[str, Any] = {
+            "available": bool(codex_account.get("available")),
+            "updated_at": nusage.json_safe(codex_account.get("updated_at")),
+            "quotas": codex_rows,
+            "summary": nusage.json_safe(activity.get("summary"))
+                       if isinstance(activity, dict) else None,
+            "daily_usage": nusage.json_safe(activity.get("dailyUsageBuckets"))
+                           if isinstance(activity, dict) else None,
+        }
+        if codex_account.get("error"):
+            codex["error"] = str(codex_account["error"])
+        if not has_codex_agent:
+            codex["reason"] = "no_managed_agent"
+
+        messages: Optional[Dict[str, Any]] = None
+        try:
+            db = sqlite3.connect(str(self.db_path), timeout=5)
+            try:
+                db.execute("PRAGMA busy_timeout=3000")
+                messages = _message_rates(db, now)
+            finally:
+                db.close()
+        except sqlite3.Error:
+            messages = None
+
+        self._json({
+            "ok": True,
+            "claude": claude,
+            "codex": codex,
+            "burn": burn,
+            "messages": messages,
+            "tokens": nusage.token_rates(now),
+        })
 
     def _handle_usage_requests(self, parsed: Any) -> None:
         """Read the per-request token log, for diagnosing unexpected usage.
