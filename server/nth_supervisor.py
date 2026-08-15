@@ -72,11 +72,13 @@ ATTACH_DIR = DB_PATH.resolve().parent / "attachments"
 TOKEN_EVENTS_PATH = _NTH_HOME / "token-events.json"
 _TOKEN_LOCK = threading.Lock()
 _TOKEN_MAX_AGE = 24 * 3600     # keep 24h of turn events
-# Retention is time-based, but the whole file is re-read, re-serialized and
-# rewritten on EVERY turn completion, so an unbounded event count degrades
-# quadratically. A hard count cap keeps one runaway agent (or a provider
-# flooding synthetic events) from making every subsequent write slower.
+# Retention is time-based, but compaction re-reads and rewrites the whole file,
+# so a hard count cap keeps one runaway agent (or a provider flooding synthetic
+# events) from making each compaction progressively slower.
 _TOKEN_MAX_EVENTS = 50_000
+# Compact this often, not every append. See record_token_event.
+_TOKEN_PRUNE_EVERY = 500
+_token_appends = 0
 # No single turn can legitimately bill this many tokens of one category. A cap
 # keeps one absurd provider value from dominating a 24h aggregate.
 _TOKEN_MAX_PER_EVENT = 1_000_000_000
@@ -109,16 +111,37 @@ def _num_ok(v: Any) -> bool:
 
 
 def load_token_events() -> List[Dict[str, Any]]:
-    """Well-formed token events only. `t`, `tot`, and `out` must all be real
-    numbers — consumers do arithmetic on every one, so a hand-corrupted entry
-    (e.g. `"tot": "abc"`) must not slip through to crash the aggregator."""
+    """Well-formed token events only.
+
+    The file is JSONL (one event per line) so writes can be O(1) appends. A
+    file written by an older build is a single JSON array; it is still read, so
+    an upgrade does not throw away the last 24h of history.
+
+    `t`, `tot` and `out` must all be real numbers — consumers do arithmetic on
+    every one, so a hand-corrupted entry must not reach the aggregator.
+    """
     try:
-        data = json.loads(TOKEN_EVENTS_PATH.read_text())
-    except (OSError, ValueError, json.JSONDecodeError):
+        raw = TOKEN_EVENTS_PATH.read_text()
+    except OSError:
         return []
-    if not isinstance(data, list):
-        return []
-    return [e for e in data if isinstance(e, dict)
+    items: List[Any] = []
+    stripped = raw.lstrip()
+    if stripped.startswith("["):
+        try:
+            data = json.loads(raw)
+            items = data if isinstance(data, list) else []
+        except (ValueError, json.JSONDecodeError):
+            items = []
+    else:
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                items.append(json.loads(line))
+            except (ValueError, json.JSONDecodeError):
+                continue  # skip a torn line rather than losing the whole file
+    return [e for e in items if isinstance(e, dict)
             and _num_ok(e.get("t")) and _num_ok(e.get("tot")) and _num_ok(e.get("out"))]
 
 
@@ -166,28 +189,53 @@ def record_token_event(agent_id: str, usage: Optional[Dict[str, Any]],
     if provider not in ("claude", "codex"):
         provider = "unknown"
     ts = now if now is not None else datetime.now(timezone.utc).timestamp()
+    event = {
+        "t": ts, "id": agent_id, "provider": provider, "v": _TOKEN_SCHEMA,
+        "tot": total, "out": output_tokens,
+        "input": input_tokens, "cache_write": cache_write,
+        "cache_read": cache_read, "output": output_tokens,
+        "other": max(0, total - category_total),
+    }
+    # Append, don't rewrite. This runs on EVERY turn of EVERY agent, and the
+    # obvious implementation — load the whole file, append, filter, dump —
+    # costs O(n) CPU under one process-global lock on every one of those turns.
+    # Measured at the 50k cap that is ~100ms of JSON work per turn, serialised
+    # fleet-wide, so with a room full of agents each turn completion queues
+    # behind whichever agent is currently rewriting. An append is O(1); the
+    # expensive compaction happens once every _TOKEN_PRUNE_EVERY appends, which
+    # is the same shape nth_request_log.py already uses.
+    global _token_appends
     with _TOKEN_LOCK:
-        events = load_token_events()
-        events.append({
-            "t": ts, "id": agent_id, "provider": provider, "v": _TOKEN_SCHEMA,
-            "tot": total, "out": output_tokens,
-            "input": input_tokens, "cache_write": cache_write,
-            "cache_read": cache_read, "output": output_tokens,
-            "other": max(0, total - category_total),
-        })
-        cutoff = ts - _TOKEN_MAX_AGE
-        events = [e for e in events if e["t"] >= cutoff]
-        if len(events) > _TOKEN_MAX_EVENTS:
-            events = events[-_TOKEN_MAX_EVENTS:]
         try:
             TOKEN_EVENTS_PATH.parent.mkdir(parents=True, exist_ok=True)
-            # Atomic write (tmp + os.replace) so the unlocked web-side reader in
-            # _token_rates never observes a torn/empty file mid-write.
-            tmp = TOKEN_EVENTS_PATH.with_suffix(".json.tmp")
-            tmp.write_text(json.dumps(events))
-            os.replace(tmp, TOKEN_EVENTS_PATH)
+            with TOKEN_EVENTS_PATH.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(event) + "\n")
         except OSError:
-            pass
+            return
+        _token_appends += 1
+        if _token_appends < _TOKEN_PRUNE_EVERY:
+            return
+        _token_appends = 0
+        _prune_token_events(ts)
+
+
+def _prune_token_events(now_ts: float) -> None:
+    """Compact the log to the retention window. Caller holds _TOKEN_LOCK."""
+    events = load_token_events()
+    cutoff = now_ts - _TOKEN_MAX_AGE
+    events = [e for e in events if e["t"] >= cutoff]
+    if len(events) > _TOKEN_MAX_EVENTS:
+        events = events[-_TOKEN_MAX_EVENTS:]
+    try:
+        # Atomic replace so the unlocked web-side reader never observes a
+        # torn or empty file mid-write.
+        tmp = TOKEN_EVENTS_PATH.with_suffix(".json.tmp")
+        with tmp.open("w", encoding="utf-8") as fh:
+            for e in events:
+                fh.write(json.dumps(e) + "\n")
+        os.replace(tmp, TOKEN_EVENTS_PATH)
+    except OSError:
+        pass
 
 
 # ── Account usage via `claude -p "/usage"` ──

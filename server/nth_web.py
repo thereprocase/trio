@@ -2451,6 +2451,8 @@ class AgentRouter(threading.Thread):
         # blocks for up to ~10s and must not stall message DETECTION across all
         # channels (Legolas). One worker keeps per-agent message order.
         self._q: "queue.Queue" = queue.Queue(maxsize=1000)
+        self._agent_ids: Optional[set] = None
+        self._agent_ids_at = 0.0
         self._worker = threading.Thread(target=self._worker_loop, daemon=True)
 
     def start(self) -> None:
@@ -2551,6 +2553,21 @@ class AgentRouter(threading.Thread):
                 sys.stderr.write(f"[nth_web] AgentRouter worker failed for agent {aid}: {e}\n")
 
     def _targets(self, m, chan_agents) -> set:
+        """Which agents this message should wake.
+
+        The sender being a managed agent is decisive, not incidental. Ambient
+        modes ("all", and "about" via #refs) exist so an agent notices what
+        HUMANS are saying around it. Applying them to another agent's output is
+        a self-sustaining loop: A posts, B wakes and replies, which wakes A,
+        which wakes B. Every hop is a real billed turn, the transcript grows
+        each time, and nothing in the loop ever decides to stop. One ordinary
+        message into a room with two "all"-mode agents is enough to start it,
+        and no operator action is required — so agent-to-agent traffic must be
+        EXPLICIT: an @mention, a !bang, or a direct message. Those are
+        deliberate acts by the sending agent, and they do not fire repeatedly
+        on their own."""
+        managed = self._managed_ids()
+        sender_is_agent = (managed is None) or (m["member_id"] in managed)
         parsed = {}
         for col in ("mentions", "refs", "bangs", "recipients"):
             try:
@@ -2564,15 +2581,41 @@ class AgentRouter(threading.Thread):
                 parsed[col] = set()
         out = set()
         for agent_id, mode in chan_agents.items():
-            if agent_id in parsed["bangs"] or agent_id in parsed["recipients"]:
+            # Explicit address: always delivered, whoever sent it.
+            if agent_id in parsed["bangs"] or agent_id in parsed["recipients"] \
+                    or agent_id in parsed["mentions"]:
                 out.add(agent_id)
-            elif mode == "all":
-                out.add(agent_id)
-            elif agent_id in parsed["mentions"]:
+                continue
+            # Ambient: only from a non-agent sender. See the docstring.
+            if sender_is_agent:
+                continue
+            if mode == "all":
                 out.add(agent_id)
             elif mode == "about" and agent_id in parsed["refs"]:
                 out.add(agent_id)
         return out
+
+    def _managed_ids(self) -> set:
+        """Ids of every managed agent, cached briefly. Read once per tick
+        rather than per message; the roster changes on operator action, not on
+        message traffic."""
+        now = time.monotonic()
+        if now - self._agent_ids_at < 5.0 and self._agent_ids is not None:
+            return self._agent_ids
+        try:
+            db = sqlite3.connect(str(self.db_path), timeout=5)
+            try:
+                ids = {r[0] for r in db.execute("SELECT id FROM agents").fetchall()}
+            finally:
+                db.close()
+        except sqlite3.Error:
+            # Fail CLOSED: None means "cannot tell", and _targets then treats
+            # every sender as an agent and delivers only explicit wakes. A
+            # missed ambient wake is a delay; a loop is an unbounded bill.
+            return None
+        self._agent_ids = ids
+        self._agent_ids_at = now
+        return ids
 
     def stop(self) -> None:
         self._stop_event.set()

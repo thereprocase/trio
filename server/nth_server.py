@@ -381,6 +381,16 @@ def get_db() -> sqlite3.Connection:
     except sqlite3.OperationalError:
         pass  # column already exists
 
+    # recipients: JSON array of member_ids a message is scoped to; empty or
+    # '[]' means broadcast. Introduced here because the agent inbox needs it:
+    # every managed agent shares that one transport, so an agent's reply must
+    # be scoped to whoever addressed it or every other agent in the inbox
+    # would read it. The user-facing DM feature builds on the same column.
+    try:
+        conn.execute("ALTER TABLE messages ADD COLUMN recipients TEXT NOT NULL DEFAULT '[]'")
+    except sqlite3.OperationalError:
+        pass  # column already exists
+
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_sessions_member
         ON sessions (channel, member_id)
