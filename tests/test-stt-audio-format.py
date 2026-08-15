@@ -185,8 +185,82 @@ def main():
         ch, rate = info.get("channels"), info.get("rate")
         check(f"engine is handed MONO audio (got {ch}ch)", ch == 1)
         check(f"engine is handed 16 kHz audio (got {rate} Hz)", rate == 16000)
+
+        check_ffmpeg_gates_health(tmp, stub, model)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+def check_ffmpeg_gates_health(tmp, stub, model):
+    """Transcoding makes ffmpeg a hard requirement of the whisper.cpp engine
+    too -- not just of mlx.
+
+    health() historically guarded that check with `engine == "mlx_whisper"`,
+    which was correct while only mlx shelled out to ffmpeg. The moment the CLI
+    worker transcodes, a box with whisper.cpp and no ffmpeg reports the engine
+    READY and then fails every clip at the convert step: the same green-light
+    shape as the WebM defect, introduced by the fix for it.
+
+    Asserts the property, not the mechanism: with ffmpeg unreachable, the
+    whisper.cpp engine must not claim to be available.
+    """
+    worker = find_worker()
+    if worker is None:
+        return
+    # A PATH containing the stub engine and deliberately NO ffmpeg.
+    #
+    # This stub is /bin/sh, NOT the python one above, and that is load-bearing:
+    # a `#!/usr/bin/env python3` shebang resolves the interpreter THROUGH PATH,
+    # so under a stripped PATH the python stub cannot execute at all. An earlier
+    # version of this check used it and "passed" because the engine looked
+    # broken -- proving nothing about ffmpeg. A test that passes for the wrong
+    # reason is the failure mode this whole file exists to catch, and it caught
+    # itself. /bin/sh is an absolute path and is unaffected.
+    bindir = os.path.join(tmp, "bin")
+    os.makedirs(bindir, exist_ok=True)
+    sh_stub = os.path.join(bindir, "whisper-cli")
+    with open(sh_stub, "w") as fh:
+        fh.write("#!/bin/sh\n"
+                 "case \"$*\" in\n"
+                 "  *--help*) printf 'usage: whisper-cli [options]\\n"
+                 "  -m FNAME, --model FNAME   model path\\n"
+                 "  -f FNAME, --file FNAME    input WAV file path\\n'; exit 0;;\n"
+                 "esac\n"
+                 "exit 0\n")
+    os.chmod(sh_stub, 0o755)
+    probe = (
+        "import json,sys;"
+        "sys.path.insert(0,%r);"
+        "import nth_web as w;"
+        "print(json.dumps(w.STT.health()))" % SERVER
+    )
+    env = dict(os.environ, PATH=bindir,
+               NTH_STT_WORKER=worker,
+               NTH_STT_CLI_BIN=os.path.join(bindir, "whisper-cli"),
+               NTH_STT_CLI_MODEL=model,
+               NTH_WHISPER_CPP_BIN=os.path.join(bindir, "whisper-cli"),
+               NTH_WHISPER_CPP_MODEL=model)
+    try:
+        r = subprocess.run([sys.executable, "-c", probe], capture_output=True,
+                           text=True, timeout=60, env=env)
+        health = json.loads((r.stdout or "").strip().splitlines()[-1])
+    except Exception as e:  # noqa: BLE001
+        skip("ffmpeg gates whisper.cpp health", f"could not read health(): {e}")
+        return
+    if shutil.which("ffmpeg", path=bindir):
+        skip("ffmpeg gates whisper.cpp health", "ffmpeg leaked into the test PATH")
+        return
+    engine = str(health.get("engine", ""))
+    if "whisper.cpp" not in engine and "cpp" not in engine.lower():
+        skip("ffmpeg gates whisper.cpp health",
+             f"engine did not select the CLI worker (got {engine!r})")
+        return
+    check("with no ffmpeg, the whisper.cpp engine does NOT report available "
+          "(transcoding needs it, so the mlx-only guard is not enough)",
+          health.get("available") is not True)
+    if health.get("available") is not True:
+        check("…and the reason names ffmpeg, so the user knows what to install",
+              "ffmpeg" in str(health.get("detail", "")).lower())
 
 
 main()
