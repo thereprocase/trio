@@ -2,6 +2,22 @@
 
 ## Open
 
+### v9 plan — see PLAN-2026-08-15-v9.md
+**Since:** 2026-08-15 | **Status:** planned, not started
+
+Foundations release: test architecture (CI matrix, real-tool tier, positive
+controls), the capability table only from the identity work, and the
+hook-target doctor check. `nth_web.py` decomposition is DEFERRED with written
+trigger conditions; invite tokens are DEFERRED until a named person needs in.
+Read the plan before reopening any of those — each deferral has a recorded
+reason and two of them were argued down by the people who proposed them.
+
+**Also queued for 8.1.2:** gap 3 (non-Apple STT engine, defect open — the
+engine was handed audio it cannot decode and ffmpeg was never pinned) and
+PORTABILITY-6 (`setup.sh` never tries `py` on Windows; the working-indicator
+hook bakes a bare interpreter name into a persisted global hook command).
+
+
 ### De-root the hub services
 **Severity:** Medium (security) | **Since:** v8.0.2 War Council (2026-08-11)
 
