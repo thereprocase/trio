@@ -150,6 +150,7 @@ OP_COOKIE = "nth_op"
 OP_COOKIE_MAX_AGE = 60 * 60 * 24 * 30   # 30 days
 OP_PENDING_TTL_S = 60 * 60              # drop un-resolved 'pending' identities
 OP_REGISTRY_MAX = 5000                  # hard cap, oldest evicted first
+OP_IDENTITY_RETRY_S = 60                 # retry an untrusted identity at most/min
 IDENTITY_SOURCE_TAILSCALE = "tailscale"
 IDENTITY_SOURCE_LOOPBACK = "loopback"
 IDENTITY_SOURCE_GUEST = "guest"
@@ -314,6 +315,7 @@ class OperatorRegistry:
 
     def __init__(self) -> None:
         self._by_token: Dict[str, OperatorIdentity] = {}
+        self._last_retry_at: Dict[str, float] = {}
         self._lock = threading.Lock()
 
     def new_token(self) -> str:
@@ -327,6 +329,24 @@ class OperatorRegistry:
         with self._lock:
             self._by_token[token] = ident
             self._evict_locked()
+
+    def should_retry_untrusted(self, token: str) -> bool:
+        """Reserve a rate-limited retry of a cached non-trusted identity."""
+        with self._lock:
+            ident = self._by_token.get(token)
+            if ident is None or ident.source in (
+                    IDENTITY_SOURCE_TAILSCALE, IDENTITY_SOURCE_LOOPBACK):
+                return False
+            now = time.time()
+            if now - self._last_retry_at.get(token, 0.0) < OP_IDENTITY_RETRY_S:
+                return False
+            self._last_retry_at[token] = now
+            return True
+
+    def record_ladder_attempt(self, token: str) -> None:
+        """Remember an initial identity-ladder attempt for retry throttling."""
+        with self._lock:
+            self._last_retry_at[token] = time.time()
 
     def _evict_locked(self) -> None:
         """Bound the registry. Every cookie-less request mints a token and
@@ -343,6 +363,7 @@ class OperatorRegistry:
             if (ident.source == IDENTITY_SOURCE_PENDING
                     and now - created > OP_PENDING_TTL_S):
                 del self._by_token[tok]
+                self._last_retry_at.pop(tok, None)
         if len(self._by_token) > OP_REGISTRY_MAX:
             oldest = sorted(
                 self._by_token.items(),
@@ -350,6 +371,7 @@ class OperatorRegistry:
             )
             for tok, _ in oldest[: len(self._by_token) - OP_REGISTRY_MAX]:
                 del self._by_token[tok]
+                self._last_retry_at.pop(tok, None)
 
     def resolve_from_loopback(self, token: str, remote_ip: str) -> Optional[OperatorIdentity]:
         """If the peer came in over loopback, trust the OS account the server
@@ -1805,7 +1827,14 @@ class NthWebHandler(BaseHTTPRequestHandler):
         token, is_new = self._get_or_mint_cookie()
         ident = OPERATOR_REGISTRY.get(token)
         if ident is not None:
-            return token, ident, is_new
+            # A transient Tailscale/whois outage must not turn this browser
+            # into a permanent guest until it clears its cookie. Trusted
+            # identities stay cached; non-trusted ones retry the full ladder
+            # at a bounded cadence.
+            if not OPERATOR_REGISTRY.should_retry_untrusted(token):
+                return token, ident, is_new
+        else:
+            OPERATOR_REGISTRY.record_ladder_attempt(token)
         remote_ip = self._client_ip()
         # Try Tailscale whois on the remote address
         ident = OPERATOR_REGISTRY.resolve_from_tailscale(token, remote_ip)
