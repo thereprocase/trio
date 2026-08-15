@@ -402,6 +402,17 @@ def get_db() -> sqlite3.Connection:
     except sqlite3.OperationalError:
         pass  # column already exists
 
+    # choices/selection: a multiple-choice question posed to a HUMAN and the
+    # answer they clicked. The question payload lives on the asking message;
+    # the answer is an ordinary reply whose prose the agent reads, with the
+    # structured selection alongside purely so the dashboard can lock the
+    # picker and highlight what was chosen.
+    for _col in ("choices", "selection"):
+        try:
+            conn.execute(f"ALTER TABLE messages ADD COLUMN {_col} TEXT NOT NULL DEFAULT ''")
+        except sqlite3.OperationalError:
+            pass  # column already exists
+
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_sessions_member
         ON sessions (channel, member_id)
@@ -2362,6 +2373,274 @@ MAX_ASK_OPTION_LEN = 300
 MAX_ASK_QUESTIONS = 20          # a single trio_ask can bundle up to this many
 MAX_ASK_HEADER_LEN = 60
 MAX_ASK_PAYLOAD = 16000         # cap combined transcript + choices JSON per ask
+
+
+def _normalize_ask_question(item):
+    """Validate + normalize one question dict {question, options, mode?, header?}.
+    Returns (qdict, error) with exactly one non-None. Shared by the single- and
+    batched-question paths so both enforce identical rules."""
+    if not isinstance(item, dict):
+        return None, "each question must be an object with question + options."
+    q = (item.get("question") or "").strip()
+    if not q:
+        return None, "question cannot be empty."
+    if len(q) > 2000:
+        return None, f"question too long ({len(q)} > 2000)."
+    mode = (item.get("mode") or "one").strip().lower()
+    if mode not in ("one", "many"):
+        return None, 'mode must be "one" or "many".'
+    opts = item.get("options")
+    if not isinstance(opts, list):
+        return None, "options must be a list of strings."
+    seen: set = set()
+    clean: list[str] = []
+    for o in opts:
+        if not isinstance(o, str):
+            return None, "each option must be a string."
+        o = o.strip()
+        if not o:
+            continue
+        if len(o) > MAX_ASK_OPTION_LEN:
+            return None, f"option too long (max {MAX_ASK_OPTION_LEN} chars)."
+        if o.lower() in seen:
+            continue
+        seen.add(o.lower())
+        clean.append(o)
+    if len(clean) < 2:
+        return None, "provide at least 2 distinct options."
+    if len(clean) > MAX_ASK_OPTIONS:
+        return None, f"too many options (max {MAX_ASK_OPTIONS})."
+    header = (item.get("header") or "").strip()[:MAX_ASK_HEADER_LEN]
+    return {"question": q, "options": clean, "mode": mode, "header": header}, None
+
+
+
+def _resolve_human_target(db, channel: str, target: str):
+    """Resolve `target` (a member id, exact display name, or guest stem) to a
+    single member row in `channel`. Returns (row, error). Exactly one of the
+    two is non-None. Name/stem matching is case-insensitive; an ambiguous
+    match (two members share the name/stem) is an error rather than a guess."""
+    target = (target or "").strip()
+    if not target:
+        return None, "target is required — name the human you're asking."
+    rows = db.execute(
+        "SELECT * FROM members WHERE channel = ?", (channel,),
+    ).fetchall()
+    # 1. Exact member-id match (unambiguous, survives renames).
+    for r in rows:
+        if r["id"] == target:
+            return r, None
+    # 2. Exact display-name match (case-insensitive).
+    tl = target.lower()
+    by_name = [r for r in rows if (r["name"] or "").strip().lower() == tl]
+    if len(by_name) == 1:
+        return by_name[0], None
+    if len(by_name) > 1:
+        return None, f'"{target}" is ambiguous — {len(by_name)} members share that name. Use the member id.'
+    # 3. Guest-stem match (@gabe → gabe-guest), if unambiguous.
+    by_stem = [r for r in rows if (_guest_stem(r["name"] or "") or "").lower() == tl]
+    if len(by_stem) == 1:
+        return by_stem[0], None
+    if len(by_stem) > 1:
+        return None, f'"{target}" is ambiguous among guests — use the member id.'
+    return None, f'No member "{target}" in this channel.'
+
+
+@mcp.tool(name=f"{TOOL_PREFIX}_ask")
+def nth_ask(
+    channel: str,
+    member_id: str,
+    target: str,
+    question: str = "",
+    options: list[str] | None = None,
+    mode: str = "one",
+    questions: list[dict] | None = None,
+    session_token: str = "",
+) -> str:
+    """Ask a HUMAN one or more multiple-choice questions they answer by clicking
+    in the web dashboard. Use this ONLY for questions directed at a person —
+    never at another agent. Agents should just ask each other in plain prose
+    with nth_send; the clickable picker exists to save a human typing and to
+    show them the exact option set you have in mind.
+
+    Two ways to call it:
+      • Single question — pass `question` + `options` (+ optional `mode`).
+      • A SET of questions — pass `questions`, a list of objects each with
+        {"question", "options", "mode"?, "header"?}. The human pages
+        forward/back through them and submits every answer at once, so a
+        batch costs ONE tool call and ONE reply instead of N of each. Prefer
+        this whenever you have several things to ask the same person.
+
+    The human sees each question's options as clickable choices (single-select
+    for mode="one", multi-select for mode="many"), plus free-text boxes so they
+    can always type their own answer. Nothing is sent until they submit.
+
+    Their answer comes back to the channel as ONE ordinary reply message (a
+    reply_to this ask) — you just read it like any other message. You do NOT
+    need to poll differently or parse a special format; read the words. For a
+    batch the reply lists each question with its answer.
+
+    The target MUST be a human (someone who joined via the web dashboard).
+    Asking an agent is rejected — address agents directly with nth_send.
+
+    Args:
+        channel: Channel code
+        member_id: Your member ID (from nth_connect)
+        target: Who to ask — a human member's name, guest stem, or member id.
+        question: The question to ask (single-question form; max 2000 chars).
+        options: The choices to offer (single-question form; 2–12 items).
+        mode: "one" (single choice) or "many" (multiple); single-question form.
+        questions: A list of question objects for a batched questionnaire (up
+                   to 20). Each: {"question": str, "options": [str,...],
+                   "mode": "one"|"many", "header": short label?}. When given,
+                   `question`/`options`/`mode` are ignored.
+        session_token: Optional session capability token (from nth_connect).
+    """
+    err = validate_channel_code(channel)
+    if err:
+        return json.dumps({"error": err})
+
+    # Build the normalized question list from either the batched `questions`
+    # param or the single question/options args. Both paths share the same
+    # per-question validation (_normalize_ask_question).
+    if questions is not None:
+        if not isinstance(questions, list) or not questions:
+            return json.dumps({"error": "questions must be a non-empty list."})
+        if len(questions) > MAX_ASK_QUESTIONS:
+            return json.dumps({"error": f"too many questions (max {MAX_ASK_QUESTIONS})."})
+        qlist: list[dict] = []
+        for idx, item in enumerate(questions, 1):
+            qn, qerr = _normalize_ask_question(item)
+            if qerr or qn is None:
+                return json.dumps({"error": f"question {idx}: {qerr or 'invalid'}"})
+            qlist.append(qn)
+    else:
+        qn, qerr = _normalize_ask_question(
+            {"question": question, "options": options, "mode": mode})
+        if qerr or qn is None:
+            return json.dumps({"error": qerr or "invalid question"})
+        qlist = [qn]
+
+    db = get_db()
+    try:
+        ch = _get_channel(db, channel)
+        if not ch:
+            return json.dumps({"error": f'Channel "{channel}" not found.'})
+        if ch["status"] == "ended":
+            return json.dumps({"error": f'Channel "{channel}" has ended.'})
+
+        member = _get_member(db, channel, member_id)
+        if not member:
+            return json.dumps({"error": "You are not a member of this channel."})
+
+        # Session capability check — mirror nth_send: a supplied token must be
+        # valid, match the member, and be a primary (not read_only) token.
+        author_session = None
+        if session_token:
+            sess = _get_session(db, channel, session_token)
+            if not sess:
+                return json.dumps({"error": "Invalid or revoked session_token."})
+            if sess["member_id"] != member_id:
+                return json.dumps({"error": "session_token does not match member_id."})
+            if sess["role"] != "primary":
+                return json.dumps({"error": f"session_token role '{sess['role']}' cannot send. Use a primary token."})
+            author_session = session_token
+
+        tgt, terr = _resolve_human_target(db, channel, target)
+        if terr or tgt is None:
+            return json.dumps({"error": terr or "target could not be resolved."})
+        tgt_kind = (tgt["kind"] if "kind" in tgt.keys() else "agent") or "agent"
+        if tgt_kind != "human":
+            return json.dumps({"error": (
+                f'"{tgt["name"]}" is an agent — trio_ask targets humans only. '
+                "Ask an agent directly with a plain nth_send message."
+            )})
+
+        # Human-readable transcript so console tailers and other agents see the
+        # full questions + options. The web dashboard renders the interactive
+        # picker from the `choices` payload instead of this text.
+        if len(qlist) == 1:
+            q = qlist[0]
+            lines = [q["question"], ""]
+            for i, o in enumerate(q["options"], 1):
+                lines.append(f"  {i}. {o}")
+            lines.append("")
+            lines.append(f"_(select {'one' if q['mode'] == 'one' else 'one or more'} "
+                         "in the dashboard, or type your own answer)_")
+        else:
+            lines = [f"{len(qlist)} questions — answer in the dashboard:", ""]
+            for qi, q in enumerate(qlist, 1):
+                lines.append(f"{qi}. {q['question']}")
+                for o in q["options"]:
+                    lines.append(f"     - {o}")
+                lines.append("")
+        content = "\n".join(lines).rstrip()
+
+        choices_json = json.dumps({
+            "target": tgt["id"],
+            "questions": qlist,
+        })
+        # Cap the total stored payload. The per-field caps still allow a 20×12×300
+        # batch to build a ~200KB row that gets broadcast over SSE to every
+        # client; bound the combined transcript + choices blob so one ask can't
+        # blow up the channel. Ask the caller to split instead.
+        if len(content) + len(choices_json) > MAX_ASK_PAYLOAD:
+            return json.dumps({"error": (
+                "questions payload too large — split into fewer/shorter questions "
+                f"(max {MAX_ASK_PAYLOAD} chars of combined text)."
+            )})
+        # Ping the target directly by id (guaranteed, independent of how the
+        # display name would parse) so they wake and see the → bar.
+        mentions_json = json.dumps([tgt["id"]])
+        now = now_iso()
+
+        cur = db.execute(
+            "INSERT INTO messages (channel, member_id, member_name, content, mentions, "
+            "choices, author_session, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (channel, member_id, member["name"], content, mentions_json,
+             choices_json, author_session, now),
+        )
+        msg_id = cur.lastrowid
+
+        if author_session:
+            db.execute(
+                "UPDATE sessions SET last_seen = ? WHERE session_token = ?",
+                (now, author_session),
+            )
+        db.execute(
+            "UPDATE members SET last_seen = ? WHERE id = ? AND channel = ?",
+            (now, member_id, channel),
+        )
+        db.execute(
+            "UPDATE channels SET updated_at = ? WHERE code = ?",
+            (now, channel),
+        )
+        db.commit()
+
+        summary = (qlist[0]["question"] if len(qlist) == 1
+                   else f"{len(qlist)} questions")
+        _console("❓", channel, f"{member['name']} asked {tgt['name']}: {summary}", 35)
+
+        return json.dumps({
+            "ok": True,
+            "channel": channel,
+            "message_id": msg_id,
+            "target": tgt["name"],
+            "target_id": tgt["id"],
+            "questions": len(qlist),
+            "note": "Answer will arrive as a single reply message from the human.",
+        })
+    finally:
+        db.close()
+
+
+# ── Image attachment delivery (Phase 2): poll returns MCP image blocks ──
+POLL_IMAGE_FORMATS = {
+    "image/png": "png", "image/jpeg": "jpeg",
+    "image/gif": "gif", "image/webp": "webp",
+}
+MAX_POLL_IMAGE_BYTES = 8 * 1024 * 1024   # total raw image bytes per poll response
 
 
 @mcp.tool(name=f"{TOOL_PREFIX}_ack")

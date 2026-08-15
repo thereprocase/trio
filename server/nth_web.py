@@ -1434,6 +1434,41 @@ def attachments_for_message(db: sqlite3.Connection, msg_id: int) -> List[Dict[st
 
 
 # ───────── EventHub: polls DB, fans out SSE events ─────────
+def parse_obj_json(raw: Optional[str]) -> Optional[Dict[str, Any]]:
+    """Parse a stored JSON object column (messages.choices / .selection) to a
+    dict, or None if empty/malformed. Used to ship the multiple-choice
+    question payload and the human's selection to the dashboard client."""
+    if not raw:
+        return None
+    try:
+        v = json.loads(raw)
+        return v if isinstance(v, dict) else None
+    except (ValueError, TypeError):
+        return None
+
+
+def ensure_ask_columns(db: sqlite3.Connection) -> None:
+    """Add the columns the dashboard writes, if the DB predates them.
+
+    These are normally created by nth_server.get_db(), but the dashboard can be
+    launched against a database whose MCP server has not been restarted since
+    the feature landed — and without this the SSE poll's SELECT of `choices`
+    crash-loops on 'no such column'. Mirrors ensure_attachments_table: the web
+    side owns its own forward-compatibility. Each ALTER is idempotent."""
+    for table, col, defn in (
+        ("members",  "kind",      "TEXT NOT NULL DEFAULT 'agent'"),
+        ("members",  "model",     "TEXT NOT NULL DEFAULT ''"),
+        ("messages", "choices",   "TEXT NOT NULL DEFAULT ''"),
+        ("messages", "selection", "TEXT NOT NULL DEFAULT ''"),
+        ("messages", "reply_to",  "INTEGER"),
+        ("messages", "recipients", "TEXT NOT NULL DEFAULT '[]'"),
+    ):
+        try:
+            db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {defn}")
+        except sqlite3.OperationalError:
+            pass  # column already exists
+
+
 def _event_visible_to(event: Dict[str, Any], viewer_id: Optional[str],
                       all_seeing: bool) -> bool:
     """Whether an SSE event may be delivered to a given viewer.
@@ -1473,6 +1508,9 @@ def _message_event(db: sqlite3.Connection, r: sqlite3.Row) -> Dict[str, Any]:
         "refs": parse_mentions_json(r["refs"] if "refs" in keys else ""),
         "bangs": parse_mentions_json(r["bangs"] if "bangs" in keys else ""),
         "recipients": parse_recipients(r["recipients"] if "recipients" in keys else ""),
+        "reply_to": r["reply_to"] if "reply_to" in keys else None,
+        "choices": parse_obj_json(r["choices"] if "choices" in keys else ""),
+        "selection": parse_obj_json(r["selection"] if "selection" in keys else ""),
         "created_at": r["created_at"],
         "attachments": attachments_for_message(db, r["id"]),
     }
@@ -1544,7 +1582,7 @@ class EventHub:
                 {"type": "context", "sessions": _read_context_snapshots()}))
             rows = db.execute(
                 "SELECT id, member_id, member_name, content, mentions, refs, bangs, "
-                "recipients, created_at "
+                "recipients, reply_to, choices, selection, created_at "
                 "FROM messages WHERE channel = ? ORDER BY id DESC LIMIT ?",
                 (self.channel, HISTORY_LIMIT),
             ).fetchall()
@@ -1726,7 +1764,7 @@ class EventHub:
                 try:
                     rows = db.execute(
                         "SELECT id, member_id, member_name, content, mentions, refs, bangs, "
-                "recipients, created_at "
+                "recipients, reply_to, choices, selection, created_at "
                         "FROM messages WHERE channel = ? AND id > ? ORDER BY id",
                         (self.channel, self.last_msg_id),
                     ).fetchall()
@@ -4101,6 +4139,59 @@ class NthWebHandler(BaseHTTPRequestHandler):
         if len(set(attachment_ids)) != len(attachment_ids):
             self._error(400, "duplicate attachment id")
             return
+        # reply_to threads this message onto another. It is also how a human
+        # answers a trio_ask: the answer is an ordinary reply whose prose the
+        # asking agent reads, with a structured `selection` alongside purely so
+        # the dashboard can lock the picker and show what was chosen.
+        reply_to = body.get("reply_to")
+        if reply_to is not None:
+            if not isinstance(reply_to, int) or isinstance(reply_to, bool) or reply_to <= 0:
+                self._error(400, "invalid reply_to")
+                return
+
+        raw_sel = body.get("selection")
+        selection_json = None
+        has_selection = raw_sel is not None
+        answers: list = []
+        if has_selection:
+            if reply_to is None:
+                self._error(400, "selection requires reply_to")
+                return
+            if not isinstance(raw_sel, dict):
+                self._error(400, "invalid selection")
+                return
+            raw_answers = raw_sel.get("answers")
+            if not isinstance(raw_answers, list) or not raw_answers:
+                self._error(400, "invalid selection.answers")
+                return
+            if len(raw_answers) > 20:
+                self._error(400, "too many answers")
+                return
+            for _a in raw_answers:
+                if not isinstance(_a, dict):
+                    self._error(400, "invalid selection.answers")
+                    return
+                _p = _a.get("picked", [])
+                _c = _a.get("custom", [])
+                if not isinstance(_p, list) or not all(type(x) is int and x >= 0 for x in _p):
+                    self._error(400, "invalid selection.picked")
+                    return
+                if not isinstance(_c, list) or not all(isinstance(x, str) for x in _c):
+                    self._error(400, "invalid selection.custom")
+                    return
+                if sum(len(x) for x in _c) > 8000:
+                    self._error(400, "selection.custom too long")
+                    return
+                clean_custom = [x.strip() for x in _c if x.strip()]
+                clean_picked = list(dict.fromkeys(_p))
+                # Every question must actually be answered — a blank entry
+                # would otherwise consume the one-shot answer slot and lock the
+                # ask with nothing in it.
+                if not clean_picked and not clean_custom:
+                    self._error(400, "each answer needs a selection or typed text")
+                    return
+                answers.append({"picked": clean_picked, "custom": clean_custom})
+
         # An addressed send is a REAL DM: it is stored with a recipients set and
         # every read path withholds it from everyone else. Absent or empty means
         # broadcast, i.e. unchanged behaviour. The operator is all-seeing, so
@@ -4153,6 +4244,70 @@ class NthWebHandler(BaseHTTPRequestHandler):
             try:
                 op_id, op_name = ensure_operator_row(db, send_channel, ident)
                 now = now_iso()
+
+                # Answer-path invariants. A `selection` claims this message
+                # answers a trio_ask. The picker enforces "only the target may
+                # answer" in the CLIENT only, so re-check it here — a raw POST
+                # bypasses the UI entirely.
+                if reply_to is not None:
+                    tgt = db.execute(
+                        "SELECT id, member_id, choices FROM messages "
+                        "WHERE id = ? AND channel = ?",
+                        (reply_to, send_channel)).fetchone()
+                    if not tgt:
+                        db.execute("ROLLBACK")
+                        self._error(400, "reply_to target not found")
+                        return
+
+                    if has_selection:
+                        q_choices = parse_obj_json(
+                            tgt["choices"] if "choices" in tgt.keys() else "")
+                        q_qs = None
+                        q_target = None
+                        if isinstance(q_choices, dict):
+                            q_target = q_choices.get("target")
+                            if isinstance(q_choices.get("questions"), list):
+                                q_qs = q_choices["questions"]
+                        if not q_qs:
+                            db.execute("ROLLBACK")
+                            self._error(400, "reply_to is not a question")
+                            return
+                        if q_target != op_id:
+                            db.execute("ROLLBACK")
+                            self._error(403, "this question is not addressed to you")
+                            return
+                        if len(answers) != len(q_qs):
+                            db.execute("ROLLBACK")
+                            self._error(400, "answer count does not match question count")
+                            return
+                        for qi, ans in enumerate(answers):
+                            q = q_qs[qi] if isinstance(q_qs[qi], dict) else {}
+                            opts = q.get("options")
+                            if not isinstance(opts, list):
+                                db.execute("ROLLBACK")
+                                self._error(400, "malformed question")
+                                return
+                            if any(x >= len(opts) for x in ans["picked"]):
+                                db.execute("ROLLBACK")
+                                self._error(400, "selection.picked out of range")
+                                return
+                            # A "pick one" question accepts at most one option.
+                            if q.get("mode") == "one" and len(ans["picked"]) > 1:
+                                db.execute("ROLLBACK")
+                                self._error(400, "single-select question accepts one option")
+                                return
+                        # One-shot: an ask is answered once. Without this the
+                        # picker could be re-submitted and the agent would read
+                        # two different answers to the same question.
+                        already = db.execute(
+                            "SELECT 1 FROM messages WHERE channel = ? AND reply_to = ? "
+                            "AND selection IS NOT NULL AND selection != '' LIMIT 1",
+                            (send_channel, reply_to)).fetchone()
+                        if already:
+                            db.execute("ROLLBACK")
+                            self._error(409, "this question has already been answered")
+                            return
+                        selection_json = json.dumps({"answers": answers})
 
                 # Validate attachments up front: every requested id must be
                 # this operator's own, unlinked, in-channel row — else abort,
@@ -4214,13 +4369,15 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 cursor = db.execute(
                     "INSERT INTO messages "
                     "(channel, member_id, member_name, content, created_at, "
-                    " mentions, refs, bangs, recipients) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    " mentions, refs, bangs, recipients, reply_to, selection) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (send_channel, op_id, op_name, posted_content, now,
                      json.dumps(mention_ids) if mention_ids else "",
                      json.dumps(ref_ids)     if ref_ids     else "",
                      json.dumps(bang_ids)    if bang_ids    else "",
-                     json.dumps(recipient_ids) if recipient_ids else "[]"),
+                     json.dumps(recipient_ids) if recipient_ids else "[]",
+                     reply_to,
+                     selection_json if selection_json else ""),
                 )
                 msg_id = cursor.lastrowid
                 # Link any uploaded attachments to this message (own, unlinked).
@@ -10672,6 +10829,18 @@ def main() -> int:
     else:
         NthWebHandler.landing_mode = True
     NthWebHandler.db_path = db_path
+
+    # Forward-compat: make sure the columns the dashboard writes exist before
+    # we serve, so it works against a database whose MCP server has not been
+    # restarted since these features landed.
+    _mig = sqlite3.connect(str(db_path), timeout=5)
+    try:
+        ensure_ask_columns(_mig)
+        _mig.commit()
+    except sqlite3.Error as e:
+        print(f"[nth_web] schema forward-compat skipped: {e}", flush=True)
+    finally:
+        _mig.close()
 
     # The agent control plane needs the db path outside a request handler
     # (router + reaper are background threads).
