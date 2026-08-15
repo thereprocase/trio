@@ -3257,6 +3257,13 @@ class NthWebHandler(BaseHTTPRequestHandler):
             self._handle_delete()
         elif parsed.path == "/api/agents":
             self._handle_agent_create()
+        elif parsed.path == "/api/agents/bulk":
+            # Must precede the /api/agents/<id>/<action> arm below. It does not
+            # actually collide (that arm requires four slashes, this has three)
+            # but the ordering is load-bearing if either pattern is ever
+            # loosened, and a bulk request landing in the per-agent route would
+            # be read as an agent literally named "bulk".
+            self._handle_agents_bulk()
         elif (parsed.path.startswith("/api/agents/")
               and parsed.path.count("/") == 4):
             # /api/agents/<id>/<action>
@@ -4329,6 +4336,81 @@ class NthWebHandler(BaseHTTPRequestHandler):
             self._error(404, "agent not found or no-op")
             return
         self._json({"ok": True, "agent_id": agent_id, "action": action})
+
+    def _handle_agents_bulk(self) -> None:
+        """Run ONE action across MANY agents: `{agent_ids, action, params}`.
+
+        Each agent goes through _apply_agent_action independently, so a failure
+        on one (archived, unknown, an effort its model does not support) never
+        aborts the rest.
+
+        The response is always 200 with a per-agent result list. **Partial
+        success is the normal outcome of a bulk operation** — a 4xx for "three
+        of ten failed" tells a client nothing about which three, and leaves it
+        unable to report or retry. The status each agent WOULD have got from
+        the single-agent route is carried per row instead.
+        """
+        ident = self._require_operator()
+        if ident is None or not self._require_agent_control():
+            return
+        body = self._read_json_body(max_bytes=65536)
+        if body is None:
+            return
+        action = str(body.get("action") or "").strip()
+        if action not in AGENT_ACTIONS:
+            self._error(400, f"unknown action: {action}")
+            return
+        raw_ids = body.get("agent_ids")
+        if not isinstance(raw_ids, list):
+            self._error(400, "agent_ids must be a list")
+            return
+        # De-dupe, preserving the caller's order. Applying an action twice to
+        # one agent is at best wasted work and at worst — wake, compact, stop —
+        # two competing operations against the same process.
+        agent_ids: List[str] = []
+        for raw in raw_ids:
+            aid = str(raw).strip()
+            if aid and aid not in agent_ids:
+                agent_ids.append(aid)
+        if not agent_ids:
+            self._error(400, "agent_ids is empty")
+            return
+        if len(agent_ids) > MAX_BULK_AGENTS:
+            self._error(400, f"at most {MAX_BULK_AGENTS} agents per bulk request")
+            return
+        params = body.get("params")
+        if params is None:
+            params = {}
+        if not isinstance(params, dict):
+            self._error(400, "params must be an object")
+            return
+        results: List[Dict[str, Any]] = []
+        for aid in agent_ids:
+            try:
+                ok = self._apply_agent_action(aid, action, params, ident)
+            except AgentActionError as exc:
+                results.append({"agent_id": aid, "ok": False,
+                                "status": exc.status, "error": exc.message})
+                continue
+            except Exception as exc:
+                # Deliberately broad: one agent in an unexpected state must not
+                # sink the batch, and every other agent's outcome is still
+                # worth reporting. The error text is carried in its row rather
+                # than swallowed.
+                sys.stderr.write(
+                    f"[nth_web] bulk {action} failed for {aid}: {exc}\n")
+                results.append({"agent_id": aid, "ok": False, "status": 500,
+                                "error": str(exc)})
+                continue
+            results.append({"agent_id": aid, "ok": True} if ok else
+                           {"agent_id": aid, "ok": False, "status": 404,
+                            "error": "agent not found or no-op"})
+        succeeded = [r["agent_id"] for r in results if r["ok"]]
+        self._json({
+            "ok": True, "action": action, "count": len(results),
+            "succeeded": succeeded, "failed": len(results) - len(succeeded),
+            "results": results,
+        })
 
     def _apply_agent_action(self, agent_id: str, action: str,
                             params: Dict[str, Any], ident) -> bool:
