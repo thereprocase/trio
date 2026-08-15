@@ -75,23 +75,48 @@ try:
     check("the owner's second device still resolves (account, not node)",
           ident is not None and ident.source == web.IDENTITY_SOURCE_TAILSCALE)
 
-    # ── unknown owner: allow + warn, unless strict ─────────────────────────
+    # ── unknown owner: FAIL CLOSED by default ──────────────────────────────
+    # The window this closes is the realistic one: `status --json` is a
+    # different subcommand from `whois`, and a TAGGED node (any hub brought up
+    # with an auth key) has no user account, so the owner lookup comes back
+    # empty while whois keeps working perfectly. Failing open there hands
+    # reveal/cull/upload to every account on the tailnet.
+    import os
     with_owner("")
     reg = web.OperatorRegistry()
     with_whois("anyone@example.com")
     ident = reg.resolve_from_tailscale("tok-unknown", "100.64.0.3")
-    check("undeterminable owner still resolves (fails open, warned)",
-          ident is not None)
+    check("undeterminable owner is REFUSED by default (fails closed)",
+          ident is None)
 
-    import os
-    os.environ["NTH_TAILNET_STRICT"] = "1"
+    os.environ["NTH_TAILNET_PERMISSIVE"] = "1"
     try:
         reg = web.OperatorRegistry()
-        ident = reg.resolve_from_tailscale("tok-strict", "100.64.0.4")
-        check("NTH_TAILNET_STRICT=1 refuses when the owner is unknown",
+        web._tailnet_owner_warned = True
+        ident = reg.resolve_from_tailscale("tok-permissive", "100.64.0.4")
+        check("NTH_TAILNET_PERMISSIVE=1 opts back into accepting anyone",
+              ident is not None)
+        # ...but that grant must NOT be cached. A tailscale identity is never
+        # re-checked once cached, so caching a permissive grant would keep
+        # operator rights alive for the cookie's 30-day life even after owner
+        # resolution starts working and says they are not the owner.
+        check("a permissive grant is provisional, not cached",
+              reg.get("tok-permissive") is None)
+    finally:
+        os.environ.pop("NTH_TAILNET_PERMISSIVE", None)
+
+    # An explicit owner still enforces even in permissive mode -- permissive
+    # only covers the "cannot determine" case, not "determined and mismatched".
+    os.environ["NTH_TAILNET_PERMISSIVE"] = "1"
+    try:
+        with_owner("operator@example.com")
+        reg = web.OperatorRegistry()
+        with_whois("intruder@example.com")
+        ident = reg.resolve_from_tailscale("tok-perm-mismatch", "100.64.0.5")
+        check("permissive does NOT excuse a known-owner mismatch",
               ident is None)
     finally:
-        os.environ.pop("NTH_TAILNET_STRICT", None)
+        os.environ.pop("NTH_TAILNET_PERMISSIVE", None)
 
     # ── a failed retry must not downgrade a guest ──────────────────────────
     # Register a guest, then force the retry window open and re-resolve with

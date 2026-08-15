@@ -258,6 +258,33 @@ _tailnet_owner_cache: Optional[str] = None
 _tailnet_owner_warned = False
 
 
+def _permissive_tailnet() -> bool:
+    """True when the operator has opted OUT of owner enforcement."""
+    return (os.environ.get("NTH_TAILNET_PERMISSIVE", "").strip().lower()
+            in ("1", "true", "yes"))
+
+
+def _warn_tailnet_owner_once(refusing: bool) -> None:
+    """Name the cause and the one-line fix. A silent refusal here looks
+    identical to 'Tailscale is broken' from the operator's side."""
+    global _tailnet_owner_warned
+    if _tailnet_owner_warned:
+        return
+    _tailnet_owner_warned = True
+    if refusing:
+        sys.stderr.write(
+            "[nth_web] could not determine this hub's tailnet owner "
+            "(a tagged node has no user account); tailnet peers are being "
+            "treated as untrusted guests. Fix with NTH_TAILNET_OWNER=<login>, "
+            "or set NTH_TAILNET_PERMISSIVE=1 to accept any tailnet account "
+            "(NOT recommended on a shared tailnet).\n")
+    else:
+        sys.stderr.write(
+            "[nth_web] NTH_TAILNET_PERMISSIVE is set and this hub's tailnet "
+            "owner is unknown: ANY tailnet account is being accepted as "
+            "operator. Set NTH_TAILNET_OWNER=<login> instead.\n")
+
+
 def tailnet_owner() -> str:
     """The tailnet login that owns THIS hub, or "" if it cannot be determined.
 
@@ -465,20 +492,40 @@ class OperatorRegistry:
         # silent-lockout shape this release fixes elsewhere. Operators who want
         # the strict reading set NTH_TAILNET_STRICT=1.
         owner = tailnet_owner()
+        provisional = False
         if owner:
             if login and login != owner:
                 return None            # falls through to the guest tier
-        elif os.environ.get("NTH_TAILNET_STRICT", "").strip() in ("1", "true", "yes"):
-            return None
         else:
-            global _tailnet_owner_warned
-            if not _tailnet_owner_warned:
-                _tailnet_owner_warned = True
-                sys.stderr.write(
-                    "[nth_web] could not determine this hub's tailnet owner; "
-                    "accepting any tailnet account as operator. Set "
-                    "NTH_TAILNET_OWNER=<login> to restrict, or "
-                    "NTH_TAILNET_STRICT=1 to refuse instead.\n")
+            # Owner undeterminable. FAIL CLOSED: drop to guest.
+            #
+            # This is deliberately the default even though it can lock a
+            # legitimate operator out of their own hub, because the window it
+            # closes is not hypothetical. `status --json` is a different
+            # subcommand from `whois` with a different output shape, and the
+            # owner lookup indexes User[Self.UserID].LoginName -- three
+            # lookups, each of which comes back empty on a TAGGED node (a
+            # server brought up with an auth key has no user), which is
+            # exactly the shape a hub deployment takes. Failing open there
+            # would hand reveal/cull/upload to every account on the tailnet
+            # at precisely the moment nobody can tell who the owner is.
+            #
+            # The lockout is recoverable and the warning says how: one env
+            # var. The alternative failure is not recoverable, because
+            # nothing announces it.
+            if not _permissive_tailnet():
+                _warn_tailnet_owner_once(refusing=True)
+                return None
+            _warn_tailnet_owner_once(refusing=False)
+            # Permissive mode still must not GRANT PERMANENTLY. A tailscale
+            # identity is never re-checked once cached (see
+            # should_retry_untrusted), so a peer trusted during a permissive
+            # window would keep operator rights for the life of their cookie
+            # -- 30 days -- even after owner resolution starts working and
+            # says they are not the owner. Marking it provisional keeps it out
+            # of the cache, so every request re-evaluates and enforcement
+            # begins the moment the owner becomes derivable.
+            provisional = True
         # Use the username half of the login (strip @domain).
         login_user = login.split("@", 1)[0] if login else ""
         display = info.get("display") or login_user or "tailnet-user"
@@ -490,7 +537,8 @@ class OperatorRegistry:
             login=login,
             created_at=time.time(),
         )
-        self.put(token, ident)
+        if not provisional:
+            self.put(token, ident)
         return ident
 
     def register_guest(self, token: str, raw_name: str) -> OperatorIdentity:
