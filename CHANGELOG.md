@@ -1,5 +1,79 @@
 # nth Changelog
 
+## v8.1.1-beta.1 — 2026-08-15 (known-gaps sprint)
+
+v8.1.0's release notes listed five known gaps rather than hiding them. This
+release closes four of them. The fifth (a non-Apple STT engine) is deferred to
+8.1.2 with a real defect still open against it, and its test ships here as an
+armed tripwire that skips loudly until the engine arrives.
+
+Every fix below was reviewed by a peer who did not write it, and three were
+corrected in review before landing.
+
+### ⚠ Behaviour change — read before upgrading
+
+**On a hub whose Tailscale node is TAGGED, tailnet peers now become guests.**
+A node brought up with an auth key has no user account, so this hub's owner
+cannot be derived — and rather than accept every tailnet account as operator,
+the server now refuses. That includes the operator. It says so on startup and
+names the fix: set `NTH_TAILNET_OWNER=<login>`, or `NTH_TAILNET_PERMISSIVE=1`
+to accept the old behaviour. Check with:
+`tailscale status --json | jq '.User[(.Self.UserID|tostring)].LoginName'`
+
+### Security
+
+- **Only the hub's owner gets the tailnet tier.** `resolve_from_tailscale`
+  accepted any login the tailnet resolved, so on a shared tailnet — or from a
+  device handed to someone else — a stranger received exactly what a local
+  shell gets: reveal a path on the operator's disk, remove members, upload into
+  their home directory. The comparison is by *account*, so the owner's own
+  several machines all still resolve; there is a test pinning that, because it
+  is the regression this could plausibly have caused.
+- **A permissive grant no longer outlives the permissive window.** A
+  `tailscale` identity is never re-checked once cached, so a peer trusted while
+  the owner was underivable kept operator rights for the cookie's 30-day life
+  even after owner resolution began working and said they were not the owner.
+  Permissive grants are now provisional — returned but not cached — so
+  enforcement begins the moment the owner becomes derivable.
+- **A retry never downgrades.** The new untrusted-identity retry re-ran the
+  ladder for `pending` and `guest`. But a guest exists precisely *because*
+  whois could not name them, so the retry failed for every guest by definition
+  and parked them back as `pending` — silently un-naming every guest once per
+  window, forever, and demanding re-identification mid-session.
+
+### Reliability
+
+- **A transient whois failure no longer pins a browser to guest.** The
+  identity ladder returned early on any cached verdict, so one bad moment —
+  tailscaled restarting, the 3 s whois timeout firing under load — persisted
+  until the cookie changed. Untrusted verdicts are now re-checked at a bounded
+  cadence; trusted ones stay cached.
+- **The Tailscale CLI is found where it actually lives.** The lookup searched
+  `PATH` only. The Mac App Store build keeps its CLI inside the app bundle, so
+  on that install every tailnet peer silently degraded to guest and the
+  trusted-tier endpoints refused the operator on their own machine. Adds the
+  known absolute locations and a one-time warning when every candidate misses,
+  because that failure degrades closed and is therefore invisible.
+- **Reveal now SELECTS the file on Linux** via the freedesktop
+  `FileManager1.ShowItems` D-Bus call, matching macOS and Windows, instead of
+  merely opening the containing folder — with a real-tool test behind it, which
+  is why it was held back from 8.1.0.
+- **`tests/test-restart-arch.py` passes.** It had been failing since before
+  v8.0.2 on a stale `~/.claude/roam/` path from the pre-v7 era. The whole suite
+  is now green.
+
+### Still open
+
+- **A non-Apple STT engine (gap 3).** Deferred with a defect open: the engine
+  was being handed audio it cannot decode, and ffmpeg was not pinned as a
+  requirement. `tests/test-stt-audio-format.py` ships now and skips loudly
+  ("no whisper.cpp-backed worker in this tree") so it starts failing the moment
+  an engine lands without fixing it.
+- **The identity model itself.** The web side still has no session tokens; the
+  MCP side does. This release narrows who is trusted; it does not change how
+  trust is established. That remains a v9 project.
+
+
 ## v8.1.0-beta.1 — 2026-08-14 (16-PR integration)
 
 Sixteen open pull requests, reviewed in one live multi-agent session by five

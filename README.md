@@ -251,7 +251,7 @@ nth is a conference call with a whiteboard, not a work queue.
 
 ## Version History
 
-Current: **v8.1.0-beta.1**
+Current: **v8.1.1-beta.1**
 
 - **v8.1** — File-path links with reveal-in-file-manager, image attachments with agent vision, local speech-to-text dictation, member removal from the roster, full-text message search, unread divider + jump-to-first-unread, working/idle indicator via Claude Code hooks
 - **v8.0** — Web dashboard with 14 themes, mobile responsive layout, context rings (statusline relay from spokes to hub), session ID auto-discovery, Walled Garden theme, operator identity (Tailscale whois / loopback / guest), per-member context badges with curated stats, cross-platform process tree walker (Linux/macOS/Windows)

@@ -51,7 +51,7 @@ from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
 sys.path.insert(0, str(Path(__file__).parent))
 from nth_constants import (ANIMAL_EMOJIS, animal_for, animal_for_channel,
@@ -150,6 +150,7 @@ OP_COOKIE = "nth_op"
 OP_COOKIE_MAX_AGE = 60 * 60 * 24 * 30   # 30 days
 OP_PENDING_TTL_S = 60 * 60              # drop un-resolved 'pending' identities
 OP_REGISTRY_MAX = 5000                  # hard cap, oldest evicted first
+OP_IDENTITY_RETRY_S = 60                 # retry an untrusted identity at most/min
 IDENTITY_SOURCE_TAILSCALE = "tailscale"
 IDENTITY_SOURCE_LOOPBACK = "loopback"
 IDENTITY_SOURCE_GUEST = "guest"
@@ -240,20 +241,121 @@ class OperatorIdentity:
         return "human — pending identity"
 
 
+# Where the Tailscale CLI might live. PATH first, then the install locations
+# that are NOT on PATH. The Mac App Store build keeps its CLI inside the app
+# bundle and Tailscale's own docs tell Mac users to alias it, so a PATH-only
+# lookup silently fails there -- and that failure is invisible and
+# consequential: whois returns None, every tailnet peer degrades to `guest`,
+# and the endpoints gated on the tailscale tier start refusing the operator on
+# their own machine with nothing anywhere naming the cause.
+TAILSCALE_CANDIDATES = (
+    "tailscale", "tailscale.exe",
+    "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
+    "/usr/local/bin/tailscale", "/opt/homebrew/bin/tailscale",
+)
+_tailscale_missing_warned = False
+_tailnet_owner_cache: Optional[str] = None
+_tailnet_owner_warned = False
+
+
+def _permissive_tailnet() -> bool:
+    """True when the operator has opted OUT of owner enforcement."""
+    return (os.environ.get("NTH_TAILNET_PERMISSIVE", "").strip().lower()
+            in ("1", "true", "yes"))
+
+
+def _warn_tailnet_owner_once(refusing: bool) -> None:
+    """Name the cause and the one-line fix. A silent refusal here looks
+    identical to 'Tailscale is broken' from the operator's side."""
+    global _tailnet_owner_warned
+    if _tailnet_owner_warned:
+        return
+    _tailnet_owner_warned = True
+    if refusing:
+        sys.stderr.write(
+            "[nth_web] could not determine this hub's tailnet owner "
+            "(a tagged node has no user account); tailnet peers are being "
+            "treated as untrusted guests. Fix with NTH_TAILNET_OWNER=<login>, "
+            "or set NTH_TAILNET_PERMISSIVE=1 to accept any tailnet account "
+            "(NOT recommended on a shared tailnet).\n")
+    else:
+        sys.stderr.write(
+            "[nth_web] NTH_TAILNET_PERMISSIVE is set and this hub's tailnet "
+            "owner is unknown: ANY tailnet account is being accepted as "
+            "operator. Set NTH_TAILNET_OWNER=<login> instead.\n")
+
+
+def tailnet_owner() -> str:
+    """The tailnet login that owns THIS hub, or "" if it cannot be determined.
+
+    Explicit NTH_TAILNET_OWNER wins; otherwise ask the local daemon who we are.
+    Cached for the process: it cannot change without the daemon restarting, and
+    this is consulted on every unresolved request.
+    """
+    global _tailnet_owner_cache
+    if _tailnet_owner_cache is not None:
+        return _tailnet_owner_cache
+    explicit = (os.environ.get("NTH_TAILNET_OWNER") or "").strip()
+    if explicit:
+        _tailnet_owner_cache = explicit
+        return explicit
+    owner = ""
+    for cmd in TAILSCALE_CANDIDATES:
+        try:
+            out = subprocess.check_output([cmd, "status", "--json"],
+                                          timeout=3, stderr=subprocess.DEVNULL)
+        except (FileNotFoundError, subprocess.SubprocessError):
+            continue
+        try:
+            data = json.loads(out.decode("utf-8", errors="replace"))
+            uid = data.get("Self", {}).get("UserID")
+            # whois returns UserProfile.LoginName; status exposes the same
+            # field under User[<uid>]. Same string shape, so a plain equality
+            # comparison is valid -- no normalisation needed.
+            owner = ((data.get("User") or {}).get(str(uid)) or {}).get("LoginName") or ""
+        except (ValueError, TypeError, AttributeError):
+            owner = ""
+        break
+    _tailnet_owner_cache = owner
+    return owner
+
+
+def _warn_tailscale_missing_once() -> None:
+    """Say so, once, when no candidate resolved. Silent degrade-to-guest is the
+    failure mode that costs someone an afternoon: the UI looks normal, the trust
+    tier is simply never granted, and nothing names the cause."""
+    global _tailscale_missing_warned
+    if _tailscale_missing_warned:
+        return
+    _tailscale_missing_warned = True
+    sys.stderr.write(
+        "[nth_web] tailscale CLI not found on PATH or at any known install "
+        "location; tailnet peers cannot be identified and will be treated as "
+        "untrusted guests. Add it to PATH to restore tailnet trust.\n")
+
+
 def tailscale_whois(remote_ip: str) -> Optional[Dict[str, str]]:
     """Ask the local Tailscale daemon who owns a tailnet IP. Returns
     {login, display, node} or None if Tailscale isn't available or the
     caller isn't on the tailnet."""
     if not remote_ip:
         return None
-    for cmd in ("tailscale", "tailscale.exe"):
+    found_cli = False
+    for cmd in TAILSCALE_CANDIDATES:
         try:
             out = subprocess.check_output(
                 [cmd, "whois", "--json", remote_ip],
                 timeout=3, stderr=subprocess.DEVNULL,
             )
-        except (FileNotFoundError, subprocess.SubprocessError):
+        except FileNotFoundError:
+            continue                      # this candidate isn't installed here
+        except subprocess.SubprocessError:
+            # The CLI EXISTS and ran; it just could not answer for this IP,
+            # which is the ordinary "peer is not on the tailnet" case. Not a
+            # missing install, so it must not trigger the warning below.
+            found_cli = True
             continue
+        found_cli = True
         try:
             data = json.loads(out.decode("utf-8", errors="replace"))
         except (ValueError, TypeError):
@@ -265,6 +367,8 @@ def tailscale_whois(remote_ip: str) -> Optional[Dict[str, str]]:
         if not login and not display:
             return None
         return {"login": login, "display": display, "node": node}
+    if not found_cli:
+        _warn_tailscale_missing_once()
     return None
 
 
@@ -275,6 +379,7 @@ class OperatorRegistry:
 
     def __init__(self) -> None:
         self._by_token: Dict[str, OperatorIdentity] = {}
+        self._last_retry_at: Dict[str, float] = {}
         self._lock = threading.Lock()
 
     def new_token(self) -> str:
@@ -288,6 +393,24 @@ class OperatorRegistry:
         with self._lock:
             self._by_token[token] = ident
             self._evict_locked()
+
+    def should_retry_untrusted(self, token: str) -> bool:
+        """Reserve a rate-limited retry of a cached non-trusted identity."""
+        with self._lock:
+            ident = self._by_token.get(token)
+            if ident is None or ident.source in (
+                    IDENTITY_SOURCE_TAILSCALE, IDENTITY_SOURCE_LOOPBACK):
+                return False
+            now = time.time()
+            if now - self._last_retry_at.get(token, 0.0) < OP_IDENTITY_RETRY_S:
+                return False
+            self._last_retry_at[token] = now
+            return True
+
+    def record_ladder_attempt(self, token: str) -> None:
+        """Remember an initial identity-ladder attempt for retry throttling."""
+        with self._lock:
+            self._last_retry_at[token] = time.time()
 
     def _evict_locked(self) -> None:
         """Bound the registry. Every cookie-less request mints a token and
@@ -304,6 +427,7 @@ class OperatorRegistry:
             if (ident.source == IDENTITY_SOURCE_PENDING
                     and now - created > OP_PENDING_TTL_S):
                 del self._by_token[tok]
+                self._last_retry_at.pop(tok, None)
         if len(self._by_token) > OP_REGISTRY_MAX:
             oldest = sorted(
                 self._by_token.items(),
@@ -311,6 +435,7 @@ class OperatorRegistry:
             )
             for tok, _ in oldest[: len(self._by_token) - OP_REGISTRY_MAX]:
                 del self._by_token[tok]
+                self._last_retry_at.pop(tok, None)
 
     def resolve_from_loopback(self, token: str, remote_ip: str) -> Optional[OperatorIdentity]:
         """If the peer came in over loopback, trust the OS account the server
@@ -351,6 +476,56 @@ class OperatorRegistry:
         if not info:
             return None
         login = info.get("login") or ""
+        # A tailnet peer is not automatically THIS hub's operator. Without this
+        # check, every account the tailnet resolves -- a second person on a
+        # shared tailnet, a device handed to someone else -- receives the same
+        # trust as a local shell: reveal a path, remove a member, upload into
+        # the operator's home directory.
+        #
+        # The comparison is by ACCOUNT, not by device: whois returns the
+        # login, and every one of the owner's own machines carries the same
+        # one, so a single-user tailnet is unaffected.
+        #
+        # When the owner cannot be determined we warn and allow, rather than
+        # failing closed. Failing closed here would refuse the operator on
+        # their own hub because of a JSON-parsing failure -- the identical
+        # silent-lockout shape this release fixes elsewhere. Operators who want
+        # the strict reading set NTH_TAILNET_STRICT=1.
+        owner = tailnet_owner()
+        provisional = False
+        if owner:
+            if login and login != owner:
+                return None            # falls through to the guest tier
+        else:
+            # Owner undeterminable. FAIL CLOSED: drop to guest.
+            #
+            # This is deliberately the default even though it can lock a
+            # legitimate operator out of their own hub, because the window it
+            # closes is not hypothetical. `status --json` is a different
+            # subcommand from `whois` with a different output shape, and the
+            # owner lookup indexes User[Self.UserID].LoginName -- three
+            # lookups, each of which comes back empty on a TAGGED node (a
+            # server brought up with an auth key has no user), which is
+            # exactly the shape a hub deployment takes. Failing open there
+            # would hand reveal/cull/upload to every account on the tailnet
+            # at precisely the moment nobody can tell who the owner is.
+            #
+            # The lockout is recoverable and the warning says how: one env
+            # var. The alternative failure is not recoverable, because
+            # nothing announces it.
+            if not _permissive_tailnet():
+                _warn_tailnet_owner_once(refusing=True)
+                return None
+            _warn_tailnet_owner_once(refusing=False)
+            # Permissive mode still must not GRANT PERMANENTLY. A tailscale
+            # identity is never re-checked once cached (see
+            # should_retry_untrusted), so a peer trusted during a permissive
+            # window would keep operator rights for the life of their cookie
+            # -- 30 days -- even after owner resolution starts working and
+            # says they are not the owner. Marking it provisional keeps it out
+            # of the cache, so every request re-evaluates and enforcement
+            # begins the moment the owner becomes derivable.
+            provisional = True
         # Use the username half of the login (strip @domain).
         login_user = login.split("@", 1)[0] if login else ""
         display = info.get("display") or login_user or "tailnet-user"
@@ -362,7 +537,8 @@ class OperatorRegistry:
             login=login,
             created_at=time.time(),
         )
-        self.put(token, ident)
+        if not provisional:
+            self.put(token, ident)
         return ident
 
     def register_guest(self, token: str, raw_name: str) -> OperatorIdentity:
@@ -410,7 +586,7 @@ def get_tailscale_ip() -> Optional[str]:
     """Best-effort: return the tailnet IPv4 address of this host, or None
     if Tailscale isn't installed/running. Used only for informational
     output — does NOT gate binding."""
-    for cmd in ("tailscale", "tailscale.exe"):
+    for cmd in TAILSCALE_CANDIDATES:
         try:
             out = subprocess.check_output(
                 [cmd, "ip", "-4"], timeout=2, stderr=subprocess.DEVNULL
@@ -1766,7 +1942,15 @@ class NthWebHandler(BaseHTTPRequestHandler):
         token, is_new = self._get_or_mint_cookie()
         ident = OPERATOR_REGISTRY.get(token)
         if ident is not None:
-            return token, ident, is_new
+            # A transient Tailscale/whois outage must not turn this browser
+            # into a permanent guest until it clears its cookie. Trusted
+            # identities stay cached; non-trusted ones retry the full ladder
+            # at a bounded cadence.
+            if not OPERATOR_REGISTRY.should_retry_untrusted(token):
+                return token, ident, is_new
+        else:
+            OPERATOR_REGISTRY.record_ladder_attempt(token)
+        prior = ident               # what we held before re-running the ladder
         remote_ip = self._client_ip()
         # Try Tailscale whois on the remote address
         ident = OPERATOR_REGISTRY.resolve_from_tailscale(token, remote_ip)
@@ -1776,6 +1960,19 @@ class NthWebHandler(BaseHTTPRequestHandler):
         ident = OPERATOR_REGISTRY.resolve_from_loopback(token, remote_ip)
         if ident is not None:
             return token, ident, is_new
+        # The ladder still says no. If this token already carried a
+        # self-declared guest identity, KEEP it rather than parking as pending.
+        #
+        # A guest exists precisely BECAUSE whois could not name them, so the
+        # retry above fails for every guest by definition. Without this, each
+        # retry window would silently un-name a guest -- the browser would be
+        # told to POST /api/identify again, and send/upload would start
+        # refusing mid-session, once a minute, forever. The retry exists to let
+        # a transient failure heal; it must never leave the caller worse off
+        # than not retrying at all. A retry may upgrade a tier, never downgrade
+        # one.
+        if prior is not None and prior.source == IDENTITY_SOURCE_GUEST:
+            return token, prior, is_new
         # Park as pending until the browser supplies a name
         ident = OperatorIdentity(
             member_id=f"{OPERATOR_MEMBER_ID_PREFIX}p_{token[:8]}",
@@ -2414,6 +2611,46 @@ class NthWebHandler(BaseHTTPRequestHandler):
             exists[cand] = self._resolve_existing(cand) is not None
         self._json({"exists": exists})
 
+    @staticmethod
+    def _reveal_linux_dbus(abspath: str):
+        """Ask the desktop's file manager to SELECT `abspath`, via freedesktop's
+        org.freedesktop.FileManager1.ShowItems. Returns the CompletedProcess, or
+        None when the call could not be attempted at all (no dbus-send, no
+        session bus, timeout) so the caller falls back to xdg-open.
+
+        Why this exists: xdg-open can only open the *containing folder*, while
+        macOS `open -R` and Explorer `/select,` both highlight the file itself.
+        ShowItems is the freedesktop equivalent, implemented by Nautilus,
+        Dolphin, Nemo, Thunar and others.
+
+        The path is percent-encoded into a file:// URI with urllib's quote().
+        That is required for correctness (spaces, '#', non-ASCII) and it also
+        removes a sharp edge: dbus-send parses `array:` arguments as a
+        COMMA-SEPARATED list, and a comma is a legal filename character, so a
+        raw path like /home/u/a,b/x.txt would arrive as two malformed URIs.
+        quote() encodes ',' as %2C, so no raw comma ever reaches the parser --
+        the hazard is designed out rather than escaped around.
+        """
+        if shutil.which("dbus-send") is None:
+            return None
+        # No session bus (headless, a service unit, ssh without a bus) means no
+        # file manager to talk to. Checking is cheaper than a 5s timeout.
+        if not (os.environ.get("DBUS_SESSION_BUS_ADDRESS")
+                or os.environ.get("XDG_RUNTIME_DIR")):
+            return None
+        uri = "file://" + quote(abspath)
+        try:
+            return subprocess.run(
+                ["dbus-send", "--session", "--print-reply", "--reply-timeout=5000",
+                 "--dest=org.freedesktop.FileManager1",
+                 "/org/freedesktop/FileManager1",
+                 "org.freedesktop.FileManager1.ShowItems",
+                 f"array:string:{uri}", "string:"],
+                capture_output=True, text=True, timeout=8,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+
     def _handle_reveal(self) -> None:
         """POST /api/reveal — body {"path": "..."}. Reveal (select) the file in
         Finder. SECURITY: no shell, arg-list only, `open -R` (reveal) never plain
@@ -2471,17 +2708,23 @@ class NthWebHandler(BaseHTTPRequestHandler):
                     capture_output=True, text=True, timeout=10,
                 )
             elif plat.startswith("linux"):
-                # Best-effort: open the containing folder (no reliable "select").
-                folder = abspath if os.path.isdir(abspath) else os.path.dirname(abspath)
-                # NO `--`. xdg-open's main argument loop matches `-*` before any
-                # sentinel handling and calls exit_failure_syntax, so a `--` makes
-                # EVERY call fail with "unexpected option '--'". Measured against
-                # xdg-utils 1.2.1. abspath is absolute, so there is no
-                # leading-dash case for a sentinel to guard against anyway.
-                cp = subprocess.run(
-                    ["xdg-open", folder],
-                    capture_output=True, text=True, timeout=10,
-                )
+                # Two tiers. freedesktop's FileManager1 SELECTS the file, which
+                # is what macOS and Windows do; xdg-open can only open the
+                # containing folder. Try the former, fall back to the latter, so
+                # a desktop with no conforming file manager still reveals
+                # something instead of failing.
+                cp = self._reveal_linux_dbus(abspath)
+                if cp is None or cp.returncode != 0:
+                    folder = abspath if os.path.isdir(abspath) else os.path.dirname(abspath)
+                    # NO `--`. xdg-open's main argument loop matches `-*` before
+                    # any sentinel handling and calls exit_failure_syntax, so a
+                    # `--` makes EVERY call fail with "unexpected option '--'".
+                    # Measured against xdg-utils 1.2.1. abspath is absolute, so
+                    # there is no leading-dash case for a sentinel to guard.
+                    cp = subprocess.run(
+                        ["xdg-open", folder],
+                        capture_output=True, text=True, timeout=10,
+                    )
             elif plat.startswith("win"):
                 # ONE argv token: explorer parses "/select,<path>" as a unit, and
                 # a space after the comma makes it ignore the selector and open
