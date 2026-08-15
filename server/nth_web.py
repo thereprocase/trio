@@ -56,6 +56,7 @@ from urllib.parse import parse_qs, quote, unquote, urlparse
 
 sys.path.insert(0, str(Path(__file__).parent))
 import nth_supervisor as nsup
+import nth_agent_manager as nam
 import nth_request_log as nrl
 from nth_constants import (ANIMAL_EMOJIS, animal_for, animal_for_channel,
                            NTH_VERSION, project_context, AGENT_INBOX_CHANNEL, can_see, is_all_seeing,
@@ -876,6 +877,31 @@ def _remove_from_channel(db: sqlite3.Connection, channel: str, target_id: str,
         )
     return [r["id"] for r in released]
 
+
+
+def _effort_recognized(provider: str, effort: str) -> bool:
+    """Is `effort` a value this PROVIDER could ever accept?
+
+    EFFORT_LEVELS is a Claude-shaped list. Checking it alone meant a Codex
+    effort was validated against the INTERSECTION of that list and what the
+    App Server advertises, so Codex's own `minimal` (and `none` on some models)
+    were unreachable no matter what model/list returned — while the code
+    claimed Codex efforts were "validated against THAT list".
+
+    So: the generic list, PLUS whatever the provider actually advertises.
+    _require_model_supports_effort still narrows it to a specific model; this
+    only rejects values no model of this provider could accept."""
+    if effort in EFFORT_LEVELS:
+        return True
+    try:
+        for m in _provider_models(provider):
+            if effort in (m.get("efforts") or ()):
+                return True
+    except Exception:                                      # noqa: BLE001
+        # Discovery is a subprocess/network call. If it fails, fall back to the
+        # generic list rather than rejecting everything.
+        return False
+    return False
 
 
 def _require_model_supports_effort(provider: str, model: str, effort: str) -> None:
@@ -2394,7 +2420,7 @@ def channel_exists(channel: str, db_path: Optional[Path] = None) -> bool:
         return False
 
 
-_SUPERVISOR: Optional["nsup.AgentSupervisor"] = None
+_SUPERVISOR: Optional["nam.UnifiedAgentSupervisor"] = None
 _SUPERVISOR_LOCK = threading.Lock()
 _ROUTER = None
 _IDLE_REAPER = None
@@ -2422,13 +2448,14 @@ def _quiesce_agents() -> None:
 _RUNTIME_HEALTH: Dict[str, Tuple[float, Dict[str, Any]]] = {}
 
 
-def get_supervisor() -> "nsup.AgentSupervisor":
+def get_supervisor() -> "nam.UnifiedAgentSupervisor":
     global _SUPERVISOR
     with _SUPERVISOR_LOCK:
         if _SUPERVISOR is None:
-            # The MCP config is built per spawn by build_mcp_config_for_hub()
-            # from NTH_SERVER_PATH, so the supervisor does not need it.
-            _SUPERVISOR = nsup.AgentSupervisor(db_path=_DB_PATH_GLOBAL)
+            # The dispatcher owns one runtime manager per provider and routes
+            # every lifecycle call by the agent's durable runtime_provider.
+            _SUPERVISOR = nam.UnifiedAgentSupervisor(
+                db_path=_DB_PATH_GLOBAL, nth_server_path=NTH_SERVER_PATH)
         return _SUPERVISOR
 
 
@@ -3641,10 +3668,12 @@ class NthWebHandler(BaseHTTPRequestHandler):
             return
         provider = (parse_qs(parsed.query).get("provider", ["claude"])[0]
                     or "claude").strip().lower()
-        if provider != "claude":
-            # A second provider arrives with the codex runtime; the
-            # dispatcher it brings implements this same surface.
-            self._error(400, "provider must be claude")
+        # Ask the dispatcher rather than hardcoding the list: a third
+        # provider should not require editing this file, and Codex must
+        # not be offered on a hub where the module is not installed.
+        _providers = get_supervisor().providers()
+        if provider not in _providers:
+            self._error(400, "provider must be one of " + "|".join(_providers))
             return
         try:
             models = get_supervisor().list_models(provider)
@@ -3671,27 +3700,22 @@ class NthWebHandler(BaseHTTPRequestHandler):
     def _handle_approvals(self) -> None:
         if self._require_operator() is None or not self._require_agent_control():
             return
+        # NEVER filter this list by placement.
+        #
+        # An approval is a live runtime BLOCKING on an operator decision, with
+        # a 120s timeout after which it auto-declines. It is not a feed item to
+        # be tidied. An earlier version kept only approvals whose agent had a
+        # placement in a non-inbox, non-ended channel -- but POST /api/agents
+        # accepts `"channels": []`, so an agent whose only placement is the
+        # inbox was invisible here while genuinely blocked, and the same hole
+        # opened for any agent whose channels were later ended or whose
+        # placement was removed. The operator saw an empty inbox and the agent
+        # timed out. The surrounding except made a query failure look identical
+        # to "nothing pending", which is how it went unnoticed.
+        #
+        # Scope the DISPLAY if a room-by-room view is ever wanted. Never the
+        # list, and never behind a query that can fail closed.
         approvals = get_supervisor().pending_approvals()
-        db = sqlite3.connect(str(self.db_path), timeout=5)
-        db.row_factory = sqlite3.Row
-        try:
-            db.execute("PRAGMA busy_timeout=3000")
-            active_channels = [r["code"] for r in db.execute(
-                "SELECT code FROM channels WHERE archived_at IS NULL "
-                "AND code != ?", (AGENT_INBOX_CHANNEL,)).fetchall()]
-            if active_channels:
-                placeholders = ",".join("?" * len(active_channels))
-                active_agents = {r["agent_id"] for r in db.execute(
-                    f"SELECT DISTINCT agent_id FROM agent_channels "
-                    f"WHERE channel IN ({placeholders})", active_channels).fetchall()}
-            else:
-                active_agents = set()
-            approvals = [a for a in approvals if a.get("agent_id") in active_agents]
-        except sqlite3.Error as e:
-            self._error(500, f"db error: {e}")
-            return
-        finally:
-            db.close()
         self._json({"ok": True, "count": len(approvals), "approvals": approvals})
 
     def _handle_agent_create(self) -> None:
@@ -3709,12 +3733,15 @@ class NthWebHandler(BaseHTTPRequestHandler):
         if body is None:
             return
         provider = (body.get("provider") or "claude").strip().lower()
-        if provider != "claude":
-            # A second provider arrives with the codex runtime; the
-            # dispatcher it brings implements this same surface.
-            self._error(400, "provider must be claude")
+        # Ask the dispatcher rather than hardcoding the list: a third
+        # provider should not require editing this file, and Codex must
+        # not be offered on a hub where the module is not installed.
+        _providers = get_supervisor().providers()
+        if provider not in _providers:
+            self._error(400, "provider must be one of " + "|".join(_providers))
             return
-        runtime = runtime_health(refresh=True, provider=provider)
+        runtime = runtime_health(
+            refresh=True, provider=provider, deep=(provider == "codex"))
         if not runtime.get("ready"):
             self._json({
                 "ok": False,
@@ -3726,8 +3753,8 @@ class NthWebHandler(BaseHTTPRequestHandler):
         prompt = (body.get("prompt") or "").strip()
         desired = (body.get("name") or "").strip()
         effort = (body.get("effort") or "").strip().lower()
-        if effort and effort not in EFFORT_LEVELS:
-            self._error(400, "effort must be one of low|medium|high|xhigh|max|ultra")
+        if effort and not _effort_recognized(provider, effort):
+            self._error(400, f"unknown effort for {provider}: {effort}")
             return
         permission_profile = (body.get("permission_profile") or "balanced").strip().lower()
         if permission_profile not in PERMISSION_PROFILES:
@@ -3747,7 +3774,31 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 self._error(400, "cwd must be an existing directory")
                 return
             cwd = str(cwd_path)
-        if effort and model:
+        if provider == "codex":
+            # Codex advertises its own models and per-model reasoning efforts
+            # over the App Server, so validate against THAT list rather than a
+            # hardcoded one — and do it before the durable agents row is
+            # written, so an unknown model fails cleanly instead of leaving a
+            # created-but-unstartable agent behind.
+            try:
+                models = get_supervisor().list_models("codex")
+            except Exception as exc:
+                self._error(409, f"Codex model discovery failed: {exc}")
+                return
+            if not model:
+                preferred = next((m for m in models if m.get("default")), None)
+                if preferred is None and models:
+                    preferred = models[0]
+                model = (preferred or {}).get("id") or ""
+            selected = next((m for m in models if m.get("id") == model), None)
+            if model and selected is None:
+                self._error(400, f"unknown Codex model: {model}")
+                return
+            if effort and selected and selected.get("efforts") \
+                    and effort not in selected["efforts"]:
+                self._error(400, f"{model} does not support effort {effort}")
+                return
+        elif effort and model:
             # The generic EFFORT_LEVELS allowlist above is cross-model, so
             # e.g. effort="xhigh" passes it even on a model whose CLAUDE_MODELS
             # entry caps at "max". Check against the model's OWN supported
@@ -4085,14 +4136,15 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 if row is None:
                     raise AgentActionError(404, "agent not found")
                 # Empty clears back to the model's default — same allowance as
-                # at creation. A non-empty value is checked against the model's
-                # OWN supported efforts (see CLAUDE_MODELS), not just the
-                # generic allowlist.
-                if effort and effort not in EFFORT_LEVELS:
+                # at creation. A non-empty value is checked against the
+                # PROVIDER's vocabulary first, then against the model's OWN
+                # supported efforts. Resolve the provider before either check:
+                # both need it, and Codex's efforts are not Claude's.
+                provider = row["runtime_provider"] or "claude"
+                if effort and not _effort_recognized(provider, effort):
                     raise AgentActionError(
-                        400, "effort must be one of low|medium|high|xhigh|max|ultra")
+                        400, f"unknown effort for {provider}: {effort}")
                 if effort:
-                    provider = row["runtime_provider"] or "claude"
                     _require_model_supports_effort(provider, row["model"], effort)
                 with db:
                     cur = db.execute(
@@ -4120,11 +4172,22 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 selected = next((m for m in known if m.get("id") == model), None)
                 if known and selected is None:
                     raise AgentActionError(400, f"unknown {provider} model: {model}")
+                # A Codex thread takes its model from thread/start, and NEITHER
+                # turn/start nor thread/resume carries one — so writing the
+                # durable row while a thread is live left the runtime on the
+                # old model indefinitely, with the UI reporting success and the
+                # roster showing the new tag. Refuse rather than lie. (Claude
+                # re-reads the model on every spawn, so it is unaffected.)
+                if (provider == "codex" and model != (row["model"] or "")
+                        and get_supervisor().is_running(agent_id)):
+                    raise AgentActionError(
+                        409, "stop or hibernate this Codex agent before changing "
+                             "its model — a running thread cannot switch models")
                 if "effort" in params:
                     effort = (params.get("effort") or "").strip().lower()
-                    if effort and effort not in EFFORT_LEVELS:
+                    if effort and not _effort_recognized(provider, effort):
                         raise AgentActionError(
-                            400, "effort must be one of low|medium|high|xhigh|max|ultra")
+                            400, f"unknown effort for {provider}: {effort}")
                     if effort:
                         _require_model_supports_effort(provider, model, effort)
                 else:
