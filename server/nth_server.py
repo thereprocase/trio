@@ -413,11 +413,16 @@ def get_db() -> sqlite3.Connection:
         except sqlite3.OperationalError:
             pass  # column already exists
 
-    # edited_at / deleted_at: an operator can correct or withdraw their own
-    # message. Both are timestamps rather than a destructive UPDATE/DELETE, so
-    # the row survives for the audit trail and readers can be told the text
-    # changed under them.
-    for _col in ("edited_at", "deleted_at"):
+    # edited_at: an operator can correct their own message. A timestamp rather
+    # than a destructive UPDATE, so the row survives for the audit trail and
+    # readers can be told the text changed under them.
+    #
+    # There is deliberately NO `deleted_at`. Delete reuses the older
+    # retracted_at / retracted_by / retraction_reason triple that every reader
+    # already honours. A second, permanently-NULL column describing the same
+    # state is a trap: the next person writes `WHERE deleted_at IS NULL` and
+    # gets a filter that silently matches every row, retracted or not.
+    for _col in ("edited_at",):
         try:
             conn.execute(f"ALTER TABLE messages ADD COLUMN {_col} TEXT")
         except sqlite3.OperationalError:

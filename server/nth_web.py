@@ -1463,7 +1463,14 @@ def ensure_ask_columns(db: sqlite3.Connection) -> None:
         ("messages", "reply_to",  "INTEGER"),
         ("messages", "recipients", "TEXT NOT NULL DEFAULT '[]'"),
         ("messages", "edited_at",  "TEXT"),
-        ("messages", "deleted_at", "TEXT"),
+        # The three the delete path actually WRITES and _edit_target reads.
+        # They were missing here while a never-used `deleted_at` was present,
+        # so against a database whose MCP server had not restarted, /api/edit
+        # and /api/delete both 500'd on "no such column: retracted_at" — the
+        # exact case this forward-compat list exists to prevent.
+        ("messages", "retracted_at",      "TEXT"),
+        ("messages", "retracted_by",      "TEXT"),
+        ("messages", "retraction_reason", "TEXT"),
     ):
         try:
             db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {defn}")
@@ -1475,18 +1482,22 @@ def _event_visible_to(event: Dict[str, Any], viewer_id: Optional[str],
                       all_seeing: bool) -> bool:
     """Whether an SSE event may be delivered to a given viewer.
 
-    Only message events carry recipients and can be a DM; everything else
-    (roster, context, ...) is always delivered. An all-seeing operator sees
-    everything. For anyone else, allow_all_seeing is False on purpose: a guest
-    is a human but NOT the operator, and must not be able to use that to read
-    other people's DMs off the live feed.
+    Only 'message' and 'message_update' events carry recipients and can be a
+    DM; everything else (roster, context, ...) is always delivered. An
+    all-seeing operator sees everything. For anyone else, allow_all_seeing is
+    False on purpose: a guest is a human but NOT the operator, and must not be
+    able to use that to read other people's DMs off the live feed.
+
+    'message_update' MUST be listed here. It carries the same row as the
+    original event, so treating it as always-deliverable would hand a guest
+    the full text of a DM the moment its author edited it.
 
     THE single delivery predicate — the live tail and the reconnect history
     burst both route through it, because a viewer denied a DM in real time and
     then handed it on reconnect is the same leak with extra steps."""
     if all_seeing:
         return True
-    if event.get("type") != "message":
+    if event.get("type") not in ("message", "message_update"):
         return True
     return can_see(viewer_id, None, event.get("member_id"),
                    event.get("recipients"), allow_all_seeing=False)
@@ -1513,6 +1524,12 @@ def _message_event(db: sqlite3.Connection, r: sqlite3.Row) -> Dict[str, Any]:
         "reply_to": r["reply_to"] if "reply_to" in keys else None,
         "choices": parse_obj_json(r["choices"] if "choices" in keys else ""),
         "selection": parse_obj_json(r["selection"] if "selection" in keys else ""),
+        # Without these three the dashboard renders a deleted message with its
+        # full original body, forever — on the live tail AND on reload. The
+        # client cannot tombstone what the feed never told it about.
+        "retracted_at": (r["retracted_at"] if "retracted_at" in keys else None),
+        "retraction_reason": (r["retraction_reason"] if "retraction_reason" in keys else None),
+        "edited_at": (r["edited_at"] if "edited_at" in keys else None),
         "created_at": r["created_at"],
         "attachments": attachments_for_message(db, r["id"]),
     }
@@ -1526,6 +1543,11 @@ class EventHub:
         self.db_path = db_path
         self.channel = channel
         self.last_msg_id = 0
+        # High-water mark for the edit/retract scan. An edit is an UPDATE, so
+        # it never raises last_msg_id and the `id > last_msg_id` tail below can
+        # never see it. This timestamp is what makes changes to ALREADY-SENT
+        # messages observable. Seeded in run() so we don't replay history.
+        self._change_scan = ""
         self._subs: List[queue.Queue] = []
         self._lock = threading.Lock()
         self._stop = threading.Event()
@@ -1584,7 +1606,8 @@ class EventHub:
                 {"type": "context", "sessions": _read_context_snapshots()}))
             rows = db.execute(
                 "SELECT id, member_id, member_name, content, mentions, refs, bangs, "
-                "recipients, reply_to, choices, selection, created_at "
+                "recipients, reply_to, choices, selection, "
+                "retracted_at, retraction_reason, edited_at, created_at "
                 "FROM messages WHERE channel = ? ORDER BY id DESC LIMIT ?",
                 (self.channel, HISTORY_LIMIT),
             ).fetchall()
@@ -1761,18 +1784,45 @@ class EventHub:
                 self.last_msg_id = int(row[0] or 0)
             except sqlite3.Error:
                 self.last_msg_id = 0
+            # Same reasoning as last_msg_id: start "now" so a hub restart does
+            # not re-broadcast every edit ever made.
+            self._change_scan = now_iso()
 
             while not self._stop.is_set():
                 try:
+                    prev_last = self.last_msg_id
                     rows = db.execute(
                         "SELECT id, member_id, member_name, content, mentions, refs, bangs, "
-                "recipients, reply_to, choices, selection, created_at "
+                "recipients, reply_to, choices, selection, "
+                "retracted_at, retraction_reason, edited_at, created_at "
                         "FROM messages WHERE channel = ? AND id > ? ORDER BY id",
                         (self.channel, self.last_msg_id),
                     ).fetchall()
                     for r in rows:
                         self._broadcast(_message_event(db, r))
                         self.last_msg_id = r["id"]
+
+                    # Edits and retractions of messages the tail has ALREADY
+                    # sent (id <= prev_last) are pushed as `message_update` so
+                    # open clients re-render in place. Without this an edit is
+                    # invisible to every connected browser until it reloads —
+                    # two people in one channel see different text, decided
+                    # only by who refreshed last.
+                    scan_now = now_iso()
+                    changed = db.execute(
+                        "SELECT id, member_id, member_name, content, mentions, refs, bangs, "
+                        "recipients, reply_to, choices, selection, "
+                        "retracted_at, retraction_reason, edited_at, created_at "
+                        "FROM messages WHERE channel = ? AND id <= ? AND "
+                        "((retracted_at IS NOT NULL AND retracted_at > ?) OR "
+                        " (edited_at IS NOT NULL AND edited_at > ?)) ORDER BY id",
+                        (self.channel, prev_last, self._change_scan, self._change_scan),
+                    ).fetchall()
+                    for r in changed:
+                        ev = _message_event(db, r)
+                        ev["type"] = "message_update"
+                        self._broadcast(ev)
+                    self._change_scan = scan_now
 
                     members = self._fetch_roster(db)
                     snapshot = json.dumps(members, sort_keys=True)
@@ -3310,13 +3360,19 @@ class NthWebHandler(BaseHTTPRequestHandler):
             "supervisor": {"live_agents": len(get_supervisor().live_ids())},
         })
 
-    def _edit_target(self, db, mid, ident):
+    def _edit_target(self, db, mid, ident, ch):
         """Load an operator-editable message row, or (None, error). The caller
-        must be its author (member_id == op_id) and it must not be retracted."""
-        op_id, op_name = ensure_operator_row(db, self.channel, ident)
+        must be its author (member_id == op_id) and it must not be retracted.
+
+        `ch` is the REQUEST's channel, never self.channel: in landing mode —
+        the default hub — self.channel is "" for every request, so binding it
+        here matched no row and made edit/delete 404 on everything. Every other
+        mutating handler resolves the channel per-request for this reason."""
+        op_id, op_name = ensure_operator_row(db, ch, ident)
         row = db.execute(
-            "SELECT member_id, retracted_at, recipients FROM messages WHERE id = ? AND channel = ?",
-            (mid, self.channel),
+            "SELECT member_id, retracted_at, recipients, selection "
+            "FROM messages WHERE id = ? AND channel = ?",
+            (mid, ch),
         ).fetchone()
         if not row:
             return None, (op_id, op_name), "message not found"
@@ -3324,6 +3380,19 @@ class NthWebHandler(BaseHTTPRequestHandler):
             return None, (op_id, op_name), "you can only change your own messages"
         if row["retracted_at"]:
             return None, (op_id, op_name), "message is already deleted"
+        # An answer to a trio_ask is frozen — neither edited nor deleted.
+        #
+        # Editing: `selection` holds indexes into the question's options, and
+        # MCP readers (history, poll) never select `selection` at all — they
+        # see only the prose. Editing the prose would leave the dashboard's
+        # locked picker highlighting one option while the asking agent reads a
+        # different answer, with no way for either to know they disagree.
+        #
+        # Deleting: the one-shot guard on the answer path keys on the existence
+        # of a selection and does not check retracted_at, so withdrawing an
+        # answer would leave its question permanently unanswerable.
+        if row["selection"]:
+            return None, (op_id, op_name), "an answer to a question cannot be changed"
         return row, (op_id, op_name), None
 
     def _handle_edit(self) -> None:
@@ -3351,6 +3420,10 @@ class NthWebHandler(BaseHTTPRequestHandler):
         if ident.source == IDENTITY_SOURCE_PENDING:
             self._error(403, "identity required — POST /api/identify first")
             return
+        ch = self._channel_for_request(urlparse(self.path))
+        if ch is None:
+            self._error(400, "channel query param required")
+            return
         db = None
         try:
             db = sqlite3.connect(str(self.db_path), timeout=5, isolation_level=None)
@@ -3358,14 +3431,14 @@ class NthWebHandler(BaseHTTPRequestHandler):
             db.execute("PRAGMA busy_timeout=5000")
             db.execute("BEGIN IMMEDIATE")
             try:
-                row, _op, err = self._edit_target(db, mid, ident)
+                row, _op, err = self._edit_target(db, mid, ident, ch)
                 if err or row is None:
                     db.execute("ROLLBACK")
                     code = (404 if err == "message not found"
                             else 403 if err and "your own" in err else 400)
                     self._error(code, err or "message not found")
                     return
-                m_ids, r_ids, b_ids = _parse_sigils_against_roster(db, self.channel, content)
+                m_ids, r_ids, b_ids = _parse_sigils_against_roster(db, ch, content)
                 # Preserve the wake⊆visibility invariant on edits too: if this
                 # message is a scoped DM, an @/#/! edited in that names a
                 # non-recipient must stay inert (narrow_wake), matching the send
@@ -3383,7 +3456,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
                      json.dumps(m_ids) if m_ids else "",
                      json.dumps(r_ids) if r_ids else "",
                      json.dumps(b_ids) if b_ids else "",
-                     now_iso(), mid, self.channel),
+                     now_iso(), mid, ch),
                 )
                 db.execute("COMMIT")
             except sqlite3.Error:
@@ -3422,6 +3495,10 @@ class NthWebHandler(BaseHTTPRequestHandler):
         if ident.source == IDENTITY_SOURCE_PENDING:
             self._error(403, "identity required — POST /api/identify first")
             return
+        ch = self._channel_for_request(urlparse(self.path))
+        if ch is None:
+            self._error(400, "channel query param required")
+            return
         db = None
         try:
             db = sqlite3.connect(str(self.db_path), timeout=5, isolation_level=None)
@@ -3429,12 +3506,12 @@ class NthWebHandler(BaseHTTPRequestHandler):
             db.execute("PRAGMA busy_timeout=5000")
             db.execute("BEGIN IMMEDIATE")
             try:
-                row, op, err = self._edit_target(db, mid, ident)
-                if err:
+                row, op, err = self._edit_target(db, mid, ident, ch)
+                if err or row is None:
                     db.execute("ROLLBACK")
                     code = (404 if err == "message not found"
-                            else 403 if "your own" in err else 400)
-                    self._error(code, err)
+                            else 403 if err and "your own" in err else 400)
+                    self._error(code, err or "message not found")
                     return
                 op_id, op_name = op
                 now = now_iso()
@@ -3442,12 +3519,18 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 db.execute(
                     "UPDATE messages SET retracted_at = ?, retracted_by = ?, "
                     "retraction_reason = ? WHERE id = ? AND channel = ?",
-                    (now, op_id, reason, mid, self.channel),
+                    (now, op_id, reason, mid, ch),
                 )
+                # The notice inherits the deleted message's recipients. Posting
+                # it as a broadcast told the whole channel that a DM existed,
+                # who wrote it and when it was withdrawn — content stays
+                # private, but the metadata is exactly what a DM is for.
+                notice_recips = row["recipients"] if "recipients" in row.keys() else ""
                 db.execute(
-                    "INSERT INTO messages (channel, member_id, member_name, content, created_at) "
-                    "VALUES (?, ?, ?, ?, ?)",
-                    (self.channel, op_id, op_name, f"[retracted #{mid}] {reason}", now),
+                    "INSERT INTO messages (channel, member_id, member_name, content, "
+                    " created_at, recipients) VALUES (?, ?, ?, ?, ?, ?)",
+                    (ch, op_id, op_name, f"[retracted #{mid}] {reason}", now,
+                     notice_recips or "[]"),
                 )
                 db.execute("COMMIT")
             except sqlite3.Error:
@@ -4220,10 +4303,15 @@ class NthWebHandler(BaseHTTPRequestHandler):
             db = sqlite3.connect(str(self.db_path), timeout=5)
             db.row_factory = sqlite3.Row
             db.execute("PRAGMA busy_timeout=3000")
+            # retracted_at IS NULL: a withdrawn message must not be searchable.
+            # "Delete" is a stronger promise than the retract marker history
+            # shows — a human who deletes a message reasonably believes the
+            # text is gone from the dashboard, and search is the dashboard.
             rows = db.execute(
                 "SELECT id, member_id, member_name, content, recipients, created_at "
                 "FROM messages "
                 "WHERE channel = ? AND content LIKE ? ESCAPE '\\' "
+                "AND retracted_at IS NULL "
                 "ORDER BY id DESC LIMIT 200",
                 (ch, like),
             ).fetchall()

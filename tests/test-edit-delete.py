@@ -138,6 +138,98 @@ finally:
         server.shutdown()
     hub.stop()
 
+# ── Landing mode: the DEFAULT hub deployment ─────────────────────────────────
+# Everything above runs single-channel, where NthWebHandler.channel holds a real
+# code. The default hub runs in LANDING mode, where it is "" for every request
+# and the channel comes from ?channel=. Both handlers used to bind self.channel,
+# so edit and delete 404'd on every call in the mode most operators actually
+# run — and nothing noticed, because no test ran in that mode.
+import queue  # noqa: E402
+
+_rl = json.loads(srv.nth_connect(summary="t", name="LandingAgent", channel="editland"))
+CH_L = _rl["channel"]
+hub_l = web.EventHub(srv.DB_PATH, CH_L)
+server_l = None
+try:
+    hub_l.start()
+    web.NthWebHandler.hub = None
+    web.NthWebHandler.channel = ""
+    web.NthWebHandler.landing_mode = True
+    web.NthWebHandler.db_path = srv.DB_PATH
+    server_l = web.QuietThreadingHTTPServer(("127.0.0.1", 0), web.NthWebHandler)
+    server_l.daemon_threads = True
+    port_l = server_l.server_address[1]
+    threading.Thread(target=server_l.serve_forever, daemon=True).start()
+    time.sleep(0.2)
+
+    st, r = http(port_l, f"/api/send?channel={CH_L}", {"content": "landing original"})
+    check("landing: send accepted", st == 200)
+    lid = r.get("id")
+
+    st, _ = http(port_l, f"/api/edit?channel={CH_L}",
+                 {"message_id": lid, "content": "landing edited"})
+    check("landing: edit accepted (404'd before the fix)", st == 200)
+
+    _db = srv.get_db()
+    try:
+        lrow = _db.execute("SELECT content, edited_at FROM messages WHERE id=?",
+                           (lid,)).fetchone()
+    finally:
+        _db.close()
+    check("landing: the edit actually applied",
+          bool(lrow) and (lrow["content"] or "") == "landing edited")
+    check("landing: edited_at stamped", bool(lrow) and bool(lrow["edited_at"]))
+
+    # An edit must reach ALREADY-CONNECTED clients. The tail only selects
+    # id > last_msg_id and an edit is an UPDATE, so without the message_update
+    # scan every open browser renders the original text until it reloads.
+    sub = hub_l.subscribe()
+    time.sleep(0.3)
+    while True:                      # discard the priming snapshot
+        try:
+            sub.get(timeout=0.2)
+        except queue.Empty:
+            break
+    st, _ = http(port_l, f"/api/edit?channel={CH_L}",
+                 {"message_id": lid, "content": "landing edited twice"})
+    seen_update, deadline = None, time.time() + 6.0
+    while time.time() < deadline and seen_update is None:
+        try:
+            ev = json.loads(sub.get(timeout=0.25))
+        except queue.Empty:
+            continue
+        except (ValueError, TypeError):
+            continue
+        if ev.get("type") == "message_update" and ev.get("id") == lid:
+            seen_update = ev
+    hub_l.unsubscribe(sub)
+    check("landing: an edit is pushed as message_update", seen_update is not None)
+    check("landing: the update carries the NEW text",
+          bool(seen_update) and seen_update.get("content") == "landing edited twice")
+
+    st, _ = http(port_l, f"/api/delete?channel={CH_L}", {"message_id": lid})
+    check("landing: delete accepted", st == 200)
+
+    # Delete is a stronger promise than retract's marker: search is part of the
+    # dashboard, so a deleted body must not come back from it.
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{port_l}/api/search?channel={CH_L}&q=landing", method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            sres = json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        sres = {"results": [{"id": lid, "http_error": e.code}]}
+    hits = [x for x in (sres.get("results") or []) if x.get("id") == lid]
+    check("landing: search does not return a deleted message", not hits)
+except OSError as e:
+    check(f"landing: server started (got {e!r})", False)
+finally:
+    if server_l is not None:
+        server_l.shutdown()
+    hub_l.stop()
+    web.NthWebHandler.landing_mode = False
+
+
 shutil.rmtree(_tmp, ignore_errors=True)
 print()
 print(f"{'FAILED' if failures else 'OK'} — {len(failures)} failure(s), {len(skips)} skip(s)")
