@@ -16,7 +16,8 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-COUNTER_FILE = Path.home() / ".claude" / "roam" / "test-restart-counter.txt"
+COUNTER_FILE = Path.home() / ".claude" / "nth" / "test-restart-counter.txt"
+COUNTER_FILE.parent.mkdir(parents=True, exist_ok=True)
 
 
 def now():
