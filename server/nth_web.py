@@ -51,7 +51,7 @@ from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
 sys.path.insert(0, str(Path(__file__).parent))
 from nth_constants import (ANIMAL_EMOJIS, animal_for, animal_for_channel,
@@ -2611,6 +2611,46 @@ class NthWebHandler(BaseHTTPRequestHandler):
             exists[cand] = self._resolve_existing(cand) is not None
         self._json({"exists": exists})
 
+    @staticmethod
+    def _reveal_linux_dbus(abspath: str):
+        """Ask the desktop's file manager to SELECT `abspath`, via freedesktop's
+        org.freedesktop.FileManager1.ShowItems. Returns the CompletedProcess, or
+        None when the call could not be attempted at all (no dbus-send, no
+        session bus, timeout) so the caller falls back to xdg-open.
+
+        Why this exists: xdg-open can only open the *containing folder*, while
+        macOS `open -R` and Explorer `/select,` both highlight the file itself.
+        ShowItems is the freedesktop equivalent, implemented by Nautilus,
+        Dolphin, Nemo, Thunar and others.
+
+        The path is percent-encoded into a file:// URI with urllib's quote().
+        That is required for correctness (spaces, '#', non-ASCII) and it also
+        removes a sharp edge: dbus-send parses `array:` arguments as a
+        COMMA-SEPARATED list, and a comma is a legal filename character, so a
+        raw path like /home/u/a,b/x.txt would arrive as two malformed URIs.
+        quote() encodes ',' as %2C, so no raw comma ever reaches the parser --
+        the hazard is designed out rather than escaped around.
+        """
+        if shutil.which("dbus-send") is None:
+            return None
+        # No session bus (headless, a service unit, ssh without a bus) means no
+        # file manager to talk to. Checking is cheaper than a 5s timeout.
+        if not (os.environ.get("DBUS_SESSION_BUS_ADDRESS")
+                or os.environ.get("XDG_RUNTIME_DIR")):
+            return None
+        uri = "file://" + quote(abspath)
+        try:
+            return subprocess.run(
+                ["dbus-send", "--session", "--print-reply", "--reply-timeout=5000",
+                 "--dest=org.freedesktop.FileManager1",
+                 "/org/freedesktop/FileManager1",
+                 "org.freedesktop.FileManager1.ShowItems",
+                 f"array:string:{uri}", "string:"],
+                capture_output=True, text=True, timeout=8,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+
     def _handle_reveal(self) -> None:
         """POST /api/reveal — body {"path": "..."}. Reveal (select) the file in
         Finder. SECURITY: no shell, arg-list only, `open -R` (reveal) never plain
@@ -2668,17 +2708,23 @@ class NthWebHandler(BaseHTTPRequestHandler):
                     capture_output=True, text=True, timeout=10,
                 )
             elif plat.startswith("linux"):
-                # Best-effort: open the containing folder (no reliable "select").
-                folder = abspath if os.path.isdir(abspath) else os.path.dirname(abspath)
-                # NO `--`. xdg-open's main argument loop matches `-*` before any
-                # sentinel handling and calls exit_failure_syntax, so a `--` makes
-                # EVERY call fail with "unexpected option '--'". Measured against
-                # xdg-utils 1.2.1. abspath is absolute, so there is no
-                # leading-dash case for a sentinel to guard against anyway.
-                cp = subprocess.run(
-                    ["xdg-open", folder],
-                    capture_output=True, text=True, timeout=10,
-                )
+                # Two tiers. freedesktop's FileManager1 SELECTS the file, which
+                # is what macOS and Windows do; xdg-open can only open the
+                # containing folder. Try the former, fall back to the latter, so
+                # a desktop with no conforming file manager still reveals
+                # something instead of failing.
+                cp = self._reveal_linux_dbus(abspath)
+                if cp is None or cp.returncode != 0:
+                    folder = abspath if os.path.isdir(abspath) else os.path.dirname(abspath)
+                    # NO `--`. xdg-open's main argument loop matches `-*` before
+                    # any sentinel handling and calls exit_failure_syntax, so a
+                    # `--` makes EVERY call fail with "unexpected option '--'".
+                    # Measured against xdg-utils 1.2.1. abspath is absolute, so
+                    # there is no leading-dash case for a sentinel to guard.
+                    cp = subprocess.run(
+                        ["xdg-open", folder],
+                        capture_output=True, text=True, timeout=10,
+                    )
             elif plat.startswith("win"):
                 # ONE argv token: explorer parses "/select,<path>" as a unit, and
                 # a space after the comma makes it ignore the selector and open
