@@ -254,6 +254,43 @@ TAILSCALE_CANDIDATES = (
     "/usr/local/bin/tailscale", "/opt/homebrew/bin/tailscale",
 )
 _tailscale_missing_warned = False
+_tailnet_owner_cache: Optional[str] = None
+_tailnet_owner_warned = False
+
+
+def tailnet_owner() -> str:
+    """The tailnet login that owns THIS hub, or "" if it cannot be determined.
+
+    Explicit NTH_TAILNET_OWNER wins; otherwise ask the local daemon who we are.
+    Cached for the process: it cannot change without the daemon restarting, and
+    this is consulted on every unresolved request.
+    """
+    global _tailnet_owner_cache
+    if _tailnet_owner_cache is not None:
+        return _tailnet_owner_cache
+    explicit = (os.environ.get("NTH_TAILNET_OWNER") or "").strip()
+    if explicit:
+        _tailnet_owner_cache = explicit
+        return explicit
+    owner = ""
+    for cmd in TAILSCALE_CANDIDATES:
+        try:
+            out = subprocess.check_output([cmd, "status", "--json"],
+                                          timeout=3, stderr=subprocess.DEVNULL)
+        except (FileNotFoundError, subprocess.SubprocessError):
+            continue
+        try:
+            data = json.loads(out.decode("utf-8", errors="replace"))
+            uid = data.get("Self", {}).get("UserID")
+            # whois returns UserProfile.LoginName; status exposes the same
+            # field under User[<uid>]. Same string shape, so a plain equality
+            # comparison is valid -- no normalisation needed.
+            owner = ((data.get("User") or {}).get(str(uid)) or {}).get("LoginName") or ""
+        except (ValueError, TypeError, AttributeError):
+            owner = ""
+        break
+    _tailnet_owner_cache = owner
+    return owner
 
 
 def _warn_tailscale_missing_once() -> None:
@@ -412,6 +449,36 @@ class OperatorRegistry:
         if not info:
             return None
         login = info.get("login") or ""
+        # A tailnet peer is not automatically THIS hub's operator. Without this
+        # check, every account the tailnet resolves -- a second person on a
+        # shared tailnet, a device handed to someone else -- receives the same
+        # trust as a local shell: reveal a path, remove a member, upload into
+        # the operator's home directory.
+        #
+        # The comparison is by ACCOUNT, not by device: whois returns the
+        # login, and every one of the owner's own machines carries the same
+        # one, so a single-user tailnet is unaffected.
+        #
+        # When the owner cannot be determined we warn and allow, rather than
+        # failing closed. Failing closed here would refuse the operator on
+        # their own hub because of a JSON-parsing failure -- the identical
+        # silent-lockout shape this release fixes elsewhere. Operators who want
+        # the strict reading set NTH_TAILNET_STRICT=1.
+        owner = tailnet_owner()
+        if owner:
+            if login and login != owner:
+                return None            # falls through to the guest tier
+        elif os.environ.get("NTH_TAILNET_STRICT", "").strip() in ("1", "true", "yes"):
+            return None
+        else:
+            global _tailnet_owner_warned
+            if not _tailnet_owner_warned:
+                _tailnet_owner_warned = True
+                sys.stderr.write(
+                    "[nth_web] could not determine this hub's tailnet owner; "
+                    "accepting any tailnet account as operator. Set "
+                    "NTH_TAILNET_OWNER=<login> to restrict, or "
+                    "NTH_TAILNET_STRICT=1 to refuse instead.\n")
         # Use the username half of the login (strip @domain).
         login_user = login.split("@", 1)[0] if login else ""
         display = info.get("display") or login_user or "tailnet-user"
@@ -1835,6 +1902,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 return token, ident, is_new
         else:
             OPERATOR_REGISTRY.record_ladder_attempt(token)
+        prior = ident               # what we held before re-running the ladder
         remote_ip = self._client_ip()
         # Try Tailscale whois on the remote address
         ident = OPERATOR_REGISTRY.resolve_from_tailscale(token, remote_ip)
@@ -1844,6 +1912,19 @@ class NthWebHandler(BaseHTTPRequestHandler):
         ident = OPERATOR_REGISTRY.resolve_from_loopback(token, remote_ip)
         if ident is not None:
             return token, ident, is_new
+        # The ladder still says no. If this token already carried a
+        # self-declared guest identity, KEEP it rather than parking as pending.
+        #
+        # A guest exists precisely BECAUSE whois could not name them, so the
+        # retry above fails for every guest by definition. Without this, each
+        # retry window would silently un-name a guest -- the browser would be
+        # told to POST /api/identify again, and send/upload would start
+        # refusing mid-session, once a minute, forever. The retry exists to let
+        # a transient failure heal; it must never leave the caller worse off
+        # than not retrying at all. A retry may upgrade a tier, never downgrade
+        # one.
+        if prior is not None and prior.source == IDENTITY_SOURCE_GUEST:
+            return token, prior, is_new
         # Park as pending until the browser supplies a name
         ident = OperatorIdentity(
             member_id=f"{OPERATOR_MEMBER_ID_PREFIX}p_{token[:8]}",

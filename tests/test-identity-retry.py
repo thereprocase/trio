@@ -26,6 +26,13 @@ class Handler:
 
 real_registry = web.OPERATOR_REGISTRY
 real_whois = web.tailscale_whois
+# The owner-equality check (8.1.1) refuses any tailnet login that is not this
+# hub's owner, and on a real machine tailnet_owner() resolves to the actual
+# account -- which would refuse the stub below and make the upgrade assertions
+# fail for a reason unrelated to retrying. Pin the owner to the stubbed login
+# so this test keeps testing the retry.
+web._tailnet_owner_cache = "operator@example.test"
+web._tailnet_owner_warned = True
 registry = web.OperatorRegistry()
 web.OPERATOR_REGISTRY = registry
 handler = Handler()
@@ -54,6 +61,7 @@ try:
 finally:
     web.OPERATOR_REGISTRY = real_registry
     web.tailscale_whois = real_whois
+    web._tailnet_owner_cache = None
 
 print(f"{'FAILED' if failures else 'OK'} — {len(failures)} failure(s)")
 sys.exit(1 if failures else 0)
