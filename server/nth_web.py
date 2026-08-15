@@ -2367,11 +2367,21 @@ def public_agent_channels(conn: sqlite3.Connection, agent_id: str) -> List[str]:
 
 
 def ensure_agent_inboxes(conn: sqlite3.Connection) -> None:
-    """Create the private DM transport and place every managed agent in it.
+    """Create the private DM transport and place every MANAGED agent in it.
 
-    This is an idempotent migration. Existing canonical agents — whether
-    supervisor-managed or externally launched — become directly messageable
-    on the next hub start without acquiring a visible channel.
+    This is an idempotent migration, run on hub start, so that a
+    supervisor-managed agent becomes directly messageable without acquiring a
+    visible channel.
+
+    `managed = 1` is load-bearing, not decoration. A self-connected agent now
+    has a row in `agents` too, and it establishes its own inbox presence at
+    connect — it is not resumed by the hub, so the hub has no business
+    asserting it is present. Without the filter this loop would force
+    `active = 1` on an inbox row that something deliberately deactivated
+    (archive does exactly that), silently restoring DM-readability to an agent
+    an operator had removed. Proven before the filter: deactivate a
+    self-connected agent's inbox presence, restart the hub, and it is active
+    again.
     """
     now = now_iso()
     conn.execute(
@@ -2379,7 +2389,7 @@ def ensure_agent_inboxes(conn: sqlite3.Connection) -> None:
         "VALUES (?, 'active', ?, ?)", (AGENT_INBOX_CHANNEL, now, now))
     rows = conn.execute(
         "SELECT id, name, model, base_prompt FROM agents "
-        "WHERE archived_at IS NULL"
+        "WHERE archived_at IS NULL AND managed = 1"
     ).fetchall()
     for row in rows:
         agent_id, name, model, base_prompt = row
@@ -2880,8 +2890,8 @@ class AgentRouter(threading.Thread):
         EXPLICIT: an @mention, a !bang, or a direct message. Those are
         deliberate acts by the sending agent, and they do not fire repeatedly
         on their own."""
-        managed = self._managed_ids()
-        sender_is_agent = (managed is None) or (m["member_id"] in managed)
+        known_agents = self._agent_sender_ids()
+        sender_is_agent = (known_agents is None) or (m["member_id"] in known_agents)
         parsed = {}
         for col in ("mentions", "refs", "bangs", "recipients"):
             try:
@@ -2909,10 +2919,30 @@ class AgentRouter(threading.Thread):
                 out.add(agent_id)
         return out
 
-    def _managed_ids(self) -> set:
-        """Ids of every managed agent, cached briefly. Read once per tick
-        rather than per message; the roster changes on operator action, not on
-        message traffic."""
+    def _agent_sender_ids(self) -> set:
+        """Ids of every AGENT, cached briefly. Read once per tick rather than
+        per message; the roster changes on operator action, not on traffic.
+
+        Every row in `agents`, not just the supervisor-managed ones. Those used
+        to be the same set, because only a spawned agent got a row — so an
+        agent that connected itself over MCP was indistinguishable from a HUMAN
+        here, and its ambient posts woke every hub-dispatched agent in the room
+        under `all` / `about`. Now that a self-connected agent registers a
+        durable identity it is correctly classified as an agent, and only an
+        explicit @mention, !bang or DM from it wakes anyone.
+
+        Scope, precisely: `_targets` only ever wakes agents that appear in
+        `placements`, which is built from `agent_channels JOIN agents` — i.e.
+        hub-dispatched agents. So this changes nothing in a room containing
+        ONLY self-connected agents (the router has no targets there at all).
+        It bites in a HYBRID room: self-connected agents alongside hub-spawned
+        ones, which is exactly where an ambient loop would have been billed.
+
+        The transition is per-row and unmigrated: an agent that connected
+        before this shipped keeps waking peers ambiently until it happens to
+        reconnect, so a live roster can hold two classes of otherwise identical
+        agent with no operator-visible signal which is which.
+        """
         now = time.monotonic()
         if now - self._agent_ids_at < 5.0 and self._agent_ids is not None:
             return self._agent_ids
@@ -4436,8 +4466,13 @@ class NthWebHandler(BaseHTTPRequestHandler):
             try:
                 db.execute("PRAGMA busy_timeout=3000")
                 marks = ",".join("?" * len(agent_ids))
+                # managed = 1: a SELF-connected agent has a row here too now,
+                # but it is not an agent this control plane operates — it has
+                # no process the supervisor owns. Counting it as "known" would
+                # report 409 "already in the requested state" for something the
+                # operator can neither see in /api/agents nor act on.
                 known = {r[0] for r in db.execute(
-                    f"SELECT id FROM agents WHERE id IN ({marks})",
+                    f"SELECT id FROM agents WHERE managed = 1 AND id IN ({marks})",
                     agent_ids).fetchall()}
             finally:
                 db.close()
@@ -4558,7 +4593,8 @@ class NthWebHandler(BaseHTTPRequestHandler):
             db = sqlite3.connect(str(self.db_path), timeout=5)
             try:
                 row = db.execute(
-                    "SELECT archived_at FROM agents WHERE id=?", (agent_id,)
+                    "SELECT archived_at FROM agents WHERE id=? AND managed=1",
+                    (agent_id,)
                 ).fetchone()
             finally:
                 db.close()

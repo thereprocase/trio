@@ -183,6 +183,51 @@ def generate_member_id() -> str:
     return "".join(random.choices(string.ascii_lowercase + string.digits, k=6))
 
 
+def _register_agent_identity(db: sqlite3.Connection, name: str,
+                             model: str, now: str) -> Tuple[str, str]:
+    """Mint and INSERT a globally unique self-connected agent identity.
+
+    `members` is channel-scoped, but an MCP connection is an AGENT — so its id
+    has to be durable in the global `agents` registry too, or the agent has
+    nothing to reclaim after a restart. Supervisor-spawned agents already get
+    such a row; this is the same durable identity for an agent that connected
+    itself.
+
+    The INSERT is the authority, not the pre-check. A SELECT-then-INSERT has a
+    window in which two connections both see an id as free, and the loser of
+    that race would be handed the winner's reclaim secret — which is the entire
+    credential for speaking as that identity. Here a collision fails the INSERT
+    and the retry mints a fresh id, so this function can only ever return a row
+    it created, never one it found.
+    """
+    while True:
+        member_id = generate_member_id()
+        # Cheap pre-check against both tables. Not load-bearing for correctness
+        # (the INSERT below is) — it just avoids the exception on the common
+        # path, and skips ids already held by a channel member so a
+        # self-connected agent cannot collide with an existing one.
+        collision = db.execute(
+            "SELECT 1 FROM agents WHERE id = ? "
+            "UNION ALL SELECT 1 FROM members WHERE id = ? LIMIT 1",
+            (member_id, member_id),
+        ).fetchone()
+        if collision is not None:
+            continue
+        reclaim_secret = secrets.token_urlsafe(32)
+        try:
+            db.execute(
+                "INSERT INTO agents "
+                "(id, name, model, managed, reclaim_secret, created_at, "
+                " last_active_at) VALUES (?, ?, ?, 0, ?, ?, ?)",
+                (member_id, name, model or "", reclaim_secret, now, now),
+            )
+        except sqlite3.IntegrityError:
+            # Another connector won the race after our pre-check. A failed
+            # INSERT cannot have exposed the winner's row; mint again.
+            continue
+        return member_id, reclaim_secret
+
+
 _GUEST_SUFFIX_RE = re.compile(r"\s*\(\s*guest\s*\)\s*$", re.IGNORECASE)
 _GUEST_KEBAB_RE = re.compile(r"[-_]guest\s*$", re.IGNORECASE)
 _GUEST_PREFIX_RE = re.compile(r"^\s*guest[:\-]\s*", re.IGNORECASE)
@@ -840,6 +885,7 @@ def nth_connect(
     topic: str = "",
     skills: str = "",
     pin_topic: bool = False,
+    model: str = "",
     node_host: str = "",
     node_version: str = "",
     resume_member_id: str = "",
@@ -857,7 +903,19 @@ def nth_connect(
     Returns a JSON object with:
       - "channel": the channel code (remember this for all subsequent calls)
       - "member_id": your unique ID (remember this too)
-      - "action": "created" or "joined"
+      - "reclaim_secret": the credential for coming back as THIS identity after
+            a restart. **Returned only on the call that mints your identity,
+            and never again — if you lose it, that identity is gone.**
+            PERSIST IT somewhere that survives your process (a state file
+            beside your notes), then on your next start pass it back as
+            `reclaim_secret` together with `resume_member_id=<your member_id>`.
+            Reconnecting WITHOUT it mints a second identity: your old row keeps
+            every @mention, placement and task claim that pointed at you, and
+            peers go on addressing a member that is no longer you. Empty string
+            on a reclaim — it is disclosed once, so that knowing the (public)
+            member_id is never enough to take over the identity.
+      - "action": "created", "joined", or "reclaimed" (a silent re-attach to an
+            identity you already held here — no join message is posted)
       - "members": list of current members (names, skills, summaries)
       - "recent_messages": last few messages for context
 
@@ -867,18 +925,27 @@ def nth_connect(
         channel: Channel code to join. If empty, generates from topic or randomly.
         topic: Used to generate a readable channel code (ignored if channel given)
         skills: Comma-separated list of your skills/capabilities
+        model: The model you are running as, recorded on your durable identity
+            so an operator's roster can show it. Cosmetic; safe to omit.
         node_host: Hostname of the machine you are running on. Only useful for
             remote (SSE) connections — the hub cannot see a spoke's hostname
             server-side, so declaring it here puts your machine on the fleet view.
         node_version: Your local nth install version (from nth_constants), so
             the fleet view can flag version drift between hub and spokes.
-        resume_member_id: Reclaim a pre-assigned identity instead of minting a
-            new one. A hub-spawned agent is told its id at launch; connecting
-            as that id re-attaches to the row the hub already created rather
-            than duplicating it.
-        reclaim_secret: Required with resume_member_id. The hub mints a fresh
-            one on every spawn, so a secret leaked from an old process or an
-            old transcript cannot reclaim a currently-running agent.
+        resume_member_id: Reclaim an identity you already hold instead of
+            minting a new one, re-attaching to the existing row rather than
+            duplicating it. Two sources: a hub-spawned agent is told its id at
+            launch, and a SELF-connected agent gets one back from its first
+            connect (see "member_id" and "reclaim_secret" above). Use it on
+            every restart — that is the whole point of having a durable
+            identity.
+        reclaim_secret: Required with resume_member_id. For a hub-spawned agent
+            the hub mints a fresh one on every spawn, so a secret leaked from
+            an old process or transcript cannot reclaim a running agent. For a
+            self-connected agent it is the value returned when the identity was
+            minted, which you must have persisted yourself. An unknown id falls
+            back to minting a fresh identity; a KNOWN id with a wrong or
+            missing secret is refused outright.
     """
     if channel:
         err = validate_channel_code(channel)
@@ -904,7 +971,11 @@ def nth_connect(
     # heartbeat. When resume_member_id is empty — every ordinary caller —
     # behaviour is unchanged.
     reclaiming = bool(resume_member_id and resume_member_id.strip())
-    member_id = resume_member_id.strip() if reclaiming else generate_member_id()
+    # A non-reclaiming caller gets its id from _register_agent_identity, which
+    # mints and INSERTs it as one authoritative step. Pre-minting here would
+    # reintroduce the SELECT-then-INSERT window that helper exists to close.
+    member_id = resume_member_id.strip() if reclaiming else ""
+    response_reclaim_secret = ""
     now = now_iso()
     db = get_db()
 
@@ -936,7 +1007,7 @@ def nth_connect(
                 db.close()
                 return json.dumps({"error": "Cannot reclaim this identity."})
             reclaiming = False
-            member_id = generate_member_id()
+            member_id = ""
 
     try:
         _reap_sessions(db)
@@ -946,50 +1017,88 @@ def nth_connect(
             if existing["status"] == "ended":
                 return json.dumps({"error": f'Channel "{channel}" has ended.'})
 
-            # Check member count (all members who ever joined)
-            count = db.execute(
-                "SELECT COUNT(*) FROM members WHERE channel = ?",
-                (channel,),
-            ).fetchone()[0]
-            if count >= MAX_MEMBERS:
-                return json.dumps({"error": f"Channel is full ({MAX_MEMBERS} members)."})
+            # A reclaim may only re-attach to an AGENT row. A human/operator
+            # row is NOT reclaimable — otherwise any MCP tool-caller could read
+            # the operator's member_id off the public roster and impersonate
+            # them: mint a valid session token and read their DMs. Checked here,
+            # before the capacity gate, because it is a refusal either way.
+            reclaimed_existing = False
+            if reclaiming:
+                existing_row = db.execute(
+                    "SELECT kind FROM members WHERE id = ? AND channel = ?",
+                    (member_id, channel)).fetchone()
+                reclaimed_existing = existing_row is not None
+                if reclaimed_existing and (
+                        (existing_row["kind"] if "kind" in existing_row.keys()
+                         else "agent") or "agent") != "agent":
+                    return json.dumps({"error": "Cannot reclaim this identity."})
 
-            # Join existing channel (retry once on member_id collision)
-            try:
-                db.execute(
-                    "INSERT INTO members (id, channel, name, summary, skills, last_seen, joined_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (member_id, channel, name, summary, skills, now, now),
-                )
-            except sqlite3.IntegrityError:
-                if reclaiming:
-                    # The row is ours and already here — this is a RE-attach,
-                    # which is the whole point. Minting a new id would create
-                    # the duplicate identity reclaim exists to prevent.
-                    db.execute(
-                        "UPDATE members SET name = ?, summary = ?, skills = ?, "
-                        "last_seen = ?, active = 1 WHERE id = ? AND channel = ?",
-                        (name, summary, skills, now, member_id, channel),
-                    )
-                else:
-                    member_id = generate_member_id()
+            # Check member count (all members who ever joined). Skipped when an
+            # agent is reclaiming a row it ALREADY has here: that row is
+            # already inside the count, so counting it against the agent would
+            # lock a legitimately-placed agent out of a channel that filled up
+            # — it would be refused entry to a seat it is still sitting in.
+            if not (reclaiming and reclaimed_existing):
+                count = db.execute(
+                    "SELECT COUNT(*) FROM members WHERE channel = ?",
+                    (channel,),
+                ).fetchone()[0]
+                if count >= MAX_MEMBERS:
+                    return json.dumps({"error": f"Channel is full ({MAX_MEMBERS} members)."})
+
+            if reclaiming:
+                # Re-attach to the existing row, or create it with the FIXED id
+                # if this channel has never seen it. Never re-mint: a new id
+                # would be the duplicate identity reclaim exists to prevent.
+                try:
                     db.execute(
                         "INSERT INTO members (id, channel, name, summary, skills, last_seen, joined_at) "
                         "VALUES (?, ?, ?, ?, ?, ?, ?)",
                         (member_id, channel, name, summary, skills, now, now),
                     )
+                except sqlite3.IntegrityError:
+                    db.execute(
+                        "UPDATE members SET name = ?, summary = ?, skills = ?, "
+                        "last_seen = ?, active = 1 WHERE id = ? AND channel = ?",
+                        (name, summary, skills, now, member_id, channel),
+                    )
+                # Keep the GLOBAL identity in step with the channel presence.
+                # Without this `agents.name` is frozen at whatever the identity
+                # was first minted as: the sigil resolver merges global names
+                # into its wake candidates, so an agent that renamed itself
+                # would go on waking to its OLD name forever, alongside the new
+                # one. `managed = 0` guard: a supervisor-managed agent's name is
+                # the operator's to set, not the agent's to overwrite on
+                # reconnect.
+                db.execute(
+                    "UPDATE agents SET name = ?, last_active_at = ? "
+                    "WHERE id = ? AND managed = 0",
+                    (name, now, member_id),
+                )
+            else:
+                member_id, response_reclaim_secret = _register_agent_identity(
+                    db, name, model, now)
+                db.execute(
+                    "INSERT INTO members (id, channel, name, summary, skills, last_seen, joined_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (member_id, channel, name, summary, skills, now, now),
+                )
             db.execute(
                 "UPDATE channels SET updated_at = ? WHERE code = ?",
                 (now, channel),
             )
-            # Post a system-style join message
-            db.execute(
-                "INSERT INTO messages (channel, member_id, member_name, content, created_at) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (channel, member_id, name, f"[joined] {name} — {summary}" + (f" (skills: {skills})" if skills else ""), now),
-            )
+            # Post a system-style join message — but stay quiet on a silent
+            # re-attach. A restarting agent rejoining a channel it never left
+            # is not news, and announcing it on every restart spends every
+            # peer's attention for nothing.
+            if not (reclaiming and reclaimed_existing):
+                db.execute(
+                    "INSERT INTO messages (channel, member_id, member_name, content, created_at) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (channel, member_id, name, f"[joined] {name} — {summary}" + (f" (skills: {skills})" if skills else ""), now),
+                )
             db.commit()
-            action = "joined"
+            action = "reclaimed" if (reclaiming and reclaimed_existing) else "joined"
         else:
             # Create new channel
             db.execute(
@@ -997,19 +1106,16 @@ def nth_connect(
                 "VALUES (?, 'active', ?, ?)",
                 (channel, now, now),
             )
-            try:
-                db.execute(
-                    "INSERT INTO members (id, channel, name, summary, skills, last_seen, joined_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (member_id, channel, name, summary, skills, now, now),
-                )
-            except sqlite3.IntegrityError:
-                member_id = generate_member_id()
-                db.execute(
-                    "INSERT INTO members (id, channel, name, summary, skills, last_seen, joined_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (member_id, channel, name, summary, skills, now, now),
-                )
+            if not reclaiming:
+                member_id, response_reclaim_secret = _register_agent_identity(
+                    db, name, model, now)
+            # The channel was just created, so its members table cannot already
+            # hold this id — no collision retry is needed on either path.
+            db.execute(
+                "INSERT INTO members (id, channel, name, summary, skills, last_seen, joined_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (member_id, channel, name, summary, skills, now, now),
+            )
             db.execute(
                 "INSERT INTO messages (channel, member_id, member_name, content, created_at) "
                 "VALUES (?, ?, ?, ?, ?)",
@@ -1152,6 +1258,12 @@ def nth_connect(
             "session_token": session_token,
             "name": name,
             "action": action,
+            # The credential for reclaiming THIS identity after a restart, and
+            # the only time it is ever disclosed. Non-empty only when this call
+            # MINTED the identity: a reclaim returns "" rather than echoing the
+            # secret back, so it cannot be harvested by anyone who merely knows
+            # an existing member_id off the public roster.
+            "reclaim_secret": response_reclaim_secret,
             "transport": "sse" if is_sse else "stdio",
             "monitor_hint": monitor_hint,
             "members": [
@@ -4146,6 +4258,34 @@ def nth_cull(channel: str, member_id: str, target_member_id: str) -> str:
             "AND revoked_at IS NULL",
             (now, channel, target_member_id),
         )
+        # Retire the GLOBAL identity too, once no channel presence remains.
+        # Only for a SELF-connected agent (managed = 0): a supervisor-managed
+        # agent's row is owned by the operator's roster and outlives any single
+        # channel — culling it from one channel must not delete it.
+        #
+        # Without this, cull leaves a durable identity and its reclaim_secret
+        # behind: the culled agent can reconnect with the same id, and the row
+        # accumulates forever because nothing else deletes an unmanaged one.
+        # The inbox presence goes with it, since that presence is what
+        # authorises reading a DM addressed to this id.
+        remaining = db.execute(
+            "SELECT COUNT(*) FROM members WHERE id = ? AND channel != ?",
+            (target_member_id, AGENT_INBOX_CHANNEL),
+        ).fetchone()[0]
+        if remaining == 0:
+            db.execute(
+                "DELETE FROM members WHERE id = ? AND channel = ?",
+                (target_member_id, AGENT_INBOX_CHANNEL),
+            )
+            db.execute(
+                "DELETE FROM agents WHERE id = ? AND managed = 0",
+                (target_member_id,),
+            )
+            db.execute(
+                "UPDATE sessions SET revoked_at = ? WHERE member_id = ? "
+                "AND revoked_at IS NULL",
+                (now, target_member_id),
+            )
 
         released_ids = [t["id"] for t in released_tasks]
         released_lock_names = [lk["resource"] for lk in released_locks]

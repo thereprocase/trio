@@ -109,10 +109,16 @@ host_id = members_named("Host")[0] if members_named("Host") else None
 took = json.loads(srv.nth_connect(summary="x", name="Impostor", channel="room",
                                   resume_member_id=host_id,
                                   reclaim_secret="anything"))
-check("claiming an unregistered member's id does NOT return that id",
+# Host connected itself over MCP, so it now HAS a registered global identity —
+# which makes this a wrong-secret reclaim of a registered id, and those are
+# refused outright rather than quietly handed a fresh one. That is stricter
+# than the old fallback: before self-connected agents had a durable identity,
+# an impostor naming this id simply got a new one and no signal that it had
+# tried to take someone else's.
+check("claiming a registered member's id does NOT return that id",
       took.get("member_id") != host_id)
-check("...it falls back to a freshly minted identity",
-      bool(took.get("member_id")))
+check("...and is refused outright, not silently given a fresh identity",
+      "error" in took and "reclaim_secret" in took["error"])
 
 unknown = json.loads(srv.nth_connect(summary="x", name="Ghost", channel="room",
                                      resume_member_id="ag_does_not_exist",

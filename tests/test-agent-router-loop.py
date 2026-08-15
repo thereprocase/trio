@@ -53,8 +53,18 @@ for aid, name in (("ag_a", "Ayla"), ("ag_b", "Bram")):
                (aid, "room", name, now, now))
     db.execute("INSERT INTO agent_channels (agent_id, channel, member_id, joined_at) "
                "VALUES (?,?,?,?)", (aid, "room", aid, now))
-human = db.execute("SELECT id FROM members WHERE channel='room' AND id NOT LIKE 'ag_%'"
-                   ).fetchone()["id"]
+# A real human: a web operator row, kind='human', with NO row in `agents`.
+# The MCP-connected "Human" above is not one — an agent that connects itself
+# now registers a durable agents identity, so it is correctly classified as an
+# agent for wake purposes. Using it as the human stand-in would test the
+# opposite of what this file is about.
+human = "_op_human"
+db.execute("INSERT INTO members (id, channel, name, summary, skills, kind, "
+           "last_seen, joined_at, active) VALUES (?,?,?,'','','human',?,?,1)",
+           (human, "room", "Operator", now, now))
+self_connected = db.execute(
+    "SELECT id FROM members WHERE channel='room' AND id NOT LIKE 'ag_%' "
+    "AND id != ?", (human,)).fetchone()["id"]
 db.commit()
 db.close()
 
@@ -87,6 +97,15 @@ check("a human's ambient message wakes both agents (the feature still works)",
 t = targets_for("ag_a")
 check("an AGENT's ambient message wakes nobody (the loop is cut)", t == set())
 
+
+# The case this project actually runs: a room of agents that connected
+# THEMSELVES over MCP. Before self-connected agents had a durable identity they
+# were indistinguishable from humans here, so the loop-cut did not apply to the
+# most common deployment at all.
+t_self = targets_for(self_connected)
+check("a SELF-CONNECTED agent's ambient message also wakes nobody — the loop "
+      "protection now covers the configuration it always should have",
+      t_self == set())
 t = targets_for("ag_a", wake_mode="about")
 check("...also under 'about'", t == set())
 
@@ -112,19 +131,24 @@ check("a human's ambient message under 'at' targets nobody", t == set())
 # ── fail closed ─────────────────────────────────────────────────────────────
 # If the agent roster cannot be read we must assume the sender IS an agent:
 # a missed ambient wake is a delay, a loop is an unbounded bill.
-_orig = router._managed_ids
-router._managed_ids = lambda: None
+_orig = router._agent_sender_ids
+router._agent_sender_ids = lambda: None
 try:
     t = targets_for(human)
     check("roster unreadable -> ambient wake suppressed (fails CLOSED)", t == set())
     t = targets_for(human, mentions=["ag_a"])
     check("roster unreadable -> explicit @mention still delivered", t == {"ag_a"})
 finally:
-    router._managed_ids = _orig
+    router._agent_sender_ids = _orig
 
 
 # ── and the guard is not just the cache being empty ────────────────────────
-check("the guard reads real agent ids", router._managed_ids() == {"ag_a", "ag_b"})
+# The self-connected agent is in this set too, and the operator is not — that
+# split is exactly what the loop-cut turns on.
+check("the guard reads real agent ids, self-connected agents included",
+      router._agent_sender_ids() == {"ag_a", "ag_b", self_connected})
+check("and a human operator is NOT in it",
+      human not in router._agent_sender_ids())
 
 print()
 if failures:
