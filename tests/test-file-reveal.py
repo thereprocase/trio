@@ -17,6 +17,7 @@ import time
 import types
 import urllib.error
 import urllib.request
+from urllib.parse import quote
 from pathlib import Path
 
 SERVER = Path(__file__).resolve().parent.parent / "server"
@@ -53,18 +54,28 @@ missing = os.path.join(_tmp, "does-not-exist.txt")
 reveal_calls = []
 
 
+# Linux reveal has two tiers: a D-Bus FileManager1.ShowItems call that SELECTS
+# the file (what macOS and Windows do), falling back to xdg-open on the
+# containing folder. Flipping this lets a test force the D-Bus tier to fail so
+# the fallback is exercised too. A mocked test cannot prove a desktop accepts
+# the D-Bus call — that is test-reveal-realtool.py's job — but it can and must
+# prove we fall back when the call fails.
+dbus_returncode = [0]
+
+
 def fake_run(args, **kwargs):
     # Record only reveal invocations. identity resolution also goes through
     # subprocess (tailscale whois via check_output, which is built on run), and
     # counting those would break every "no exec" assertion below.
-    if args and args[0] in ("open", "xdg-open", "explorer", "explorer.exe"):
+    if args and args[0] in ("open", "xdg-open", "explorer", "explorer.exe", "dbus-send"):
         reveal_calls.append({"args": args, "kwargs": kwargs})
     # Real subprocess.run returns BYTES for stdout unless text=True, and
     # check_output() is implemented on top of run() — returning str here makes
     # every check_output caller (e.g. tailscale_whois) blow up on .decode().
     text = kwargs.get("text") or kwargs.get("universal_newlines")
     empty = "" if text else b""
-    return types.SimpleNamespace(returncode=0, stdout=empty, stderr=empty)
+    rc = dbus_returncode[0] if (args and args[0] == "dbus-send") else 0
+    return types.SimpleNamespace(returncode=rc, stdout=empty, stderr=empty)
 
 
 web.subprocess.run = fake_run
@@ -177,13 +188,54 @@ try:
             check("reveal: reveals the abspath of the real file",
                   args[-1] == os.path.abspath(real_file))
         elif sys.platform.startswith("linux"):
-            check("reveal: uses xdg-open", args[0] == "xdg-open")
-            # Regression guard. xdg-open's arg loop matches "-*" first and
-            # rejects "--" outright, so its presence broke every Linux reveal.
+            # Tier 1: D-Bus ShowItems, which SELECTS the file the way macOS and
+            # Windows do. Only attempted when dbus-send exists and a session bus
+            # is advertised, so on a headless box we land on xdg-open instead
+            # and assert that below.
+            if args[0] == "dbus-send":
+                check("reveal: D-Bus targets FileManager1",
+                      "--dest=org.freedesktop.FileManager1" in args)
+                check("reveal: D-Bus calls ShowItems (select, not open)",
+                      "org.freedesktop.FileManager1.ShowItems" in args)
+                uri_arg = [a for a in args if a.startswith("array:string:")]
+                check("reveal: D-Bus is passed one file:// URI",
+                      len(uri_arg) == 1
+                      and uri_arg[0] == "array:string:file://"
+                          + quote(os.path.abspath(real_file)))
+                # dbus-send splits `array:` arguments on COMMAS, and a comma is
+                # a legal filename character. quote() encodes it as %2C, so a
+                # raw comma can never reach that parser.
+                check("reveal: no raw comma reaches the D-Bus array parser",
+                      "," not in uri_arg[0][len("array:string:"):])
+                check("reveal: D-Bus call is bounded by a reply timeout",
+                      any(a.startswith("--reply-timeout=") for a in args))
+            else:
+                check("reveal: uses xdg-open", args[0] == "xdg-open")
+                check("reveal: opens the containing folder of the real file",
+                      args[-1] == os.path.dirname(os.path.abspath(real_file)))
+            # Regression guard, both tiers. xdg-open's arg loop matches "-*"
+            # first and rejects "--" outright, so its presence broke every
+            # Linux reveal.
             check("reveal: NO `--` (xdg-open rejects it as an unknown option)",
                   "--" not in args)
-            check("reveal: opens the containing folder of the real file",
-                  args[-1] == os.path.dirname(os.path.abspath(real_file)))
+
+            # Tier 2: when D-Bus fails, we MUST fall back to xdg-open rather
+            # than reporting failure. This is the half a mocked test can prove,
+            # and the reason the D-Bus tier is safe to add at all.
+            reveal_calls.clear()
+            dbus_returncode[0] = 1
+            try:
+                st_fb, resp_fb = http(port, "/api/reveal", {"path": real_file})
+            finally:
+                dbus_returncode[0] = 0
+            fb = [c["args"] for c in reveal_calls if c["args"][0] == "xdg-open"]
+            check("reveal: D-Bus failure falls back to xdg-open", len(fb) == 1)
+            check("reveal: fallback still returns 200",
+                  st_fb == 200 and resp_fb.get("ok") is True)
+            if fb:
+                check("reveal: fallback opens the containing folder",
+                      fb[0][-1] == os.path.dirname(os.path.abspath(real_file)))
+                check("reveal: fallback carries NO `--`", "--" not in fb[0])
         elif sys.platform.startswith("win"):
             check("reveal: uses explorer", args[0] == "explorer")
             # Regression guard. "/select," and the path must be ONE token; split

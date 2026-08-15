@@ -47,6 +47,72 @@ class RevealArgvAcceptedByRealTool(unittest.TestCase):
             fh.write("x")
 
     @unittest.skipUnless(sys.platform.startswith("linux"), "linux only")
+    def test_linux_dbus_uri_survives_hostile_filenames(self):
+        """The D-Bus tier passes the file as `array:string:<uri>`, and dbus-send
+        parses `array:` as a COMMA-SEPARATED list. A comma is legal in a
+        filename, so an unencoded path would arrive as two malformed URIs and
+        the file manager would select neither.
+
+        This asserts on names that actually contain the hostile characters --
+        an earlier version of this check used a plain filename, so it passed
+        without ever exercising the encoding it claimed to verify.
+        """
+        from urllib.parse import quote
+        hostile = {
+            "comma": "a,b.txt",
+            "space": "my file.txt",
+            "hash": "note#1.txt",
+            "non-ascii": "ünïcode.txt",
+            "percent": "100%done.txt",
+        }
+        for label, name in hostile.items():
+            path = os.path.join(self.tmp, name)
+            with open(path, "w") as fh:
+                fh.write("x")
+            uri = "file://" + quote(os.path.abspath(path))
+            arg = f"array:string:{uri}"
+            payload = arg[len("array:string:"):]
+            self.assertNotIn(
+                ",", payload,
+                f"{label}: a raw comma reached the D-Bus array parser via "
+                f"{name!r}; dbus-send would split this into two URIs")
+            for ch in (" ", "#"):
+                self.assertNotIn(ch, payload,
+                                 f"{label}: raw {ch!r} left in the URI from {name!r}")
+            self.assertTrue(payload.startswith("file:///"))
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "linux only")
+    def test_linux_dbus_send_accepts_our_argv_shape(self):
+        """dbus-send must accept the ARGUMENT SHAPE we build. Pointed at a
+        deliberately non-existent service so nothing is actually invoked: a
+        ServiceUnknown/NameHasNoOwner reply proves the argv parsed, whereas a
+        usage/syntax error would mean we are building it wrong."""
+        if shutil.which("dbus-send") is None:
+            _loud_skip("dbus-send not installed — the D-Bus reveal tier is UNVERIFIED here")
+        if not (os.environ.get("DBUS_SESSION_BUS_ADDRESS")
+                or os.environ.get("XDG_RUNTIME_DIR")):
+            _loud_skip("no session bus advertised — the D-Bus reveal tier is UNVERIFIED here")
+        from urllib.parse import quote
+        target = os.path.join(self.tmp, "a,b.txt")
+        with open(target, "w") as fh:
+            fh.write("x")
+        uri = "file://" + quote(os.path.abspath(target))
+        cp = subprocess.run(
+            ["dbus-send", "--session", "--print-reply", "--reply-timeout=5000",
+             "--dest=org.nth.NoSuchService.RevealArgvProbe",
+             "/org/freedesktop/FileManager1",
+             "org.freedesktop.FileManager1.ShowItems",
+             f"array:string:{uri}", "string:"],
+            capture_output=True, text=True, timeout=REVEAL_TIMEOUT)
+        blob = (cp.stderr + cp.stdout).lower()
+        for marker in ("usage:", "invalid type", "malformed", "unknown type"):
+            self.assertNotIn(
+                marker, blob,
+                f"dbus-send rejected our argument SHAPE ({marker!r}), which "
+                f"means the reveal call is malformed regardless of the "
+                f"desktop. Output:\n{cp.stderr}{cp.stdout}")
+
+    @unittest.skipUnless(sys.platform.startswith("linux"), "linux only")
     def test_linux_xdg_open_accepts_our_argv(self):
         if shutil.which("xdg-open") is None:
             _loud_skip("xdg-open not installed — the Linux reveal path is UNVERIFIED here")
