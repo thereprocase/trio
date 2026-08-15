@@ -15,9 +15,11 @@ The organising principle is: never report a number that is confidently wrong.
 A rate that cannot be computed honestly is reported as None, and every derived
 figure carries enough context to say what it was measured over. Concretely:
 
-  * a rate window is capped at the quota's own reset period, because a window
-    that outlives its quota straddles resets and its slope is a sawtooth
-    artifact rather than a burn rate;
+  * no slope is ever taken across a quota RESET, because that measures the
+    reset rather than the usage. Two independent cuts enforce it: the window
+    start derived from the provider's own `resets_at`, and a visible step down
+    in the value, which covers the (normal) case of a stale or absent reset
+    time. A window longer than the quota's own period is refused outright;
   * a rate is only ever computed across samples from the SAME source, because
     the two sources for a Claude percentage can disagree and a handoff between
     them would otherwise render as a spike;
@@ -62,6 +64,15 @@ BURN_SPANS: Tuple[Tuple[str, float], ...] = (
 # and `before_reset` permanently true — a plausible-looking wrong answer rather
 # than an error. Anything beyond this horizon is treated as absent.
 MAX_RESET_HORIZON = 400 * 86400
+# Timestamps below this are nonsense too — a negative or near-zero `resetsAt`
+# re-emitted verbatim renders as a date tens of billions of years BC.
+MIN_RESET_FLOOR = 1_000_000_000            # 2001-09-09; older than this repo
+
+# A drop of more than this many percentage points between consecutive samples
+# is a quota reset, not usage going backwards. Small enough to catch any real
+# reset (they drop to near zero), large enough not to fire on provider
+# rounding jitter.
+RESET_DROP_PP = 0.5
 
 # Set once if the series cannot be persisted. Without this the feature dies
 # silently on a read-only NTH_HOME or a full disk: every rate reads None
@@ -103,7 +114,7 @@ def sane_timestamp(value: Any, now: float) -> Optional[float]:
     if not num_ok(value, allow_none=False):
         return None
     ts = float(value)
-    if ts > now + MAX_RESET_HORIZON:
+    if ts > now + MAX_RESET_HORIZON or ts < MIN_RESET_FLOOR:
         return None
     return ts
 
@@ -203,21 +214,55 @@ def record_sample(five_hour: Optional[float], seven_day: Optional[float],
         return hist
 
 
-def _baseline(history: List[Dict[str, Any]], key: str, span: float, now: float,
-              max_age: Optional[float] = None) -> Optional[Dict[str, Any]]:
+def since_last_reset(history: List[Dict[str, Any]], key: str,
+                     window_start: Optional[float] = None
+                     ) -> List[Dict[str, Any]]:
+    """The tail of `history` that belongs to the CURRENT quota window.
+
+    Everything downstream measures a slope, and a slope taken across a reset is
+    not a burn rate — it is the reset, reported as usage. A quota that read 95%
+    just before its reset and 8% just after yields "−87 pp" as a headline
+    number if the two samples are compared.
+
+    Two independent cuts, because neither is sufficient alone:
+
+      * `window_start` (= resets_at − period) is EXACT when the provider told
+        us when the quota resets. Samples before it belong to the last window.
+      * A step DOWN in the value is a reset we can see for ourselves. This is
+        what covers a stale or absent `resets_at` — which is the normal case
+        for the statusline source, documented as lagging.
+
+    Bounding the baseline's AGE instead (the obvious fix) is not enough: a
+    reset three hours ago plus a sampling gap still leaves a four-hour-old
+    pre-reset baseline inside a five-hour quota. The series only grows when
+    someone polls, so multi-hour gaps are ordinary.
+    """
+    start = 0
+    previous = None
+    for index, sample in enumerate(history):
+        value = sample.get(key)
+        if value is None:
+            continue
+        if window_start is not None and sample["t"] < window_start:
+            start = index + 1
+        elif previous is not None and previous - value > RESET_DROP_PP:
+            start = index
+        previous = value
+    return history[start:]
+
+
+def _baseline(history: List[Dict[str, Any]], key: str, span: float,
+              now: float) -> Optional[Dict[str, Any]]:
     """The sample to measure against: the newest one at or before the window
     start, falling back to the earliest available when none is that old.
 
-    `max_age` is the quota's own reset period, and it is the reason this
-    function exists rather than being inlined twice. Capping the requested SPAN
-    is not enough on its own: the fallback can still hand back a sample older
-    than the quota, so a "15 minute" or "daily" figure would be measured across
-    a reset and report the reset as usage. A baseline that old is refused
-    outright — no number beats a wrong one.
+    The fallback is why every rate reports `measured_hours` — early on, or
+    after a reset, the only baseline available is younger than the window
+    asked for, and the honest answer is the real span rather than the label.
 
     Shared by every rate and change function so a guard added here cannot
-    silently fail to apply elsewhere. Assumes `history` is sorted by `t`, which
-    record_sample guarantees.
+    silently fail to apply elsewhere. Assumes `history` is sorted by `t` and
+    already trimmed by since_last_reset().
     """
     target = now - span
     prior = None
@@ -230,14 +275,11 @@ def _baseline(history: List[Dict[str, Any]], key: str, span: float, now: float,
             if prior is None:
                 prior = sample
             break
-    if prior is not None and max_age is not None and now - prior["t"] >= max_age:
-        return None
     return prior
 
 
 def rate_over(history: List[Dict[str, Any]], key: str, span: float,
-              current: Optional[float], now: float,
-              max_age: Optional[float] = None
+              current: Optional[float], now: float
               ) -> Tuple[Optional[float], Optional[float]]:
     """(percentage points per hour, hours actually measured over).
 
@@ -252,7 +294,7 @@ def rate_over(history: List[Dict[str, Any]], key: str, span: float,
     """
     if current is None:
         return None, None
-    prior = _baseline(history, key, span, now, max_age)
+    prior = _baseline(history, key, span, now)
     if prior is None:
         return None, None
     elapsed = now - prior["t"]
@@ -284,7 +326,8 @@ def usable_spans(max_span: Optional[float]) -> List[Tuple[str, float]]:
 def burn_windows(history: List[Dict[str, Any]], key: str,
                  current: Optional[float], now: float,
                  source: Optional[str] = None,
-                 max_span: Optional[float] = None
+                 max_span: Optional[float] = None,
+                 window_start: Optional[float] = None
                  ) -> Dict[str, Dict[str, Optional[float]]]:
     """{window: {pp_per_hr, measured_hours}} for every window in BURN_SPANS.
 
@@ -294,12 +337,12 @@ def burn_windows(history: List[Dict[str, Any]], key: str,
     """
     src_key = f"{key}_src"
     same_source = [s for s in history if s.get(src_key) == source]
+    same_source = since_last_reset(same_source, key, window_start)
     usable = dict(usable_spans(max_span))
     out: Dict[str, Dict[str, Optional[float]]] = {}
     for name, _ in BURN_SPANS:
         if name in usable:
-            rate, hours = rate_over(same_source, key, usable[name], current, now,
-                                    max_age=max_span)
+            rate, hours = rate_over(same_source, key, usable[name], current, now)
         else:
             rate, hours = None, None
         out[name] = {"pp_per_hr": rate, "measured_hours": hours}
@@ -318,15 +361,15 @@ def _codex_series(history: List[Dict[str, Any]], key: str) -> List[Dict[str, Any
 
 def codex_burn_windows(history: List[Dict[str, Any]], key: str,
                        current: Optional[float], now: float,
-                       max_span: Optional[float] = None
+                       max_span: Optional[float] = None,
+                       window_start: Optional[float] = None
                        ) -> Dict[str, Dict[str, Optional[float]]]:
-    shaped = _codex_series(history, key)
+    shaped = since_last_reset(_codex_series(history, key), "value", window_start)
     usable = dict(usable_spans(max_span))
     out: Dict[str, Dict[str, Optional[float]]] = {}
     for name, _ in BURN_SPANS:
         if name in usable:
-            rate, hours = rate_over(shaped, "value", usable[name], current, now,
-                                    max_age=max_span)
+            rate, hours = rate_over(shaped, "value", usable[name], current, now)
         else:
             rate, hours = None, None
         out[name] = {"pp_per_hr": rate, "measured_hours": hours}
@@ -336,19 +379,25 @@ def codex_burn_windows(history: List[Dict[str, Any]], key: str,
 def change_over(history: List[Dict[str, Any]], key: str, span: float,
                 current: Optional[float], now: float,
                 source: Optional[str] = None,
-                max_span: Optional[float] = None) -> Optional[Dict[str, float]]:
+                window_start: Optional[float] = None) -> Optional[Dict[str, float]]:
     """Actual percentage-point change and elapsed hours for a lookback window.
 
-    `max_span` applies the same anti-sawtooth rule as the rate windows. Without
-    it a "daily change" on a 5-hour quota spans five resets and reports the
-    resets rather than the usage: a quota that read 95% just over five hours
-    ago and has since reset to 10% would report −85 pp of "daily change".
+    `window_start` applies the same anti-sawtooth rule as the rate windows.
+    Without it a "daily change" on a 5-hour quota spans five resets and reports
+    the resets rather than the usage: a quota that read 95% just before a reset
+    and 8% just after would report −87 pp of "daily change".
+
+    Note this deliberately keeps the full 24h nominal span and lets the
+    baseline fall back to the oldest sample in the current window. Refusing to
+    answer instead would make `daily_change` permanently null on any quota
+    shorter than a day, which is every Claude session quota.
     """
     if current is None:
         return None
     if source is not None:
         history = [s for s in history if s.get(f"{key}_src") == source]
-    prior = _baseline(history, key, span, now, max_age=max_span)
+    history = since_last_reset(history, key, window_start)
+    prior = _baseline(history, key, span, now)
     if prior is None or now - prior["t"] < 60:
         return None
     change = current - prior[key]
@@ -360,10 +409,10 @@ def change_over(history: List[Dict[str, Any]], key: str, span: float,
 
 def codex_change_over(history: List[Dict[str, Any]], key: str,
                       current: Optional[float], now: float,
-                      max_span: Optional[float] = None
+                      window_start: Optional[float] = None
                       ) -> Optional[Dict[str, float]]:
     return change_over(_codex_series(history, key), "value", 86400.0,
-                       current, now, max_span=max_span)
+                       current, now, window_start=window_start)
 
 
 def exhaust_projection(burn: Dict[str, Dict[str, Optional[float]]],
@@ -404,8 +453,14 @@ def exhaust_projection(burn: Dict[str, Dict[str, Optional[float]]],
                       and hours_to_reset is not None else None)
     if raw_projection is not None and not num_ok(raw_projection, allow_none=False):
         raw_projection = None
-    projected_at_reset = (round(min(100.0, raw_projection), 1)
-                          if raw_projection is not None else None)
+    # Truncate rather than round: a raw 99.9998 rounding UP to 100.0 publishes
+    # "expected at reset: 100.0%" beside `before_reset: false`, and a client
+    # reading the first as "exhausts before the reset" would contradict the
+    # field that actually answers that question.
+    projected_at_reset = (
+        100.0 if raw_projection is not None and raw_projection >= 100.0
+        else (math.floor(raw_projection * 10) / 10
+              if raw_projection is not None else None))
     # `current` is reported explicitly. A UI showing the arithmetic behind the
     # forecast ("40% now + 3.0 pp/hr × 20h") cannot back-derive it as
     # `projected − rate × hours` once the clamp engages: a clamped 3040%→100%
@@ -519,17 +574,25 @@ def token_events() -> List[Dict[str, Any]]:
     path = nsup.TOKEN_EVENTS_PATH
     try:
         stat = path.stat()
-        key = (str(path), stat.st_mtime_ns, stat.st_size)
+        # Inode and ctime as well as mtime and size: a same-size rewrite inside
+        # one mtime tick is indistinguishable otherwise, which is unreachable
+        # on APFS/ext4 but not on a coarse-granularity or network filesystem.
+        key = (str(path), stat.st_mtime_ns, stat.st_size,
+               stat.st_ino, stat.st_ctime_ns)
     except OSError:
         key = None
+    # A copy of the LIST (not of the events): the memo is shared by every
+    # caller on every request thread, so handing out the backing list means one
+    # caller appending to it corrupts every later aggregate for the life of the
+    # process. The events themselves are treated as read-only.
     with _token_memo_lock:
         if key is not None and _token_memo["key"] == key:
-            return _token_memo["events"]
+            return list(_token_memo["events"])
     events = nsup.load_token_events()
     with _token_memo_lock:
         _token_memo["key"] = key
         _token_memo["events"] = events
-    return events
+    return list(events)
 
 
 _TOKEN_WINDOWS: Tuple[Tuple[str, float], ...] = (

@@ -3428,17 +3428,20 @@ class NthWebHandler(BaseHTTPRequestHandler):
         # interactive render, so its mtime is genuinely its age.
         try:
             raw = json.loads(STATUSLINE_STATE_PATH.read_text())
-            limits = raw.get("_cached_rate_limits") or {}
-            five_hour = limits.get("five_hour") or {}
-            seven_day = limits.get("seven_day") or {}
-            if "used_percentage" in five_hour or "used_percentage" in seven_day:
-                mtime = STATUSLINE_STATE_PATH.stat().st_mtime
-                fh = [five_hour.get("used_percentage"),
-                      five_hour.get("resets_at"), "statusline", mtime]
-                sd = [seven_day.get("used_percentage"),
-                      seven_day.get("resets_at"), "statusline", mtime]
-        except (OSError, ValueError, AttributeError, TypeError,
-                json.JSONDecodeError):
+            limits = raw.get("_cached_rate_limits")
+            limits = limits if isinstance(limits, dict) else {}
+            mtime = STATUSLINE_STATE_PATH.stat().st_mtime
+            # Per quota, independently. A malformed `five_hour` (a bare number,
+            # a string) must not discard a perfectly good `seven_day`: they are
+            # separate readings from separate windows, and the file is
+            # user-writable. isinstance rather than `in`, because `"x" in 7`
+            # raises TypeError and a shared except would swallow both.
+            for slot, name in ((fh, "five_hour"), (sd, "seven_day")):
+                quota = limits.get(name)
+                if isinstance(quota, dict) and "used_percentage" in quota:
+                    slot[:] = [quota.get("used_percentage"),
+                               quota.get("resets_at"), "statusline", mtime]
+        except (OSError, ValueError, json.JSONDecodeError):
             pass
         # Overlay the `/usage` CLI cache when present AND fresh (< 30 min — a
         # stuck cache must not outrank the statusline forever). Each field
@@ -3529,10 +3532,20 @@ class NthWebHandler(BaseHTTPRequestHandler):
         history = nusage.record_sample(
             fh_pct, sd_pct, fh_src, sd_src, codex_current, now=now)
         # Each quota's windows are capped at its own reset period.
+        # window_start = when the CURRENT quota window began. Exact when the
+        # provider told us the reset time; None when it did not, in which case
+        # nth_usage falls back to spotting the reset as a step down in the
+        # value. Either way no slope is taken across a reset.
+        fh_window_start = (fh_resets - FIVE_HOUR_SECONDS
+                           if fh_resets is not None else None)
+        sd_window_start = (sd_resets - SEVEN_DAY_SECONDS
+                           if sd_resets is not None else None)
         burn_fh = nusage.burn_windows(history, "fh", fh_pct, now, fh_src,
-                                      max_span=FIVE_HOUR_SECONDS)
+                                      max_span=FIVE_HOUR_SECONDS,
+                                      window_start=fh_window_start)
         burn_sd = nusage.burn_windows(history, "sd", sd_pct, now, sd_src,
-                                      max_span=SEVEN_DAY_SECONDS)
+                                      max_span=SEVEN_DAY_SECONDS,
+                                      window_start=sd_window_start)
         burn: Dict[str, Any] = {
             "five_hour": burn_fh,
             "seven_day": burn_sd,
@@ -3547,10 +3560,10 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 # is shortened rather than reporting the resets as usage.
                 "five_hour": nusage.change_over(
                     history, "fh", 86400.0, fh_pct, now, fh_src,
-                    max_span=FIVE_HOUR_SECONDS),
+                    window_start=fh_window_start),
                 "seven_day": nusage.change_over(
                     history, "sd", 86400.0, sd_pct, now, sd_src,
-                    max_span=SEVEN_DAY_SECONDS),
+                    window_start=sd_window_start),
             },
             "sampled_at": now,
         }
@@ -3562,11 +3575,15 @@ class NthWebHandler(BaseHTTPRequestHandler):
         for row in codex_rows:
             duration = row.get("window_duration_mins")
             max_span = duration * 60.0 if duration else None
+            row_start = (row["resets_at"] - max_span
+                         if row["resets_at"] is not None and max_span else None)
             windows = nusage.codex_burn_windows(
-                history, row["key"], row["used_percentage"], now, max_span)
+                history, row["key"], row["used_percentage"], now, max_span,
+                window_start=row_start)
             row["burn"] = windows
             row["daily_change"] = nusage.codex_change_over(
-                history, row["key"], row["used_percentage"], now, max_span)
+                history, row["key"], row["used_percentage"], now,
+                window_start=row_start)
             row["projection"] = nusage.exhaust_projection(
                 windows, row["used_percentage"], row["resets_at"], now)
 

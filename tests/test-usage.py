@@ -26,6 +26,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from http.client import RemoteDisconnected
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -124,24 +125,56 @@ check("change: baseline younger than 60s -> None",
 # −85 pp "daily change" — the reset, presented as usage.
 straddle = [sample(5 * 3600 + 10, fh=95.0, fh_src="cli"),
             sample(60, fh=10.0, fh_src="cli")]
-check("change: WITHOUT the cap, the reset is reported as an -85pp daily change "
-      "(this is the bug the cap exists for)",
-      nu.change_over(straddle, "fh", 86400, 10.0, NOW, "cli"
-                     )["percentage_points"] == -85.0)
-check("change: WITH the quota's reset period as the cap, no number is reported "
-      "rather than the reset",
-      nu.change_over(straddle, "fh", 86400, 10.0, NOW, "cli",
-                     max_span=5 * 3600.0) is None)
-# Capping the requested SPAN is not sufficient on its own — the earliest-sample
-# fallback can hand back a baseline older than the quota no matter how short
-# the window asked for. The age of the baseline is what gets refused.
-check("baseline: a baseline older than the quota is refused even for a short "
-      "window",
-      nu.rate_over(straddle, "fh", 900, 10.0, NOW,
-                   max_age=5 * 3600.0) == (None, None))
-check("baseline: the same short window is fine against a fresher baseline",
-      nu.rate_over([sample(3600, fh=5.0, fh_src="cli")], "fh", 900, 10.0, NOW,
-                   max_age=5 * 3600.0) == (5.0, 1.0))
+check("change: the naive comparison across these two samples WOULD report the "
+      "reset as -85pp (this is the bug the cut exists for)",
+      round(10.0 - straddle[0]["fh"], 2) == -85.0)
+_after_reset = nu.change_over(straddle, "fh", 86400, 10.0, NOW, "cli")
+check("change: change_over measures only the post-reset window instead",
+      _after_reset is not None and _after_reset["percentage_points"] == 0.0
+      and _after_reset["elapsed_hours"] < 0.1)
+
+# ── the reset cut ──
+# Bounding the baseline's AGE is not enough. A reset 3h ago plus a sampling gap
+# (the series only grows when someone polls, so overnight gaps are ordinary)
+# leaves a 4h-old pre-reset baseline inside a 5h quota — under any age bound
+# that still permits same-window baselines.
+gap = [sample(4 * 3600, fh=95.0, fh_src="cli"), sample(10, fh=8.0, fh_src="cli")]
+check("reset: a step DOWN in the value is spotted without any reset time",
+      [s["fh"] for s in nu.since_last_reset(gap, "fh")] == [8.0])
+check("reset: with the reset detected, no sawtooth rate survives",
+      nu.burn_windows(gap, "fh", 8.0, NOW, "cli",
+                      max_span=5 * 3600.0)["h1"]["pp_per_hr"] is None)
+check("reset: and no sawtooth daily change survives either",
+      nu.change_over(gap, "fh", 86400, 8.0, NOW, "cli") is None)
+# The provider's own reset time is the exact cut when it is available.
+check("reset: window_start drops samples from the previous window",
+      [s["fh"] for s in nu.since_last_reset(
+          gap, "fh", window_start=NOW - 2 * 3600)] == [8.0])
+# A reset the value does not reveal (usage climbed back ABOVE the old reading
+# before the next sample) is only catchable with the provider's reset time.
+climbed = [sample(4 * 3600, fh=90.0, fh_src="cli"),
+           sample(10, fh=97.0, fh_src="cli")]
+check("reset: a reset hidden by a higher post-reset value is still cut when "
+      "the provider told us when the window began",
+      len(nu.since_last_reset(climbed, "fh")) == 2
+      and [s["fh"] for s in nu.since_last_reset(
+          climbed, "fh", window_start=NOW - 2 * 3600)] == [97.0])
+check("reset: rounding jitter is not mistaken for a reset",
+      len(nu.since_last_reset(
+          [sample(7200, fh=10.4, fh_src="cli"),
+           sample(3600, fh=10.0, fh_src="cli")], "fh")) == 2)
+
+# daily_change must NOT be permanently null on a quota shorter than a day.
+# Refusing any baseline older than the quota period would do exactly that:
+# the 24h target always falls back to the oldest sample, which is always
+# older than 5h once the series has been running.
+dense = [sample(6 * 3600 - i * 600, fh=10.0 + i, fh_src="cli")
+         for i in range(30)]
+daily = nu.change_over(dense, "fh", 86400, 45.0, NOW, "cli")
+check("change: daily_change still answers on a 5-hour quota, measured over "
+      "the window it really had",
+      daily is not None and daily["elapsed_hours"] <= 6.0
+      and daily["percentage_points"] > 0)
 
 # ── exhaust_projection ──
 def burn_of(**rates):
@@ -184,6 +217,13 @@ check("projection: a reset time in the past reads as absent, not as imminent",
       and stale["before_reset"] is None)
 check("projection: a stale reset time still leaves the burn rate usable",
       stale["will_exhaust"] is True and stale["rate_per_hr"] == 3.0)
+# A raw forecast just under 100 must not ROUND UP to 100.0: a client reading
+# "expected at reset: 100.0%" as "exhausts before the reset" would then
+# contradict before_reset, which is the field that actually answers that.
+edge = nu.exhaust_projection(burn_of(h24=3.0), 99.999, NOW + 1.0, NOW)
+check("projection: a forecast just under 100 is truncated, not rounded up to "
+      "contradict before_reset",
+      edge["projected_at_reset"] < 100.0 and edge["before_reset"] is False)
 zero = nu.exhaust_projection(burn_of(h24=3.0), 40.0, 0.0, NOW)
 check("projection: resets_at == 0 is treated as absent, not as truthy-false",
       zero["hours_to_reset"] is None and zero["before_reset"] is None)
@@ -277,6 +317,17 @@ ms = {"rate_limits": {"rateLimits": {"limitId": "j", "primary": {
     "usedPercent": 10, "resetsAt": (NOW + 3600) * 1000}}}}
 check("codex rows: a millisecond-epoch resetsAt is rejected, not believed",
       nu.quota_rows(ms, NOW)[0]["resets_at"] is None)
+# The floor matters for the same reason as the ceiling: a negative or
+# near-zero resetsAt is re-emitted verbatim and renders as a date billions of
+# years BC rather than as a missing value.
+neg = {"rate_limits": {"rateLimits": {"limitId": "n", "primary": {
+    "usedPercent": 10, "resetsAt": -1e18}}}}
+check("codex rows: an absurdly OLD resetsAt is rejected too",
+      nu.quota_rows(neg, NOW)[0]["resets_at"] is None)
+check("sane_timestamp: legitimate near-future and far-past bounds",
+      nu.sane_timestamp(NOW + 3600, NOW) == NOW + 3600
+      and nu.sane_timestamp(NOW + nu.MAX_RESET_HORIZON + 10, NOW) is None
+      and nu.sane_timestamp(0, NOW) is None)
 
 # ── json_safe: provider blobs are re-emitted whole ──
 blob = json.loads('{"totalTokens": NaN, "nested": [1, Infinity, "x"], "ok": 3}')
@@ -326,16 +377,24 @@ check("tokens: an unknown provider is bucketed, not dropped",
       nu.token_rates(NOW, [{"t": NOW, "provider": "martian",
                             "tot": 7, "out": 1}]
                      )["m15"]["providers"]["unknown"]["total"] == 7)
-# The parse is memoized against the file's (mtime, size). Proven by pulling the
-# file out from under it: a cached read still answers, a changed file does not.
+# The parse is memoized against the file's identity+mtime+size.
 first = nu.token_events()
-check("tokens: an unchanged file returns the memoized parse",
-      nu.token_events() is first)
+check("tokens: an unchanged file yields the same events again",
+      nu.token_events() == first)
+# The memo is shared across every request thread, so it must hand out a COPY:
+# one caller appending to the backing list would otherwise corrupt every later
+# aggregate for the life of the process.
+borrowed = nu.token_events()
+borrowed.append({"t": NOW, "id": "x", "provider": "claude", "tot": 10**6,
+                 "out": 1, "v": 1})
+check("tokens: a caller mutating the returned list cannot poison the memo",
+      len(nu.token_events()) == len(first)
+      and nu.token_rates(NOW, nu.token_events())["m15"]["total"] == 1800)
 with nsup.TOKEN_EVENTS_PATH.open("a") as fh:
     fh.write(json.dumps({"t": NOW, "id": "a3", "provider": "claude",
                          "tot": 42, "out": 2, "v": 1}) + "\n")
 check("tokens: an appended event invalidates the memo",
-      nu.token_events() is not first and len(nu.token_events()) == len(first) + 1)
+      len(nu.token_events()) == len(first) + 1)
 
 # ───────────────────────────── tier 2: HTTP ─────────────────────────────
 
@@ -353,9 +412,12 @@ web.NthWebHandler.db_path = srv.DB_PATH
 web._DB_PATH_GLOBAL = srv.DB_PATH
 web._SUPERVISOR = None
 
-# Never let the handler shell out to `claude -p "/usage"` from a test.
+# Never let the handler shell out to `claude -p "/usage"` from a test — but
+# keep the real one, because part of the point below is that it can RAISE.
 _refresh_calls = []
-nsup.maybe_refresh_usage_cli = lambda: _refresh_calls.append(1)
+_real_refresh = nsup.maybe_refresh_usage_cli
+_stub_refresh = lambda: _refresh_calls.append(1)
+nsup.maybe_refresh_usage_cli = _stub_refresh
 
 web.STATUSLINE_STATE_PATH = _tmp / "statusline-state.json"
 web.STATUSLINE_STATE_PATH.write_text(json.dumps({"_cached_rate_limits": {
@@ -372,6 +434,13 @@ def http(port, path):
         with urllib.request.urlopen(req, timeout=8) as resp:
             raw = resp.read().decode()
             return resp.status, raw
+    except (RemoteDisconnected, ConnectionError) as exc:
+        # The handler raised out of do_GET, which has no wrapping exception
+        # handler: the socket closed with no status line at all. Report it as
+        # status 0 rather than letting it abort the run — a dropped connection
+        # is a RESULT this suite deliberately tests for, and one traceback
+        # would hide every check after it.
+        return 0, f"connection dropped: {exc}"
     except urllib.error.HTTPError as e:
         try:
             return e.code, e.read().decode()
@@ -435,19 +504,53 @@ try:
           d["claude"]["five_hour"]["updated_at"]
           < d["claude"]["seven_day"]["updated_at"])
 
-    # An oversized `t` in the CLI cache must not raise OverflowError out of
-    # do_GET — that drops the connection with no response at all.
-    nsup.USAGE_CLI_PATH.write_text('{"t": ' + "9" * 400 + ', "week_pct": 5}')
-    st, body = http(port, "/api/usage")
-    check("usage: an oversized CLI timestamp still answers",
-          st == 200 and strict.decode(body)["ok"] is True)
-    nsup.USAGE_CLI_PATH.unlink()
+    # ── inputs that must not drop the connection ──
+    # do_GET has NO wrapping exception handler, so anything that raises out of
+    # the handler costs the client the whole response: no status line, just a
+    # closed socket, on every poll, until someone repairs the file by hand.
+    #
+    # These run against the REAL nsup.maybe_refresh_usage_cli. An earlier
+    # version of this test monkeypatched it away for the whole HTTP tier —
+    # which stubbed out the very function that raised, so the check passed
+    # while production dropped the connection. Restore it around these.
+    nsup.maybe_refresh_usage_cli = _real_refresh
+    try:
+        nsup.USAGE_CLI_PATH.write_text('{"t": ' + "9" * 400 + ', "week_pct": 5}')
+        st, body = http(port, "/api/usage")
+        check("usage: an oversized CLI timestamp answers rather than dropping "
+              "the connection (float() on it raises OverflowError)",
+              st == 200 and strict.decode(body)["ok"] is True)
+        nsup.USAGE_CLI_PATH.unlink()
+
+        # A crash mid-append leaves a truncated multi-byte sequence.
+        # read_text() then raises UnicodeDecodeError — a ValueError, NOT an
+        # OSError, so an `except OSError` around it does not help.
+        good = nsup.TOKEN_EVENTS_PATH.read_bytes()
+        nsup.TOKEN_EVENTS_PATH.write_bytes(
+            good + b'{"t": 1, "id": "\xf0\x9f\x92')
+        st, body = http(port, "/api/usage")
+        check("usage: a token log truncated mid-UTF-8 still answers",
+              st == 200 and strict.decode(body)["ok"] is True)
+        nsup.TOKEN_EVENTS_PATH.write_bytes(good)
+    finally:
+        nsup.maybe_refresh_usage_cli = _stub_refresh
 
     # ── degradation, not 500s, and never a non-finite in the body ──
     web.STATUSLINE_STATE_PATH.write_text('{"_cached_rate_limits": {"five_hour": 7}}')
     st, body = http(port, "/api/usage")
     check("usage: a malformed statusline file yields available:false, not a 500",
           st == 200 and strict.decode(body)["claude"]["available"] is False)
+    # One malformed quota must not discard the other. They are separate
+    # readings of separate windows, and the file is user-writable.
+    web.STATUSLINE_STATE_PATH.write_text(
+        '{"_cached_rate_limits": {"five_hour": 7,'
+        ' "seven_day": {"used_percentage": 21.0}}}')
+    st, body = http(port, "/api/usage")
+    d = strict.decode(body)
+    check("usage: a malformed five_hour does not discard a good seven_day",
+          st == 200 and d["claude"]["available"] is True
+          and d["claude"]["seven_day"]["used_percentage"] == 21.0
+          and d["claude"]["five_hour"]["used_percentage"] is None)
     web.STATUSLINE_STATE_PATH.write_text(
         '{"_cached_rate_limits": {"five_hour": {"used_percentage": NaN},'
         ' "seven_day": {"used_percentage": 12.0}}}')
