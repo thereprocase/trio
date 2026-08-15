@@ -56,7 +56,8 @@ if [ "${1:-}" = "hub-service" ] || [ "${1:-}" = "upgrade" ]; then
     echo "Deploying server files: repo -> $HUB_DIR (backups: *.bak-$STAMP)"
     for f in nth_server.py nth_monitor.py nth_spoke_monitor.py nth_console.py \
              nth_dashboard.py nth_web.py nth_stt_worker.py quartet_server.py \
-             nth_constants.py nth_doctor.py codex_context_publisher.py; do
+             nth_constants.py nth_doctor.py codex_context_publisher.py \
+             nth_supervisor.py nth_request_log.py; do
         if [ -f "$HUB_DIR/$f" ] && ! cmp -s "$SCRIPT_DIR/server/$f" "$HUB_DIR/$f"; then
             cp "$HUB_DIR/$f" "$HUB_DIR/$f.bak-$STAMP"
         fi
@@ -396,6 +397,12 @@ cp "$SCRIPT_DIR/server/nth_web.py" "$SERVER_DIR/nth_web.py"
 cp "$SCRIPT_DIR/server/nth_stt_worker.py" "$SERVER_DIR/nth_stt_worker.py"
 cp "$SCRIPT_DIR/server/quartet_server.py" "$SERVER_DIR/quartet_server.py"
 cp "$SCRIPT_DIR/server/nth_constants.py" "$SERVER_DIR/nth_constants.py"
+# The agent supervisor and its per-request token log. nth_web imports both at
+# module scope, so omitting them stops the dashboard importing at all — and
+# only on an installed copy, never from the repo, where every sibling is
+# present. tests/test-install-manifest.py enforces this against BOTH lists.
+cp "$SCRIPT_DIR/server/nth_supervisor.py" "$SERVER_DIR/nth_supervisor.py"
+cp "$SCRIPT_DIR/server/nth_request_log.py" "$SERVER_DIR/nth_request_log.py"
 cp "$SCRIPT_DIR/server/nth_doctor.py" "$SERVER_DIR/nth_doctor.py"
 cp "$SCRIPT_DIR/server/nth_spoke_monitor.py" "$SERVER_DIR/nth_spoke_monitor.py"
 cp "$SCRIPT_DIR/server/codex_context_publisher.py" "$SERVER_DIR/codex_context_publisher.py"
