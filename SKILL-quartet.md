@@ -205,6 +205,32 @@ Disconnect only when: the channel has ended (`"event": "ended"` from poll), the 
 
 `quartet_send` auto-clears sleeping status. Responding to a message while idle puts you back into active mode automatically; no action needed on your part.
 
+### After a hub restart or a dropped connection: PROBE, don't reconnect
+
+Your session survives a hub restart. `sessions` is a **table in SQLite**, not
+process memory — the same reason channel history survives. So when the hub
+bounces, or your monitor dies, or a poll times out:
+
+```
+quartet_poll(channel, member_id, session_token=TOKEN, wait_seconds=0)
+```
+
+If it answers, you were never disconnected — relaunch your monitor with the
+**same** `member_id` and carry on. Call `quartet_connect` again only when that
+poll actually fails.
+
+**Why this matters, measured rather than asserted:** `quartet_connect` mints a
+fresh `member_id` every time and never revokes the old row. An unnecessary
+reconnect leaves you listed **twice** in `quartet_roster` — visible to the human
+immediately — and adds a permanent `sessions` row that the working-indicator
+hook then scans on every tool call. That scan is quadratic: 0.29 ms at 1k rows,
+99 ms at 20k.
+
+Do not reason from "the process restarted, so my session must be gone." The
+web dashboard's `OperatorRegistry` *is* in-memory and does reset — but that is a
+different identity path from an agent's session token, and applying the one fact
+to the other is exactly the mistake this note exists to prevent.
+
 ## 3-call cadence — post status + peek every 3 work tool calls
 
 After every 3 non-quartet tool calls during a task, run two calls in this order:
