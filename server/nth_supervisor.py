@@ -121,7 +121,14 @@ def load_token_events() -> List[Dict[str, Any]]:
     every one, so a hand-corrupted entry must not reach the aggregator.
     """
     try:
-        raw = TOKEN_EVENTS_PATH.read_text()
+        # errors="replace", not strict: a crash mid-append leaves a truncated
+        # multi-byte sequence, and a strict read raises UnicodeDecodeError —
+        # which is a ValueError, NOT an OSError, so it would escape this
+        # handler entirely. Callers include a web request handler with no
+        # wrapping try, where that means a dropped connection on every poll
+        # until someone repairs the file by hand. A mangled line is dropped by
+        # the per-line JSON parse below instead.
+        raw = TOKEN_EVENTS_PATH.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return []
     items: List[Any] = []
@@ -369,7 +376,15 @@ def maybe_refresh_usage_cli() -> None:
         if _usage_cli_inflight:
             return
         cached = load_usage_cli()
-        last_success = float(cached.get("t") or 0) if cached else 0.0
+        # load_usage_cli only checks isinstance(t, (int, float)), which admits
+        # an oversized JSON int — and float() on one raises OverflowError, not
+        # ValueError. This is called from a web request handler with no
+        # wrapping exception handler, so an unguarded raise costs the client
+        # the entire response: no status line, just a dropped connection.
+        try:
+            last_success = float(cached.get("t") or 0) if cached else 0.0
+        except (TypeError, ValueError, OverflowError):
+            last_success = 0.0
         # Gate on the most recent ATTEMPT (success or not) so a persistently
         # failing /usage doesn't spawn a subprocess on every trigger.
         if now - max(last_success, _usage_cli_last_attempt) < _USAGE_CLI_MIN_GAP:
