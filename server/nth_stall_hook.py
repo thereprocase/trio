@@ -41,7 +41,7 @@ import json
 import os
 import sqlite3
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 DB_PATH = Path(os.environ.get("NTH_DB_PATH", str(Path.home() / ".claude" / "nth" / "nth.db")))
@@ -73,6 +73,19 @@ CREATE TABLE IF NOT EXISTS stall_events (
 _INSERT = (
     "INSERT INTO stall_events (session_id, error, cwd, created_at) "
     "VALUES (?, ?, ?, ?)"
+)
+
+# Age out old rows on write. Nothing else reclaims them: the roster badge only
+# READS, and a spoke install has no hub process at all — so without this the
+# table grows one row per dead turn forever.
+#
+# Bounded by AGE, not by count, and deliberately generous: a stall row is the
+# evidence that a session froze, and a human may not look at the dashboard for
+# a day. Deleting a row that is still OPEN would erase a live STALLED badge, so
+# only rows past the cutoff go, open or not — by then the session is long gone.
+STALL_RETENTION_HOURS = 48
+_PRUNE = (
+    "DELETE FROM stall_events WHERE created_at < ?"
 )
 
 
@@ -132,6 +145,15 @@ def main() -> int:
                 return 0
             conn.execute(_DDL)
             conn.execute(_INSERT, row)
+        # Prune AFTER the insert, and never let it cost us the row: the event
+        # is one-shot (drop it and nothing re-reports the stall), whereas a
+        # skipped prune is corrected by the next stall.
+        try:
+            cutoff = (datetime.now(timezone.utc)
+                      - timedelta(hours=STALL_RETENTION_HOURS)).isoformat()
+            conn.execute(_PRUNE, (cutoff,))
+        except sqlite3.Error:
+            pass
     except Exception:
         return 0  # best-effort: never disturb the host session
     finally:
