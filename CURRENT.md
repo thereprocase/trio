@@ -1,11 +1,33 @@
-# Current State — nth v8.1.0-beta.1
+# Current State — nth v8.1.1-beta.1
 
-**Version:** v8.1.0-beta.1 (2026-08-14, local tag — not yet pushed)
+**Version:** v8.1.1-beta.1 (2026-08-15)
+**Prior:** v8.1.0-beta.1 (2026-08-14, released)
 **Prior:** v8.0.2-beta.1 (2026-08-11), v8.0.1-beta.1 (2026-08-11), v8.0.0-beta.1 (2026-08-11), v7.3.1 (2026-08-11), v7.3 (2026-08-11), v7.2 (2026-04-20), v7.1 (2026-04-20), v7 (2026-04-19)
 **Branch:** main
 **Remote:** `github.com:thereprocase/trio.git` (GitHub) + `gitlab.com:theReproCase/trio.git` (GitLab mirror — ⚠ not synced since pre-v8)
 
 ## What Just Shipped
+
+**v8.1.1-beta.1** — known-gaps sprint (2026-08-15). v8.1.0's release notes
+listed five known gaps; this closes four of them the same night, each reviewed
+by someone who did not write it.
+
+- ⚠ **Behaviour change:** on a TAGGED-node hub the tailnet owner cannot be
+  derived, and tailnet peers now become guests rather than operators — set
+  `NTH_TAILNET_OWNER=<login>`. The server says so on startup.
+- **Security.** Only the hub's owner gets the tailnet tier (was: any login the
+  tailnet resolved). Permissive grants are provisional, so they cannot outlive
+  the window that produced them. A retry can upgrade a tier, never downgrade.
+- **Reliability.** Transient whois failures self-heal instead of pinning a
+  browser to guest. The Tailscale CLI is found in the Mac App Store bundle
+  location. Reveal SELECTS the file on Linux via D-Bus.
+- **The suite is fully green** — `test-restart-arch.py` had been red since
+  before v8.0.2 on a stale pre-v7 path.
+- **Still open:** a non-Apple STT engine (8.1.2, defect open — its test ships
+  now and skips loudly), and the identity model itself (v9).
+
+### Previously
+
 
 **v8.1.0-beta.1** — 16-PR integration (2026-08-14 night). Five Claude sessions
 reviewed all 16 open PRs across four lenses, then integrated them on five
