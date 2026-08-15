@@ -30,6 +30,7 @@ _tmp = Path(tempfile.mkdtemp(prefix="nth_identity_"))
 os.environ["NTH_HOME"] = str(_tmp)
 
 import nth_server as srv    # noqa: E402
+import nth_web as web       # noqa: E402
 
 failures = []
 
@@ -341,23 +342,133 @@ try:
         "INSERT INTO agents (id, name, model, managed, reclaim_secret, "
         "created_at, last_active_at) VALUES ('mg0001', 'Managed', '', 1, "
         "'m-secret', ?, ?)", (srv.now_iso(), srv.now_iso()))
+    for ch in ("chan-cull", srv.AGENT_INBOX_CHANNEL):
+        conn.execute(
+            "INSERT INTO members (id, channel, name, summary, skills, "
+            "last_seen, joined_at) VALUES ('mg0001', ?, 'Managed', '', '', ?, ?)",
+            (ch, srv.now_iso(), srv.now_iso()))
+    # A session in ANOTHER channel: culling from chan-cull legitimately revokes
+    # that channel's sessions, so only a session elsewhere can show whether the
+    # revoke was wrongly widened to every session the member holds.
     conn.execute(
-        "INSERT INTO members (id, channel, name, summary, skills, last_seen, "
-        "joined_at) VALUES ('mg0001', 'chan-cull', 'Managed', '', '', ?, ?)",
+        "INSERT INTO sessions (session_token, member_id, channel, role, "
+        "fingerprint, connected_at, last_seen, last_read) VALUES "
+        "('mgtok', 'mg0001', 'chan-other', 'primary', 'f', ?, ?, 0)",
         (srv.now_iso(), srv.now_iso()))
     conn.commit()
     conn.close()
     json.loads(srv.nth_cull(channel="chan-cull", member_id=host["member_id"],
                             target_member_id="mg0001"))
+    conn = db()
+    mg_inbox = conn.execute(
+        "SELECT 1 FROM members WHERE id='mg0001' AND channel=?",
+        (srv.AGENT_INBOX_CHANNEL,)).fetchone()
+    mg_sessions = conn.execute(
+        "SELECT COUNT(*) FROM sessions WHERE member_id='mg0001' "
+        "AND revoked_at IS NULL").fetchone()[0]
+    conn.close()
     check("a MANAGED agent's identity survives being culled from a channel",
           agent_row("mg0001") is not None)
+    # The identity surviving is not enough. An earlier version of the
+    # retirement block guarded only the DELETE with managed=0 and left the
+    # inbox delete and the session revoke unguarded — so a managed agent kept
+    # its roster row but lost the presence that makes it messageable, and DMs
+    # to it silently failed until the next hub start. Assert the whole block
+    # was skipped, not just its last statement.
+    check("...along with its inbox presence, which is what makes it "
+          "messageable at all", mg_inbox is not None)
+    check("...and its live sessions, which a channel-scoped cull must not "
+          "revoke globally", mg_sessions == 1)
+
+    # A human is not an identity this retires at all. Culling an operator from
+    # a channel must never escalate to signing them out everywhere.
+    conn = db()
+    conn.execute(
+        "INSERT INTO members (id, channel, name, summary, skills, kind, "
+        "last_seen, joined_at) VALUES ('_op_vic', 'chan-cull', 'Victim', '', "
+        "'', 'human', ?, ?)", (srv.now_iso(), srv.now_iso()))
+    conn.execute(
+        "INSERT INTO members (id, channel, name, summary, skills, kind, "
+        "last_seen, joined_at) VALUES ('_op_vic', ?, 'Victim', '', '', "
+        "'human', ?, ?)", (srv.AGENT_INBOX_CHANNEL, srv.now_iso(), srv.now_iso()))
+    # Again in another channel, for the same reason.
+    conn.execute(
+        "INSERT INTO sessions (session_token, member_id, channel, role, "
+        "fingerprint, connected_at, last_seen, last_read) VALUES "
+        "('optok', '_op_vic', 'chan-other', 'primary', 'f', ?, ?, 0)",
+        (srv.now_iso(), srv.now_iso()))
+    conn.commit()
+    conn.close()
+    json.loads(srv.nth_cull(channel="chan-cull", member_id=host["member_id"],
+                            target_member_id="_op_vic"))
+    conn = db()
+    op_inbox = conn.execute(
+        "SELECT 1 FROM members WHERE id='_op_vic' AND channel=?",
+        (srv.AGENT_INBOX_CHANNEL,)).fetchone()
+    op_sessions = conn.execute(
+        "SELECT COUNT(*) FROM sessions WHERE member_id='_op_vic' "
+        "AND revoked_at IS NULL").fetchone()[0]
+    conn.close()
+    check("culling a HUMAN from a channel does not strip their inbox row",
+          op_inbox is not None)
+    check("nor revoke every session they hold — a channel-scoped removal must "
+          "not escalate to a global sign-out at a peer agent's request",
+          op_sessions == 1)
+
+    # ── the global name follows a rename on EVERY reclaim path ──
+    # A stale agents.name is a second, hidden @handle: the sigil resolver
+    # merges global names into each member's wake candidates, so it still wakes
+    # the agent while appearing on no roster. The mint-time name is
+    # caller-supplied, which makes that alias attacker-choosable.
+    renamer = connect(summary="x", name="Gabe", channel="chan-rename")
+    rid, rsecret = renamer["member_id"], renamer["reclaim_secret"]
+    connect(summary="x", name="helper", channel="chan-rename",
+            resume_member_id=rid, reclaim_secret=rsecret)
+    check("a rename on reclaim into an EXISTING channel updates agents.name",
+          agent_row(rid)["name"] == "helper")
+    # The branch that was missed: reclaiming into a channel that does not exist
+    # yet takes the new-channel path.
+    connect(summary="x", name="scout", channel="chan-rename-fresh",
+            resume_member_id=rid, reclaim_secret=rsecret)
+    check("and so does a reclaim into a channel that did not exist yet",
+          agent_row(rid)["name"] == "scout")
+    _m, _r, bangs = srv._parse_sigils(db(), "chan-rename-fresh", "@Gabe hello")
+    mentions, _r2, _b2 = srv._parse_sigils(
+        db(), "chan-rename-fresh", "@Gabe hello")
+    check("so the old name is no longer a live @handle anywhere",
+          rid not in mentions)
+
+    # ── the mint loop is bounded ──
+    check("the mint retry has a finite cap, so a schema change that makes a "
+          "non-PK constraint fire cannot spin forever",
+          isinstance(srv.MAX_IDENTITY_MINT_ATTEMPTS, int)
+          and 0 < srv.MAX_IDENTITY_MINT_ATTEMPTS <= 64)
+    _always = lambda: "always-the-same"
+    _real = srv.generate_member_id
+    srv.generate_member_id = _always
+    conn = db()
+    conn.execute(
+        "INSERT INTO agents (id, name, model, managed, reclaim_secret, "
+        "created_at, last_active_at) VALUES ('always-the-same', 'Squatter', "
+        "'', 0, 's', ?, ?)", (srv.now_iso(), srv.now_iso()))
+    conn.commit()
+    try:
+        raised = False
+        try:
+            srv._register_agent_identity(conn, "Doomed", "", srv.now_iso())
+        except RuntimeError:
+            raised = True
+        check("a generator that can only ever collide gives up instead of "
+              "looping forever", raised)
+    finally:
+        srv.generate_member_id = _real
+        conn.close()
 
     # ── the hub must not resurrect presence it does not own ──
     # ensure_agent_inboxes runs on every hub start and force-sets active=1 on
     # the inbox row of every agent it finds. Once self-connected agents have
     # rows in `agents`, an unfiltered sweep would undo any deactivation — and
     # inbox presence is exactly what authorises reading a DM addressed to you.
-    import nth_web as web    # noqa: E402 — only this check needs it
     ghost2 = connect(summary="x", name="Ghost2", channel="chan-ghost")
     gid = ghost2["member_id"]
     conn = db()
@@ -395,6 +506,53 @@ try:
     conn.close()
     check("but it still places a MANAGED agent in its inbox, as intended",
           placed is not None and placed["active"] == 1)
+
+    # ── a self-connected agent must not squat the operator's name pool ──
+    # pick_agent_name draws spawned-agent names from `agents`, so without a
+    # managed filter an agent that names itself "Scout" silently removes that
+    # character name from the supervisor's pool and blocks an operator asking
+    # for it.
+    # Assert THROUGH pick_agent_name: ask it for the exact name the
+    # self-connected agent took. `desired` is returned when it is not in the
+    # blocked set, so this fails iff the self-connected row entered the pool.
+    squatted = web._CHARACTER_NAMES[0]
+    connect(summary="x", name=squatted, channel="chan-names")
+    conn = db()
+    try:
+        granted = web.pick_agent_name(conn, desired=squatted)
+        # And the converse, so the check cannot pass by the function ignoring
+        # `desired` altogether: a MANAGED row with that name must block it.
+        conn.execute(
+            "INSERT INTO agents (id, name, model, managed, reclaim_secret, "
+            "created_at, last_active_at) VALUES ('nm0001', ?, '', 1, 'x', ?, ?)",
+            (squatted, srv.now_iso(), srv.now_iso()))
+        conn.commit()
+        refused = web.pick_agent_name(conn, desired=squatted)
+    finally:
+        conn.close()
+    check("a self-connected agent taking a character name does not block the "
+          "operator from requesting it", granted == squatted)
+    check("...but a MANAGED agent holding it does", refused != squatted)
+
+    # ── a shadowed identity is not retired by cull ──
+    # An id with an unmanaged `agents` row AND a kind='human' members row is a
+    # contradictory state. Cull declines to retire it rather than guessing,
+    # which is what the NOT EXISTS in the eligibility test is for.
+    conn = db()
+    conn.execute(
+        "INSERT INTO agents (id, name, model, managed, reclaim_secret, "
+        "created_at, last_active_at) VALUES ('shadowcull', 'Shadow2', '', 0, "
+        "'s2', ?, ?)", (srv.now_iso(), srv.now_iso()))
+    conn.execute(
+        "INSERT INTO members (id, channel, name, summary, skills, kind, "
+        "last_seen, joined_at) VALUES ('shadowcull', 'chan-cull', 'Shadow2', "
+        "'', '', 'human', ?, ?)", (srv.now_iso(), srv.now_iso()))
+    conn.commit()
+    conn.close()
+    json.loads(srv.nth_cull(channel="chan-cull", member_id=host["member_id"],
+                            target_member_id="shadowcull"))
+    check("an id whose members row says human is not retired, even with an "
+          "unmanaged agents row", agent_row("shadowcull") is not None)
 
     # ── no two identities can ever share an id or a secret ──
     ids, secrets_seen = {aid, ghost["member_id"]}, {secret, ghost["reclaim_secret"]}

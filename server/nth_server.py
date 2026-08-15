@@ -52,6 +52,9 @@ _AGENT_IDENTITY: dict = {"id": "", "name": ""}
 CHANNEL_CODE_PATTERN = re.compile(r"^[a-z0-9][a-z0-9\-]{0,31}$")
 MAX_MESSAGE_LENGTH = 4000
 MAX_MEMBERS = 20
+# Retries before _register_agent_identity gives up. See the loop for why this
+# is bounded rather than `while True`.
+MAX_IDENTITY_MINT_ATTEMPTS = 8
 STALE_THRESHOLD_SECONDS = 300  # 5 minutes without heartbeat = stale
 
 # Server-injected behavioral footer appended to every message in poll responses.
@@ -200,7 +203,14 @@ def _register_agent_identity(db: sqlite3.Connection, name: str,
     and the retry mints a fresh id, so this function can only ever return a row
     it created, never one it found.
     """
-    while True:
+    # Bounded. Today only the primary key can raise IntegrityError here, so a
+    # collision is astronomically unlikely and one retry always suffices — but
+    # an unbounded loop is one `ALTER TABLE agents ADD COLUMN ... NOT NULL` or
+    # one added unique index away from spinning a core inside a live MCP call
+    # that holds an open write transaction, returning nothing, forever.
+    # Measured at ~600k INSERT attempts in 2s under a forced non-PK
+    # IntegrityError. A refused connect is a far better failure than a hang.
+    for _attempt in range(MAX_IDENTITY_MINT_ATTEMPTS):
         member_id = generate_member_id()
         # Cheap pre-check against both tables. Not load-bearing for correctness
         # (the INSERT below is) — it just avoids the exception on the common
@@ -226,6 +236,9 @@ def _register_agent_identity(db: sqlite3.Connection, name: str,
             # INSERT cannot have exposed the winner's row; mint again.
             continue
         return member_id, reclaim_secret
+    raise RuntimeError(
+        f"could not mint a unique agent identity in "
+        f"{MAX_IDENTITY_MINT_ATTEMPTS} attempts")
 
 
 _GUEST_SUFFIX_RE = re.compile(r"\s*\(\s*guest\s*\)\s*$", re.IGNORECASE)
@@ -1062,19 +1075,7 @@ def nth_connect(
                         "last_seen = ?, active = 1 WHERE id = ? AND channel = ?",
                         (name, summary, skills, now, member_id, channel),
                     )
-                # Keep the GLOBAL identity in step with the channel presence.
-                # Without this `agents.name` is frozen at whatever the identity
-                # was first minted as: the sigil resolver merges global names
-                # into its wake candidates, so an agent that renamed itself
-                # would go on waking to its OLD name forever, alongside the new
-                # one. `managed = 0` guard: a supervisor-managed agent's name is
-                # the operator's to set, not the agent's to overwrite on
-                # reconnect.
-                db.execute(
-                    "UPDATE agents SET name = ?, last_active_at = ? "
-                    "WHERE id = ? AND managed = 0",
-                    (name, now, member_id),
-                )
+
             else:
                 member_id, response_reclaim_secret = _register_agent_identity(
                     db, name, model, now)
@@ -1245,6 +1246,30 @@ def nth_connect(
             (name, summary, now, member_id, AGENT_INBOX_CHANNEL))
         db.commit()
 
+        # Keep the GLOBAL identity in step with the channel presence, on EVERY
+        # reclaim path. `agents.name` is otherwise frozen at whatever the
+        # identity was first minted as, and the sigil resolver merges global
+        # names into each member's wake candidates — so a stale global name is
+        # a second, hidden @handle that still wakes the agent while appearing
+        # on no roster. Since the mint-time name is caller-supplied, that
+        # handle is attacker-choosable.
+        #
+        # This sits outside the channel branches deliberately: an earlier
+        # version updated it only in the existing-channel branch, so reclaiming
+        # into a channel that did not exist yet left the stale alias in place.
+        # Reproduced: connect as "Gabe", reclaim into a brand-new channel as
+        # "helper", and @Gabe still resolved there.
+        #
+        # `managed = 0`: a supervisor-managed agent's name is the operator's to
+        # set, not the agent's to overwrite on reconnect.
+        if reclaiming:
+            db.execute(
+                "UPDATE agents SET name = ?, last_active_at = ? "
+                "WHERE id = ? AND managed = 0",
+                (name, now, member_id),
+            )
+            db.commit()
+
         # Whose approvals this process files. Set here, after any reclaim
         # collision has been resolved, so a rejected reclaim can never poison
         # this process's approval identity with someone else's member_id.
@@ -1295,6 +1320,12 @@ def nth_connect(
             resp["objective"] = objective
         if action == "created":
             _console("🌟", channel, f"{name} created channel", 32)
+        elif action == "reclaimed":
+            # A silent re-attach must be silent on the console too. Printing
+            # "joined" here contradicted the whole point of suppressing the
+            # [joined] message, and an operator watching the tail would see a
+            # restarting agent as a new arrival every time.
+            _console("♻️", channel, f"{name} re-attached", 90)
         else:
             _console("👋", channel, f"{name} joined ({len(members)} members)", 32)
         return json.dumps(resp)
@@ -4247,6 +4278,14 @@ def nth_cull(channel: str, member_id: str, target_member_id: str) -> str:
             (channel, target_member_id),
         )
 
+        # Read BEFORE the delete below: the kind check needs the members row
+        # that is about to be removed.
+        retire_eligible = db.execute(
+            "SELECT 1 FROM agents a WHERE a.id = ? AND a.managed = 0 "
+            "AND NOT EXISTS (SELECT 1 FROM members m WHERE m.id = a.id "
+            "                AND m.kind = 'human')",
+            (target_member_id,),
+        ).fetchone() is not None
         db.execute(
             "DELETE FROM members WHERE id = ? AND channel = ?",
             (target_member_id, channel),
@@ -4258,29 +4297,43 @@ def nth_cull(channel: str, member_id: str, target_member_id: str) -> str:
             "AND revoked_at IS NULL",
             (now, channel, target_member_id),
         )
-        # Retire the GLOBAL identity too, once no channel presence remains.
-        # Only for a SELF-connected agent (managed = 0): a supervisor-managed
-        # agent's row is owned by the operator's roster and outlives any single
-        # channel — culling it from one channel must not delete it.
+        # Retire the GLOBAL identity too, once no channel presence remains —
+        # but ONLY for a self-connected agent.
         #
         # Without this, cull leaves a durable identity and its reclaim_secret
-        # behind: the culled agent can reconnect with the same id, and the row
+        # behind: the culled agent reconnects with the same id, and the row
         # accumulates forever because nothing else deletes an unmanaged one.
         # The inbox presence goes with it, since that presence is what
         # authorises reading a DM addressed to this id.
+        #
+        # The eligibility test gates the WHOLE block, not just the DELETE.
+        # An earlier version guarded only `DELETE FROM agents` with
+        # `managed = 0` and left the inbox delete and the session revoke
+        # unguarded, which turned a channel-scoped cull into something much
+        # larger for two kinds of member it was never meant to touch:
+        #   * a MANAGED agent kept its roster row but lost the inbox presence
+        #     that makes it messageable at all, so DMs to it silently failed
+        #     until the next hub start put the row back;
+        #   * a HUMAN operator lost their inbox row and had EVERY session
+        #     revoked globally — a channel-scoped removal escalated to a
+        #     sign-out, at the request of any peer agent in that channel.
+        # Both reproduced. A managed agent's row belongs to the operator's
+        # roster and outlives any single channel; a human is not an identity
+        # this code retires at all.
+        # `remaining` must be read AFTER the delete (it counts what is left);
+        # `retire_eligible` was read BEFORE it, because the kind check needs a
+        # members row this function has already removed. Reading it here would
+        # always find no human row and always say yes.
         remaining = db.execute(
             "SELECT COUNT(*) FROM members WHERE id = ? AND channel != ?",
             (target_member_id, AGENT_INBOX_CHANNEL),
         ).fetchone()[0]
-        if remaining == 0:
+        if retire_eligible and remaining == 0:
             db.execute(
                 "DELETE FROM members WHERE id = ? AND channel = ?",
                 (target_member_id, AGENT_INBOX_CHANNEL),
             )
-            db.execute(
-                "DELETE FROM agents WHERE id = ? AND managed = 0",
-                (target_member_id,),
-            )
+            db.execute("DELETE FROM agents WHERE id = ?", (target_member_id,))
             db.execute(
                 "UPDATE sessions SET revoked_at = ? WHERE member_id = ? "
                 "AND revoked_at IS NULL",

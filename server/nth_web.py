@@ -1244,6 +1244,15 @@ def cull_member(db: sqlite3.Connection, channel: str, caller_id: str,
         "SELECT resource FROM locks WHERE channel = ? AND held_by = ?",
         (channel, target_id)).fetchall()]
     db.execute("DELETE FROM locks WHERE channel = ? AND held_by = ?", (channel, target_id))
+    # Read BEFORE the delete: the kind check needs the members row that is
+    # about to be removed. Read after, it always finds no human row and always
+    # says yes.
+    retire_eligible = db.execute(
+        "SELECT 1 FROM agents a WHERE a.id = ? AND a.managed = 0 "
+        "AND NOT EXISTS (SELECT 1 FROM members m WHERE m.id = a.id "
+        "                AND m.kind = 'human')",
+        (target_id,),
+    ).fetchone() is not None
     db.execute("DELETE FROM members WHERE id = ? AND channel = ?", (target_id, channel))
     # Revoke their sessions so a lingering token can't be reused if the same
     # member_id ever re-joins (defence-in-depth; also stops row build-up).
@@ -1252,6 +1261,27 @@ def cull_member(db: sqlite3.Connection, channel: str, caller_id: str,
         "AND revoked_at IS NULL",
         (now, channel, target_id),
     )
+    # Retire the global identity, same rule and same reasons as
+    # nth_server.nth_cull: a self-connected agent removed from its last channel
+    # keeps a durable id and reclaim_secret otherwise, and nothing else deletes
+    # an unmanaged row. Left behind, that ghost row also poisons global DM
+    # name resolution permanently — two rows named "Ada" make @Ada ambiguous,
+    # and the anti-squatting rule then refuses the DM outright, with no
+    # operator-reachable remedy because no UI lists managed = 0 rows.
+    # Gated on the WHOLE condition: a managed agent's row belongs to the
+    # operator's roster and outlives any single channel, and a human is not an
+    # identity this retires at all.
+    remaining = db.execute(
+        "SELECT COUNT(*) FROM members WHERE id = ? AND channel != ?",
+        (target_id, AGENT_INBOX_CHANNEL),
+    ).fetchone()[0]
+    if retire_eligible and remaining == 0:
+        db.execute("DELETE FROM members WHERE id = ? AND channel = ?",
+                   (target_id, AGENT_INBOX_CHANNEL))
+        db.execute("DELETE FROM agents WHERE id = ?", (target_id,))
+        db.execute(
+            "UPDATE sessions SET revoked_at = ? WHERE member_id = ? "
+            "AND revoked_at IS NULL", (now, target_id))
 
     released_ids = [r["id"] for r in released]
     # Name the operator: this renders as an author-less system line, so without
@@ -2435,7 +2465,11 @@ def _gen_agent_id() -> str:
 def pick_agent_name(db, desired: str = "") -> str:
     """A free requested name, or a random unused character name."""
     used = {r[0] for r in db.execute(
-        "SELECT name FROM agents WHERE archived_at IS NULL").fetchall()}
+        "SELECT name FROM agents "
+        # managed = 1: this pool is the OPERATOR's namespace. A self-connected
+        # agent naming itself "Scout" must not silently remove that character
+        # name from the supervisor's pool and block the operator asking for it.
+        "WHERE archived_at IS NULL AND managed = 1").fetchall()}
     if desired and desired not in used:
         return desired
     available = [name for name in _CHARACTER_NAMES if name not in used]
@@ -4851,8 +4885,14 @@ class NthWebHandler(BaseHTTPRequestHandler):
             db = sqlite3.connect(str(self.db_path), timeout=5)
             db.row_factory = sqlite3.Row
             try:
+                # managed = 1, matching the archive branch and the bulk
+                # probe: a self-connected agent has a row here too, but this
+                # control plane does not own it. Unarchiving one would clear
+                # archived_at, stamp state='stopped' and mint an inbox row for
+                # an identity /api/agents never lists.
                 exists = db.execute(
-                    "SELECT 1 FROM agents WHERE id=?", (agent_id,)).fetchone()
+                    "SELECT 1 FROM agents WHERE id=? AND managed=1",
+                    (agent_id,)).fetchone()
                 if exists is None:
                     raise AgentActionError(404, "agent not found")
                 with db:
