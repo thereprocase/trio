@@ -796,6 +796,8 @@ def nth_connect(
     pin_topic: bool = False,
     node_host: str = "",
     node_version: str = "",
+    resume_member_id: str = "",
+    reclaim_secret: str = "",
 ) -> str:
     """Join an nth channel. Creates the channel if it doesn't exist.
 
@@ -824,6 +826,13 @@ def nth_connect(
             server-side, so declaring it here puts your machine on the fleet view.
         node_version: Your local nth install version (from nth_constants), so
             the fleet view can flag version drift between hub and spokes.
+        resume_member_id: Reclaim a pre-assigned identity instead of minting a
+            new one. A hub-spawned agent is told its id at launch; connecting
+            as that id re-attaches to the row the hub already created rather
+            than duplicating it.
+        reclaim_secret: Required with resume_member_id. The hub mints a fresh
+            one on every spawn, so a secret leaked from an old process or an
+            old transcript cannot reclaim a currently-running agent.
     """
     if channel:
         err = validate_channel_code(channel)
@@ -840,9 +849,48 @@ def nth_connect(
     summary = summary[:MAX_SUMMARY_LENGTH] if summary else ""
     skills = skills[:MAX_SKILLS_LENGTH] if skills else ""
 
-    member_id = generate_member_id()
+    # Identity reclaim. A supervisor-spawned agent connects AS its pre-assigned
+    # member_id rather than minting a new one, so its row, its channel
+    # placements and every @mention that targets it all keep referring to the
+    # same identity. Without this the agent silently becomes a SECOND member:
+    # the router's "never feed an agent its own message" check stops matching,
+    # the reply-dedup probe stops matching, and the roster never sees its
+    # heartbeat. When resume_member_id is empty — every ordinary caller —
+    # behaviour is unchanged.
+    reclaiming = bool(resume_member_id and resume_member_id.strip())
+    member_id = resume_member_id.strip() if reclaiming else generate_member_id()
     now = now_iso()
     db = get_db()
+
+    if reclaiming:
+        # Authenticate against the GLOBAL agents row before looking at the
+        # channel-local member row: otherwise a first connect to a new channel
+        # could claim a known canonical id without holding its secret.
+        registered = db.execute(
+            "SELECT reclaim_secret FROM agents WHERE id = ?", (member_id,)
+        ).fetchone()
+        if registered:
+            stored = ((registered["reclaim_secret"]
+                       if "reclaim_secret" in registered.keys() else "") or "")
+            supplied = (reclaim_secret or "").strip()
+            if not stored or not supplied or not secrets.compare_digest(stored, supplied):
+                db.close()
+                return json.dumps({
+                    "error": "Cannot reclaim this identity: invalid or missing "
+                             "reclaim_secret."})
+        else:
+            # An unknown id is never honoured — otherwise a caller could claim
+            # an arbitrary identity on a first join. Fall through to minting a
+            # fresh one, except for a human row, which is refused outright.
+            requested = db.execute(
+                "SELECT kind FROM members WHERE id = ? AND channel = ?",
+                (member_id, channel)).fetchone()
+            if requested and ((requested["kind"] if "kind" in requested.keys()
+                               else "agent") or "agent") != "agent":
+                db.close()
+                return json.dumps({"error": "Cannot reclaim this identity."})
+            reclaiming = False
+            member_id = generate_member_id()
 
     try:
         _reap_sessions(db)
@@ -868,12 +916,22 @@ def nth_connect(
                     (member_id, channel, name, summary, skills, now, now),
                 )
             except sqlite3.IntegrityError:
-                member_id = generate_member_id()
-                db.execute(
-                    "INSERT INTO members (id, channel, name, summary, skills, last_seen, joined_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (member_id, channel, name, summary, skills, now, now),
-                )
+                if reclaiming:
+                    # The row is ours and already here — this is a RE-attach,
+                    # which is the whole point. Minting a new id would create
+                    # the duplicate identity reclaim exists to prevent.
+                    db.execute(
+                        "UPDATE members SET name = ?, summary = ?, skills = ?, "
+                        "last_seen = ?, active = 1 WHERE id = ? AND channel = ?",
+                        (name, summary, skills, now, member_id, channel),
+                    )
+                else:
+                    member_id = generate_member_id()
+                    db.execute(
+                        "INSERT INTO members (id, channel, name, summary, skills, last_seen, joined_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (member_id, channel, name, summary, skills, now, now),
+                    )
             db.execute(
                 "UPDATE channels SET updated_at = ? WHERE code = ?",
                 (now, channel),

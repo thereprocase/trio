@@ -777,6 +777,9 @@ class AgentSupervisor:
         self.on_event = on_event
         self.runtime = runtime or ClaudeRuntime()
         self._procs: Dict[str, AgentProc] = {}
+        # Agents whose spawn is in flight. reconcile() must not reap these:
+        # their handle is registered before the process exists.
+        self._starting: set = set()
         self._pending: Dict[str, Deque[Dict[str, Any]]] = {}
         self._compacting: set[str] = set()
         self._models: Dict[str, str] = {}
@@ -1151,8 +1154,23 @@ class AgentSupervisor:
             # spawn-died branch below still removes the handle on failure.
             with self._lock:
                 self._procs[agent_id] = proc
-            proc.start()
-            sid = proc.wait_session(session_timeout)
+                self._starting.add(agent_id)
+            try:
+                proc.start()
+                sid = proc.wait_session(session_timeout)
+            except Exception:
+                # The row already says 'spawning'. Leaving it there would show
+                # a permanently-starting agent, and the stale handle would make
+                # is_running() lie — so unwind both before the caller sees the
+                # error (a missing binary raises straight out of Popen).
+                with self._lock:
+                    if self._procs.get(agent_id) is proc:
+                        del self._procs[agent_id]
+                self._set_state(agent_id, ST_ERRORED, clear_pid=True)
+                raise
+            finally:
+                with self._lock:
+                    self._starting.discard(agent_id)
             if not proc.alive():
                 # Spawn died before/around init — drop the dead handle so the
                 # registry doesn't hold a zombie entry (Sauron).
@@ -1224,6 +1242,27 @@ class AgentSupervisor:
             self._forget_pending(agent_id)
             rows = self._set_state(agent_id, ST_STOPPED, clear_pid=True)
             return bool(proc) or rows > 0
+
+    def interrupt(self, agent_id: str) -> bool:
+        """Cut a turn short without ending the session.
+
+        Claude Code has no in-band cancel on its stdin stream, so the only way
+        to stop a turn is to end the process. The session_id is deliberately
+        KEPT, so the next wake resumes the same transcript with --resume: the
+        agent loses the turn it was mid-way through, not its memory. That is
+        the difference between interrupt and stop."""
+        with self._plock(agent_id):
+            with self._lock:
+                proc = self._procs.pop(agent_id, None)
+                self._models.pop(agent_id, None)
+            if not proc:
+                return False
+            proc.stop()
+            self._forget_pending(agent_id)
+            # sleeping, not stopped: an interrupted agent is still deployed and
+            # a wake should bring it back where it was.
+            self._set_state(agent_id, ST_SLEEPING, clear_pid=True)
+            return True
 
     def clear(self, agent_id: str, **spawn_kw) -> Optional[AgentProc]:
         """Discard transcript continuity and launch a fresh session.
@@ -1348,8 +1387,21 @@ class AgentSupervisor:
         finally:
             db.close()
 
+    # Decisions the approval inbox accepts. The dashboard offers four; only two
+    # are distinct outcomes for THIS gate, so the session-scoped and cancelled
+    # forms are normalised rather than rejected. Rejecting them silently left
+    # the approval pending and the agent blocked for the full timeout while the
+    # operator saw a 404.
+    _DECISION_ALIASES = {
+        "accept": "accept",
+        "acceptForSession": "accept",
+        "decline": "decline",
+        "cancel": "decline",
+    }
+
     def resolve_approval(self, approval_id: str, decision: str) -> bool:
-        if decision not in ("accept", "decline"):
+        decision = self._DECISION_ALIASES.get(decision, "")
+        if not decision:
             return False
         db = self._db()
         try:
@@ -1421,7 +1473,15 @@ class AgentSupervisor:
         periodically by the hub (also covers Legolas' zombie note)."""
         reaped = []
         with self._lock:
-            dead = [(a, p) for a, p in self._procs.items() if not p.alive()]
+            # A handle is registered BEFORE its process starts, so that an
+            # early init event can find it. In that window alive() is False
+            # while the agent is about to be perfectly healthy — reaping it
+            # there deletes the handle, stamps the row errored, and then spawn
+            # stamps 'running' again with no handle registered: a live claude
+            # session the supervisor can no longer see or stop. Skip anything a
+            # spawn is currently holding.
+            dead = [(a, pr) for a, pr in self._procs.items()
+                    if not pr.alive() and a not in self._starting]
             for a, _ in dead:
                 del self._procs[a]
         for a, _ in dead:

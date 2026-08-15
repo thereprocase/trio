@@ -723,20 +723,21 @@ def _agent_liveness(db: sqlite3.Connection) -> Dict[str, Tuple[bool, bool]]:
     out: Dict[str, Tuple[bool, bool]] = {}
     try:
         rows = db.execute(
+            # blocked_since / last_tool_at belong to the activity-hook
+            # feature and are deliberately NOT selected here: this query is
+            # inside a try/except that swallows sqlite errors, so naming a
+            # column this schema lacks turned the whole function into a silent
+            # "return {}" — and every agent then read as not-connected unless
+            # this exact process had spawned it.
             "SELECT m.id AS aid, m.last_seen AS m_ls, "
             "  m.messenger_heartbeat AS m_hb, m.status_text AS status_text, "
-            "  s.last_seen AS s_ls, s.last_turn_end AS s_turn_end, "
-            "  s.blocked_since AS blocked_since, s.last_tool_at AS last_tool_at "
+            "  s.last_seen AS s_ls, s.last_turn_end AS s_turn_end "
             "FROM members m "
             "LEFT JOIN sessions s "
             "  ON s.member_id = m.id AND s.revoked_at IS NULL"
         ).fetchall()
     except sqlite3.Error:
         return out
-    # Is turn tracking live anywhere in this DB? Gates the first-turn tool
-    # fallback in member_status so a deployment with no turn hook can't show an
-    # idle agent as "working" (see member_status). One cheap existence probe.
-    turn_hook_seen = _turn_tracking_active(db)
     now = datetime.now(timezone.utc).timestamp()
     for r in rows:
         # This channel's own freshest heartbeat, from any source.
@@ -746,10 +747,7 @@ def _agent_liveness(db: sqlite3.Connection) -> Dict[str, Tuple[bool, bool]]:
         status = member_status(
             hb, r["status_text"] or "",
             session_activity_iso=(r["s_ls"] or None),
-            last_turn_end_iso=(r["s_turn_end"] or None),
-            blocked_since_iso=(r["blocked_since"] or None),
-            last_tool_at_iso=(r["last_tool_at"] or None),
-            turn_hook_seen=turn_hook_seen)
+            last_turn_end_iso=(r["s_turn_end"] or None))
         row_working = row_fresh and status == "working"
         prev_fresh, prev_working = out.get(r["aid"], (False, False))
         out[r["aid"]] = (prev_fresh or row_fresh, prev_working or row_working)
@@ -2318,6 +2316,13 @@ def wake_agent(agent_id: str, supervisor, db_path: Path):
             (agent_id,)).fetchall()]
     finally:
         db.close()
+    # Waking an agent that is ALREADY running is a no-op inside the supervisor
+    # (spawn short-circuits on a live handle). Rotating the secret first would
+    # therefore invalidate the one the live agent is holding and hand it no
+    # replacement — it could never reclaim again. Only rotate when we are
+    # actually going to inject a fresh preamble.
+    if supervisor.is_running(agent_id):
+        return None
     base = (row["base_prompt"] or "").strip()
     reclaim_secret = _rotate_reclaim_secret(db_path, agent_id)
     preamble = (base + "\n\n" if base else "") + \
