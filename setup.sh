@@ -681,6 +681,10 @@ changed |= register('StopFailure', 'nth_turn_hook.py',  turn_cmd)
 # activity, regardless of kind.
 changed |= register('PreToolUse',       'nth_activity_hook.py', activity_cmd)
 changed |= register('UserPromptSubmit', 'nth_activity_hook.py', activity_cmd)
+# PostToolUse too: it is what clears blocked_since when the human answers an
+# AskUserQuestion/ExitPlanMode. Without it a session stays flagged blocked until
+# the turn ends, which is most of the window the flag is supposed to cover.
+changed |= register('PostToolUse',      'nth_activity_hook.py', activity_cmd)
 
 if not changed:
     print('trio hooks: already registered')
