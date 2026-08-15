@@ -37,9 +37,17 @@ Three signals, one hook (they share this capture so the hot path opens once):
     tool_name `Task`; its `subagent_type`/`description` land in the same row, so
     the roster can surface spawned sub-agents too.
   * blocked — on `PreToolUse` for an interactive-blocking tool
-    (`AskUserQuestion`, `ExitPlanMode`) we set `sessions.blocked_since`; any
-    non-blocking tool, a `PostToolUse` (the answer landed), or a new prompt
-    clears it. member_status() renders `blocked` loudly.
+    (`AskUserQuestion`, `ExitPlanMode`) we set `sessions.blocked_since`.
+    member_status() renders `blocked` loudly.
+
+    It is cleared by the matching tool's `PostToolUse` (the human answered), by
+    a new prompt, and by the turn hook at every turn end — and by nothing else.
+    In particular an ordinary tool does NOT clear it: Claude Code dispatches
+    tools in parallel, so a sibling Read running while AskUserQuestion still
+    waits on the human would clear the flag and the session would read as
+    un-blocked for the rest of the prompt. One column cannot be both the signal
+    and its own self-heal. The turn-end clear is what bounds a stale flag (an
+    Esc-aborted prompt fires no PostToolUse) without racing the signal.
 
 Why last_seen and not a new column
 ----------------------------------
@@ -54,10 +62,34 @@ Privacy contract
 We store a SUMMARY, never raw `tool_input` — inputs carry file contents, command
 lines, URLs with tokens, secrets. Only a small whitelist of fields is read, each
 capped, and never a value-bearing argument: Bash keeps the program name only
-(first shell token — never args/flags/env, which is where secrets live), file
-tools keep a basename, Task keeps subagent_type + the agent-authored
-description, Glob/Grep keep the (capped) pattern. Everything else stores the
-tool name alone.
+(never args/flags/env, which is where secrets live), file tools keep a basename,
+Task keeps subagent_type + the agent-authored description, Glob/Grep keep the
+(capped) pattern. Everything else — including every URL and search query —
+stores the tool name alone.
+
+The Bash summary is the sharp edge, because a shell command line is the most
+likely place for a live credential. It is parsed with `shlex` (so a *quoted*
+multi-word value stays one token and is skipped whole), refuses any command
+containing a substitution construct (`$(…)`, backticks, `${…}`, process
+substitution — there the real program is computed at runtime and the tokens
+around it are fragments of a command we would be storing blind), and finally
+accepts the result only if it looks like a plain program name. That last gate is
+an allow-list on purpose: enumerating dangerous shell syntax is a losing game,
+so anything not recognisably a command name is dropped rather than guessed at.
+
+Accepted residual risks, all narrow and all requiring the secret to be in a
+field a human or agent chose to name:
+  * Glob/Grep patterns — an agent searching FOR a literal secret value surfaces
+    it. Requires searching for secret-shaped text; capped short.
+  * Task descriptions — agent-authored free text, stored up to 80 chars. An
+    agent that pastes an error message or config fragment into a description
+    leaks it. This is the same exposure as the agent simply saying it in the
+    channel, which it can already do.
+  * Filenames — a file literally named for its contents
+    (`aws_key_AKIA….txt`) leaks through the basename.
+None of these can be closed by parsing, only by storing less; the tool name
+alone would be safer and much less useful. They are logged where a channel
+member can see them, not published.
 
 Performance contract (same as nth_turn_hook.py)
 -----------------------------------------------
@@ -82,6 +114,7 @@ WHERE fingerprint = session_id.
 import json
 import os
 import re
+import shlex
 import sqlite3
 import sys
 from datetime import datetime, timezone
@@ -90,7 +123,22 @@ from pathlib import Path
 # A leading `NAME=value` shell env-assignment (e.g. `AWS_SECRET=... aws ...`,
 # `TOKEN=... curl ...`) — the most common way a secret rides on a command line.
 # We skip these when picking the program name so a secret is never stored.
+# Matched against shlex tokens, so a QUOTED value stays one token: naive
+# whitespace splitting turned `API_KEY="hunter 2" curl` into
+# ['API_KEY="hunter', '2"', 'curl'] and stored `2"` — half the secret — as the
+# "program name".
 _ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+
+# What a program name may look like once basename'd. An ALLOW-list, deliberately:
+# a deny-list of shell metacharacters is a losing game, and anything that isn't a
+# plain command name is something we do not understand well enough to store.
+_PROGRAM_NAME_RE = re.compile(r"^[A-Za-z0-9._+-]+$")
+
+# Substitution constructs. shlex does not evaluate them, so `X=$(cat ~/.netrc) cmd`
+# tokenizes as ['X=$(cat', '~/.netrc)', 'cmd'] and the "program name" would be a
+# fragment of the substituted command. There is no safe summary of a command
+# whose real program is computed at runtime, so we store nothing.
+_SHELL_SUBSTITUTION = ("$(", "`", "${", "<(", ">(")
 
 DB_PATH = Path(os.environ.get("NTH_DB_PATH", str(Path.home() / ".claude" / "nth" / "nth.db")))
 HOOK_DB_TIMEOUT_S = 0.05
@@ -114,16 +162,25 @@ _TARGET_MAX = 80    # short summary — a basename / program name / description 
 # resurrecting long-dead members as "working" and corrupting
 # effective_last_seen. Joining several channels from one session IS legitimate —
 # one live member each — so scope per channel rather than to a single row.
+#
+# The inner pick is `ORDER BY ... LIMIT 1`, not `connected_at = MAX(...)`:
+# two live rows in one channel sharing a connected_at timestamp both satisfy
+# `= MAX(...)`, so a tie stamped every tied row — the very multi-row write this
+# scope exists to prevent. Ties are not hypothetical: connect timestamps have
+# whole-second resolution in some code paths. session_token breaks the tie so
+# the choice is deterministic rather than merely single.
 _LIVE_SESSION_SCOPE = (
     " WHERE fingerprint = ? AND revoked_at IS NULL"
     "   AND session_token IN ("
     "     SELECT s2.session_token FROM sessions s2"
     "      WHERE s2.fingerprint = ? AND s2.revoked_at IS NULL"
-    "        AND s2.connected_at = ("
-    "          SELECT MAX(s3.connected_at) FROM sessions s3"
+    "        AND s2.session_token = ("
+    "          SELECT s3.session_token FROM sessions s3"
     "           WHERE s3.fingerprint = s2.fingerprint"
     "             AND s3.channel = s2.channel"
-    "             AND s3.revoked_at IS NULL))"
+    "             AND s3.revoked_at IS NULL"
+    "           ORDER BY s3.connected_at DESC, s3.session_token DESC"
+    "           LIMIT 1))"
 )
 
 
@@ -153,18 +210,36 @@ def _summarize_target(tool_name: str, tool_input) -> str:
             # Program name ONLY. Args/flags come after the program and are where
             # secrets live (`mysql -pPASS`, `curl ...?token=`); leading
             # `NAME=value` env-assignments come BEFORE it and are also secret
-            # carriers. Skip the assignments, take the program, and as a
-            # belt-and-braces check refuse anything that still smells of a value.
-            cmd = (tool_input.get("command") or "").strip()
+            # carriers.
+            cmd = tool_input.get("command")
+            if not isinstance(cmd, str):
+                return ""
+            cmd = cmd.strip()
+            if not cmd:
+                return ""
+            # Anything whose program is computed at runtime has no safe summary.
+            if any(marker in cmd for marker in _SHELL_SUBSTITUTION):
+                return ""
+            try:
+                # shlex, not str.split(): it honours quoting, so a quoted
+                # multi-word secret stays inside its own token and is skipped
+                # whole by _ENV_ASSIGN_RE instead of half-leaking.
+                tokens = shlex.split(cmd)
+            except ValueError:
+                return ""   # unbalanced quotes — we cannot tokenize it safely
             head = ""
-            for tok in cmd.split():
+            for tok in tokens:
                 if _ENV_ASSIGN_RE.match(tok):
                     continue  # env assignment — never the program, may be secret
                 head = tok
                 break
-            if "=" in head:
-                return ""  # unexpected shape — store nothing rather than risk it
-            return _cap(os.path.basename(head), 40)
+            name = os.path.basename(head)
+            # Final gate: only a plain command name is stored. This is what
+            # catches every shape the two rules above did not anticipate —
+            # redirections, operators, a stray value fragment, non-ASCII.
+            if not _PROGRAM_NAME_RE.match(name):
+                return ""
+            return _cap(name, 40)
         if tool_name in ("Read", "Write", "Edit", "MultiEdit", "NotebookEdit"):
             fp = (tool_input.get("file_path")
                   or tool_input.get("notebook_path") or "")
@@ -188,10 +263,16 @@ def _summarize_target(tool_name: str, tool_input) -> str:
 
 
 def _migrate(conn) -> None:
-    """Add the columns / capped table this hook writes, for a DB that predates
-    them. nth_server.py owns the canonical schema and normally runs first (at
-    server start / setup.sh); this is the transitional fallback so an upgraded
-    hook running against an old DB self-heals instead of dropping last_seen."""
+    """Fallback schema, for a hook upgraded ahead of its server.
+
+    nth_server.py's get_db() owns the canonical schema and creates all of this
+    on every connection, so in normal operation this never runs. It exists only
+    for the window where a new hook is installed but the server has not been
+    restarted — without it the hook would silently drop last_seen until then.
+
+    It is deliberately reached only via the "no such column"/"no such table"
+    exception path: this is DDL, and running it speculatively on every tool call
+    would put schema work on the host's critical path."""
     for col in ("last_tool_name TEXT", "last_tool_target TEXT",
                 "last_tool_at TEXT", "blocked_since TEXT"):
         try:
@@ -201,14 +282,14 @@ def _migrate(conn) -> None:
     conn.execute(
         "CREATE TABLE IF NOT EXISTS tool_events ("
         " id INTEGER PRIMARY KEY AUTOINCREMENT,"
-        " session_id TEXT NOT NULL,"
+        " fingerprint TEXT NOT NULL,"
         " tool_name TEXT NOT NULL DEFAULT '',"
         " target TEXT NOT NULL DEFAULT '',"
         " created_at TEXT NOT NULL)"
     )
     conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_tool_events_session "
-        "ON tool_events (session_id, id)"
+        "CREATE INDEX IF NOT EXISTS idx_tool_events_fingerprint "
+        "ON tool_events (fingerprint, id)"
     )
 
 
@@ -219,42 +300,81 @@ def _apply(conn, event, session_id, tool_name, target, now) -> None:
     cheaper for the host than three separate acquisitions, each of which could
     pay the full busy timeout."""
     fp = session_id[:64]
+    blocking = tool_name in BLOCKING_TOOLS
     conn.execute("BEGIN IMMEDIATE")
-    if event == "PreToolUse":
-        # Fold last_seen + tool summary + blocked into ONE write. blocked_since
-        # is set for a blocking tool and CLEARED (NULL) for any other tool — so
-        # ordinary tool activity self-heals a stale block even if PostToolUse
-        # was missed.
-        blocked = now if tool_name in BLOCKING_TOOLS else None
+    if event == "PreToolUse" and blocking:
+        # Entering an interactive prompt. Set the flag alongside the usual
+        # stamps.
         cur = conn.execute(
             "UPDATE sessions SET last_seen = ?, last_tool_name = ?, "
             "last_tool_target = ?, last_tool_at = ?, blocked_since = ?"
             + _LIVE_SESSION_SCOPE,
-            (now, tool_name[:_NAME_MAX], target, now, blocked, fp, fp),
+            (now, tool_name[:_NAME_MAX], target, now, now, fp, fp),
         )
-        # Only record events for a session trio actually tracks (rowcount>0),
-        # so the capped table can't fill with orphan sub-agent/unknown sessions.
-        if cur.rowcount and tool_name:
-            conn.execute(
-                "INSERT INTO tool_events (session_id, tool_name, target, created_at) "
-                "VALUES (?, ?, ?, ?)",
-                (fp, tool_name[:_NAME_MAX], target, now),
-            )
-            # Bounded prune: keep only the newest N rows for THIS session.
-            conn.execute(
-                "DELETE FROM tool_events WHERE session_id = ? AND id NOT IN "
-                "(SELECT id FROM tool_events WHERE session_id = ? "
-                " ORDER BY id DESC LIMIT ?)",
-                (fp, fp, TOOL_EVENTS_PER_SESSION),
-            )
-    else:
-        # PostToolUse (answer landed) / UserPromptSubmit (new prompt): bump
-        # last_seen and clear any block. Leave last_tool_* alone — it reflects
-        # the last tool that STARTED.
-        conn.execute(
+    elif event == "PreToolUse" and tool_name:
+        # An ordinary tool. Deliberately does NOT touch blocked_since.
+        #
+        # Clearing it here looked like a free self-heal, but Claude Code
+        # dispatches tools in parallel: a sibling Read firing while
+        # AskUserQuestion is still waiting on the human would clear the flag and
+        # the session would read as un-blocked for the rest of the prompt. The
+        # flag is a single slot, so it cannot serve as both the signal and its
+        # own self-heal. The turn hook clears it at every turn end instead,
+        # which bounds a stale flag to the current turn without racing.
+        cur = conn.execute(
+            "UPDATE sessions SET last_seen = ?, last_tool_name = ?, "
+            "last_tool_target = ?, last_tool_at = ?"
+            + _LIVE_SESSION_SCOPE,
+            (now, tool_name[:_NAME_MAX], target, now, fp, fp),
+        )
+    elif event == "PreToolUse":
+        # PreToolUse with no tool_name (a Claude Code build that omits the
+        # field, or a mis-wired hook). Stamp liveness only — writing the tool
+        # columns here would blank the roster chip on every such event.
+        cur = conn.execute(
+            "UPDATE sessions SET last_seen = ?" + _LIVE_SESSION_SCOPE,
+            (now, fp, fp),
+        )
+    elif event == "PostToolUse" and blocking:
+        # The human answered the interactive prompt. This is the ONLY event
+        # that clears the flag mid-turn — matching it to the blocking tool is
+        # what keeps a sibling tool's PostToolUse from clearing it early.
+        cur = conn.execute(
             "UPDATE sessions SET last_seen = ?, blocked_since = NULL"
             + _LIVE_SESSION_SCOPE,
             (now, fp, fp),
+        )
+    elif event == "UserPromptSubmit":
+        # A new prompt means the previous turn is over and nothing is waiting
+        # on a human, so a leftover flag is definitely stale.
+        cur = conn.execute(
+            "UPDATE sessions SET last_seen = ?, blocked_since = NULL"
+            + _LIVE_SESSION_SCOPE,
+            (now, fp, fp),
+        )
+    else:
+        # PostToolUse for an ordinary tool: liveness only. Leave last_tool_*
+        # alone — it reflects the last tool that STARTED — and leave
+        # blocked_since alone, per the parallel-dispatch note above.
+        cur = conn.execute(
+            "UPDATE sessions SET last_seen = ?" + _LIVE_SESSION_SCOPE,
+            (now, fp, fp),
+        )
+
+    # Only record events for a session trio actually tracks (rowcount>0), so
+    # the capped table can't fill with orphan sub-agent/unknown sessions.
+    if event == "PreToolUse" and cur.rowcount and tool_name:
+        conn.execute(
+            "INSERT INTO tool_events (fingerprint, tool_name, target, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            (fp, tool_name[:_NAME_MAX], target, now),
+        )
+        # Bounded prune: keep only the newest N rows for THIS fingerprint.
+        conn.execute(
+            "DELETE FROM tool_events WHERE fingerprint = ? AND id NOT IN "
+            "(SELECT id FROM tool_events WHERE fingerprint = ? "
+            " ORDER BY id DESC LIMIT ?)",
+            (fp, fp, TOOL_EVENTS_PER_SESSION),
         )
     conn.execute("COMMIT")
 
@@ -291,18 +411,35 @@ def main() -> int:
     if not session_id:
         return 0
 
+    # tool_name is needed on PostToolUse too, not just PreToolUse: clearing
+    # blocked_since is scoped to the *matching* tool, so we have to know which
+    # tool just finished.
     tool_name = ""
     target = ""
-    if event == "PreToolUse":
+    if event in ("PreToolUse", "PostToolUse"):
         tn = payload.get("tool_name")
         tool_name = tn if isinstance(tn, str) else ""
+    if event == "PreToolUse":
+        # Only PreToolUse summarises the input — PostToolUse carries a result,
+        # which we never read.
         target = _summarize_target(tool_name, payload.get("tool_input"))
+
+    # A pure-telemetry hook must not materialise a database. sqlite3.connect
+    # creates the file, so without this a stray NTH_DB_PATH (or a hook running
+    # before the server has ever started) leaves behind a DB containing only
+    # tool_events — which the real server would then never adopt.
+    if not DB_PATH.exists():
+        return 0
 
     now = _now_iso()
     conn = None
     try:
         conn = sqlite3.connect(str(DB_PATH), timeout=HOOK_DB_TIMEOUT_S,
                                isolation_level=None)
+        # Every other DB-touching module in this codebase runs NORMAL under WAL.
+        # This is the hottest writer of them all: FULL fsyncs on every commit,
+        # i.e. on every tool call of every session.
+        conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute(f"PRAGMA busy_timeout={int(HOOK_DB_TIMEOUT_S * 1000)}")
         try:
             _apply(conn, event, session_id, tool_name, target, now)
@@ -327,6 +464,13 @@ def main() -> int:
         return 0  # best-effort: never disturb the host session
     finally:
         if conn is not None:
+            # Explicit: every give-up path above can leave an open transaction,
+            # and close() only rolls it back as an implementation detail of
+            # CPython's sqlite3. Keep the invariant local.
+            try:
+                conn.execute("ROLLBACK")
+            except Exception:
+                pass
             try:
                 conn.close()
             except Exception:
