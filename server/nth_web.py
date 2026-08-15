@@ -240,20 +240,57 @@ class OperatorIdentity:
         return "human — pending identity"
 
 
+# Where the Tailscale CLI might live. PATH first, then the install locations
+# that are NOT on PATH. The Mac App Store build keeps its CLI inside the app
+# bundle and Tailscale's own docs tell Mac users to alias it, so a PATH-only
+# lookup silently fails there -- and that failure is invisible and
+# consequential: whois returns None, every tailnet peer degrades to `guest`,
+# and the endpoints gated on the tailscale tier start refusing the operator on
+# their own machine with nothing anywhere naming the cause.
+TAILSCALE_CANDIDATES = (
+    "tailscale", "tailscale.exe",
+    "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
+    "/usr/local/bin/tailscale", "/opt/homebrew/bin/tailscale",
+)
+_tailscale_missing_warned = False
+
+
+def _warn_tailscale_missing_once() -> None:
+    """Say so, once, when no candidate resolved. Silent degrade-to-guest is the
+    failure mode that costs someone an afternoon: the UI looks normal, the trust
+    tier is simply never granted, and nothing names the cause."""
+    global _tailscale_missing_warned
+    if _tailscale_missing_warned:
+        return
+    _tailscale_missing_warned = True
+    sys.stderr.write(
+        "[nth_web] tailscale CLI not found on PATH or at any known install "
+        "location; tailnet peers cannot be identified and will be treated as "
+        "untrusted guests. Add it to PATH to restore tailnet trust.\n")
+
+
 def tailscale_whois(remote_ip: str) -> Optional[Dict[str, str]]:
     """Ask the local Tailscale daemon who owns a tailnet IP. Returns
     {login, display, node} or None if Tailscale isn't available or the
     caller isn't on the tailnet."""
     if not remote_ip:
         return None
-    for cmd in ("tailscale", "tailscale.exe"):
+    found_cli = False
+    for cmd in TAILSCALE_CANDIDATES:
         try:
             out = subprocess.check_output(
                 [cmd, "whois", "--json", remote_ip],
                 timeout=3, stderr=subprocess.DEVNULL,
             )
-        except (FileNotFoundError, subprocess.SubprocessError):
+        except FileNotFoundError:
+            continue                      # this candidate isn't installed here
+        except subprocess.SubprocessError:
+            # The CLI EXISTS and ran; it just could not answer for this IP,
+            # which is the ordinary "peer is not on the tailnet" case. Not a
+            # missing install, so it must not trigger the warning below.
+            found_cli = True
             continue
+        found_cli = True
         try:
             data = json.loads(out.decode("utf-8", errors="replace"))
         except (ValueError, TypeError):
@@ -265,6 +302,8 @@ def tailscale_whois(remote_ip: str) -> Optional[Dict[str, str]]:
         if not login and not display:
             return None
         return {"login": login, "display": display, "node": node}
+    if not found_cli:
+        _warn_tailscale_missing_once()
     return None
 
 
@@ -410,7 +449,7 @@ def get_tailscale_ip() -> Optional[str]:
     """Best-effort: return the tailnet IPv4 address of this host, or None
     if Tailscale isn't installed/running. Used only for informational
     output — does NOT gate binding."""
-    for cmd in ("tailscale", "tailscale.exe"):
+    for cmd in TAILSCALE_CANDIDATES:
         try:
             out = subprocess.check_output(
                 [cmd, "ip", "-4"], timeout=2, stderr=subprocess.DEVNULL
