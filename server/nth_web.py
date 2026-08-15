@@ -4145,12 +4145,21 @@ class NthWebHandler(BaseHTTPRequestHandler):
         # the dashboard can lock the picker and show what was chosen.
         reply_to = body.get("reply_to")
         if reply_to is not None:
-            if not isinstance(reply_to, int) or isinstance(reply_to, bool) or reply_to <= 0:
+            # The upper bound is not cosmetic. SQLite binds INTEGER as signed
+            # 64-bit, so anything larger raises OverflowError — which is NOT a
+            # sqlite3.Error, so neither the inner nor the outer handler below
+            # catches it: the request thread dies with a bare traceback and the
+            # client gets a connection reset instead of a 400.
+            if (not isinstance(reply_to, int) or isinstance(reply_to, bool)
+                    or reply_to <= 0 or reply_to > 2 ** 63 - 1):
                 self._error(400, "invalid reply_to")
                 return
 
         raw_sel = body.get("selection")
         selection_json = None
+        # Member ids this message must wake regardless of its prose — currently
+        # just the author of an ask being answered. Merged into mentions below.
+        answer_wake_ids: list = []
         has_selection = raw_sel is not None
         answers: list = []
         if has_selection:
@@ -4251,8 +4260,8 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 # bypasses the UI entirely.
                 if reply_to is not None:
                     tgt = db.execute(
-                        "SELECT id, member_id, choices FROM messages "
-                        "WHERE id = ? AND channel = ?",
+                        "SELECT id, member_id, choices, retracted_at "
+                        "FROM messages WHERE id = ? AND channel = ?",
                         (reply_to, send_channel)).fetchone()
                     if not tgt:
                         db.execute("ROLLBACK")
@@ -4260,6 +4269,25 @@ class NthWebHandler(BaseHTTPRequestHandler):
                         return
 
                     if has_selection:
+                        # A withdrawn question is not answerable. Retraction is
+                        # also the ONLY recourse when an ask deadlocks: the
+                        # target is stored as a member id, and a human who
+                        # re-identifies at a different trust tier (guest ->
+                        # Tailscale, cleared cookie, loopback vs tailnet) becomes
+                        # a different member row who can never satisfy the
+                        # q_target check below. The asker retracts and re-asks.
+                        if tgt["retracted_at"]:
+                            db.execute("ROLLBACK")
+                            self._error(409, "this question was withdrawn")
+                            return
+                        # An answer must be as visible as the question it
+                        # answers. A DM-scoped answer would leave every other
+                        # reader looking at a permanently unanswered ask while
+                        # the one-shot guard below considers it closed.
+                        if recipient_ids:
+                            db.execute("ROLLBACK")
+                            self._error(400, "an answer cannot be a direct message")
+                            return
                         q_choices = parse_obj_json(
                             tgt["choices"] if "choices" in tgt.keys() else "")
                         q_qs = None
@@ -4307,7 +4335,29 @@ class NthWebHandler(BaseHTTPRequestHandler):
                             db.execute("ROLLBACK")
                             self._error(409, "this question has already been answered")
                             return
+                        # Freeze the chosen option TEXT alongside the indexes.
+                        # An index alone means nothing without the exact options
+                        # array it was validated against, and that array lives
+                        # in a mutable TEXT column: anything that later rewrites
+                        # the question silently remaps every stored answer, and
+                        # the one-shot guard above prevents re-answering. The
+                        # text is what the human actually agreed to, so store it.
+                        for qi, ans in enumerate(answers):
+                            q = q_qs[qi] if isinstance(q_qs[qi], dict) else {}
+                            opts = q.get("options") or []
+                            ans["picked_text"] = [
+                                str(opts[x]) for x in ans["picked"] if x < len(opts)
+                            ]
                         selection_json = json.dumps({"answers": answers})
+                        # The asking agent is BLOCKED on this answer, so wake it.
+                        # Nothing else does: the reply's sigils come only from
+                        # the human's typed prose, so an agent listening in
+                        # `about` or `at` never hears that its own question was
+                        # answered. Deriving the wake from reply_to is the only
+                        # signal that does not depend on what the human typed.
+                        asker_id = tgt["member_id"]
+                        if asker_id and asker_id not in answer_wake_ids:
+                            answer_wake_ids.append(asker_id)
 
                 # Validate attachments up front: every requested id must be
                 # this operator's own, unlinked, in-channel row — else abort,
@@ -4366,6 +4416,12 @@ class NthWebHandler(BaseHTTPRequestHandler):
                     mention_ids = narrow_wake(mention_ids, recipient_ids, op_id)
                     ref_ids = narrow_wake(ref_ids, recipient_ids, op_id)
                     bang_ids = narrow_wake(bang_ids, recipient_ids, op_id)
+                # Answering an ask wakes its author. Added AFTER narrow_wake
+                # because an answer can never be a DM (rejected above), so
+                # there is no recipient set to narrow against.
+                for _wid in answer_wake_ids:
+                    if _wid not in mention_ids:
+                        mention_ids.append(_wid)
                 cursor = db.execute(
                     "INSERT INTO messages "
                     "(channel, member_id, member_name, content, created_at, "
@@ -10819,6 +10875,24 @@ def main() -> int:
     # grows with the install). Nothing downstream depends on its result.
     threading.Thread(target=_startup_sweep, name="attach-gc", daemon=True).start()
 
+    # Forward-compat: make sure the columns the dashboard reads and writes
+    # exist before anything queries them, so we work against a database whose
+    # MCP server has not been restarted since these features landed.
+    #
+    # This MUST run before EventHub.start(). The hub's snapshot query names
+    # choices/selection/reply_to, and its poll loop swallows sqlite errors —
+    # so against an unmigrated DB the first client would get an empty history
+    # with no error signal, indistinguishable from an empty channel, and the
+    # hub would never self-heal.
+    _mig = sqlite3.connect(str(db_path), timeout=5)
+    try:
+        ensure_ask_columns(_mig)
+        _mig.commit()
+    except sqlite3.Error as e:
+        print(f"[nth_web] schema forward-compat skipped: {e}", flush=True)
+    finally:
+        _mig.close()
+
     # Landing mode creates hubs lazily, one per channel actually viewed.
     hub = None
     if args.channel:
@@ -10829,18 +10903,6 @@ def main() -> int:
     else:
         NthWebHandler.landing_mode = True
     NthWebHandler.db_path = db_path
-
-    # Forward-compat: make sure the columns the dashboard writes exist before
-    # we serve, so it works against a database whose MCP server has not been
-    # restarted since these features landed.
-    _mig = sqlite3.connect(str(db_path), timeout=5)
-    try:
-        ensure_ask_columns(_mig)
-        _mig.commit()
-    except sqlite3.Error as e:
-        print(f"[nth_web] schema forward-compat skipped: {e}", flush=True)
-    finally:
-        _mig.close()
 
     # The agent control plane needs the db path outside a request handler
     # (router + reaper are background threads).
