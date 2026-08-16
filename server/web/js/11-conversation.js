@@ -731,7 +731,7 @@
       // is what makes them "global" from the user's seat and fixes "messages
       // showing up in a channel I didn't send them in". The DM view (state.dmKey
       // set, handled above) still receives these, so live DM updates are
-      // unaffected. See atrium "Slack for Humans and Agents" model.
+      // unaffected. See the humans-and-agents workspace model.
       return;
     } else if (msg.channel && state.channel && msg.channel !== state.channel) {
       // A message from another channel must not render in the channel

@@ -35,7 +35,7 @@
     if (dm) return { name: archived ? 'audit' : 'dm', params: { key: dm }, title: 'DM ' + dm, readOnly: archived };
     if (channel) return { name: 'channel', params: { code: channel, archived }, title: 'trio#' + channel, readOnly: archived };
     const name = pageRoutes[pathname] || 'home';
-    return { name, params: {}, title: name === 'home' ? 'Atrium' : name, readOnly: false };
+    return { name, params: {}, title: name === 'home' ? 'nth' : name, readOnly: false };
   }
   function serialize(route) {
     const params = route.params || {};

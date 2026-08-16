@@ -134,7 +134,7 @@
   function renderPage(panel) {
     panel.replaceChildren();
     const p = read();
-    const hero = document.createElement('div'); hero.className = 'view-hero'; hero.innerHTML = '<h2>Settings & diagnostics</h2><p>Shape how Atrium looks, sounds, and keeps you informed.</p>';
+    const hero = document.createElement('div'); hero.className = 'view-hero'; hero.innerHTML = '<h2>Settings & diagnostics</h2><p>Shape how the workspace looks, sounds, and keeps you informed.</p>';
     const appearance = document.createElement('section'); appearance.className = 'pref-group'; appearance.innerHTML = '<h3>Appearance</h3>';
     const themeRow = document.createElement('div'); themeRow.className = 'pref-row pref-row-themes'; themeRow.innerHTML = '<div class="pr-txt"><div class="l">Theme presets</div><div class="d">Choose the light and dark themes used by the toggle. Each preset sets its own accent.</div></div>';
     const themeChoices = document.createElement('div'); themeChoices.className = 'theme-choice';

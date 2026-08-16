@@ -87,7 +87,7 @@
     if (root.store) { root.store.set('session.operator', root.state.operator); root.store.set('session.channel', root.state.channel); }
     // No channel selected on load; stay on the workspace home view instead of
     // forcing the first channel open.
-    document.getElementById('h-channel').textContent = root.state.channel ? `#${root.state.channel}` : 'Atrium';
+    document.getElementById('h-channel').textContent = root.state.channel ? `#${root.state.channel}` : 'nth';
     document.getElementById('h-meta').textContent = root.state.channel ? 'Live agent workspace' : 'No channel selected';
     mountFeatures?.();
     if (root.startEvents) root.startEvents(root.state.channel);

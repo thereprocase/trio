@@ -25,7 +25,7 @@
   // moot). Persisted so a dismissal sticks across reloads — the question is
   // still unanswered server-side, so a fresh /api/questions would otherwise
   // re-surface it. Keyed by the attention-item id ('question-<id>').
-  const DISMISSED_QUESTIONS_KEY = 'atrium.dismissedQuestions';
+  const DISMISSED_QUESTIONS_KEY = 'trio.dismissedQuestions';
   const dismissedQuestions = (() => {
     try { return new Set(JSON.parse(localStorage.getItem(DISMISSED_QUESTIONS_KEY) || '[]').map(String)); }
     catch { return new Set(); }
@@ -378,7 +378,7 @@
   }
   function updateTopbar(title, subtitle) {
     const h = $('h-channel'); const m = $('h-meta');
-    if (h) h.textContent = title || 'Atrium';
+    if (h) h.textContent = title || 'nth';
     if (m) m.textContent = subtitle || '';
   }
   function showConversationPage() {
@@ -575,7 +575,7 @@
     const span = hours >= 23.5 ? 'last 24h' : `last ${hours.toFixed(hours < 2 ? 1 : 0)}h`;
     return `<div class="usage-trend"><span class="burn ${tone}">${pp > 0 ? '+' : pp < 0 ? '−' : ''}${Math.abs(pp).toFixed(1)} pp</span> <span class="burn-win">${esc(span)}</span></div>`;
   }
-  // Forecast at reset, including the exact linear calculation Atrium used.
+  // Forecast at reset, including the exact linear calculation the usage panel uses.
   // This is deliberately explicit: "40% now + 1.2 pp/hr × 30h = 76%" makes
   // both the selected rate and the assumption behind the projection auditable.
   function projectionLine(proj, stale, quotaLabel) {
@@ -906,7 +906,7 @@
     if (conn) conn.classList.add('hidden');
     const shell = document.querySelector('.conversation-shell');
     shell?.classList.add('workspace-page');
-    updateTopbar(view === 'home' ? 'Atrium' : view[0].toUpperCase() + view.slice(1), view === 'home' ? 'Home' : `trio view · ${view}`);
+    updateTopbar(view === 'home' ? 'nth' : view[0].toUpperCase() + view.slice(1), view === 'home' ? 'Home' : `trio view · ${view}`);
     document.querySelectorAll('[data-trio-view]').forEach(n => n.hidden = true);
     let panel = $(`trio-${view}-view`);
     if (!panel) { panel = document.createElement('section'); panel.id = `trio-${view}-view`; panel.dataset.trioView = view; panel.className = 'workspace-view'; document.querySelector('.conversation-shell')?.prepend(panel); }
@@ -1395,12 +1395,18 @@
       if (subagentPending.has(id)) return;
       subagentPending.add(id);
       Trio.api.get('/api/tools?member=' + encodeURIComponent(id))
-        .then(d => {
-          const items = (d && d.subagents) || [];
+        .then(d => (d && d.subagents) || [])
+        // A failure caches an empty list exactly like a success does. The
+        // subagent feed is written by the activity hook, which is not part of
+        // every deployment — where it is absent the endpoint 404s, and caching
+        // only the success path would re-request on every single drawer render
+        // forever. An empty list renders nothing, and the TTL means the client
+        // starts showing subagents on its own once the hook is installed.
+        .catch(() => [])
+        .then(items => {
           subagentCache.set(id, { at: Date.now(), items });
           if (box.isConnected !== false) box.innerHTML = renderSubagentList(items);
         })
-        .catch(() => {})
         .finally(() => subagentPending.delete(id));
     });
   }
@@ -1581,7 +1587,7 @@
     // threads, so a your_dms-only lookup returned null for them and the drawer
     // mislabeled a real DM as a channel ("Channel size", "#__agent_inbox__").
     const dm = state.dmKey ? (state.dmThread || (state.dms?.your_dms || []).find(d => d.key === state.dmKey)) : null;
-    const title = dm ? (dm.name || state.dmKey) : '#' + (state.channel || 'Atrium');
+    const title = dm ? (dm.name || state.dmKey) : '#' + (state.channel || 'nth');
     // Membership editing applies to real channels only (not DMs) and not when
     // archived/read-only. Always start with edit mode off on a fresh open.
     const canEditMembers = !dm && !archived;

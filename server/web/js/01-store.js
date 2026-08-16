@@ -2,7 +2,7 @@
   'use strict';
   const Trio = window.Trio = window.Trio || {};
   const initial = {
-    route: { name: 'home', params: {}, title: 'Atrium', subtitle: '' },
+    route: { name: 'home', params: {}, title: 'nth', subtitle: '' },
     session: { operator: null, token: '', channel: '', dmKey: '', dmName: '', dmMemberIds: [], readOnly: false, focused: true },
     dmAudit: false,
     workspace: { channels: [], dms: { your_dms: [], agent_dms: [] }, meta: {}, approvals: [], tasks: [], attention: 0 },

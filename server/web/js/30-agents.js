@@ -549,7 +549,7 @@
   // Create-agent slider re-opens where you left it. (Editing an existing agent
   // defaults to that agent's own current effort — see the manage-dialog
   // Configure editor.)
-  const EFFORT_KEY = 'atrium.effort.last';
+  const EFFORT_KEY = 'trio.effort.last';
   function lastEffort(provider, model) {
     try { return JSON.parse(localStorage.getItem(EFFORT_KEY) || '{}')[`${provider}:${model}`] ?? null; }
     catch { return null; }
