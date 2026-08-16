@@ -800,8 +800,28 @@
     // and these ticks arrive constantly on the multiplexed stream.
     const detail = event.detail;
     if (!detail || detail.channel !== state.channel) return;
-    if (Array.isArray(detail.members)) state.members = new Map(detail.members.map(m => [m.id, m]));
-    render();
+    if (!Array.isArray(detail.members)) return;
+    // Re-render only when something the CONVERSATION paints actually changed.
+    //
+    // A roster event does not mean a person joined or left. The server
+    // broadcasts whenever its snapshot differs, and that snapshot carries
+    // messenger_heartbeat, watchdog_heartbeat and last_seen — which the
+    // monitor rewrites every ~10s FOR EVERY MEMBER, with no message traffic at
+    // all. So in a room of ten agents the snapshot changes every second or
+    // two, forever. render() clears #messages and rebuilds every visible card
+    // through cardFor -> paintBody -> two TreeWalkers, measured at ~116ms for
+    // 500 messages, which threw away the whole point of the incremental
+    // upsert() path on nothing but presence churn.
+    //
+    // What this view reads off a member is their display name and their
+    // avatar tone (for the author line and @mention chips). Nothing else here
+    // repaints from the roster — the face-pile and the drawer are 20-workspace's,
+    // and they listen separately.
+    const painted = list => (list || []).map(m => m.id + '\u0000' + (m.name || ''))
+      .sort().join('');
+    const before = painted([...state.members.values()]);
+    state.members = new Map(detail.members.map(m => [m.id, m]));
+    if (painted(detail.members) !== before) render();
   }
   function onBoot(event) { state.operator = event.detail?.operator || state.operator; }
   function onPrefsChanged() { render(); }

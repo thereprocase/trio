@@ -1861,13 +1861,18 @@ class EventHub:
         # can be launched standalone against a DB whose server has not restarted
         # — folding both into one try/except would drop filter_mode and the
         # context % for every member just because the turn column is missing.
-        def _roster_sql(turn: bool, v72: bool) -> str:
+        def _roster_sql(turn: bool, v72: bool, kind: bool) -> str:
             cols = [
                 "m.id AS id", "m.name AS name", "m.status_text AS status_text",
                 "m.last_seen AS member_last_seen", "m.last_read AS member_last_read",
                 "m.messenger_heartbeat AS messenger_heartbeat",
                 "m.watchdog_heartbeat AS watchdog_heartbeat",
             ]
+            # Its own tier for the same reason the others have theirs: a DB
+            # predating this column must not also lose filter_mode and the
+            # context %, which is what folding it into v72 would do.
+            if kind:
+                cols.append("m.kind AS kind")
             if v72:
                 cols += ["m.filter_mode AS filter_mode", "m.context_json AS context_json"]
             cols += [
@@ -1886,9 +1891,12 @@ class EventHub:
                     "ORDER BY m.joined_at")
 
         rows = None
-        for _turn, _v72 in ((True, True), (False, True), (False, False)):
+        for _turn, _v72, _kind in ((True, True, True), (False, True, True),
+                                   (True, True, False), (False, True, False),
+                                   (False, False, False)):
             try:
-                rows = db.execute(_roster_sql(_turn, _v72), (self.channel,)).fetchall()
+                rows = db.execute(_roster_sql(_turn, _v72, _kind),
+                                  (self.channel,)).fetchall()
                 break
             except sqlite3.OperationalError:
                 continue
@@ -1941,6 +1949,12 @@ class EventHub:
             out.append({
                 "id": r["id"],
                 "name": r["name"] or r["id"],
+                # The client reads `member.kind || 'agent'`, so omitting this
+                # does not blank a field — it silently relabels every HUMAN as
+                # an agent: wrong role badge on their messages, "agent" in the
+                # @-autocomplete, a subagent box under their name, and a
+                # "Remove from channel" button the server will then refuse.
+                "kind": (r["kind"] if "kind" in keys else None) or "agent",
                 "status_text": r["status_text"] or "",
                 "last_seen": effective_last_seen,
                 "last_read": effective_last_read,
@@ -4295,7 +4309,17 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 "SELECT id, name, model, state, managed, session_id, pid, "
                 "effort, runtime_provider, runtime_ref, cwd, permission_profile, "
                 "wake_mode, avatar_name, created_at, last_active_at, archived_at, "
-                "context_pct, context_tokens "
+                "context_pct, context_tokens, "
+                # The agent's own status line. It lives on members (it is set
+                # per channel), not on agents, so it has to be joined back —
+                # without it every agent card reads the canned "Connected and
+                # ready." no matter what the agent last said about itself.
+                # An agent can sit in several channels; take its most recently
+                # CHANGED non-empty status, which is the one it would want
+                # shown, rather than an arbitrary channel's.
+                "(SELECT m.status_text FROM members m "
+                "  WHERE m.id = agents.id AND COALESCE(m.status_text, '') != '' "
+                "  ORDER BY m.status_changed_at DESC LIMIT 1) AS status_text "
                 "FROM agents WHERE managed = 1 AND archived_at IS "
                 + ("NOT NULL" if archived else "NULL") + " ORDER BY created_at"
             ).fetchall()
@@ -4318,6 +4342,8 @@ class NthWebHandler(BaseHTTPRequestHandler):
                     "cwd": r["cwd"] or "",
                     "permission_profile": r["permission_profile"] or "balanced",
                     "wake_mode": r["wake_mode"] or "at",
+                    "status_text": (r["status_text"]
+                                    if "status_text" in r.keys() else "") or "",
                     "avatar_url": avatar_url(r["avatar_name"] or r["name"]),
                     "session_id": r["session_id"], "pid": r["pid"],
                     "channels": chans,

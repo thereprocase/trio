@@ -196,6 +196,24 @@ check("the test hook is stripped from the served bundle",
       and any("__TRIO_TEST_HOOK_START__" in web._read_web_source(n)
               for n in disk_js_files))
 
+# ── the sources must stay TEXT ─────────────────────────────────────────
+# A raw control byte in a source file makes git classify the whole file as
+# binary: `git diff` prints "Binary files differ", `git diff --check` skips it,
+# and it silently drops out of every line-based review. One module sat in that
+# state for an entire branch — reviewed by nobody, including its author — and a
+# second one was introduced while FIXING the first, by typing a separator that
+# came out as a literal NUL rather than an escape. The intent (a delimiter no
+# id can contain) is fine; '\\u0000' expresses it and keeps the file reviewable.
+binary = []
+for name in list(disk_css_files) + list(disk_js_files) + ["index.html"]:
+    raw = (WEB / name).read_bytes()
+    if b"\x00" in raw:
+        binary.append(f"{name} (NUL at byte {raw.index(chr(0).encode())})")
+check("no web source contains a raw control byte — git would treat it as "
+      "binary and drop it out of every diff"
+      + (f" — {', '.join(binary)}" if binary else ""),
+      not binary)
+
 # ── the reader refuses to leave server/web/ ────────────────────────────
 escaped = None
 try:
