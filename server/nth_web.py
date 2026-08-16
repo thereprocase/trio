@@ -3297,6 +3297,12 @@ class NthWebHandler(BaseHTTPRequestHandler):
             self._handle_channels(parsed)
         elif path == "/api/dms":
             self._handle_dms(parsed)
+        elif path == "/api/questions":
+            self._handle_questions()
+        elif path == "/api/mentions":
+            self._handle_mentions()
+        elif path == "/api/tasks":
+            self._handle_tasks(parsed)
         elif path == "/api/meta":
             ch = self._channel_for_request(parsed)
             if ch is None:
@@ -5191,6 +5197,213 @@ class NthWebHandler(BaseHTTPRequestHandler):
                     pass
         self._json({"ok": True, "archived": archived,
                     "count": len(channels), "channels": channels})
+
+    def _handle_questions(self) -> None:
+        """Pending multiple-choice questions addressed to the operator.
+
+        "Pending" is derived, not stored: a question is answered when the
+        operator has posted a reply_to it carrying a selection. Deriving it
+        means an answer sent from anywhere — dashboard, MCP, a second browser —
+        clears the question everywhere, with no answered-flag to keep in sync.
+        """
+        ident = self._require_operator()
+        if ident is None:
+            return
+        operator_id = ident.member_id
+        db = None
+        try:
+            db = sqlite3.connect(str(self.db_path), timeout=5)
+            db.row_factory = sqlite3.Row
+            db.execute("PRAGMA busy_timeout=3000")
+            answered = {(r["channel"], r["reply_to"]) for r in db.execute(
+                "SELECT channel, reply_to FROM messages "
+                "WHERE member_id = ? AND reply_to IS NOT NULL "
+                "  AND COALESCE(selection, '') != '' "
+                "  AND EXISTS (SELECT 1 FROM channels c "
+                "              WHERE c.code = messages.channel "
+                "                AND c.archived_at IS NULL)",
+                (operator_id,)).fetchall()}
+            rows = db.execute(
+                "SELECT id, channel, member_id, member_name, content, "
+                "       created_at, choices FROM messages "
+                "WHERE COALESCE(choices, '') != '' AND member_id != ? "
+                "  AND EXISTS (SELECT 1 FROM channels c "
+                "              WHERE c.code = messages.channel "
+                "                AND c.archived_at IS NULL) "
+                "ORDER BY id DESC LIMIT 2000",
+                (operator_id,)).fetchall()
+            questions = []
+            name_cache: Dict[str, str] = {}
+            for r in rows:
+                choices = parse_obj_json(r["choices"])
+                # The target check is what makes this the OPERATOR's queue: a
+                # question posed to someone else is not theirs to answer.
+                if (not isinstance(choices, dict)
+                        or choices.get("target") != operator_id):
+                    continue
+                if (r["channel"], r["id"]) in answered:
+                    continue
+                qs = choices.get("questions") or []
+                if not qs and "options" in choices:
+                    # Single-question form, kept readable alongside batches.
+                    qs = [{"question": choices.get("question", ""),
+                           "options": choices["options"],
+                           "mode": choices.get("mode")}]
+                if not qs:
+                    continue
+                questions.append({
+                    "id": r["id"],
+                    "channel": r["channel"],
+                    "member_id": r["member_id"],
+                    "member_name": resolve_display_name(
+                        db, r["member_id"], name_cache),
+                    "created_at": r["created_at"],
+                    "question": qs[0].get("question", "") or "Question",
+                    "questions": qs,
+                })
+        except sqlite3.Error as e:
+            sys.stderr.write(f"[nth_web] questions db error: {e}\n")
+            self._error(500, "question list failed")
+            return
+        finally:
+            if db is not None:
+                try:
+                    db.close()
+                except sqlite3.Error:
+                    pass
+        self._json({"ok": True, "count": len(questions),
+                    "questions": questions})
+
+    def _handle_mentions(self) -> None:
+        """@mentions of the operator, each with a read receipt."""
+        ident = self._require_operator()
+        if ident is None:
+            return
+        operator_id = ident.member_id
+        db = None
+        try:
+            db = sqlite3.connect(str(self.db_path), timeout=5)
+            db.row_factory = sqlite3.Row
+            db.execute("PRAGMA busy_timeout=3000")
+            rows = db.execute(
+                "SELECT m.id, m.channel, m.member_id, m.member_name, "
+                "       m.content, m.created_at, m.mentions, "
+                "       (mr.member_id IS NOT NULL) AS is_read "
+                "FROM messages m "
+                "LEFT JOIN message_reads mr "
+                "  ON mr.message_id = m.id AND mr.member_id = ? "
+                "WHERE m.mentions LIKE ? AND m.member_id != ? "
+                "  AND EXISTS (SELECT 1 FROM channels c "
+                "              WHERE c.code = m.channel "
+                "                AND c.archived_at IS NULL) "
+                "ORDER BY m.id DESC LIMIT 2000",
+                (operator_id, f"%{operator_id}%", operator_id)).fetchall()
+            mentions = []
+            name_cache: Dict[str, str] = {}
+            unread_count = 0
+            for r in rows:
+                # The LIKE above is a coarse prefilter only — it would also
+                # match an id that merely CONTAINS the operator's. The parsed
+                # array is the exact test, and it is the one that decides.
+                if operator_id not in parse_mentions_json(r["mentions"]):
+                    continue
+                is_read = bool(r["is_read"])
+                if not is_read:
+                    unread_count += 1
+                mentions.append({
+                    "id": r["id"],
+                    "channel": r["channel"],
+                    "member_id": r["member_id"],
+                    "member_name": resolve_display_name(
+                        db, r["member_id"], name_cache),
+                    "created_at": r["created_at"],
+                    "content": r["content"] or "",
+                    "read": is_read,
+                })
+        except sqlite3.Error as e:
+            sys.stderr.write(f"[nth_web] mentions db error: {e}\n")
+            self._error(500, "mention list failed")
+            return
+        finally:
+            if db is not None:
+                try:
+                    db.close()
+                except sqlite3.Error:
+                    pass
+        self._json({"ok": True, "count": len(mentions),
+                    "unread_count": unread_count, "mentions": mentions})
+
+    def _handle_tasks(self, parsed) -> None:
+        """Read-only task board for one channel.
+
+        Read-only on purpose: tasks are claimed and completed through MCP,
+        where the claim is atomic and the agent doing the work is the one
+        recording it. A human "complete" button would let the board disagree
+        with what actually happened.
+        """
+        # Landing mode serves many channels from one process, so the channel
+        # comes from the request rather than a process-wide attribute — the
+        # same shape as _handle_search. atrium reaches self.channel here
+        # because its _authorize_channel resolved it first; there is no such
+        # gate on this branch, so scope explicitly.
+        ch = self._channel_for_request(parsed)
+        if ch is None:
+            self._error(400, "channel query param required")
+            return
+        if self.landing_mode and not self._channel_exists(ch):
+            self._error(404, f"no such channel: {ch}")
+            return
+        _token, ident, _is_new = self._resolve_identity()
+        if ident.source == IDENTITY_SOURCE_PENDING:
+            self._error(403, "identity required — POST /api/identify first")
+            return
+        # Active work first, terminal states last.
+        order = ("CASE status WHEN 'open' THEN 0 WHEN 'claimed' THEN 1 "
+                 "WHEN 'blocked' THEN 2 WHEN 'done' THEN 3 "
+                 "WHEN 'cancelled' THEN 4 ELSE 5 END")
+        db = None
+        try:
+            db = sqlite3.connect(str(self.db_path), timeout=5)
+            db.row_factory = sqlite3.Row
+            db.execute("PRAGMA busy_timeout=3000")
+            rows = db.execute(
+                "SELECT id, posted_by, claimed_by, status, description, "
+                "       result, blocked_by, created_at, updated_at, "
+                "       lease_expires_at "
+                "FROM tasks WHERE channel = ? "
+                f"ORDER BY {order}, id", (ch,)).fetchall()
+            tasks = []
+            for r in rows:
+                try:
+                    deps = json.loads(r["blocked_by"] or "[]")
+                except (ValueError, TypeError):
+                    # A malformed blocked_by must not take the whole board
+                    # down; an empty dependency list is the safe reading.
+                    deps = []
+                tasks.append({
+                    "id": r["id"],
+                    "posted_by": r["posted_by"],
+                    "claimed_by": r["claimed_by"],
+                    "status": r["status"],
+                    "description": r["description"] or "",
+                    "result": r["result"] or "",
+                    "blocked_by": deps,
+                    "created_at": r["created_at"],
+                    "updated_at": r["updated_at"],
+                    "lease_expires_at": r["lease_expires_at"],
+                })
+        except sqlite3.Error as e:
+            sys.stderr.write(f"[nth_web] tasks db error: {e}\n")
+            self._error(500, "task list failed")
+            return
+        finally:
+            if db is not None:
+                try:
+                    db.close()
+                except sqlite3.Error:
+                    pass
+        self._json({"ok": True, "channel": ch,
+                    "count": len(tasks), "tasks": tasks})
 
     def _handle_archive_update(self) -> None:
         """Archive or restore one channel or one operator DM thread.
