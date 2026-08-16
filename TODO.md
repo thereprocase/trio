@@ -35,14 +35,11 @@ is not discoverable six months out.
   needs me"). Neither derives from the other. Landing goes away when the
   workspace client replaces the landing page; unifying them before that client
   exists would mean designing the merged endpoint blind.
-- **`dm_thread_key` is VIEWER-RELATIVE and already persisted.** One conversation
-  has three keys: `"bob"` to alice, `"alice"` to bob, `"alice,bob"` to an
-  auditing operator. That is fine for per-viewer state (unread, drafts) but not
-  for shareable deep links, a search index, or Attention aggregation. It is
-  already a PRIMARY KEY column in `dm_archives`, so making it canonical later
-  is a data migration, not a refactor. Gandalf's recommendation: a small
-  `nth_conversation.py` with `canonical_dm_key()` / `conversation_id_for()` /
-  `parse_conversation_id()`, done BEFORE the client lands.
+- ~~**`dm_thread_key` is VIEWER-RELATIVE and already persisted.**~~ **DONE**
+  (`6ab9d6a`). The key is now the sorted participant set, identical for every
+  viewer, in `server/nth_conversation.py`. Done before release precisely
+  because `dm_archives.thread_key` is half a primary key: with no rows shipped
+  yet it cost nothing, and after release it would have been a backfill.
 - **`JSON_OVERHEAD_CHARS_PER_MESSAGE = 80` and the `chars/4` divisor** drive
   every token estimate and nothing pins either against a real envelope. A loose
   bound test (±40%) would fail only when the envelope has genuinely changed
