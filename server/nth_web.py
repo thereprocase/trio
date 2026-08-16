@@ -1188,6 +1188,13 @@ def _parse_sigils_against_roster(
     return mention_ids, ref_ids, bang_ids
 
 
+def _is_lock_error(exc: sqlite3.OperationalError) -> bool:
+    """True when a SQLite OperationalError is a transient write-lock/busy
+    condition (worth retrying) rather than a schema or syntax fault."""
+    msg = str(exc).lower()
+    return "locked" in msg or "busy" in msg
+
+
 def ensure_operator_row(db: sqlite3.Connection, channel: str, ident: OperatorIdentity) -> Tuple[str, str]:
     """Insert-or-update this operator's members row. On every send we
     refresh the summary so trust source is fresh if a guest later upgrades
@@ -2387,6 +2394,42 @@ STT_SLOTS = threading.BoundedSemaphore(STT_MAX_CONCURRENT)
 CHANNEL_CODE_RE = re.compile(r"^[a-z0-9][a-z0-9\-]{0,31}$")
 
 
+# ── unified DM threading ──
+# A DM's identity is its PARTICIPANTS, not its channel. The same pair of people
+# may exchange messages that live in several backing channels (older rows are
+# scattered across topics; new ones go through the global agent inbox), and to
+# a reader that is one conversation. Keying on participants is what merges
+# them; keying on channel is what split them in the first place.
+def dm_thread_key(message, operator_id: str) -> Tuple[str, List[str]]:
+    """Unified-inbox key and peer ids for one DM row involving the operator.
+
+    Returns ("", []) when the operator is not a participant, so callers can
+    use the empty key as "not one of mine".
+    """
+    participants = set(parse_recipients(message["recipients"]))
+    participants.add(message["member_id"])
+    if operator_id not in participants:
+        return "", []
+    others = sorted(participants - {operator_id})
+    if not others:
+        return "", []
+    # A 1:1 thread is keyed by the peer alone, so it stays stable and readable
+    # in a URL. Group threads take a prefix so a group of one can never collide
+    # with the 1:1 thread for that same person.
+    key = others[0] if len(others) == 1 else "group:" + ",".join(others)
+    return key, others
+
+
+def dm_audit_thread_key(message) -> str:
+    """Stable participant key for a DM row the operator is NOT part of.
+
+    These are agent-to-agent conversations, surfaced read-only for audit.
+    """
+    participants = set(parse_recipients(message["recipients"]))
+    participants.add(message["member_id"])
+    return ",".join(sorted(participants)) if len(participants) > 1 else ""
+
+
 # ── agent control plane (supervisor-backed) ──
 # The hub owns ONE AgentSupervisor. Agent endpoints are operator-only.
 def public_agent_channels(conn: sqlite3.Connection, agent_id: str) -> List[str]:
@@ -3252,6 +3295,8 @@ class NthWebHandler(BaseHTTPRequestHandler):
             self._json(_landing_snapshot(self.db_path))
         elif path == "/api/channels":
             self._handle_channels(parsed)
+        elif path == "/api/dms":
+            self._handle_dms(parsed)
         elif path == "/api/meta":
             ch = self._channel_for_request(parsed)
             if ch is None:
@@ -3367,6 +3412,10 @@ class NthWebHandler(BaseHTTPRequestHandler):
             self._handle_transcribe()
         elif parsed.path == "/api/messages/mark-read":
             self._handle_message_read()
+        elif parsed.path == "/api/channels":
+            self._handle_channel_create()
+        elif parsed.path == "/api/archives":
+            self._handle_archive_update()
         else:
             self._error(404, "not found")
 
@@ -5142,6 +5191,395 @@ class NthWebHandler(BaseHTTPRequestHandler):
                     pass
         self._json({"ok": True, "archived": archived,
                     "count": len(channels), "channels": channels})
+
+    def _handle_archive_update(self) -> None:
+        """Archive or restore one channel or one operator DM thread.
+
+        Archiving is navigational, never destructive: a channel archive
+        preserves membership, messages, tasks and runtime state, and restoring
+        is a single UPDATE back to NULL.
+
+        DM archives store a message-id WATERMARK rather than a flag, so a newly
+        received message returns the thread to the active inbox on its own. A
+        boolean would have to be cleared explicitly on every send, and missing
+        that in one path is how a live conversation goes quietly missing.
+        """
+        ident = self._require_operator()
+        if ident is None:
+            return
+        body = self._read_json_body(max_bytes=8192)
+        if body is None:
+            return
+        kind = str(body.get("kind") or "").strip().lower()
+        key = str(body.get("key") or "").strip()
+        archived = body.get("archived")
+        if kind not in ("channel", "dm"):
+            self._error(400, "kind must be channel or dm")
+            return
+        if not key or len(key) > 512:
+            self._error(400, "archive key is required")
+            return
+        if not isinstance(archived, bool):
+            self._error(400, "archived must be true or false")
+            return
+        if kind == "channel" and key == AGENT_INBOX_CHANNEL:
+            # The inbox is the DM transport, not a room. Archiving it would
+            # hide every agent's private channel at once.
+            self._error(400, "the internal agent inbox cannot be archived")
+            return
+
+        db = None
+        try:
+            db = sqlite3.connect(str(self.db_path), timeout=5)
+            db.row_factory = sqlite3.Row
+            db.execute("PRAGMA busy_timeout=3000")
+            now = now_iso()
+            if kind == "channel":
+                if db.execute("SELECT 1 FROM channels WHERE code=?",
+                              (key,)).fetchone() is None:
+                    self._error(404, "channel not found")
+                    return
+                if archived:
+                    db.execute(
+                        "UPDATE channels SET archived_at=?, archived_by=?, "
+                        "updated_at=? WHERE code=?",
+                        (now, ident.member_id, now, key))
+                else:
+                    db.execute(
+                        "UPDATE channels SET archived_at=NULL, "
+                        "archived_by=NULL, updated_at=? WHERE code=?",
+                        (now, key))
+            else:
+                # Resolve the thread's newest message id. Scanned newest-first
+                # and stopped at the first match, so this is a short walk in
+                # the common case rather than a full DM history scan.
+                latest_id = 0
+                for row in db.execute(
+                        "SELECT id, member_id, recipients FROM messages "
+                        "WHERE recipients IS NOT NULL "
+                        "  AND recipients NOT IN ('', '[]') "
+                        "ORDER BY id DESC").fetchall():
+                    thread_key, _others = dm_thread_key(row, ident.member_id)
+                    if thread_key == key:
+                        latest_id = row["id"]
+                        break
+                if not latest_id:
+                    # Refuses a thread the operator is not part of, because
+                    # dm_thread_key returns "" for those and can never match.
+                    self._error(404, "DM thread not found")
+                    return
+                if archived:
+                    db.execute(
+                        "INSERT INTO dm_archives (owner_id, thread_key, "
+                        "archived_through_id, archived_at) VALUES (?,?,?,?) "
+                        "ON CONFLICT(owner_id, thread_key) DO UPDATE SET "
+                        "archived_through_id=excluded.archived_through_id, "
+                        "archived_at=excluded.archived_at",
+                        (ident.member_id, key, latest_id, now))
+                else:
+                    db.execute(
+                        "DELETE FROM dm_archives "
+                        "WHERE owner_id=? AND thread_key=?",
+                        (ident.member_id, key))
+            db.commit()
+        except sqlite3.Error as e:
+            sys.stderr.write(f"[nth_web] archive db error: {e}\n")
+            self._error(500, "archive update failed")
+            return
+        finally:
+            if db is not None:
+                try:
+                    db.close()
+                except sqlite3.Error:
+                    pass
+        self._json({"ok": True, "kind": kind, "key": key,
+                    "archived": archived})
+
+    def _handle_dms(self, parsed) -> None:
+        """The operator's unified, cross-channel DM surface.
+
+        New DMs live in the global agent inbox; older rows are scattered across
+        whatever topic channel they were sent in. Both are one conversation to
+        a reader, so this groups by PARTICIPANTS rather than by channel,
+        yielding one operator thread per counterpart plus a separate
+        agent-to-agent audit section. `?with=<thread-key>` also returns the
+        merged history for that one thread.
+        """
+        ident = self._require_operator()
+        if ident is None:
+            return
+        operator_id = ident.member_id
+        qs = parse_qs(parsed.query)
+        with_id = (qs.get("with", [""])[0] or "").strip()
+        archived = (qs.get("archived", ["0"])[0] == "1")
+        db = None
+        try:
+            db = sqlite3.connect(str(self.db_path), timeout=5)
+            db.row_factory = sqlite3.Row
+            db.execute("PRAGMA busy_timeout=3000")
+            rows = db.execute(
+                "SELECT m.*, (mr.member_id IS NOT NULL) AS is_read "
+                "FROM messages m "
+                "LEFT JOIN message_reads mr "
+                "  ON mr.message_id = m.id AND mr.member_id = ? "
+                "WHERE m.recipients IS NOT NULL "
+                "  AND m.recipients NOT IN ('', '[]') "
+                "ORDER BY m.id DESC LIMIT 2000",
+                (operator_id,)).fetchall()
+            name_cache: Dict[str, str] = {operator_id: ident.display_name}
+
+            def display_name(member_id: str) -> str:
+                if member_id not in name_cache:
+                    resolve_display_name(db, member_id, name_cache)
+                return name_cache[member_id]
+
+            archive_map = {r["thread_key"]: r for r in db.execute(
+                "SELECT thread_key, archived_through_id, archived_at "
+                "FROM dm_archives WHERE owner_id = ?",
+                (operator_id,)).fetchall()}
+
+            yours: Dict[str, Dict[str, Any]] = {}
+            agent_threads: Dict[str, Dict[str, Any]] = {}
+            for r in rows:
+                participants = set(parse_recipients(r["recipients"]))
+                participants.add(r["member_id"])
+                if operator_id in participants:
+                    key, others = dm_thread_key(r, operator_id)
+                    if not key:
+                        continue
+                    if key not in yours:
+                        # Rows arrive newest-first, so the first row seen for a
+                        # thread IS its latest — no max() bookkeeping needed.
+                        yours[key] = {
+                            "key": key, "member_ids": others,
+                            "name": ", ".join(display_name(i) for i in others),
+                            "channel": r["channel"], "last_id": r["id"],
+                            "last_at": r["created_at"],
+                            "preview": (r["content"] or "")[:120],
+                            "from": display_name(r["member_id"]),
+                            "unread": 0,
+                        }
+                    if r["member_id"] != operator_id and not r["is_read"]:
+                        yours[key]["unread"] += 1
+                else:
+                    key = dm_audit_thread_key(r)
+                    if key and key not in agent_threads:
+                        ids = sorted(participants)
+                        agent_threads[key] = {
+                            "key": key, "member_ids": ids,
+                            "name": " ↔ ".join(display_name(i) for i in ids),
+                            "channel": r["channel"], "last_id": r["id"],
+                            "last_at": r["created_at"],
+                            "preview": (r["content"] or "")[:120],
+                            "from": display_name(r["member_id"]),
+                            "unread": 0,
+                        }
+
+            # Archiving an AGENT archives the conversations you had with it.
+            # Otherwise a retired agent keeps a live-looking DM row in the
+            # sidebar forever: you cannot reply to it and it is not coming
+            # back until you unarchive. Derived rather than stored, so
+            # unarchiving the agent restores the thread with no bookkeeping.
+            archived_agents = {r["id"]: r["archived_at"] for r in db.execute(
+                "SELECT id, archived_at FROM agents "
+                "WHERE archived_at IS NOT NULL").fetchall()}
+
+            def all_archived(member_ids) -> str:
+                """Newest archive stamp if EVERY counterpart is an archived
+                agent, else "". One live participant keeps a group alive."""
+                ids = [i for i in (member_ids or []) if i]
+                if not ids or any(i not in archived_agents for i in ids):
+                    return ""
+                # .get rather than [] so this stays a total function: the guard
+                # above is what makes every id present, and a future edit to it
+                # should surface as a wrong archive state, not a 500 from deep
+                # inside the DM list.
+                return max((archived_agents.get(i) or "") for i in ids)
+
+            for key, thread in yours.items():
+                marker = archive_map.get(key)
+                # The marker is a watermark: a message NEWER than it means the
+                # thread has spoken since you archived it, so it is live again.
+                thread["archived"] = bool(
+                    marker and thread["last_id"] <= marker["archived_through_id"])
+                thread["archived_at"] = (marker["archived_at"]
+                                         if thread["archived"] else None)
+                stamp = all_archived(thread["member_ids"])
+                thread["agent_archived"] = bool(stamp)
+                if stamp and not thread["archived"]:
+                    # Archived because the agent was, not by an explicit DM
+                    # archive. The client reads agent_archived to explain that
+                    # restoring means unarchiving the agent.
+                    thread["archived"] = True
+                    thread["archived_at"] = stamp
+
+            yours = {k: t for k, t in yours.items()
+                     if bool(t["archived"]) == archived}
+            # Audit threads have no archive of their own: they follow their
+            # participants, disappearing once every one of them is archived.
+            for thread in agent_threads.values():
+                thread["agent_archived"] = bool(
+                    all_archived(thread["member_ids"]))
+            agent_threads = {k: t for k, t in agent_threads.items()
+                             if bool(t["agent_archived"]) == archived}
+
+            merged = []
+            if with_id:
+                marker = archive_map.get(with_id)
+                # One pass over rows (already newest-first): collect this
+                # thread's rows once, so the latest id is simply the first
+                # match and the event-building loop touches only this thread's
+                # rows rather than all 2000 fetched for the grouping above.
+                matched = []
+                for r in rows:
+                    key, _others = dm_thread_key(r, operator_id)
+                    if not key:
+                        key = dm_audit_thread_key(r)
+                    if key == with_id:
+                        matched.append(r)
+                latest = matched[0]["id"] if matched else 0
+                requested = yours.get(with_id) or agent_threads.get(with_id)
+                # An agent-archived thread reads as archived here too, so
+                # opening it from the archive browser (which asks archived=1)
+                # actually returns its history instead of an empty thread.
+                thread_is_archived = bool(
+                    (marker and latest
+                     and latest <= marker["archived_through_id"])
+                    or all_archived((requested or {}).get("member_ids")
+                                    or with_id.split(",")))
+                if thread_is_archived == archived:
+                    for r in reversed(matched):
+                        # Two-arg call on purpose. Upstream's _message_event
+                        # takes member_name straight off the row, which is
+                        # populated at send time; atrium's variant also takes a
+                        # name cache and re-resolves. Threading that through
+                        # here would change what the live tail and history
+                        # burst report as well, which is a different change
+                        # than adding this endpoint.
+                        evt = _message_event(db, r)
+                        evt["channel"] = r["channel"]
+                        merged.append(evt)
+
+            targets = []
+            for a in db.execute(
+                    "SELECT id, name, state, model FROM agents "
+                    "WHERE managed = 1 AND archived_at IS NULL "
+                    "ORDER BY name COLLATE NOCASE").fetchall():
+                targets.append({
+                    "id": a["id"],
+                    "name": resolve_display_name(db, a["id"]),
+                    "state": a["state"], "model": a["model"],
+                    "channels": public_agent_channels(db, a["id"]),
+                    "dm_channel": AGENT_INBOX_CHANNEL,
+                })
+        except sqlite3.Error as e:
+            sys.stderr.write(f"[nth_web] dms db error: {e}\n")
+            self._error(500, "dm list failed")
+            return
+        finally:
+            if db is not None:
+                try:
+                    db.close()
+                except sqlite3.Error:
+                    pass
+        self._json({
+            "ok": True,
+            "archived": archived,
+            "your_dms": list(yours.values()),
+            "agent_dms": list(agent_threads.values()),
+            "targets": targets,
+            "with": with_id,
+            "messages": merged,
+        })
+
+    def _handle_channel_create(self) -> None:
+        """Create a channel from the operator console.
+
+        MCP trio_connect still owns agent-created channels; this is the
+        human-facing equivalent. It creates the channel, places the
+        authenticated operator in it, and optionally pins a short objective.
+        """
+        ident = self._require_operator()
+        if ident is None:
+            return
+        body = self._read_json_body(max_bytes=4096)
+        if body is None:
+            return
+        topic = (body.get("topic") or "").strip()[:500]
+        code = (body.get("code") or "").strip().lower()
+        if not code and topic:
+            code = re.sub(r"[^a-z0-9-]", "-", topic.lower())
+            code = re.sub(r"-+", "-", code).strip("-")[:32]
+        if not code:
+            code = "channel-" + secrets.token_hex(3)
+        if not CHANNEL_CODE_RE.match(code):
+            self._error(400, "channel code must be lowercase alphanumeric "
+                             "with hyphens, 1-32 chars")
+            return
+        if code == AGENT_INBOX_CHANNEL:
+            self._error(400, "that channel name is reserved for private "
+                             "agent messages")
+            return
+        # Three rows in one transaction, while the EventHub poller and member
+        # heartbeats are also writing under WAL. A brief write-lock used to
+        # surface as a one-shot 500, which the operator saw as "the modal
+        # closed and nothing happened" — the create dialog closes before this
+        # request resolves. Retry transient locks so routine contention heals.
+        last_err = None
+        for attempt in range(4):
+            db = sqlite3.connect(str(self.db_path), timeout=5)
+            db.row_factory = sqlite3.Row
+            try:
+                db.execute("PRAGMA busy_timeout=5000")
+                if db.execute("SELECT 1 FROM channels WHERE code = ?",
+                              (code,)).fetchone():
+                    self._error(409, "channel already exists")
+                    return
+                now = now_iso()
+                with db:
+                    db.execute(
+                        "INSERT INTO channels (code, status, created_at, "
+                        "updated_at) VALUES (?, 'active', ?, ?)",
+                        (code, now, now))
+                    op_id, op_name = ensure_operator_row(db, code, ident)
+                    created = db.execute(
+                        "INSERT INTO messages (channel, member_id, "
+                        "member_name, content, created_at) VALUES (?,?,?,?,?)",
+                        (code, op_id, op_name,
+                         f"[channel created] {topic}" if topic
+                         else "[channel created]", now))
+                    if topic:
+                        db.execute(
+                            "UPDATE channels SET pinned_message_id = ? "
+                            "WHERE code = ?", (created.lastrowid, code))
+                self._json({"ok": True,
+                            "channel": {"code": code, "topic": topic}},
+                           status=201)
+                return
+            except sqlite3.IntegrityError:
+                # Lost a race for the same code: the pre-check passed for both
+                # writers and one INSERT won the PK. Report the same clean 409
+                # the pre-check gives, not a 500.
+                self._error(409, "channel already exists")
+                return
+            except sqlite3.OperationalError as e:
+                last_err = e
+                if _is_lock_error(e):
+                    if attempt < 3:
+                        time.sleep(0.1 * (attempt + 1))
+                        continue
+                    break
+                sys.stderr.write(f"[nth_web] channel create db error: {e}\n")
+                self._error(500, "channel create failed")
+                return
+            except sqlite3.Error as e:
+                sys.stderr.write(f"[nth_web] channel create db error: {e}\n")
+                self._error(500, "channel create failed")
+                return
+            finally:
+                db.close()
+        sys.stderr.write(f"[nth_web] channel create lock timeout: {last_err}\n")
+        self._error(503, "channel create is busy, please retry")
 
     def _handle_search(self, parsed) -> None:
         """Full-history search: substring match over this channel's stored

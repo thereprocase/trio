@@ -458,6 +458,23 @@ def get_db() -> sqlite3.Connection:
     # sub-agents spawned with a read_only token cannot forge posts under
     # the parent's member_id. member_id stays the public identity;
     # session_token is the private mutation capability.
+    # DM archive markers, one per (owner, thread).
+    #
+    # Stored as a WATERMARK, not a flag: `archived_through_id` records how far
+    # the thread was archived. A newer message therefore un-archives the thread
+    # on its own, which is the behaviour a person expects — archiving a
+    # conversation means "I am done with this for now", not "never show me this
+    # agent again". A boolean would need explicit un-setting on every send, and
+    # forgetting that in one code path is how threads get silently lost.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS dm_archives (
+            owner_id            TEXT NOT NULL,
+            thread_key          TEXT NOT NULL,
+            archived_through_id INTEGER NOT NULL,
+            archived_at         TEXT NOT NULL,
+            PRIMARY KEY (owner_id, thread_key)
+        )
+    """)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS sessions (
             session_token   TEXT PRIMARY KEY,
