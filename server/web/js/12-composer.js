@@ -252,11 +252,10 @@
     if (cid === conversationId()) renderAttachments();
     updateSendState();
     try {
-      const response = await fetch(apiUrl('/api/upload'), {
-        method: 'POST', headers: { 'Content-Type': file.type, 'X-Filename': encodeURIComponent(file.name || 'image') }, body: file,
-      });
-      if (!response.ok) throw new Error('upload failed (' + response.status + ')');
-      const attachment = await response.json();
+      // Trio.api.upload carries the same request this used to inline; keeping
+      // one copy means a server-side change to the upload contract cannot fix
+      // one caller and leave the other silently posting the wrong encoding.
+      const attachment = await Trio.api.upload(file);
       if (!attachment.ok || !Number.isInteger(attachment.id)) throw new Error('Upload did not return an attachment id');
       revokePreview(placeholder);
       Object.assign(placeholder, attachment, { name: attachment.filename, loading: false, url: apiUrl(attachment.url) });

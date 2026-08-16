@@ -7846,8 +7846,19 @@ class NthWebHandler(BaseHTTPRequestHandler):
                     db.close()
                 except sqlite3.Error:
                     pass
+        # `url` is not redundant with `id`. The composer does
+        # `url: apiUrl(attachment.url)` on the response, and apiUrl() ends up in
+        # `path.includes('?')` — so an absent url is not an empty thumbnail, it
+        # is a TypeError inside uploadOne's try. Its catch has already revoked
+        # the blob preview and spliced the placeholder out of the array, so the
+        # image the user just uploaded DISAPPEARS from the composer and they get
+        # a raw JS error toast, while the row and file sit on disk until GC.
+        # The comment this replaces claimed the client builds the URL itself;
+        # it builds it only for messages already rendered (11-conversation.js),
+        # not here.
         self._json({"ok": True, "id": att_id, "mime": mime,
-                    "filename": filename})   # client builds the URL with its channel
+                    "filename": filename,
+                    "url": f"/api/attachment/{att_id}"})
         # Opportunistic GC: uploading is exactly when abandoned uploads accrue,
         # and it is already a slow path. Rate-limited internally, and after the
         # response so it can never delay the client.

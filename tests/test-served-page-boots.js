@@ -45,12 +45,40 @@ function check(name, cond, detail = '') {
 // perfectly good requests — an artifact of the client, not of either side; a
 // browser honours Connection: close. Use an agent that never reuses a socket.
 const agent = new http.Agent({ keepAlive: false, maxSockets: 8 });
-function request(base, url, init = {}) {
+
+// The body must arrive with a Content-Length. The server reads that header to
+// size the body and answers "missing or oversized body" without it — node's
+// http.request defaults to chunked encoding, which this stdlib server does not
+// accept. Omitting it made EVERY client POST fail, silently, including the
+// mark-read calls the read-path checks were already making.
+// FormData is normalised through Response so multipart framing and the
+// boundary in Content-Type come from the platform rather than by hand.
+async function bodyToBuffer(body) {
+  if (body == null) return { buf: null, headers: {} };
+  if (typeof body === 'string') return { buf: Buffer.from(body), headers: {} };
+  if (typeof FormData !== 'undefined' && body instanceof FormData) {
+    const res = new Response(body);
+    const buf = Buffer.from(await res.arrayBuffer());
+    return { buf, headers: { 'Content-Type': res.headers.get('content-type') } };
+  }
+  // A Blob/File is what the upload path sends: /api/upload takes the raw image
+  // bytes as the body, not a multipart part. Content-Type is the image's own
+  // mime and is set by the caller, so it is not overridden here.
+  if (typeof Blob !== 'undefined' && body instanceof Blob) {
+    return { buf: Buffer.from(await body.arrayBuffer()), headers: {} };
+  }
+  return { buf: Buffer.from(body), headers: {} };
+}
+
+async function request(base, url, init = {}) {
   const u = new URL(url.startsWith('http') ? url : base + url);
+  const { buf, headers: bodyHeaders } = await bodyToBuffer(init.body);
+  const headers = { ...(init.headers || {}), ...bodyHeaders };
+  if (buf) headers['Content-Length'] = String(buf.length);
   return new Promise((resolve, reject) => {
     const req = http.request({
       agent, hostname: u.hostname, port: u.port, path: u.pathname + u.search,
-      method: init.method || 'GET', headers: init.headers || {},
+      method: init.method || 'GET', headers,
     }, res => {
       let body = '';
       res.setEncoding('utf8');
@@ -63,7 +91,7 @@ function request(base, url, init = {}) {
       }));
     });
     req.on('error', reject);
-    if (init.body) req.write(init.body);
+    if (buf) req.write(buf);
     req.end();
   });
 }
@@ -222,6 +250,57 @@ let child;
   // appears in innerHTML even when the element carries it.
   check('  an @mention resolved to a member NAME, not a raw id',
         [...list.querySelectorAll('.inline-mention')].some(e => /@Ada/.test(e.textContent)));
+
+  // ── WRITE PATHS ─────────────────────────────────────────────────────────
+  // Everything above is a read. Reads alone are what let the upload seam ship:
+  // /api/upload returned no `url`, the composer did apiUrl(attachment.url),
+  // and the resulting TypeError was swallowed by a catch that had already
+  // spliced the image out — so attaching an image was completely broken while
+  // every read-path test stayed green. These drive the client's OWN request
+  // builders against the real server, which is the only place a request/response
+  // disagreement can surface.
+
+  // POST /api/send, through Trio.api like the composer does.
+  let sendResult = null, sendErr = null;
+  try { sendResult = await Trio.api.post('/api/send', { content: 'written by the smoke test' }); }
+  catch (e) { sendErr = e; }
+  check('POST /api/send succeeds through the client api layer',
+        !sendErr && sendResult && sendResult.ok !== false, sendErr && sendErr.message);
+  const after = await (await request(BASE, '/api/mentions?channel=served')).json();
+  check('  the server accepted it (endpoint still answers 200)', !!after);
+
+  // /api/upload, through the client's own uploader — which is what the
+  // composer calls, so this is the real path. Node has Blob/File globally; the
+  // sandbox does not, so lend them in.
+  sandbox.Blob = Blob; sandbox.File = File;
+  // A one-pixel PNG: the server sniffs magic bytes, so random bytes are rejected
+  // for the wrong reason and would make this test pass on a broken client.
+  const PNG = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+    'base64');
+  let uploaded = null, uploadErr = null;
+  try {
+    uploaded = await Trio.api.upload(new File([PNG], 'dot.png', { type: 'image/png' }));
+  } catch (e) { uploadErr = e; }
+  check('POST /api/upload succeeds through the client uploader',
+        !uploadErr && uploaded && uploaded.ok !== false, uploadErr && uploadErr.message);
+  if (uploaded) {
+    check('  the response carries an id', Number.isInteger(uploaded.id));
+    // THE SEAM. The composer does exactly this with the response, and an absent
+    // url throws inside its try — discarding the upload the user just made.
+    check('  the response carries a url — without it the composer throws and ' +
+          'silently discards the image',
+          typeof uploaded.url === 'string' && uploaded.url.length > 0);
+    let apiUrlErr = null, built = null;
+    try { built = Trio.api.url(uploaded.url); } catch (e) { apiUrlErr = e; }
+    check('  api.url() accepts it without throwing (the composer\'s exact call)',
+          !apiUrlErr && typeof built === 'string', apiUrlErr && apiUrlErr.message);
+    if (built) {
+      const fetched = await request(BASE, built);
+      check(`  and the built URL actually serves the image (${fetched.status})`,
+            fetched.status === 200);
+    }
+  }
 
   console.log('\n' + passed + ' passed, ' + failures.length + ' failed');
   if (failures.length) failures.forEach(f => console.log('  ✗ ' + f));
