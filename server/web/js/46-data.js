@@ -52,6 +52,8 @@
     } catch (e) { announce(e.message || 'Preview failed'); return; }
     const confirmParts = buildConfirm(preview);
     if (!confirmParts) { announce(emptyMsg || 'Nothing to prune.'); return; }
+    // The prune flow is the most destructive surface in the app — it deletes
+    // messages, attachments and whole channels. The button says so.
     ui.confirmAction(confirmParts.message, confirmParts.description, async () => {
       try {
         const res = await api.post('/api/prune', { ...body, dry_run: false }, false);
@@ -62,7 +64,7 @@
         announce(parts.join(' · ') + '.');
         renderPage(panel);
       } catch (e) { announce(e.message || 'Prune failed'); }
-    });
+    }, { submitLabel: 'Delete', danger: true });
   }
 
   function readDays(input) {

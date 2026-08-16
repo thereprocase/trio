@@ -43,7 +43,15 @@
     if (!node) { node = document.createElement('dialog'); node.id = 'trio-control-modal'; document.body.append(node); }
     configureDialog(node);
     const cancelLabel = esc(options.cancelLabel || 'Cancel');
-    const submitButton = options.submit === false ? '' : '<button type="submit" value="default" class="primary">Save</button>';
+    // The accept button has to be able to name its action. Hardcoding "Save"
+    // meant every destructive confirmation in the app was accepted by a button
+    // reading Save — "Permanently delete the entire 'deploy' channel? …
+    // This cannot be undone." with a blue Save underneath. The verb in the
+    // prompt and the verb on the button never agreed, on any dialog.
+    const submitLabel = esc(options.submitLabel || 'Save');
+    const danger = options.danger ? ' danger' : '';
+    const submitButton = options.submit === false ? ''
+      : `<button type="submit" value="default" class="primary${danger}">${submitLabel}</button>`;
     // The × and Cancel buttons are type="button" close triggers, NOT submits.
     // Previously they were submit buttons, and the × (first in tree order) was
     // therefore the form's implicit-submission default — so pressing Enter in a
@@ -53,17 +61,27 @@
     node.querySelectorAll('[data-close]').forEach(btn => btn.addEventListener('click', () => node.close('cancel')));
     node.addEventListener('close', () => { if (node.returnValue === 'default') submit?.(node); }, { once: true }); node.showModal();
   }
-  function confirmAction(message, actionOrDescription, maybeAction) {
+  function confirmAction(message, actionOrDescription, maybeAction, options = {}) {
     // Two-arg form: confirmAction(message, action)
     // Three-arg form: confirmAction(message, description, action) — renders a
     // body line under the prompt; description is text-only (escaped here).
+    // Either form takes a trailing options object; pass {submitLabel: 'Delete',
+    // danger: true} so the button says what it will do.
     const hasDescription = typeof actionOrDescription === 'string';
     const description = hasDescription ? actionOrDescription : '';
     const action = hasDescription ? maybeAction : actionOrDescription;
+    const opts = hasDescription ? (options || {})
+                                : (maybeAction || options || {});
     const body = description
       ? `<p>${esc(message)}</p><p class="modal-desc">${esc(description)}</p>`
       : `<p>${esc(message)}</p>`;
-    modal('Confirm', body, () => action?.());
+    // Default the button to the FIRST WORD of the prompt ("Archive this
+    // channel?" -> "Archive"), so a caller that says nothing still gets a
+    // button that agrees with its question instead of a generic Save.
+    const inferred = /^([A-Z][a-z]+)\b/.exec(String(message || ''));
+    const submitLabel = opts.submitLabel || (inferred ? inferred[1] : 'Confirm');
+    modal('Confirm', body, () => action?.(),
+          { submitLabel, danger: opts.danger });
   }
   function setLive(text) {
     let region = document.getElementById('trio-aria-live');

@@ -417,7 +417,14 @@
   }
   function renderHome(panel) {
     panel.replaceChildren();
-    if (state.workspaceError && !dataReady('channels')) { const p = document.createElement('p'); p.className = 'home-empty'; p.textContent = state.workspaceError; const b = document.createElement('button'); b.type = 'button'; b.className = 'btn primary'; b.textContent = 'Retry'; b.addEventListener('click', refresh); p.append(b); panel.append(p); return; }
+    // Gated on there being NOTHING TO SHOW, not on the loading flags. refresh()
+    // marks every slice loaded once it settles — deliberately, so a partially
+    // failed refresh cannot leave sections spinning forever — which made the
+    // old `!dataReady('channels')` permanently false and this whole branch
+    // unreachable. With every request failing, Home therefore rendered a
+    // cheerful greeting, three zeros and a green health row, and the only
+    // trace was a console.warn nobody has open.
+    if (state.workspaceError && !listOf(state.channels).length) { const p = document.createElement('p'); p.className = 'home-empty'; p.textContent = state.workspaceError; const b = document.createElement('button'); b.type = 'button'; b.className = 'btn primary'; b.textContent = 'Retry'; b.addEventListener('click', refresh); p.append(b); panel.append(p); return; }
     const operatorName = state.operator?.name || state.meta?.operator?.name || 'there';
     const intro = document.createElement('div'); intro.className = 'hello';
     intro.innerHTML = `<div class="greet">Good ${new Date().getHours() < 12 ? 'morning' : new Date().getHours() < 18 ? 'afternoon' : 'evening'}, ${esc(operatorName)}.</div><div class="sub">Here’s what’s happening across your workspace.</div>`;
@@ -457,7 +464,30 @@
     if (!dataReady('usage')) { const d = document.createElement('div'); d.className = 'home-loading'; d.innerHTML = `${SPIN}<span>Loading usage…</span>`; usage.append(d); } else usage.append(usageMeters(state.usage));
     const health = document.createElement('section'); health.className = 'home-section'; health.innerHTML = '<div class="sec-head"><h3>Runtime health</h3><span class="sh-line"></span></div>';
     const healthRow = document.createElement('div'); healthRow.className = 'health-row';
-    [['Hub', 'ok', 'Live'], ['Agents', 'ok', agentsReady ? agentArray().length + ' connected' : 'checking…'], ['Database', 'ok', 'Ready']].forEach(([name, tone, value]) => { const chip = document.createElement('span'); chip.className = 'hchip'; chip.innerHTML = `<span class="d ${tone}"></span>${esc(name)} · ${esc(value)}`; healthRow.append(chip); });
+    // Derived, not decorative. These three chips were hardcoded to the tone
+    // 'ok' — the string, in all three cases, never computed from anything — so
+    // the row was structurally incapable of showing bad health and stayed
+    // green while every request behind it was failing. A health panel that
+    // cannot report ill health is worse than none: it actively argues the
+    // operator out of investigating.
+    //
+    // What each one can honestly claim:
+    //   Hub       — the SSE connection state, which is the live signal.
+    //   Agents    — 'warn' when the roster could not be fetched at all, since
+    //               "0 connected" and "could not ask" look identical otherwise.
+    //   Database  — the server answers /api/channels out of SQLite, so a
+    //               successful channels slice is the evidence it is readable.
+    const connState = (Trio.store?.get?.('connection') || {});
+    const hubTone = connState.failed ? 'warn' : 'ok';
+    const hubValue = connState.text || 'Live';
+    const agentsFailed = !!state.sliceErrors?.agents;
+    const dbFailed = !!state.sliceErrors?.channels;
+    [['Hub', hubTone, hubValue],
+     ['Agents', agentsFailed ? 'warn' : 'ok',
+      agentsFailed ? 'unavailable'
+                   : agentsReady ? agentArray().length + ' connected' : 'checking…'],
+     ['Database', dbFailed ? 'warn' : 'ok', dbFailed ? 'unreachable' : 'Ready'],
+    ].forEach(([name, tone, value]) => { const chip = document.createElement('span'); chip.className = 'hchip'; chip.innerHTML = `<span class="d ${esc(tone)}"></span>${esc(name)} · ${esc(value)}`; healthRow.append(chip); });
     health.append(healthRow);
     panel.append(viewHeader('Home', 'Your workspace at a glance'), intro, grid, working, usage, recent, health);
   }
@@ -1048,8 +1078,16 @@
   async function archiveCurrent() {
     const target = state.dmKey ? 'this DM' : (state.channel ? 'this channel' : '');
     if (!target) { Trio.ui.toast('No conversation to archive'); return; }
-    Trio.ui.confirmAction(`Archive ${target}?`, () => {
-      const nextArchived = !state.readOnly;
+    // Which direction this goes is decided by state.readOnly, and the prompt
+    // has to be built from the SAME value. It used to be hardcoded "Archive
+    // …?" while the direction was computed inside the callback, so opening an
+    // archived conversation and clicking the menu item — correctly labelled
+    // "Restore channel" — asked "Archive this channel?" instead. Anyone who
+    // reads their confirmations cancels; anyone who does not gets the right
+    // outcome by luck.
+    const nextArchived = !state.readOnly;
+    const verb = nextArchived ? 'Archive' : 'Restore';
+    Trio.ui.confirmAction(`${verb} ${target}?`, () => {
       if (state.dmKey) {
         const title = 'DM ' + state.dmName;
         archive('dm', state.dmKey, nextArchived).then(() =>
@@ -1228,9 +1266,20 @@
       // roster page if it's open. It's the slowest slice, so it marks ready last.
       (Trio.agents?.refresh?.() || Promise.resolve()).then(() => markLoaded('agents')),
     ];
+    // Names in the SAME ORDER as `requests`, so a rejection can be attributed
+    // to the slice it came from. Promise.allSettled preserves order, and
+    // without this the only record of WHICH endpoint failed was a console
+    // warning — which is why the Home health row could not tell "no agents"
+    // from "could not ask about agents".
+    const SLICES = ['channels', 'dms', 'meta', 'tasks', 'approvals',
+                    'questions', 'mentions', 'usage', 'agents'];
     const results = await Promise.allSettled(requests);
     const failures = results.filter(result => result.status === 'rejected');
     failures.forEach(result => console.warn('workspace refresh failed', result.reason));
+    state.sliceErrors = {};
+    results.forEach((result, i) => {
+      if (result.status === 'rejected') state.sliceErrors[SLICES[i]] = result.reason;
+    });
     if (failures.length === results.length) state.workspaceError = 'Workspace refresh failed';
     // A rejected slice never ran its markLoaded(), which would otherwise leave
     // its Home section spinning forever (no error, no retry) whenever SOME — but
@@ -1238,7 +1287,7 @@
     // renders its empty/last-known state (matching pre-progressive-load
     // behaviour), and the 15s poll refills it if the endpoint recovers.
     state.loaded = state.loaded || {};
-    ['channels', 'dms', 'meta', 'tasks', 'approvals', 'questions', 'mentions', 'usage', 'agents'].forEach(k => { state.loaded[k] = true; });
+    SLICES.forEach(k => { state.loaded[k] = true; });
     state.workspaceLoading = false;
     renderRail();
     // state.agents was just refreshed above; repaint the face-pile and (if open)
@@ -1431,7 +1480,8 @@
       Trio.ui.confirmAction(
         `Remove ${name} from #${state.channel}?`,
         `${name} is ${status} — removing them releases any tasks they've claimed.`,
-        () => removeMember(id, name));
+        () => removeMember(id, name),
+        { submitLabel: 'Remove', danger: true });
     } else {
       removeMember(id, name);
     }
