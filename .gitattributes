@@ -1,0 +1,6 @@
+# Vendored avatar art (SVG Repo). These are third-party assets, not source we
+# maintain, so they are exempt from the whitespace checks the release suite
+# runs via `git diff --check`. Without this, 29 files of trailing whitespace
+# drown out any real finding, and the alternative — reformatting them — edits
+# artwork we did not author for no benefit.
+server/web/avatars/**/*.svg -whitespace
