@@ -67,6 +67,14 @@ if [ "${1:-}" = "hub-service" ] || [ "${1:-}" = "upgrade" ]; then
         cp "$SCRIPT_DIR/server/$f" "$HUB_DIR/$f"
     done
 
+    # The browser bundle. nth_web.py composes its page from these files at
+    # IMPORT time, so without them the dashboard does not start at all — it
+    # raises before it can serve or log a thing. Copied as a DIRECTORY rather
+    # than as named files so that adding a CSS layer never requires an edit
+    # here; a named list is exactly what drifted for the Python modules above.
+    rm -rf "${HUB_DIR:?}/web"
+    cp -R "$SCRIPT_DIR/server/web" "$HUB_DIR/web"
+
     # Dedicated venv — same rationale and pin as spoke mode (mcp 2.0 removed
     # FastMCP; OS python upgrades orphan site-packages). Wheels only.
     HUB_VENV="$HUB_DIR/venv"
@@ -413,6 +421,12 @@ cp "$SCRIPT_DIR/server/nth_usage.py" "$SERVER_DIR/nth_usage.py"
 cp "$SCRIPT_DIR/server/nth_doctor.py" "$SERVER_DIR/nth_doctor.py"
 cp "$SCRIPT_DIR/server/nth_spoke_monitor.py" "$SERVER_DIR/nth_spoke_monitor.py"
 cp "$SCRIPT_DIR/server/codex_context_publisher.py" "$SERVER_DIR/codex_context_publisher.py"
+# The browser bundle — index.html plus the ordered CSS/JS layers. nth_web.py
+# reads these at IMPORT time to compose the served page, so an install without
+# them cannot start the dashboard at all. Copied as a DIRECTORY so a new asset
+# never needs an edit here. See tests/test-install-manifest.py.
+rm -rf "${SERVER_DIR:?}/web"
+cp -R "$SCRIPT_DIR/server/web" "$SERVER_DIR/web"
 
 # nth-doctor launcher: stdlib-only health check, callable from anywhere.
 if [ "$PLATFORM" != "windows" ]; then

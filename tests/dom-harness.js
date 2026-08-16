@@ -51,7 +51,11 @@ const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
 
-const WEB_PY = path.resolve(__dirname, '..', 'server', 'nth_web.py');
+// The client used to live in a <script> block inside nth_web.py's INDEX_HTML
+// literal, which this harness had to find by regex among several such blocks.
+// It is now an ordinary file, so read it directly: the harness exercises
+// exactly the bytes the server inlines, with no Python parsing in between.
+const CLIENT_JS = path.resolve(__dirname, '..', 'server', 'web', 'js', 'app.js');
 const ASK_JS = path.resolve(__dirname, '..', 'server', 'nth_ask_client.js');
 
 // ── Fake DOM ──────────────────────────────────────────────────────────────
@@ -501,28 +505,17 @@ function buildSandbox() {
 // Extract the embedded client <script> and inject the pure ask helpers, the
 // same substitution nth_web.py performs at serve time.
 function buildScript() {
-  const py = fs.readFileSync(WEB_PY, 'utf8');
-  // nth_web.py serves more than one document (the channel dashboard and the
-  // fleet landing page), so "the only <script>" is not a safe selector. Pick
-  // the block that carries the test-hook sentinel — that is by definition the
-  // dashboard bundle these tests exercise. If no block has it, fail loudly
-  // rather than silently testing the wrong one: a green suite that exercises
-  // nothing is the worst outcome for a harness.
+  let js = fs.readFileSync(CLIENT_JS, 'utf8');
+  // The sentinel check survives the move to a real file. It no longer selects
+  // between candidate blocks, but it still answers the question that matters:
+  // is this the bundle carrying the hook these tests read their helpers back
+  // out of? Without it, a future split of app.js would leave the harness
+  // loading a file with no hook and every test failing far from the cause.
   const SENTINEL = '__TRIO_TEST_HOOK_START__';
-  const blocks = [];
-  for (const m of py.matchAll(/<script(?:\s[^>]*)?>/g)) {
-    const bodyStart = m.index + m[0].length;
-    const bodyEnd = py.indexOf('</script>', bodyStart);
-    if (bodyEnd < 0) continue;
-    blocks.push({ bodyStart, bodyEnd });
+  if (!js.includes(SENTINEL)) {
+    throw new Error(`${path.relative(process.cwd(), CLIENT_JS)} does not carry ` +
+      `${SENTINEL} — the client was split or renamed; update dom-harness.js`);
   }
-  const hits = blocks.filter(b => py.slice(b.bodyStart, b.bodyEnd).includes(SENTINEL));
-  if (hits.length !== 1) {
-    throw new Error(`expected exactly 1 <script> block carrying ${SENTINEL} in nth_web.py, ` +
-      `found ${hits.length} of ${blocks.length} block(s) — update dom-harness.js`);
-  }
-  const { bodyStart: start, bodyEnd: end } = hits[0];
-  let js = py.slice(start, end);
   // The ask-helpers module is optional: it only exists in builds that ship
   // the multiple-choice picker. Absent it, the placeholder collapses to ''.
   const askHelpers = fs.existsSync(ASK_JS) ? fs.readFileSync(ASK_JS, 'utf8') : '';

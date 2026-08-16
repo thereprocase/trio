@@ -1,6 +1,6 @@
 // Unread-watermark tests. Extracts the real functions from the shipped
-// dashboard bundle in nth_web.py and runs them against a fake message map, so
-// the read-state rules are pinned without a browser.
+// dashboard client and runs them against a fake message map, so the read-state
+// rules are pinned without a browser.
 //
 // Usage: node tests/test-unread.js
 'use strict';
@@ -8,12 +8,15 @@ const fs = require('fs');
 const path = require('path');
 const assert = require('assert');
 
-const WEB_PY = path.join(__dirname, '..', 'server', 'nth_web.py');
-const src = fs.readFileSync(WEB_PY, 'utf8');
+// Read the client source directly. This used to slice functions out of a
+// Python file, because the client lived inside nth_web.py's INDEX_HTML
+// literal; server/web/js/app.js is the same bytes without the indirection.
+const CLIENT_JS = path.join(__dirname, '..', 'server', 'web', 'js', 'app.js');
+const src = fs.readFileSync(CLIENT_JS, 'utf8');
 
 function grab(name) {
   const i = src.indexOf(`function ${name}(`);
-  if (i < 0) throw new Error(`could not find function ${name} in nth_web.py`);
+  if (i < 0) throw new Error(`could not find function ${name} in ${path.basename(CLIENT_JS)}`);
   let depth = 0, started = false;
   for (let j = i; j < src.length; j++) {
     if (src[j] === '{') { depth++; started = true; }

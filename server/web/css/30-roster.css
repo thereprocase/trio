@@ -1,0 +1,117 @@
+  #side { grid-row: 2 / 3; grid-column: 2 / 3;
+          background: var(--panel); border-left: 1px solid var(--border);
+          overflow-y: auto; display: flex; flex-direction: column; }
+  #side section { padding: 14px; border-bottom: 1px solid var(--border); }
+  #side section:last-child { border-bottom: none; }
+  #side h2 { font-size: 10px; text-transform: uppercase; color: var(--dim);
+             letter-spacing: 0.08em; margin: 0 0 10px; font-weight: 600; }
+  /* Heading row: section title on the left, close control in the corner. */
+  #side .side-head { display: flex; align-items: center; justify-content: space-between;
+                     gap: 8px; margin: 0 0 10px; }
+  #side .side-head h2 { margin: 0; }
+  #side-close { flex: 0 0 auto; width: 22px; height: 22px; padding: 0;
+                display: flex; align-items: center; justify-content: center;
+                background: var(--bg2); color: var(--dim);
+                border: 1px solid var(--border); border-radius: var(--pill-radius);
+                font-family: inherit; font-size: 12px; line-height: 1; cursor: pointer; }
+  #side-close:hover { background: var(--accent); color: var(--bg);
+                      border-color: var(--accent); }
+  #side-close:focus-visible { outline: none; border-color: var(--accent);
+                              color: var(--fg); }
+
+  .member { padding: 8px 0; cursor: pointer; }
+  .member + .member { border-top: 1px solid var(--border); }
+  .member .row { display: flex; align-items: center; gap: 8px; }
+  .member .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+  .member .roster-animal { font-size: 16px; line-height: 1; flex-shrink: 0;
+                           user-select: none; }
+  .member .dm-btn { font-size: 9px; padding: 2px 6px; border-radius: 3px;
+                    background: var(--bg2); color: var(--dim); border: 1px solid var(--border);
+                    cursor: pointer; flex-shrink: 0; user-select: none;
+                    text-transform: uppercase; letter-spacing: 0.5px; }
+  .member .dm-btn:hover { background: var(--accent); color: var(--bg);
+                          border-color: var(--accent); }
+  .member .ctx-pct { font-size: 9px; padding: 1px 5px; border-radius: 7px;
+                     background: var(--bg2); color: var(--dim); margin-left: 4px; }
+  .member .ctx-pct.warm { background: #4a3a20; color: #e5d35e; }
+  .member .ctx-pct.hot  { background: #4a2420; color: var(--bang-chip); }
+  .member .member-actions { display: none; padding: 6px 0 2px 16px; }
+  .member.expanded .member-actions { display: flex; }
+  /* Destructive, so it carries --err rather than the amber --mention hue that
+     means "someone said your name" everywhere else in this UI. */
+  /* Sized off .dm-btn on purpose: the routine control and the destructive one
+     sit in the same expanded row, and the destructive one should not be the
+     bigger target. */
+  .member .rm-btn { font: inherit; font-size: 9px; line-height: 1.2;
+                    padding: 2px 6px; border-radius: 3px;
+                    background: var(--bg2); color: var(--err); border: 1px solid var(--border);
+                    cursor: pointer; flex-shrink: 0; user-select: none;
+                    text-transform: uppercase; letter-spacing: 0.5px; }
+  .member .rm-btn:hover:not(:disabled) { background: var(--err); color: var(--bg);
+                          border-color: var(--err); }
+  .member .rm-btn:disabled { opacity: 0.6; cursor: default; }
+  .member .fmode { font-size: 9px; padding: 1px 5px; border-radius: 3px;
+                   flex-shrink: 0; user-select: none;
+                   text-transform: uppercase; letter-spacing: 0.5px;
+                   border: 1px solid transparent; }
+  .member .fmode.all   { color: var(--dim); background: var(--bg2); border-color: var(--border); }
+  .member .fmode.about { color: var(--ref-chip); background: var(--ref-chip-bg);
+                         border-color: var(--ref-chip-border); }
+  .member .fmode.at    { color: #f0c060; background: rgba(240, 192, 96, 0.1);
+                         border-color: rgba(240, 192, 96, 0.3); }
+  .member .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+                  font-weight: 500; }
+  .member .caret { color: var(--dimmer); font-size: 9px; transition: transform 0.1s; }
+  .member.expanded .caret { transform: rotate(90deg); }
+  .member .id { color: var(--dimmer); font-size: 10px; margin-left: 2px; }
+  .dot.active { background: var(--accent2); }
+  /* working = alive AND mid-turn: a breathing green dot, the "it's on it,
+     keep chilling" cue. Distinct from the solid green "active" (legacy /
+     hook-not-installed) and the grey "idle" (turn ended, waiting on you). */
+  .dot.working { background: var(--accent2); animation: workpulse 1.3s ease-in-out infinite; }
+  @keyframes workpulse {
+    0%   { opacity: 1;    transform: scale(1); }
+    50%  { opacity: 0.4;  transform: scale(0.72); }
+    100% { opacity: 1;    transform: scale(1); }
+  }
+  @media (prefers-reduced-motion: reduce) { .dot.working { animation: none; } }
+  .dot.idle { background: var(--dimmer); }
+  .dot.stale { background: var(--warn); }
+  .dot.dead { background: var(--err); }
+  .member .stext { font-size: 10px; color: var(--dim); margin-top: 4px;
+                   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+                   padding-left: 16px; line-height: 1.4; }
+
+  .member .stats { display: none; padding: 10px 0 4px 16px;
+                   font-size: 10px; color: var(--dim); }
+  .member.expanded .stats { display: block; }
+  .stats .stat-row { display: flex; justify-content: space-between; padding: 4px 0; gap: 12px; }
+  .stats .stat-label { color: var(--dim); }
+  .stats .stat-val { color: var(--fg); font-weight: 600; text-align: right;
+                     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+                     max-width: 180px; }
+  .stats .stat-val.good { color: var(--accent2); }
+  .stats .stat-val.warn { color: var(--warn); }
+  .stats .stat-val.bad { color: var(--err); }
+  .stats .snippet { color: var(--fg); font-style: italic;
+                    white-space: normal; padding-top: 4px; line-height: 1.3;
+                    max-height: 54px; overflow: hidden; }
+
+  /* Channel stats block */
+  #chanstats .stat-row { display: flex; justify-content: space-between; padding: 4px 0;
+                         font-size: 11px; }
+  #chanstats .stat-label { color: var(--dim); }
+  #chanstats .stat-val { color: var(--fg); font-weight: 600; }
+  #sparkline { font-family: inherit; font-size: 14px; color: var(--accent);
+               letter-spacing: -1px; padding-top: 4px; }
+  #filter-banner { padding: 4px 8px; background: var(--hover); color: var(--mention);
+                   font-size: 10px; border-radius: 3px; margin-bottom: 6px;
+                   display: none; cursor: pointer; }
+  #filter-banner.active { display: block; }
+  /* Fatal/bootstrap errors. Deliberately outside header .meta, which the
+     mobile breakpoint hides — a failed boot has to be legible on a phone. */
+  #fatal-banner { display: none; padding: 10px 14px; background: var(--err);
+                  color: #fff; font-size: 13px; font-weight: 600;
+                  text-align: center; position: sticky; top: 0; z-index: 999; }
+
+  /* ── Composer (unchanged from v1) ── */

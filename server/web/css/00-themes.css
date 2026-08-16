@@ -1,0 +1,398 @@
+  :root {
+    /* ── Midnight (default dark) ── */
+    --bg: #0b0f14; --bg2: #121821; --panel: #161d27; --border: #273040;
+    --fg: #d8dde6; --dim: #7a8596; --dimmer: #59606f;
+    --accent: #3ba0e6; --accent-hi: #50b0f0; --accent2: #59cb79;
+    --warn: #e3c34c; --err: #e56a4a; --mention: #e3c34c;
+    --hover: #0f1420; --ov: 255,255,255;
+    --card-radius: 3px; --card-shadow: none;
+    --pill-radius: 3px; --input-radius: 4px;
+    --ref-chip: #9ccf9c; --ref-chip-bg: rgba(126, 222, 126, 0.08);
+    --ref-chip-border: rgba(126, 222, 126, 0.25);
+    --bang-chip: #ff8470; --bang-chip-bg: rgba(255, 132, 112, 0.2);
+    --bang-chip-border: rgba(255, 132, 112, 0.5);
+    --bang-label-bg: rgba(255, 132, 112, 0.15);
+  }
+  :root[data-theme="light"] {
+    /* ── Daylight (light) ── */
+    --bg: #f6f7f9; --bg2: #eceef2; --panel: #e2e6ec; --border: #c8cfd8;
+    --fg: #1c2430; --dim: #5a6675; --dimmer: #88909d;
+    --accent: #1f7fd0; --accent-hi: #2b93e6; --accent2: #2e9e52;
+    --warn: #b8860b; --err: #cc4a2c; --mention: #b8860b;
+    --hover: #dce1e8; --ov: 0,0,0;
+    --ref-chip: #2d8a2d; --ref-chip-bg: rgba(45, 138, 45, 0.1);
+    --ref-chip-border: rgba(45, 138, 45, 0.3);
+    --bang-chip: #cc3320; --bang-chip-bg: rgba(204, 51, 32, 0.1);
+    --bang-chip-border: rgba(204, 51, 32, 0.35);
+    --bang-label-bg: rgba(204, 51, 32, 0.1);
+  }
+  :root[data-theme="nord"] {
+    /* ── Nord (dark) ── */
+    --bg: #2e3440; --bg2: #2b303b; --panel: #3b4252; --border: #434c5e;
+    --fg: #e5e9f0; --dim: #8f9bb3; --dimmer: #717d94;
+    --accent: #88c0d0; --accent-hi: #8fbcbb; --accent2: #a3be8c;
+    --warn: #ebcb8b; --err: #bf616a; --mention: #ebcb8b;
+    --hover: #353c4a; --ov: 255,255,255;
+  }
+  :root[data-theme="dracula"] {
+    /* ── Dracula (dark) ── */
+    --bg: #282a36; --bg2: #21222c; --panel: #343746; --border: #44475a;
+    --fg: #f8f8f2; --dim: #a0a3b1; --dimmer: #6272a4;
+    --accent: #bd93f9; --accent-hi: #caa9fa; --accent2: #50fa7b;
+    --warn: #f1fa8c; --err: #ff5555; --mention: #ffb86c;
+    --hover: #313442; --ov: 255,255,255;
+  }
+  :root[data-theme="pve-dark"] {
+    /* ── Proxmox VE Dark (from theme-proxmox-dark.css) ── */
+    --bg: #1a1a1a; --bg2: #262626; --panel: #333; --border: #404040;
+    --fg: #f2f2f2; --dim: #999; --dimmer: #666;
+    --accent: #4db5ff; --accent-hi: #99d5ff; --accent2: #0060a4;
+    --warn: #ffae0b; --err: #ce3c3c; --mention: #ffae0b;
+    --hover: #595959; --ov: 255,255,255;
+    --card-radius: 2px; --card-shadow: 0 1px 5px rgba(0,0,0,0.5);
+    --pill-radius: 2px; --input-radius: 2px;
+  }
+  :root[data-theme="pve-light"] {
+    /* ── Proxmox VE Light (from ext6-pve.css + gauge defaults) ── */
+    --bg: #f5f5f5; --bg2: #e2eff9; --panel: #fff; --border: #cfcfcf;
+    --fg: #000; --dim: #555; --dimmer: #8e8e8e;
+    --accent: #3892d4; --accent-hi: #4db5ff; --accent2: #21bf4b;
+    --warn: #bd8300; --err: #cc1800; --mention: #bd8300;
+    --hover: #e2eff9; --ov: 0,0,0;
+    --card-radius: 2px; --card-shadow: 0 1px 8px rgba(136,136,136,0.3);
+    --pill-radius: 2px; --input-radius: 2px;
+    --ref-chip: #2d8a2d; --ref-chip-bg: rgba(45, 138, 45, 0.1);
+    --ref-chip-border: rgba(45, 138, 45, 0.3);
+    --bang-chip: #cc3320; --bang-chip-bg: rgba(204, 51, 32, 0.1);
+    --bang-chip-border: rgba(204, 51, 32, 0.35);
+    --bang-label-bg: rgba(204, 51, 32, 0.1);
+  }
+  :root[data-theme="solarized"] {
+    /* ── Solarized Dark (PVE Dashboard) ── */
+    --bg: #002b36; --bg2: #00212b; --panel: #073642; --border: rgba(147,161,161,.2);
+    --fg: #eee8d5; --dim: #93a1a1; --dimmer: #6c7c7c;
+    --accent: #268bd2; --accent-hi: #3a9bde; --accent2: #859900;
+    --warn: #b58900; --err: #dc322f; --mention: #b58900;
+    --hover: #0a4453; --ov: 255,255,255;
+    --card-radius: 6px; --card-shadow: 0 1px 4px rgba(0,0,0,.4); --pill-radius: 4px;
+  }
+  :root[data-theme="bluebubble"] {
+    /* ── Walled Garden (dark, from macOS dark-mode Messages) ── */
+    --bg: #1c1c1e; --bg2: #2c2c2e; --panel: #2c2c2e; --border: #3a3a3c;
+    --fg: #fff; --dim: #98989f; --dimmer: #6b6b6e;
+    --accent: #0a84ff; --accent-hi: #409cff; --accent2: #30d158;
+    --warn: #ff9f0a; --err: #ff453a; --mention: #ff9f0a;
+    --hover: #3a3a3c; --ov: 255,255,255;
+    --card-radius: 18px; --card-shadow: none;
+    --pill-radius: 999px; --input-radius: 18px;
+    --bubble-mine: #0b84ff; --bubble-mine-ink: #fff;
+    --bubble-theirs: #26252a; --bubble-theirs-ink: #fff;
+    --bubble-system: transparent;
+  }
+  /* ── Walled Garden: dark-mode pixel-faithful recreation ── */
+  :root[data-theme="bluebubble"] .msg {
+    max-width: 70%; border-left: none; margin-left: 0; margin-bottom: 2px;
+    padding: 8px 14px; border-radius: 18px; position: relative;
+    background: var(--bubble-theirs) !important; color: var(--bubble-theirs-ink);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display",
+      "Helvetica Neue", "Helvetica", "Arial", sans-serif;
+    font-size: 17px; line-height: 1.28; letter-spacing: -0.01em;
+  }
+  :root[data-theme="bluebubble"] .msg.sender-break { margin-top: 8px; }
+  :root[data-theme="bluebubble"] .msg:hover { filter: brightness(1.08); }
+  :root[data-theme="bluebubble"] .msg:not(.mine) { border-bottom-left-radius: 4px; }
+  :root[data-theme="bluebubble"] .msg:not(.mine)::before {
+    content: ""; position: absolute; bottom: 0; left: -6px;
+    width: 12px; height: 16px;
+    background: radial-gradient(ellipse at top right, var(--bubble-theirs) 55%, transparent 56%);
+  }
+  :root[data-theme="bluebubble"] .msg.mine::before {
+    content: ""; position: absolute; bottom: 0; right: -6px; left: auto;
+    width: 12px; height: 16px;
+    background: radial-gradient(ellipse at top left, var(--bubble-mine) 55%, transparent 56%);
+  }
+  :root[data-theme="bluebubble"] .msg .head {
+    font-size: 11px; color: #98989f; margin-bottom: 1px;
+    font-weight: 400;
+  }
+  :root[data-theme="bluebubble"] .msg .head .time { color: #98989f; }
+  :root[data-theme="bluebubble"] .msg .author { font-weight: 600; color: #fff; font-size: 13px; }
+  :root[data-theme="bluebubble"] .msg .body { color: inherit; }
+  :root[data-theme="bluebubble"] .msg .body.plain { white-space: pre-wrap; }
+  :root[data-theme="bluebubble"] .msg.mine {
+    margin-left: auto; background: var(--bubble-mine) !important;
+    color: var(--bubble-mine-ink); border-bottom-right-radius: 4px;
+    border-bottom-left-radius: 18px;
+  }
+  :root[data-theme="bluebubble"] .msg.mine .head { color: rgba(255,255,255,0.6); }
+  :root[data-theme="bluebubble"] .msg.mine .head .time { color: rgba(255,255,255,0.45); }
+  :root[data-theme="bluebubble"] .msg.mine .author { color: rgba(255,255,255,0.8); }
+  :root[data-theme="bluebubble"] .msg.system {
+    max-width: 100%; text-align: center; border-radius: 10px;
+    background: transparent !important; color: #98989f; font-style: normal;
+    font-size: 13px; padding: 4px 14px; font-weight: 400;
+  }
+  :root[data-theme="bluebubble"] .msg.system::before { display: none; }
+  :root[data-theme="bluebubble"] .msg .mentions-bar .mchip,
+  :root[data-theme="bluebubble"] .msg .refs-bar .mchip {
+    background: rgba(0,0,0,0.07); border: none; color: #007aff;
+    font-weight: 500; border-radius: 10px; font-size: 13px;
+  }
+  :root[data-theme="bluebubble"] .msg.mine .mentions-bar .mchip,
+  :root[data-theme="bluebubble"] .msg.mine .refs-bar .mchip {
+    background: rgba(255,255,255,0.2); border: none; color: #fff;
+  }
+  :root[data-theme="bluebubble"] .msg .bangs-bar .mchip {
+    background: rgba(255,59,48,0.12); border: none; color: #ff3b30;
+  }
+  :root[data-theme="bluebubble"] .msg .body code.mdic {
+    background: rgba(0,0,0,0.06); border: none; border-radius: 4px;
+    font-size: 0.9em;
+  }
+  :root[data-theme="bluebubble"] .msg.mine .body code.mdic {
+    background: rgba(255,255,255,0.18); border: none;
+  }
+  :root[data-theme="bluebubble"] .msg .body pre.mdcode {
+    background: rgba(0,0,0,0.04); border: none; border-radius: 10px;
+    padding: 8px 12px;
+  }
+  :root[data-theme="bluebubble"] .msg.mine .body pre.mdcode {
+    background: rgba(255,255,255,0.12); border: none;
+  }
+  :root[data-theme="bluebubble"] .msg .body a { color: #007aff; text-decoration: none; }
+  :root[data-theme="bluebubble"] .msg.mine .body a { color: #fff; text-decoration: underline; }
+  :root[data-theme="bluebubble"] .msg.targeted {
+    border-left: none; box-shadow: 0 0 0 2px rgba(255,149,0,0.4);
+    border-radius: 18px;
+  }
+  /* Header — frosted dark glass */
+  :root[data-theme="bluebubble"] header {
+    background: rgba(28,28,30,0.92); border-bottom: 0.5px solid rgba(255,255,255,0.08);
+    backdrop-filter: saturate(180%) blur(20px); -webkit-backdrop-filter: saturate(180%) blur(20px);
+  }
+  :root[data-theme="bluebubble"] header .title { color: #0a84ff; font-size: 17px; }
+  :root[data-theme="bluebubble"] header .meta { color: #98989f; }
+  :root[data-theme="bluebubble"] header .pill { border: none;
+    background: rgba(10,132,255,0.15); color: #0a84ff; font-weight: 500; }
+  :root[data-theme="bluebubble"] header .pill:hover { background: rgba(10,132,255,0.25); }
+  :root[data-theme="bluebubble"] header .pill.on { background: #0a84ff; color: #fff; }
+  :root[data-theme="bluebubble"] header .pill.conn.ok { color: #30d158; background: rgba(48,209,88,0.15); }
+  :root[data-theme="bluebubble"] header .pill.conn.bad { color: #ff453a; background: rgba(255,69,58,0.15); }
+  /* Sidebar */
+  :root[data-theme="bluebubble"] #side {
+    background: #2c2c2e; border-left: 0.5px solid rgba(255,255,255,0.08);
+  }
+  :root[data-theme="bluebubble"] #side h2 { color: #98989f; font-size: 13px;
+    text-transform: uppercase; letter-spacing: 0.02em; }
+  :root[data-theme="bluebubble"] .member .name { font-size: 15px; color: #fff; }
+  :root[data-theme="bluebubble"] .member .stext { font-size: 13px; color: #98989f; }
+  :root[data-theme="bluebubble"] .member .dot { width: 10px; height: 10px; }
+  :root[data-theme="bluebubble"] .member + .member { border-top: 0.5px solid rgba(255,255,255,0.08); }
+  :root[data-theme="bluebubble"] .member .dm-btn {
+    background: rgba(10,132,255,0.15); color: #0a84ff; border: none; border-radius: 14px;
+  }
+  /* Match the theme's pill shape so the remove control isn't a sharp grey box
+     beside a rounded blue one — destructive, so it keeps the red family. */
+  :root[data-theme="bluebubble"] .member .rm-btn {
+    background: rgba(255,69,58,0.15); color: #ff453a; border: none; border-radius: 14px;
+  }
+  :root[data-theme="bluebubble"] .member .rm-btn:hover:not(:disabled) {
+    background: #ff453a; color: #fff;
+  }
+  /* Composer — dark keyboard area */
+  :root[data-theme="bluebubble"] #composer {
+    background: #1c1c1e; border-top: 0.5px solid rgba(255,255,255,0.08); padding: 8px 10px;
+  }
+  /* The textarea is transparent here, so the stack carries the bubble fill. */
+  :root[data-theme="bluebubble"] #input-stack {
+    background: #2c2c2e; border-radius: 18px;
+  }
+  /* The mirror must follow every metric this theme sets on #input, and #input's
+     glyphs must stay transparent — this selector out-specifies the base rule,
+     so without re-asserting it the real text is drawn opaque ON TOP of the
+     mirror in a different font and size. */
+  :root[data-theme="bluebubble"] #input-highlight {
+    border: 0.5px solid transparent; border-radius: 18px;
+    padding: 8px 14px; font-size: 17px; line-height: 1.28;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display",
+      "Helvetica Neue", "Helvetica", "Arial", sans-serif;
+  }
+  :root[data-theme="bluebubble"] #input {
+    background: transparent; color: transparent; caret-color: #fff; border: 0.5px solid #48484a; border-radius: 18px;
+    padding: 8px 14px; font-size: 17px; line-height: 1.28;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display",
+      "Helvetica Neue", "Helvetica", "Arial", sans-serif;
+  }
+  :root[data-theme="bluebubble"] #input:focus { border-color: #0a84ff; }
+  :root[data-theme="bluebubble"] #send-btn {
+    border-radius: 50%; width: 34px; height: 34px; padding: 0;
+    font-size: 0; background: #0a84ff; position: relative;
+  }
+  :root[data-theme="bluebubble"] #send-btn::after {
+    content: "\2191"; font-size: 20px; font-weight: 700; color: #fff;
+  }
+  :root[data-theme="bluebubble"] #send-btn:disabled { background: #48484a; }
+  :root[data-theme="bluebubble"] #hint { display: none; }
+  :root[data-theme="bluebubble"] #preview { font-size: 13px; color: #98989f; }
+  :root[data-theme="bluebubble"] #target-bar .tb-pill {
+    border: none; background: rgba(10,132,255,0.15); color: #0a84ff;
+    border-radius: 14px; font-weight: 500;
+  }
+  :root[data-theme="bluebubble"] #target-bar .tb-pill.on {
+    background: #0a84ff; color: #fff;
+  }
+  /* Completions dropdown */
+  :root[data-theme="bluebubble"] #completions {
+    border-radius: 14px; border: none; box-shadow: 0 4px 24px rgba(0,0,0,0.5);
+    background: rgba(44,44,46,0.96); backdrop-filter: blur(20px);
+  }
+  :root[data-theme="bluebubble"] .completion:hover,
+  :root[data-theme="bluebubble"] .completion.selected { background: #3a3a3c; }
+  /* Settings panel */
+  :root[data-theme="bluebubble"] #settings-panel {
+    border-radius: 14px; border: none; box-shadow: 0 4px 24px rgba(0,0,0,0.5);
+    background: rgba(44,44,46,0.96); backdrop-filter: blur(20px);
+  }
+  /* Guest modal */
+  :root[data-theme="bluebubble"] #guest-modal .guest-card {
+    border-radius: 14px; border: none; box-shadow: 0 4px 30px rgba(0,0,0,0.5);
+    background: #2c2c2e;
+  }
+  :root[data-theme="bluebubble"] #guest-modal button {
+    border-radius: 14px; background: #0a84ff; font-weight: 600;
+  }
+  /* Hide noise — clean like the garden */
+  :root[data-theme="bluebubble"] .acks { display: none; }
+  :root[data-theme="bluebubble"] .watermark-pins { display: none; }
+  :root[data-theme="bluebubble"] #jump-btn {
+    border-radius: 999px; background: #0a84ff; box-shadow: 0 2px 12px rgba(10,132,255,0.4);
+  }
+  :root[data-theme="bluebubble"] #chat {
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display",
+      "Helvetica Neue", "Helvetica", "Arial", sans-serif;
+    background: #000;
+  }
+
+  :root[data-theme="win31"] {
+    /* ── Windows 3.1 (PVE Dashboard) ── */
+    --bg: #c0c0c0; --bg2: #008080; --panel: #c0c0c0; --border: #808080;
+    --fg: #000; --dim: #404040; --dimmer: #606060;
+    --accent: #a85000; --accent-hi: #904500; --accent2: #006400;
+    --warn: #5c5c00; --err: #800000; --mention: #5c5c00;
+    --hover: #d4d4d4; --ov: 0,0,0;
+    --card-radius: 0; --card-shadow: none; --pill-radius: 0;
+    --ref-chip: #3d6b3d; --ref-chip-bg: rgba(61, 107, 61, 0.12);
+    --ref-chip-border: rgba(61, 107, 61, 0.3);
+    --bang-chip: #b82e1f; --bang-chip-bg: rgba(184, 46, 31, 0.12);
+    --bang-chip-border: rgba(184, 46, 31, 0.35);
+    --bang-label-bg: rgba(184, 46, 31, 0.1);
+  }
+  :root[data-theme="crt"] {
+    /* ── CRT Green (PVE Dashboard) ── */
+    --bg: #020a02; --bg2: #031003; --panel: #031603; --border: rgba(51,255,102,.28);
+    --fg: #33ff66; --dim: #1f9941; --dimmer: #29693c;
+    --accent: #7dff9c; --accent-hi: #a0ffb8; --accent2: #33ff66;
+    --warn: #c6ff00; --err: #ff5544; --mention: #c6ff00;
+    --hover: #041d04; --ov: 255,255,255;
+    --card-radius: 2px; --card-shadow: 0 0 10px rgba(51,255,102,.12); --pill-radius: 2px;
+  }
+  :root[data-theme="amber"] {
+    /* ── Amber Mono (PVE Dashboard) ── */
+    --bg: #0d0700; --bg2: #140a00; --panel: #1a0e00; --border: rgba(255,176,0,.25);
+    --fg: #ffb000; --dim: #b87900; --dimmer: #845a0a;
+    --accent: #ffcb52; --accent-hi: #ffe080; --accent2: #ffb000;
+    --warn: #ffd700; --err: #ff5e2e; --mention: #ffd700;
+    --hover: #1f1100; --ov: 255,255,255;
+    --card-radius: 2px; --card-shadow: 0 0 10px rgba(255,176,0,.1); --pill-radius: 2px;
+  }
+  :root[data-theme="paper"] {
+    /* ── Paper Print (PVE Dashboard) ── */
+    --bg: #f4f1ea; --bg2: #efeae0; --panel: #fffdf8; --border: #d8d2c4;
+    --fg: #1c1b18; --dim: #6b675e; --dimmer: #8f8b80;
+    --accent: #9a3b2e; --accent-hi: #b8503e; --accent2: #3a6b2e;
+    --warn: #9a7b1a; --err: #a32a22; --mention: #9a7b1a;
+    --hover: #f5f0e6; --ov: 0,0,0;
+    --card-radius: 2px; --card-shadow: 0 1px 0 #d8d2c4; --pill-radius: 2px;
+    --ref-chip: #2d8a2d; --ref-chip-bg: rgba(45, 138, 45, 0.1);
+    --ref-chip-border: rgba(45, 138, 45, 0.3);
+    --bang-chip: #cc3320; --bang-chip-bg: rgba(204, 51, 32, 0.1);
+    --bang-chip-border: rgba(204, 51, 32, 0.35);
+    --bang-label-bg: rgba(204, 51, 32, 0.1);
+  }
+  :root[data-theme="vaporwave"] {
+    /* ── Vaporwave (PVE Dashboard) ── */
+    --bg: #2b0f54; --bg2: #1b1145; --panel: #3a1f6e; --border: rgba(255,134,200,.3);
+    --fg: #ffe6ff; --dim: #c7a6ff; --dimmer: #8a6ac0;
+    --accent: #7af9ff; --accent-hi: #a0fcff; --accent2: #9bffb0;
+    --warn: #ffe66d; --err: #ff6b8b; --mention: #ffe66d;
+    --hover: #4a2f80; --ov: 255,255,255;
+    --card-radius: 16px; --card-shadow: 0 8px 24px rgba(255,134,200,.25); --pill-radius: 999px;
+  }
+  :root[data-theme="synthwave"] {
+    /* ── Synthwave (PVE Dashboard) ── */
+    --bg: #120024; --bg2: #06000f; --panel: #1c0636; --border: rgba(5,217,232,.3);
+    --fg: #ffd9ff; --dim: #b07adb; --dimmer: #7a50a0;
+    --accent: #05d9e8; --accent-hi: #40e8f0; --accent2: #39ff14;
+    --warn: #f9c80e; --err: #ff2a6d; --mention: #f9c80e;
+    --hover: #2a1048; --ov: 255,255,255;
+    --card-radius: 4px; --card-shadow: 0 0 18px rgba(255,42,109,.3); --pill-radius: 3px;
+  }
+  :root[data-theme="gameboy"] {
+    /* ── Game Boy (PVE Dashboard) ── */
+    --bg: #9bbc0f; --bg2: #9bbc0f; --panel: #8bac0f; --border: #306230;
+    --fg: #0f380f; --dim: #285528; --dimmer: #426542;
+    --accent: #0f380f; --accent-hi: #1a4a1a; --accent2: #0f380f;
+    --warn: #306230; --err: #0f380f; --mention: #306230;
+    --hover: #98b80e; --ov: 0,0,0;
+    --card-radius: 0; --card-shadow: 3px 3px 0 #0f380f; --pill-radius: 0;
+    --ref-chip: #1e5a1e; --ref-chip-bg: rgba(30, 90, 30, 0.15);
+    --ref-chip-border: rgba(30, 90, 30, 0.35);
+    --bang-chip: #a52a1a; --bang-chip-bg: rgba(165, 42, 26, 0.15);
+    --bang-chip-border: rgba(165, 42, 26, 0.35);
+    --bang-label-bg: rgba(165, 42, 26, 0.12);
+  }
+  :root[data-theme="dosblue"] {
+    /* ── DOS Blue (PVE Dashboard) ── */
+    --bg: #0000aa; --bg2: #0000aa; --panel: #0000aa; --border: #5555ff;
+    --fg: #fff; --dim: #55ffff; --dimmer: #3a9a9a;
+    --accent: #ffff55; --accent-hi: #ffffaa; --accent2: #55ff55;
+    --warn: #ffff55; --err: #ff5555; --mention: #ffff55;
+    --hover: #000080; --ov: 255,255,255;
+    --card-radius: 0; --card-shadow: none; --pill-radius: 0;
+  }
+  :root[data-theme="popart"] {
+    /* ── Pop Art (PVE Dashboard) ── */
+    --bg: #0a0014; --bg2: #1a0033; --panel: #15041f; --border: #3a0d5e;
+    --fg: #fff5e1; --dim: #b89cff; --dimmer: #7a60c0;
+    --accent: #00f5ff; --accent-hi: #60faff; --accent2: #39ff14;
+    --warn: #ffbe0b; --err: #ff206e; --mention: #ffbe0b;
+    --hover: #200840; --ov: 255,255,255;
+    --card-radius: 0; --card-shadow: 5px 5px 0 #ff006e; --pill-radius: 0;
+  }
+  :root[data-theme="lcars"] {
+    /* ── LCARS (PVE Dashboard) ── */
+    --bg: #000; --bg2: #000; --panel: #140d06; --border: #3a2a14;
+    --fg: #FFCC99; --dim: #C9A98C; --dimmer: #8a6a50;
+    --accent: #FF9900; --accent-hi: #FFCC66; --accent2: #66CC66;
+    --warn: #FFCC66; --err: #CC6666; --mention: #FFCC66;
+    --hover: #1f1508; --ov: 255,255,255;
+    --card-radius: 14px; --card-shadow: none; --pill-radius: 999px;
+  }
+  * { box-sizing: border-box; }
+  :root {
+    --msg-font: "JetBrains Mono", "Fira Code", "Cascadia Code", ui-monospace, Menlo, monospace;
+  }
+  html, body { margin: 0; padding: 0; height: 100%;
+    background: var(--bg); color: var(--fg);
+    font-family: "JetBrains Mono", "Fira Code", "Cascadia Code", ui-monospace, Menlo, monospace;
+    font-size: 13px; line-height: 1.45;
+  }
+  #chat, #chat .msg, #chat .msg * { font-family: var(--msg-font); }
+  button { font-family: inherit; }
+
+  #app { display: grid; grid-template-columns: 1fr 300px; grid-template-rows: 42px 1fr auto;
+         height: 100vh; }
+  #app.side-collapsed { grid-template-columns: 1fr 0; }
+  #app.side-collapsed #side { display: none; }
+
+  /* Full-history search panel */
