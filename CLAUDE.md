@@ -16,6 +16,29 @@ nth is an MCP server + two sibling skills (`/trio` local, `/quartet` remote) for
 
 **Monitor (v7):** `server/nth_monitor.py` — single long-lived Python process launched via Claude Code's `Monitor` tool with `persistent=True`. One per member per session. Polls the local SQLite DB every 0.5s (active) or 3s (idle), prints one JSON event per line to stdout; each line becomes a `<task-notification>` in the parent session. Writes `last_seen` + `messenger_heartbeat` + `watchdog_heartbeat` in a single batched UPDATE every 10s (gated by both monotonic and wall clocks, so host suspend doesn't starve the heartbeat). Uses `PRAGMA synchronous=NORMAL` under WAL so fast polling is cheap on disk.
 
+**Web dashboard:** `server/nth_web.py` — a stdlib-only HTTP server that renders
+a channel as a browser UI. Serves the fleet/channel index at `/` in landing
+mode, or one channel's dashboard when given a channel code.
+
+**Browser source:** `server/web/` — the client is ordinary source, not a Python
+string. `index.html` is the skeleton; `css/00-themes.css` … `css/50-responsive.css`
+are ordered cascade layers; `js/app.js` is the client. `nth_web.py` composes them
+into one inlined HTML response — no bundler, no build step, no generated artifact.
+
+⚠️ **`server/web/` is read at IMPORT time, not per request.** `nth_web.py` raises
+if the directory is missing, so an install that ships the Python modules but not
+this tree cannot start the dashboard at all — it dies before it can log anything,
+and only on an installed copy, never from a checkout where every file is present.
+`setup.sh` therefore copies `server/web/` as a DIRECTORY at both install sites (a
+named file list is exactly what drifted for the Python modules), and
+`tests/test-install-manifest.py` stages only what `setup.sh` names into an empty
+tree and imports `nth_web` there to prove it.
+
+⚠️ **`WEB_CSS_FILES` order is the cascade order**, and `js/app.js` is ONE file on
+purpose: the client is a single IIFE whose functions share one closure, so
+splitting it across `<script>` tags breaks it — in the browser, where this repo's
+tests would never see it. `tests/test-web-bundle.py` pins both.
+
 **Operator tooling:** `server/nth_console.py` (stdlib DB tailer — dumps full channel history into terminal scrollback then follows) and `server/nth_dashboard.py` (Rich dashboard — per-agent engagement signals like read latency, queue depth, @-reply rate; for 3-8 agent rooms).
 
 **Deleted in v7:** `nth_sentinel.py`, `nth_wait.py`, `messenger-foreground.py`, `sentinel-foreground.py`, `nth_sse.py` (pre-v6 SSE wrapper, replaced by `quartet_server.py`), `agents/trio-sentinel.md`. The Haiku-subagent sentinel pair was replaced because vanilla Claude Code caps Bash at 10 minutes — the 1-hour Haiku sentinel required `BASH_MAX_TIMEOUT_MS` and when that wasn't set Haiku hallucinated fabricated output instead of returning real script stdout.
