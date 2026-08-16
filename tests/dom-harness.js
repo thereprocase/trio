@@ -51,11 +51,7 @@ const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
 
-// The client used to live in a <script> block inside nth_web.py's INDEX_HTML
-// literal, which this harness had to find by regex among several such blocks.
-// It is now an ordinary file, so read it directly: the harness exercises
-// exactly the bytes the server inlines, with no Python parsing in between.
-const CLIENT_JS = path.resolve(__dirname, '..', 'server', 'web', 'js', 'app.js');
+const WEB_ROOT = path.resolve(__dirname, '..', 'server', 'web');
 const ASK_JS = path.resolve(__dirname, '..', 'server', 'nth_ask_client.js');
 
 // ── Fake DOM ──────────────────────────────────────────────────────────────
@@ -111,14 +107,14 @@ class FakeElement {
     this.dataset = {};
     this.style = makeStyle();
     this.value = '';
-    // Textarea/input caret state. Real elements expose these as numbers, and
-    // caret-aware code (insertTranscript) branches on that type — so a stub
-    // that omitted them would silently exercise only the fallback path.
-    this.selectionStart = 0;
-    this.selectionEnd = 0;
     this.checked = false;
     this.disabled = false;
     this.options = [];
+    // Textarea/input caret state. Real elements expose these as numbers, and
+    // caret-aware code branches on that type — a stub that omitted them would
+    // silently exercise only the no-caret fallback path.
+    this.selectionStart = 0;
+    this.selectionEnd = 0;
     this.classList = makeClassList(this);
     this._listeners = {};
     this.dispatched = [];        // event types passed to dispatchEvent()
@@ -135,6 +131,7 @@ class FakeElement {
   get parentNode() { return this._parent; }
   get parentElement() { return this._parent && this._parent.nodeType !== 11 ? this._parent : null; }
   get firstChild() { return this.children[0] || null; }
+  get firstElementChild() { return this.children.find(c => c.nodeType !== 3) || null; }
   get childNodes() { return this.children; }
 
   get textContent() {
@@ -229,11 +226,11 @@ class FakeElement {
   }
   // Listeners are recorded, never fired (as everywhere else in this harness),
   // but the dispatched types are kept so a test can assert that code which
-  // MUST notify the mention mirror / autosize / preview actually did.
+  // MUST notify a mirror / autosize / preview actually did.
   dispatchEvent(e) { this.dispatched.push((e && e.type) || ''); return true; }
   setSelectionRange(s, e) { this.selectionStart = s; this.selectionEnd = e; }
 
-  focus() {} blur() {} click() {} scrollIntoView() {}
+  focus() {} blur() {} click() {} scrollIntoView() {} showModal() {} close() {}
   getBoundingClientRect() { return { top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0 }; }
   // Nearest self-or-ancestor element matching `sel`. decorateInlineMentions
   // relies on this to skip @mentions already inside <code>/<pre>/<a>/.inline-
@@ -461,9 +458,13 @@ function makeLocalStorage() {
 }
 
 class FakeEventSource {
-  constructor() { this.readyState = 0; }
-  addEventListener() {} removeEventListener() {} close() {}
+  constructor(url) { this.url = url; this.readyState = 0; this.closed = false; FakeEventSource.instances.push(this); }
+  addEventListener() {} removeEventListener() {} close() { this.closed = true; }
+  // Test helpers to drive the connection lifecycle the real EventSource fires.
+  fireOpen() { this.readyState = 1; if (this.onopen) this.onopen(); }
+  fireError() { if (this.onerror) this.onerror(); }
 }
+FakeEventSource.instances = [];
 
 function buildSandbox() {
   const document = makeDocument();
@@ -480,9 +481,6 @@ function buildSandbox() {
     scrollTo: noop,
     fetch: () => new Promise(() => {}),   // never resolves; boot()'s network calls hang harmlessly
     EventSource: FakeEventSource,
-    // `new Event('input')` is how the client tells the mention mirror, the
-    // autosize and the preview that the composer changed.
-    Event: function Event(type) { this.type = String(type); },
     Notification: function () {},
     AudioContext: function () { return { createOscillator: () => ({ connect: noop, start: noop, stop: noop }), createGain: () => ({ connect: noop, gain: {} }), destination: {}, currentTime: 0 }; },
   };
@@ -496,54 +494,73 @@ function buildSandbox() {
     console, setTimeout, clearTimeout, setInterval, clearInterval,
     URL, URLSearchParams, TextEncoder, TextDecoder, NodeFilter,
     Map, Set, WeakMap, Promise, JSON, Math, Date, RegExp, Array, Object, String, Number, Boolean, Error,
+    EventTarget, Event, CustomEvent,
   });
   window.webkitAudioContext = window.AudioContext;
   window.__TRIO_TEST__ = {};        // truthy → nth_web.py's hook publishes helpers here
   return window;
 }
 
-// Extract the embedded client <script> and inject the pure ask helpers, the
-// same substitution nth_web.py performs at serve time.
+// The module list is READ OUT OF nth_web.py, not written here. A hardcoded
+// copy is a third list to keep in step with WEB_JS_FILES and setup.sh, and the
+// way it fails is the worst kind: a module added to production but not to the
+// harness escapes client coverage entirely, with every existing test still
+// green. Parsing the tuple means the harness runs exactly what the server
+// serves, and a reordering that breaks production breaks these tests too.
+function productionModules() {
+  const py = fs.readFileSync(path.resolve(__dirname, '..', 'server', 'nth_web.py'), 'utf8');
+  const block = py.match(/WEB_JS_FILES = \(([\s\S]*?)\)/);
+  if (!block) throw new Error('could not find WEB_JS_FILES in server/nth_web.py');
+  const names = [...block[1].matchAll(/"js\/([^"]+)"/g)].map(m => m[1]);
+  if (!names.length) throw new Error('WEB_JS_FILES parsed to an empty list');
+  // The test hook is what the harness REPLACES below, so it must not also run.
+  return names.filter(n => n !== '99-test-hook.js');
+}
+
+// Load the ordered source modules that production composes into INDEX_HTML.
 function buildScript() {
-  let js = fs.readFileSync(CLIENT_JS, 'utf8');
-  // The sentinel check survives the move to a real file. It no longer selects
-  // between candidate blocks, but it still answers the question that matters:
-  // is this the bundle carrying the hook these tests read their helpers back
-  // out of? Without it, a future split of app.js would leave the harness
-  // loading a file with no hook and every test failing far from the cause.
-  const SENTINEL = '__TRIO_TEST_HOOK_START__';
-  if (!js.includes(SENTINEL)) {
-    throw new Error(`${path.relative(process.cwd(), CLIENT_JS)} does not carry ` +
-      `${SENTINEL} — the client was split or renamed; update dom-harness.js`);
+  const all = productionModules();
+  // 90-boot must stay last and must not auto-run: it mounts every feature
+  // against a live DOM and opens an EventSource, which the tests drive
+  // themselves. Asserted rather than assumed — if it ever stops being last in
+  // WEB_JS_FILES, the harness would silently boot mid-load.
+  if (all[all.length - 1] !== '90-boot.js') {
+    throw new Error(`expected 90-boot.js last in WEB_JS_FILES, got ${all[all.length - 1]}`);
   }
-  // The ask-helpers module is optional: it only exists in builds that ship
-  // the multiple-choice picker. Absent it, the placeholder collapses to ''.
-  const askHelpers = fs.existsSync(ASK_JS) ? fs.readFileSync(ASK_JS, 'utf8') : '';
-  // Same placeholder substitutions nth_web.py performs at serve time. Global
-  // (regex) replace matches Python's str.replace-all semantics, so a placeholder
-  // that ever appears twice stays in sync with production. The animal lists
-  // only feed the guest-avatar picker; empty arrays parse fine and don't affect
-  // any code path under test.
-  js = js
-    .replace(/\/\*__ANIMAL_EMOJIS__\*\//g, '[]')
-    .replace(/\/\*__ANIMAL_NAMES__\*\//g, '[]')
-    .replace(/\/\*__ASK_HELPERS__\*\//g, () => askHelpers)
-    // The channel query-string placeholder is substituted per-request in
-    // production; under the harness a fixed test channel is enough.
-    .replace(/\/\*__API_QS__\*\/''/g, JSON.stringify('?channel=test'))
-    // Web-dictation language, injected at import time from NTH_STT_LANG. The
-    // literal already carries the production default, so keep it.
-    .replace(/\/\*__STT_LANG__\*\/'en-US'/g, JSON.stringify('en-US'));
-  // Any leftover /*__FOO__*/ placeholder means nth_web.py grew a new injection
-  // point the harness doesn't know about. Left unsubstituted it would either be
-  // a parse error (statement position) or silently wrong — either way, surface
-  // it loudly here so the gap is a teachable error, not a green lie.
-  const leftover = js.match(/\/\*__[A-Z_]+__\*\//);
-  if (leftover) {
-    throw new Error(`unsubstituted placeholder ${leftover[0]} in the client script — ` +
-      `add its substitution to dom-harness.js buildScript()`);
-  }
-  return js;
+  const files = all.slice(0, -1);
+  return [
+    fs.readFileSync(ASK_JS, 'utf8'),
+    ...files.map(name => fs.readFileSync(path.join(WEB_ROOT, 'js', name), 'utf8')),
+    "document.readyState = 'loading';",  // keep 90-boot from auto-running in the harness
+    fs.readFileSync(path.join(WEB_ROOT, 'js', '90-boot.js'), 'utf8'),
+  ].join('\n') + `
+    globalThis.__TRIO_TEST__ = {
+      state: window.Trio.state,
+      renderMarkdown: window.Trio.markdown.renderMarkdown,
+      escapeHtml: window.Trio.markdown.escapeHtml,
+      isSystemContent: window.Trio.markdown.isSystemContent,
+      systemMessageText: window.Trio.markdown.systemMessageText,
+      humanizeIdSigils: window.Trio.markdown.humanizeIdSigils,
+      paintBody: window.Trio.conversation.paintBody,
+      cardFor: window.Trio.conversation.cardFor,
+      answerPayload: window.Trio.conversation.answerPayload,
+      isPrivate: window.Trio.conversation.isPrivate,
+      buildSendPayload: window.Trio.composer.buildSendPayload,
+      apiUrl: path => { const ch = window.Trio.state.channel || ''; return ch ? path + (path.includes('?') ? '&' : '?') + 'channel=' + encodeURIComponent(ch) : path; },
+      rememberColors: () => {},
+      applyTargetBars: () => {},
+      targetableMembers: members => (members || []).filter(m => !m.is_operator),
+      soleAgentId: members => { const ids = (members || []).filter(m => !m.is_operator).map(m => m.id); return ids.length === 1 ? ids[0] : null; },
+      directAt: (text, m) => { const n = m && m.name; return n && !(new RegExp('(^|\\\\s)@' + n.replace(/[-/\\\\^\\x24*+?.()|[\\]{}]/g, '\\\\$&') + '(?=\\\\s|$)', 'i')).test(text) ? '@' + n + ' ' + text : text; },
+      upsert: window.Trio.conversation.upsert,
+      render: window.Trio.conversation.render,
+      detectFilePathCandidates: window.Trio.fileLinks.detectFilePathCandidates,
+      linkifyValidatedPaths: window.Trio.fileLinks.linkifyValidatedPaths,
+      sidebar: window.Trio.sidebar,
+      lightbox: window.Trio.lightbox,
+      Trio: window.Trio,
+    };
+  `;
 }
 
 function load() {
@@ -552,7 +569,7 @@ function load() {
   const script = buildScript();
   let bootError = null;
   try {
-    vm.runInContext(script, context, { filename: 'nth_web.client.js', timeout: 5000 });
+    vm.runInContext(script, context, { filename: 'trio-web-modules.js', timeout: 5000 });
   } catch (e) {
     // boot() may throw against the minimal DOM — the __TRIO_TEST__ hook is set
     // BEFORE boot() runs, so the helpers are already published regardless.

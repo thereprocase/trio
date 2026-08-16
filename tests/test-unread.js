@@ -1,310 +1,158 @@
-// Unread-watermark tests. Extracts the real functions from the shipped
-// dashboard client and runs them against a fake message map, so the read-state
-// rules are pinned without a browser.
+// The unread divider — "New since your last visit" — placed by
+// Trio.conversation.render().
+//
+// This file used to test twelve functions of the single-pane client
+// (isHiddenMsg, firstVisibleUnreadDom, updateNewBar, …). None of them survive
+// in the workspace client, which computes the divider inline in render()
+// instead, so the old assertions could only have been kept red or deleted.
+// They are replaced here rather than dropped: the rules are the same ones, and
+// each of them is a way the divider has actually been wrong before.
+//
+// The subtle one is the interaction with age-based collapse. render() may hide
+// messages older than the history threshold behind an "older messages" toggle,
+// and the divider index is computed over the FULL list but used to index the
+// RENDERED slice. Those two are different arrays whenever anything is hidden,
+// and an unmapped index puts the divider at an arbitrary point in the
+// conversation — or past the end, where it silently vanishes.
 //
 // Usage: node tests/test-unread.js
 'use strict';
-const fs = require('fs');
-const path = require('path');
+
 const assert = require('assert');
+const { load } = require('./dom-harness');
 
-// Read the client source directly. This used to slice functions out of a
-// Python file, because the client lived inside nth_web.py's INDEX_HTML
-// literal; server/web/js/app.js is the same bytes without the indirection.
-const CLIENT_JS = path.join(__dirname, '..', 'server', 'web', 'js', 'app.js');
-const src = fs.readFileSync(CLIENT_JS, 'utf8');
-
-function grab(name) {
-  const i = src.indexOf(`function ${name}(`);
-  if (i < 0) throw new Error(`could not find function ${name} in ${path.basename(CLIENT_JS)}`);
-  let depth = 0, started = false;
-  for (let j = i; j < src.length; j++) {
-    if (src[j] === '{') { depth++; started = true; }
-    else if (src[j] === '}') { depth--; if (started && depth === 0) return src.slice(i, j + 1); }
-  }
-  throw new Error(`unbalanced braces reading ${name}`);
-}
-
-// Fake message node. classList carries the visibility rules; dataset.sender
-// carries authorship, which the read-state rules need in order to never count
-// your own message as unread. `sender` defaults to a peer, so every existing
-// test keeps meaning what it meant.
-function node(...classes) {
-  const set = new Set(classes);
-  return { classList: { contains: c => set.has(c), add: c => set.add(c), remove: c => set.delete(c) },
-           dataset: { sender: 'peer' } };
-}
-function ownNode(...classes) {
-  const n = node(...classes);
-  n.dataset.sender = 'op';        // matches mkState's operator.id
-  return n;
-}
-
-let dividerPresent = true, newBarText = null;
-function armDivider() { dividerPresent = true; }
-const sandbox = {
-  state: null,
-  document: { getElementById: () => (dividerPresent ? { remove() { dividerPresent = false; } } : null) },
-  newBar: { classList: { add() {}, remove() {} }, set textContent(v) { newBarText = v; } },
-  chat: { insertBefore() {}, scrollHeight: 10000, clientHeight: 800, scrollTop: 0 },
-  jumpBtn: { classList: { add() {}, remove() {} } },
-  jumpCount: { style: {}, textContent: '' },
-  USER_INTENT_MS: 1500,
-  Date,
-  Math, console,
-};
-const code = [grab('isHiddenMsg'), grab('isOwnMsg'), grab('firstVisibleUnreadDom'), grab('unreadCountVisible'),
-              grab('markCaughtUp'), grab('seedBaseline'), grab('updateJumpButton'),
-              grab('noteIntent'), grab('scrollIsUsers'), grab('sustainIntent'),
-              grab('disownScroll'), grab('updateNewBar')].join('\n');
-const fn = new Function('sandbox', `with (sandbox) { ${code};
-  return { isHiddenMsg, isOwnMsg, firstVisibleUnreadDom, unreadCountVisible, markCaughtUp, seedBaseline,
-           updateJumpButton, noteIntent, scrollIsUsers, sustainIntent, disownScroll, updateNewBar,
-           refreshUnreadDivider: () => {} }; }`);
-// refreshUnreadDivider/updateNewBar are stubbed via the returned closure below
-sandbox.refreshUnreadDivider = () => {};
-const H = fn(sandbox);
-sandbox.refreshUnreadDivider = H.refreshUnreadDivider;
-
-let passed = 0; const failures = [];
-function check(name, f) {
-  try { f(); passed++; console.log('PASS: ' + name); }
+const failures = [];
+let passed = 0;
+function check(name, fn) {
+  try { fn(); passed++; console.log('PASS: ' + name); }
   catch (e) { failures.push(name); console.log('FAIL: ' + name + ' — ' + e.message); }
 }
-function mkState(over) {
-  return Object.assign({ lastSeenId: 0, messageDomById: new Map(), members: new Map(),
-                         operator: { id: 'op' }, suppressCatchUp: false }, over);
+
+const cx = load();
+const H = cx.hooks;
+const Trio = H.Trio;
+const document = cx.document;   // the sandbox's DOM, not a Node global
+if (cx.bootError) console.log('(note) boot ran with: ' + cx.bootError.message);
+
+const DAY = 86400000;
+
+// Build `count` messages, the newest `recent` of them inside the age cutoff so
+// the rest collapse behind the "older messages" toggle.
+function seed({ count, recent = count, lastSeenId }) {
+  // 11-conversation binds the ROOT Trio.state (const { state } = Trio), not
+  // the store's `conversation` slice — seeding the slice renders an empty
+  // conversation and every assertion below passes vacuously.
+  const state = Trio.state;
+  state.messages = new Map();
+  for (let i = 1; i <= count; i++) {
+    const age = i > count - recent ? 0 : 30 * DAY;
+    state.messages.set(i, {
+      id: i, member_id: 'a', member_name: 'Ada', content: 'm' + i,
+      created_at: new Date(Date.now() - age).toISOString(),
+      mentions: [], refs: [], bangs: [], recipients: [],
+    });
+  }
+  state.lastSeenId = lastSeenId;
+  state.messageDomById = new Map();
+  state.olderExpanded = {};
+  Trio.state.channel = 'test';
+  // Age-based collapse is off unless messageHistoryDays is a positive number,
+  // and under the harness preferences.read() supplies no value — so a fixture
+  // that merely backdates messages collapses NOTHING and the two tests below
+  // pass while exercising the uncollapsed path. Set it explicitly.
+  Trio.state.preferences = Object.assign({}, Trio.state.preferences,
+    { messageHistoryDays: recent === count ? 0 : 3 });
 }
 
-// ── the regression Frodo and Sauron both found ───────────────────────────────
-check('markCaughtUp stops at a filtered-out unread (does not sweep it)', () => {
-  const m = new Map();
-  m.set(10, node()); m.set(11, node('filtered-out')); m.set(12, node('filtered-out'));
-  m.set(205, node());
-  sandbox.state = mkState({ lastSeenId: 10, messageDomById: m });
-  H.markCaughtUp();
-  assert.strictEqual(sandbox.state.lastSeenId, 10,
-    'watermark must not jump over messages the filter is hiding');
-});
+// Guard the fixture itself: if collapse silently stops happening again, these
+// tests must fail rather than quietly re-test the ordinary path.
+function assertCollapsed(expectedVisible) {
+  const list = document.getElementById('messages');
+  const cards = new Set(Trio.state.messageDomById.values());
+  const visible = list.children.filter(el => cards.has(el)).length;
+  assert.strictEqual(visible, expectedVisible,
+    `fixture did not collapse: ${visible} cards rendered, expected ` +
+    `${expectedVisible} — the age cutoff is not in effect, so this test is ` +
+    'not exercising the collapsed path at all');
+}
 
-check('markCaughtUp advances through dm-hidden (structurally invisible)', () => {
-  const m = new Map();
-  m.set(1, node()); m.set(2, node('dm-hidden')); m.set(3, node());
-  sandbox.state = mkState({ lastSeenId: 0, messageDomById: m });
-  H.markCaughtUp();
-  assert.strictEqual(sandbox.state.lastSeenId, 3,
-    'dm-hidden must not deadlock the watermark');
-});
+function renderAndFind() {
+  Trio.conversation.render();
+  const list = document.getElementById('messages');
+  const kids = list ? list.children : [];
+  return kids.findIndex(el => el.className === 'unread-divider');
+}
 
-check('markCaughtUp advances over a fully visible tail', () => {
-  const m = new Map();
-  m.set(1, node()); m.set(2, node()); m.set(3, node());
-  sandbox.state = mkState({ lastSeenId: 1, messageDomById: m });
-  H.markCaughtUp();
-  assert.strictEqual(sandbox.state.lastSeenId, 3);
-});
-
-check('clearing the filter restores the still-unread message', () => {
-  const m = new Map();
-  const hidden = node('filtered-out');
-  m.set(876, node()); m.set(3523, hidden); m.set(3524, node());
-  sandbox.state = mkState({ lastSeenId: 876, messageDomById: m });
-  H.markCaughtUp();                       // user is "at bottom" of the 1-row filtered list
-  hidden.classList.remove('filtered-out'); // filter cleared
-  assert.strictEqual(sandbox.state.lastSeenId, 876);
-  assert.strictEqual(H.unreadCountVisible(), 2, '3523 and 3524 are both still unread');
-});
-
-// ── baseline seeding (the background-tab case) ───────────────────────────────
-check('seedBaseline with no server last_read → arrive caught up', () => {
-  const m = new Map(); m.set(5, node()); m.set(6, node()); m.set(7, node());
-  sandbox.state = mkState({ messageDomById: m });
-  H.seedBaseline();
-  assert.strictEqual(sandbox.state.lastSeenId, 7);
-  assert.strictEqual(H.unreadCountVisible(), 0);
-});
-
-check('seedBaseline honours the server watermark → history stays unread', () => {
-  const m = new Map(); m.set(5, node()); m.set(6, node()); m.set(7, node());
-  const members = new Map([['op', { last_read: 5 }]]);
-  sandbox.state = mkState({ messageDomById: m, members });
-  H.seedBaseline();
-  assert.strictEqual(sandbox.state.lastSeenId, 5);
-  assert.strictEqual(H.unreadCountVisible(), 2, '6 and 7 arrived while away');
-});
-
-check('seedBaseline is idempotent once a watermark exists', () => {
-  const m = new Map(); m.set(9, node());
-  sandbox.state = mkState({ lastSeenId: 3, messageDomById: m });
-  H.seedBaseline();
-  assert.strictEqual(sandbox.state.lastSeenId, 3);
-});
-
-check('seedBaseline clamps a server watermark ahead of loaded history', () => {
-  const m = new Map(); m.set(2, node());
-  const members = new Map([['op', { last_read: 999 }]]);
-  sandbox.state = mkState({ messageDomById: m, members });
-  H.seedBaseline();
-  assert.strictEqual(sandbox.state.lastSeenId, 2);
-});
-
-check('firstVisibleUnreadDom skips hidden and returns the lowest unread', () => {
-  const m = new Map();
-  const want = node();
-  m.set(1, node()); m.set(2, node('dm-hidden')); m.set(3, want); m.set(4, node());
-  sandbox.state = mkState({ lastSeenId: 1, messageDomById: m });
-  assert.strictEqual(H.firstVisibleUnreadDom(), want);
-});
-
-// ── the two criticals: who caused the scroll ────────────────────────────────
-function atBottom() { sandbox.chat.scrollTop = sandbox.chat.scrollHeight - sandbox.chat.clientHeight; }
-
-check('a programmatic scroll to the bottom does NOT mark caught up', () => {
-  const m = new Map(); m.set(1, node()); m.set(2, node()); m.set(3, node());
-  sandbox.state = mkState({ lastSeenId: 1, messageDomById: m, userIntentAt: 0 });
-  armDivider(); atBottom();
-  H.updateJumpButton();                       // settle / jump-to-unread, no gesture
-  assert.strictEqual(sandbox.state.lastSeenId, 1, 'watermark must not move');
-  assert.strictEqual(dividerPresent, true, 'divider must survive');
-});
-
-check('a user-driven scroll to the bottom DOES mark caught up', () => {
-  const m = new Map(); m.set(1, node()); m.set(2, node()); m.set(3, node());
-  sandbox.state = mkState({ lastSeenId: 1, messageDomById: m, userIntentAt: Date.now() });
-  armDivider(); atBottom();
-  H.updateJumpButton();
-  assert.strictEqual(sandbox.state.lastSeenId, 3);
-});
-
-check('a stale gesture no longer counts as intent', () => {
-  const m = new Map(); m.set(1, node()); m.set(2, node());
-  sandbox.state = mkState({ lastSeenId: 1, messageDomById: m,
-                            userIntentAt: Date.now() - 5000 });
-  armDivider(); atBottom();
-  H.updateJumpButton();
-  assert.strictEqual(sandbox.state.lastSeenId, 1);
-});
-
-check('a long smooth scroll still cannot mark caught up at any point', () => {
-  const m = new Map(); m.set(1, node()); m.set(2, node()); m.set(3, node());
-  sandbox.state = mkState({ lastSeenId: 1, messageDomById: m, userIntentAt: 0 });
-  armDivider();
-  for (let i = 0; i < 174; i++) {            // the measured event count
-    sandbox.chat.scrollTop = (sandbox.chat.scrollHeight - sandbox.chat.clientHeight) * (i / 173);
-    H.updateJumpButton();
+// Index of the divider among the CARDS only, which is what a reader sees: the
+// list also holds day separators and the "older messages" toggle. Cards are
+// identified by the DOM map render() populates, not by guessing at class
+// names — an earlier version counted the older-messages toggle as a card and
+// reported the divider one position late.
+function dividerBeforeMessage() {
+  Trio.conversation.render();
+  const list = document.getElementById('messages');
+  const cards = new Set(Trio.state.messageDomById.values());
+  let seenCards = 0;
+  for (const el of list.children) {
+    if (el.className === 'unread-divider') return seenCards;
+    if (cards.has(el)) seenCards++;
   }
-  assert.strictEqual(sandbox.state.lastSeenId, 1, 'no frame may mark caught up');
-  assert.strictEqual(dividerPresent, true);
+  return -1;
+}
+
+check('no divider on a first-ever visit (lastSeenId 0), however much history', () => {
+  seed({ count: 5, lastSeenId: 0 });
+  assert.strictEqual(renderAndFind(), -1,
+    'a first visit marked the entire history as unread');
 });
 
-check('a moving user scroll keeps its attribution past the window', () => {
-  sandbox.state = mkState({ userIntentAt: Date.now() - 1400 });
-  for (let i = 0; i < 40; i++) H.sustainIntent();   // frames of a long fling
-  assert.strictEqual(H.scrollIsUsers(), true, 'momentum must not lose attribution');
+check('no divider when everything has been seen', () => {
+  seed({ count: 5, lastSeenId: 5 });
+  assert.strictEqual(renderAndFind(), -1,
+    'a fully-read conversation still showed "New since your last visit"');
 });
 
-check('a programmatic scroll can never bootstrap attribution', () => {
-  sandbox.state = mkState({ userIntentAt: 0 });
-  for (let i = 0; i < 200; i++) H.sustainIntent();
-  assert.strictEqual(H.scrollIsUsers(), false, 'stale must stay stale');
+check('a divider appears when there is anything unread', () => {
+  seed({ count: 5, lastSeenId: 3 });
+  assert.notStrictEqual(renderAndFind(), -1, 'unread messages produced no divider');
 });
 
-check('appendMessage-style advance uses the walk, not a bare max', () => {
-  const m = new Map();
-  m.set(3573, node()); m.set(3578, node('filtered-out')); m.set(3579, node());
-  sandbox.state = mkState({ lastSeenId: 3573, messageDomById: m });
-  H.markCaughtUp();
-  assert.strictEqual(sandbox.state.lastSeenId, 3573,
-    'a later visible message must not leapfrog an earlier hidden one');
+check('the divider sits before the first UNREAD message, not at the top', () => {
+  seed({ count: 5, lastSeenId: 3 });
+  assert.strictEqual(dividerBeforeMessage(), 3,
+    'the divider was not placed before message 4 — the first one past lastSeenId');
 });
 
-check('a warm gesture cannot donate attribution to a page-issued scroll', () => {
-  // scroll up to notice the bar, then click it — the primary interaction
-  sandbox.state = mkState({ userIntentAt: Date.now() - 300 });
-  assert.strictEqual(H.scrollIsUsers(), true, 'gesture is warm before the click');
-  H.disownScroll();                                  // what the click handler does
-  for (let i = 0; i < 180; i++) H.sustainIntent();   // frames of the glide
-  assert.strictEqual(H.scrollIsUsers(), false,
-    'the page-issued glide must not inherit the wheel that preceded it');
+check('a lastSeenId ahead of every message shows no divider', () => {
+  seed({ count: 5, lastSeenId: 99 });
+  assert.strictEqual(renderAndFind(), -1,
+    'a watermark past the newest message still reported unread');
 });
 
-check('disowning does not block the next real gesture', () => {
-  sandbox.state = mkState({ userIntentAt: Date.now() - 300 });
-  H.disownScroll();
-  H.noteIntent();                                    // user touches the scroller again
-  assert.strictEqual(H.scrollIsUsers(), true);
+// ── the collapse interaction ────────────────────────────────────────────────
+check('with old messages collapsed, the divider still renders', () => {
+  // 8 messages, only the newest 3 inside the cutoff: 5 collapse away. The
+  // unread boundary (id 6) is INSIDE the visible slice.
+  seed({ count: 8, recent: 3, lastSeenId: 5 });
+  const at = renderAndFind();
+  assertCollapsed(3);
+  assert.notStrictEqual(at, -1,
+    'collapsing old messages lost the divider entirely — the index was ' +
+    'computed over the full list but used against the rendered slice');
 });
 
-check('the new-bar makes no claim while the user is at the bottom', () => {
-  const m = new Map(); m.set(1, node()); m.set(2, node());
-  sandbox.state = mkState({ lastSeenId: 1, messageDomById: m });
-  armDivider();
-  let shown = null;
-  sandbox.newBar.classList = { add: () => { shown = true; }, remove: () => { shown = false; } };
-  sandbox.chat.scrollTop = sandbox.chat.scrollHeight - sandbox.chat.clientHeight;
-  H.updateNewBar();
-  assert.strictEqual(shown, false, 'no "messages below" claim when already at the bottom');
-  assert.strictEqual(sandbox.state.lastSeenId, 1, 'and nothing marked read to achieve it');
+check('an unread boundary inside the collapsed range pins the divider to the top', () => {
+  // Unread starts at id 2, which is hidden. There is nowhere earlier to put
+  // the divider in the visible slice, so it belongs at position 0 — not at
+  // index 1, which would point at the wrong message.
+  seed({ count: 8, recent: 3, lastSeenId: 1 });
+  const pos = dividerBeforeMessage();
+  assertCollapsed(3);
+  assert.strictEqual(pos, 0,
+    'the divider was placed by an index into the full list rather than the ' +
+    'rendered slice');
 });
 
-check('the new-bar still reports unread when scrolled up', () => {
-  const m = new Map(); m.set(1, node()); m.set(2, node());
-  sandbox.state = mkState({ lastSeenId: 1, messageDomById: m });
-  armDivider();
-  let shown = null;
-  sandbox.newBar.classList = { add: () => { shown = true; }, remove: () => { shown = false; } };
-  sandbox.chat.scrollTop = 0;
-  H.updateNewBar();
-  assert.strictEqual(shown, true);
-});
-
-
-
-// ── your own message is never unread (found in live testing) ────────────────
-check('a message you sent while scrolled up is not counted unread', () => {
-  const m = new Map();
-  m.set(1, node()); m.set(2, ownNode());
-  sandbox.state = mkState({ lastSeenId: 1, messageDomById: m });
-  assert.strictEqual(H.unreadCountVisible(), 0,
-    'sending while scrolled up must not raise your own unread count');
-});
-
-check('the divider is not drawn above your own message', () => {
-  const m = new Map();
-  m.set(1, node()); m.set(2, ownNode());
-  sandbox.state = mkState({ lastSeenId: 1, messageDomById: m });
-  assert.strictEqual(H.firstVisibleUnreadDom(), null);
-});
-
-check("a peer's message is still unread when yours follows it", () => {
-  const m = new Map();
-  const peer = node();
-  m.set(1, node()); m.set(2, peer); m.set(3, ownNode());
-  sandbox.state = mkState({ lastSeenId: 1, messageDomById: m });
-  assert.strictEqual(H.unreadCountVisible(), 1, 'only the peer message counts');
-  assert.strictEqual(H.firstVisibleUnreadDom(), peer,
-    'the divider belongs above the peer message, not yours');
-});
-
-// This is why the fix skips at COUNTING time rather than advancing lastSeenId
-// past your own message: a high-water mark moved over id 3 would also bury the
-// peer's unread id 2 underneath it.
-check('replying does not silently mark an earlier peer message read', () => {
-  const m = new Map();
-  m.set(1, node()); m.set(2, node()); m.set(3, ownNode());
-  sandbox.state = mkState({ lastSeenId: 1, messageDomById: m });
-  assert.strictEqual(sandbox.state.lastSeenId, 1, 'watermark untouched by counting');
-  assert.strictEqual(H.unreadCountVisible(), 1);
-});
-
-check('own-message skipping needs an operator id (guards a null identity)', () => {
-  const m = new Map();
-  m.set(1, node()); m.set(2, ownNode());
-  sandbox.state = mkState({ lastSeenId: 1, messageDomById: m, operator: { id: '' } });
-  assert.strictEqual(H.unreadCountVisible(), 1,
-    'with no identity yet, fall back to counting everything rather than nothing');
-});
-
-console.log('');
-console.log((failures.length ? 'FAILED' : 'OK') + ` — ${passed} passed, ${failures.length} failure(s)`);
+console.log('\n' + passed + ' passed, ' + failures.length + ' failed');
+if (failures.length) failures.forEach(f => console.log('  ✗ ' + f));
 process.exit(failures.length ? 1 : 0);

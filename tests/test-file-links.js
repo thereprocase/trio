@@ -135,10 +135,12 @@ check('linkify: mixed — only the validated one is linked', () => {
   assert.strictEqual(links[0].dataset.path, '/yes/a.py');
 });
 
-check('linkify: path inside inline `code` is NOT linkified', () => {
+check('linkify: path inside inline `code` IS linkified (agents use backticks)', () => {
   const body = linkify('run <code class="mdic">/real/file.py</code> now',
     new Set(['/real/file.py']));
-  assert.strictEqual(body.querySelectorAll('.file-link').length, 0, body.innerHTML);
+  const links = body.querySelectorAll('.file-link');
+  assert.strictEqual(links.length, 1, body.innerHTML);
+  assert.strictEqual(links[0].dataset.path, '/real/file.py');
 });
 
 check('linkify: path inside <pre> is NOT linkified', () => {
