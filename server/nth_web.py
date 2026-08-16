@@ -1687,16 +1687,32 @@ def _event_visible_to(event: Dict[str, Any], viewer_id: Optional[str],
                    event.get("recipients"), allow_all_seeing=False)
 
 
-def _message_event(db: sqlite3.Connection, r: sqlite3.Row) -> Dict[str, Any]:
+def _message_event(db: sqlite3.Connection, r: sqlite3.Row,
+                   channel: str) -> Dict[str, Any]:
     """The SSE payload for one message row.
 
     Shared by the history burst and the live tail. They were duplicate literals;
     `recipients` is what scopes a DM in the dashboard, and a field present in
     one path but not the other would show a private message as an ordinary one
-    depending only on whether you were watching when it arrived."""
+    depending only on whether you were watching when it arrived.
+
+    `channel` is REQUIRED, and required positionally, because the operator's
+    workspace-wide stream (/api/workspace/events) merges every channel's hub
+    queue into one connection. The client decides where a message belongs by
+    comparing this field to the room on screen, and its guard reads
+    `msg.channel && … !== state.channel` — which SHORT-CIRCUITS when the field
+    is absent. So an unstamped event does not get dropped or logged; it renders
+    into whatever conversation the operator happens to have open, and it also
+    silently disables channel mute and the cross-channel desktop popup, both of
+    which key off the same field.
+
+    A default here would restore exactly that failure, quietly, the first time
+    someone adds a call site. Making it positional means a missed one is a
+    TypeError at the call, not a wrong pixel three screens away."""
     keys = r.keys()
     return {
         "type": "message",
+        "channel": channel,
         "id": r["id"],
         "member_id": r["member_id"],
         "member_name": r["member_name"] or r["member_id"],
@@ -1805,7 +1821,7 @@ class EventHub:
                 (self.channel, HISTORY_LIMIT),
             ).fetchall()
             for r in reversed(rows):
-                ev = _message_event(db, r)
+                ev = _message_event(db, r, self.channel)
                 if not _event_visible_to(ev, viewer_id, all_seeing):
                     continue
                 q.put_nowait(json.dumps(ev))
@@ -1992,7 +2008,7 @@ class EventHub:
                         (self.channel, self.last_msg_id),
                     ).fetchall()
                     for r in rows:
-                        self._broadcast(_message_event(db, r))
+                        self._broadcast(_message_event(db, r, self.channel))
                         self.last_msg_id = r["id"]
 
                     # Edits and retractions of messages the tail has ALREADY
@@ -2012,7 +2028,7 @@ class EventHub:
                         (self.channel, prev_last, self._change_scan, self._change_scan),
                     ).fetchall()
                     for r in changed:
-                        ev = _message_event(db, r)
+                        ev = _message_event(db, r, self.channel)
                         ev["type"] = "message_update"
                         self._broadcast(ev)
                     self._change_scan = scan_now
@@ -6804,9 +6820,13 @@ class NthWebHandler(BaseHTTPRequestHandler):
                         # here would change what the live tail and history
                         # burst report as well, which is a different change
                         # than adding this endpoint.
-                        evt = _message_event(db, r)
-                        evt["channel"] = r["channel"]
-                        merged.append(evt)
+                        # This query spans channels, so the channel comes off
+                        # the row rather than from a hub. It used to be stamped
+                        # on after the fact — the only path that got it right,
+                        # which is what proved the SSE paths were wrong. Now it
+                        # goes through the same required parameter as everyone
+                        # else, so the two cannot drift apart again.
+                        merged.append(_message_event(db, r, r["channel"]))
 
             targets = []
             for a in db.execute(
