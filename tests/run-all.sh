@@ -69,6 +69,29 @@ for f in test-*.py; do
     fi
 done
 
+# The Node DOM tests. These exercise the browser client against a fake DOM and
+# were previously run only by hand, so nothing noticed when a change to the
+# client's location broke all four of them at once. A test nobody runs is not
+# a test. Node is stdlib-only here (no npm), so this adds no dependency.
+if command -v node >/dev/null 2>&1; then
+    for f in test-*.js; do
+        [ -e "$f" ] || continue
+        out="$(run_test node "$f" 2>&1)"; rc=$?
+        if [ $rc -eq 0 ]; then
+            printf '  \033[32mPASS\033[0m  %s\n' "$f"; pass=$((pass+1))
+        else
+            printf '  \033[31mFAIL\033[0m  %s\n' "$f"
+            printf '%s\n' "$out" | tail -20 | sed 's/^/        /'
+            fail=$((fail+1)); failed_names="$failed_names $f"
+        fi
+    done
+else
+    for f in test-*.js; do
+        [ -e "$f" ] || continue
+        printf '  \033[90mSKIP\033[0m  %s (needs node)\n' "$f"; skip=$((skip+1))
+    done
+fi
+
 echo ""
 echo "  $pass passed, $fail failed, $skip skipped"
 [ -n "$failed_names" ] && echo "  failed:$failed_names"
