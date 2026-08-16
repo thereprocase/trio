@@ -108,6 +108,14 @@
     if (Trio.router?.navigate) Trio.router.navigate('channel', { code, archived: readOnly });
     loadConversation(code, '#' + code, readOnly ? 'Archived channel — read only' : 'Live agent workspace', readOnly, false);
   }
+  // The operator's server-side read watermark for the conversation being
+  // opened. Lives on their own roster row; absent until the roster lands.
+  function operatorLastRead() {
+    const opId = state.operator?.id || state.meta?.operator?.id;
+    if (!opId) return 0;
+    const row = state.members instanceof Map ? state.members.get(opId) : null;
+    return Number(row?.last_read) || 0;
+  }
   function loadConversation(channel, title, subtitle, readOnly = false, isDm = false, isAudit = false) {
     if (Trio.store) Trio.store.set('session.channel', channel);
     // Invalidate any in-flight DM loaders and cancel their fetches. Without
@@ -144,6 +152,13 @@
     const banner = document.getElementById('private-banner');
     if (banner) { banner.classList.toggle('hidden', !isDm); banner.classList.toggle('audit', !!isAudit); banner.textContent = isDm ? (isAudit ? 'Agent-to-agent audit — read only' : readOnly ? 'Archived private conversation — read only' : 'Private conversation') : ''; }
     state.messages = new Map(); state.messageDomById = new Map(); state.answers = new Map();
+    // Freeze this conversation's unread divider BEFORE its history arrives.
+    // The prime burst calls markRead() on every message while the view sits at
+    // the bottom, so anything computed after it would already be caught up —
+    // which is why the divider never used to appear on entry. The operator's
+    // own last_read comes off the roster; if the roster is not in yet the base
+    // stays 0 and no divider is drawn, which is the honest answer.
+    Trio.conversation?.seedWatermark?.(operatorLastRead());
     Trio.conversation?.render?.();
     Trio.composer?.syncReadOnly?.();
     // Swap the composer to THIS conversation's own draft/targets/images now that

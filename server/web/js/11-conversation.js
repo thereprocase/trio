@@ -12,7 +12,8 @@
   state.answers = state.answers instanceof Map ? state.answers : new Map();
   state.askPage = state.askPage instanceof Map ? state.askPage : new Map();
   state.scrollPositions = state.scrollPositions || {};
-  state.lastSeenId = state.lastSeenId || 0;
+  state.lastSeenByConv = state.lastSeenByConv || {};
+  state.dividerBaseByConv = state.dividerBaseByConv || {};
   state.jumpUnread = state.jumpUnread || 0;
   state.activeMessageActions = state.activeMessageActions || null;
 
@@ -79,7 +80,53 @@
   }
   function nearBottom(el) { return !el || el.scrollHeight - el.scrollTop - el.clientHeight < 80; }
   function convId() { return state.dmKey ? 'dm:' + state.dmKey : (state.channel || 'home'); }
-  function markRead() { const list = ordered(); const last = list[list.length - 1]; if (last && Number(last.id) > Number(state.lastSeenId)) state.lastSeenId = last.id; flushRead(); }
+  // ── Read watermarks ──────────────────────────────────────────────────────
+  // TWO values, per conversation, because they answer different questions.
+  //
+  //   lastSeenByConv[conv]     how far the operator has read. Advances as they
+  //                            scroll; drives what gets flushed to the server.
+  //   dividerBaseByConv[conv]  where "New since your last visit" is drawn.
+  //                            FROZEN when the conversation is opened.
+  //
+  // Both used to be one global scalar, which was wrong twice over. Being
+  // global, switching from a busy channel read to id 900 into a quieter one
+  // whose newest id is 500 made findIndex(id > 900) return -1, so the divider
+  // could never appear there again for the rest of the session — and entering
+  // a channel with higher ids positioned the divider by a DIFFERENT
+  // conversation's watermark. Being one value, the prime burst destroyed it:
+  // every upsert ends in markRead() when the view is near the bottom, which it
+  // is on entry, so the watermark raced to the newest message before the first
+  // paint and the divider — whose entire purpose is to show on entry — never
+  // appeared at all.
+  function seenId() { return Number(state.lastSeenByConv?.[convId()]) || 0; }
+  function setSeenId(id) {
+    state.lastSeenByConv = state.lastSeenByConv || {};
+    state.lastSeenByConv[convId()] = id;
+  }
+  // Called once per conversation entry, before its history is ingested.
+  // `serverLastRead` is the operator's own watermark from the roster; without
+  // it (roster not in yet) the base stays unset and the divider is simply not
+  // drawn, which is the honest answer to "we do not know what you had read".
+  function seedWatermark(serverLastRead) {
+    const key = convId();
+    state.dividerBaseByConv = state.dividerBaseByConv || {};
+    state.lastSeenByConv = state.lastSeenByConv || {};
+    // The DIVIDER is re-frozen on every entry: leaving a conversation and
+    // coming back should show what is new since THAT visit, not since the
+    // first one this session. (loadConversation runs per navigation — a
+    // same-channel partial switch deliberately bypasses it — so this cannot
+    // move the divider out from under someone who is mid-read.)
+    state.dividerBaseByConv[key] = Number(serverLastRead) || 0;
+    // The READ watermark is only seeded, never rewound: it may already have
+    // advanced past the server's value locally, and lowering it would re-send
+    // reads the server has already recorded.
+    const seeded = Number(serverLastRead) || 0;
+    if (!(key in state.lastSeenByConv) || state.lastSeenByConv[key] < seeded) {
+      state.lastSeenByConv[key] = seeded;
+    }
+  }
+  function dividerBase() { return Number(state.dividerBaseByConv?.[convId()]) || 0; }
+  function markRead() { const list = ordered(); const last = list[list.length - 1]; if (last && Number(last.id) > seenId()) setSeenId(last.id); flushRead(); }
   let flushRefreshTimer = null;
   function flushRead() {
     if (state.readOnly) return;
@@ -690,8 +737,12 @@
     if (hideOld) list.append(olderToggle(oldCount, false));
     else if (cutoff > 0 && oldCount > 0 && expanded) list.append(olderToggle(oldCount, true));
     // Unread divider index, mapped into the rendered slice.
-    let unread = messages.findIndex(msg => Number(msg.id) > Number(state.lastSeenId));
-    if (state.lastSeenId === 0) unread = -1;
+    // Drawn against the FROZEN entry watermark, not the advancing read one —
+    // otherwise reading the conversation erases the divider you opened it to
+    // see. A base of 0 means "we never knew what you had read", and no
+    // divider is drawn rather than marking the whole history unread.
+    const base = dividerBase();
+    let unread = base ? messages.findIndex(msg => Number(msg.id) > base) : -1;
     let unreadRel = -1;
     if (unread >= 0) {
       if (hideOld) unreadRel = unread <= splitIndex ? 0 : unread - splitIndex;
@@ -850,5 +901,5 @@
   }
   function mount() { init(); }
 
-  Trio.conversation = { init, mount, unmount, render, ingest, upsert, paintBody, cardFor, viewModel, answerPayload, isPrivate };
+  Trio.conversation = { init, mount, unmount, render, ingest, upsert, paintBody, cardFor, viewModel, answerPayload, isPrivate, seedWatermark };
 })();
