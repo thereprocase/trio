@@ -1188,6 +1188,13 @@ def _parse_sigils_against_roster(
     return mention_ids, ref_ids, bang_ids
 
 
+# What one message costs beyond its own text when actually delivered to a
+# model: the JSON envelope's field names and punctuation (id, from, content,
+# at, mentions, refs, ...). Counting only visible characters understates a
+# channel's real context footprint, which is the number being asked for.
+JSON_OVERHEAD_CHARS_PER_MESSAGE = 80
+
+
 def _is_lock_error(exc: sqlite3.OperationalError) -> bool:
     """True when a SQLite OperationalError is a transient write-lock/busy
     condition (worth retrying) rather than a schema or syntax fault."""
@@ -1592,6 +1599,39 @@ def ensure_ask_columns(db: sqlite3.Connection) -> None:
             db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {defn}")
         except sqlite3.OperationalError:
             pass  # column already exists
+
+
+def _unlink_attachment_files(paths: List[str]) -> Tuple[int, int]:
+    """Best-effort delete of on-disk attachment files for the storage pruner.
+
+    FILES-FIRST + IDEMPOTENT (deliberate ordering, mirrors the atomicity care in
+    the upload path): callers unlink the files BEFORE deleting the owning DB rows.
+    A file that's already gone is NOT an error — a prior partial run may have
+    removed it — so re-running the same prune converges instead of failing. The
+    inverse order (rows first) would strand files with no DB pointer to find them
+    on a retry, defeating a storage-management feature. Reads never trust the
+    `bytes` column for freed-space accounting: it stats each file so the returned
+    figure is the real disk space reclaimed.
+
+    Returns (freed_bytes, error_count). `error_count` counts only genuine unlink
+    failures (permissions, I/O) — never a missing file."""
+    freed = 0
+    errors = 0
+    for p in paths:
+        if not p:
+            continue
+        fp = Path(p)
+        try:
+            try:
+                freed += fp.stat().st_size
+            except OSError:
+                pass  # size unknown — still attempt the unlink below
+            fp.unlink()
+        except FileNotFoundError:
+            pass       # already gone — idempotent, not an error
+        except OSError:
+            errors += 1
+    return freed, errors
 
 
 def _event_visible_to(event: Dict[str, Any], viewer_id: Optional[str],
@@ -3257,6 +3297,13 @@ class NthWebHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         path = parsed.path
+        if path.startswith("/avatars/"):
+            # Static and unauthenticated on purpose: these are 29 checked-in
+            # SVGs chosen from a fixed allowlist, identical for every viewer,
+            # and gating them would only mean the roster renders broken images
+            # before an identity cookie exists.
+            self._serve_avatar(path)
+            return
         if path == "/" or path == "/index.html":
             # Mint a cookie on first visit so /api/meta + /api/events carry it.
             token, _ident, is_new = self._resolve_identity()
@@ -3303,6 +3350,12 @@ class NthWebHandler(BaseHTTPRequestHandler):
             self._handle_mentions()
         elif path == "/api/tasks":
             self._handle_tasks(parsed)
+        elif path == "/api/storage":
+            self._handle_storage(parsed)
+        elif path == "/api/channel-size":
+            self._handle_channel_size(parsed)
+        elif path == "/api/workspace/events":
+            self._serve_workspace_sse()
         elif path == "/api/meta":
             ch = self._channel_for_request(parsed)
             if ch is None:
@@ -3422,6 +3475,8 @@ class NthWebHandler(BaseHTTPRequestHandler):
             self._handle_channel_create()
         elif parsed.path == "/api/archives":
             self._handle_archive_update()
+        elif parsed.path == "/api/prune":
+            self._handle_prune()
         else:
             self._error(404, "not found")
 
@@ -5197,6 +5252,699 @@ class NthWebHandler(BaseHTTPRequestHandler):
                     pass
         self._json({"ok": True, "archived": archived,
                     "count": len(channels), "channels": channels})
+
+    def _serve_workspace_sse(self) -> None:
+        """Cross-channel, operator-only SSE multiplexing every channel's hub.
+
+        The per-channel /api/events stream cannot keep the workspace live: a
+        unified DM thread contains rows from several backing channels, so a
+        client watching one channel would miss half its own conversation.
+        """
+        _token, ident, _is_new = self._resolve_identity()
+        viewer_id = ident.member_id
+        if not is_all_seeing(viewer_id):
+            # all_seeing=True is passed to subscribe() below, so this gate is
+            # what makes that safe: a non-operator must never be handed a
+            # stream that deliberately skips the per-viewer withholding.
+            self._error(403, "operator only")
+            return
+
+        if not self.landing_mode:
+            # Single-channel mode owns exactly one hub, and _hub_for_channel
+            # returns it whatever code it is asked for — looping over channels
+            # here would subscribe to the same hub many times and deliver
+            # every message that many times over.
+            channels = [self.channel]
+        else:
+            db = None
+            try:
+                db = sqlite3.connect(str(self.db_path), timeout=5)
+                db.row_factory = sqlite3.Row
+                # Bounded to recently-active, unarchived channels. Each hub is
+                # a background thread polling SQLite twice a second, so
+                # subscribing to every channel that ever existed would make one
+                # operator's first connection a permanent thread-count ratchet
+                # as channels accumulate. A channel nobody has touched in 30
+                # days warming its hub on first view instead is a fine trade.
+                channels = [r["code"] for r in db.execute(
+                    "SELECT code FROM channels WHERE archived_at IS NULL "
+                    "AND updated_at > datetime('now', '-30 days')").fetchall()]
+            except sqlite3.Error as e:
+                sys.stderr.write(f"[nth_web] workspace sse db error: {e}\n")
+                self._error(500, "workspace stream failed")
+                return
+            finally:
+                if db is not None:
+                    try:
+                        db.close()
+                    except sqlite3.Error:
+                        pass
+
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "keep-alive")
+        self.send_header("X-Accel-Buffering", "no")
+        self.end_headers()
+
+        merged: queue.Queue = queue.Queue(maxsize=500)
+        subs = []
+        stop = threading.Event()
+
+        def pump(q):
+            while not stop.is_set():
+                try:
+                    payload = q.get(timeout=0.5)
+                except queue.Empty:
+                    continue
+                try:
+                    merged.put(payload, timeout=1.0)
+                except queue.Full:
+                    # Say so rather than drop in silence: a full merge queue
+                    # means the client is slower than the room, and the
+                    # symptom downstream is a message that never arrives.
+                    if not stop.is_set():
+                        sys.stderr.write("[nth_web] workspace SSE: merged "
+                                         "queue full, dropping payload\n")
+
+        try:
+            for ch in channels:
+                hub = self._hub_for_channel(ch)
+                q = hub.subscribe(viewer_id=viewer_id, all_seeing=True)
+                subs.append((hub, q))
+                threading.Thread(target=pump, args=(q,), daemon=True).start()
+            last_heartbeat = time.monotonic()
+            while True:
+                try:
+                    payload = merged.get(timeout=1.0)
+                    self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
+                    self.wfile.flush()
+                except queue.Empty:
+                    now = time.monotonic()
+                    if now - last_heartbeat >= SSE_HEARTBEAT_SEC:
+                        self.wfile.write(b": keepalive\n\n")
+                        self.wfile.flush()
+                        last_heartbeat = now
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
+        finally:
+            # Always runs, including when subscribing partway through the loop
+            # raised: an unsubscribed queue keeps its hub from ever going idle,
+            # so the reaper would never retire it.
+            stop.set()
+            for hub, q in subs:
+                hub.unsubscribe(q)
+
+    def _serve_avatar(self, path: str) -> None:
+        """Serve one checked-in character SVG.
+
+        The name is matched against _CHARACTER_NAMES rather than sanitised,
+        so no request-supplied string ever reaches the filesystem: an allowlist
+        cannot be walked out of, whereas ".." stripping is a thing to get
+        wrong. The shape is fixed at /avatars/<name>/avatar.svg.
+        """
+        parts = path.strip("/").split("/")
+        if (len(parts) != 3 or parts[0] != "avatars"
+                or parts[2] != "avatar.svg"):
+            self._error(404, "not found")
+            return
+        # Checked against the AVATAR set, matching avatar_url() exactly. The
+        # two happen to be equal today (every _CHARACTERS pair is ("X", "X")),
+        # but avatar_url builds the path from the avatar, so validating the
+        # name here would silently disagree the moment a pair differs.
+        if parts[1] not in {avatar for _name, avatar in _CHARACTERS}:
+            self._error(404, "not found")
+            return
+        asset = WEB_SOURCE_DIR / "avatars" / parts[1] / "avatar.svg"
+        try:
+            payload = asset.read_bytes()
+        except OSError:
+            self._error(404, "not found")
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "image/svg+xml; charset=utf-8")
+        self.send_header("Content-Length", str(len(payload)))
+        # These are content-addressed by name and never change in place, so a
+        # long immutable cache is safe and keeps them off the wire entirely.
+        self.send_header("Cache-Control", "public, max-age=31536000, immutable")
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def _require_trusted_operator(self, verb: str):
+        """An all-seeing operator whose identity comes from a TRUSTED source —
+        local shell or Tailscale peer — exactly the tier /api/cull requires.
+
+        The storage figures expose the size of every channel, including private
+        DM traffic in the shared inbox, so a self-declared guest (the weakest
+        tier, and reachable once --tailnet binds 0.0.0.0) must be refused.
+        Returns the identity, or None after writing the error response.
+
+        THE SOURCE CHECK BELOW IS REDUNDANT TODAY, deliberately kept. On this
+        branch is_all_seeing() matches on the id PREFIX (`_op_l_` / `_op_t_`),
+        which already encodes the trust source and fails `_op_g_` closed, so
+        _require_operator alone admits exactly the same set. Mutation testing
+        confirms it: deleting this check changes no reachable behaviour. It
+        stays because the two are independent statements of one rule — if an
+        identity is ever minted whose prefix and source disagree, this refuses
+        it. Do not read its green tests as evidence that it is load-bearing.
+        """
+        ident = self._require_operator()
+        if ident is None:
+            return None
+        if ident.source not in CULL_ALLOWED_SOURCES:
+            self._error(403, f"only a trusted operator (local or tailnet) "
+                             f"can {verb}")
+            return None
+        return ident
+
+    def _handle_storage(self, parsed) -> None:
+        """Workspace-wide storage overview: total DB size, attachment totals,
+        and a per-channel breakdown sorted heaviest-first."""
+        if self._require_trusted_operator("view storage") is None:
+            return
+        db = None
+        try:
+            db = sqlite3.connect(str(self.db_path), timeout=5)
+            db.row_factory = sqlite3.Row
+            db.execute("PRAGMA busy_timeout=3000")
+            page_count = db.execute("PRAGMA page_count").fetchone()[0]
+            page_size = db.execute("PRAGMA page_size").fetchone()[0]
+            freelist = db.execute("PRAGMA freelist_count").fetchone()[0]
+            # CAST(... AS BLOB) so LENGTH counts OCTETS, not characters. Without
+            # it the message estimate is in a different unit from the exact
+            # attachments.bytes figure it is added to, and multi-byte UTF-8
+            # content silently undercounts.
+            msg_rows = db.execute(
+                "SELECT channel, COUNT(*) AS n, "
+                "  COALESCE(SUM(LENGTH(CAST(content AS BLOB))), 0) + "
+                "  COALESCE(SUM(LENGTH(CAST(COALESCE(member_name, '') "
+                "                           AS BLOB))), 0) AS text_bytes "
+                "FROM messages GROUP BY channel").fetchall()
+            try:
+                att_rows = db.execute(
+                    "SELECT channel, COUNT(*) AS n, "
+                    "  COALESCE(SUM(bytes), 0) AS b "
+                    "FROM attachments GROUP BY channel").fetchall()
+            except sqlite3.Error:
+                # The attachments table is created on first upload, so a hub
+                # that has never received one legitimately has no such table.
+                att_rows = []
+            archived = {r["code"] for r in db.execute(
+                "SELECT code FROM channels "
+                "WHERE archived_at IS NOT NULL").fetchall()}
+        except sqlite3.Error as e:
+            sys.stderr.write(f"[nth_web] storage db error: {e}\n")
+            self._error(500, "storage query failed")
+            return
+        finally:
+            if db is not None:
+                try:
+                    db.close()
+                except sqlite3.Error:
+                    pass
+
+        def blank(code):
+            return {"channel": code, "message_count": 0,
+                    "est_message_bytes": 0, "attachment_count": 0,
+                    "attachment_bytes": 0}
+
+        by_channel: Dict[str, Dict[str, Any]] = {}
+        for r in msg_rows:
+            entry = by_channel.setdefault(r["channel"], blank(r["channel"]))
+            entry["message_count"] = r["n"]
+            entry["est_message_bytes"] = r["text_bytes"]
+        total_att_count = 0
+        total_att_bytes = 0
+        for r in att_rows:
+            entry = by_channel.setdefault(r["channel"], blank(r["channel"]))
+            entry["attachment_count"] = r["n"]
+            entry["attachment_bytes"] = r["b"]
+            total_att_count += r["n"]
+            total_att_bytes += r["b"]
+        rows = list(by_channel.values())
+        for entry in rows:
+            entry["archived"] = entry["channel"] in archived
+        rows.sort(key=lambda e: e["attachment_bytes"] + e["est_message_bytes"],
+                  reverse=True)
+        self._json({
+            "ok": True,
+            "db_bytes": page_count * page_size,
+            # What VACUUM could give back, reported separately: a DB that has
+            # had a big prune looks enormous by page count alone.
+            "db_reclaimable_bytes": freelist * page_size,
+            "attachments": {"count": total_att_count,
+                            "bytes": total_att_bytes},
+            "by_channel": rows,
+        })
+
+    def _handle_channel_size(self, parsed) -> None:
+        """Rough token estimate for one channel's history — how much of a
+        model's context window it would occupy.
+
+        Deliberately approximate: chars/4, plus a fixed per-message allowance
+        for the JSON envelope each message costs when actually delivered to a
+        model, which is more than the raw text a human would count.
+
+        An all-seeing operator counts ALL messages, because agents read the
+        full history and that is the figure being asked for. A non-all-seeing
+        caller counts BROADCASTS ONLY: the channel may be the shared agent
+        inbox (a real row holding every DM) or a legacy topic channel with
+        addressed rows in it, and an unfiltered SUM there leaks the aggregate
+        size of private traffic the caller is not party to.
+        """
+        qs = parse_qs(parsed.query)
+        dm_key = (qs.get("dm", [""])[0] or "").strip()
+        if dm_key:
+            # DM threads have no channel row of their own — size them by
+            # participant set instead.
+            self._handle_dm_size(dm_key)
+            return
+        ch = self._channel_for_request(parsed)
+        if ch is None:
+            self._error(400, "channel query param required")
+            return
+        if self.landing_mode and not self._channel_exists(ch):
+            self._error(404, f"no such channel: {ch}")
+            return
+        _token, ident, _is_new = self._resolve_identity()
+        if ident.source == IDENTITY_SOURCE_PENDING:
+            self._error(403, "identity required — POST /api/identify first")
+            return
+        if is_all_seeing(ident.member_id):
+            size_where = "channel = ?"
+        else:
+            size_where = ("channel = ? AND (recipients IS NULL "
+                          "OR recipients = '' OR recipients = '[]')")
+        db = None
+        try:
+            db = sqlite3.connect(str(self.db_path), timeout=5)
+            db.execute("PRAGMA busy_timeout=3000")
+            count, content_chars, name_chars = db.execute(
+                "SELECT COUNT(*), COALESCE(SUM(LENGTH(content)), 0), "
+                "  COALESCE(SUM(LENGTH(member_name)), 0) "
+                "FROM messages WHERE " + size_where, (ch,)).fetchone()
+        except sqlite3.Error as e:
+            sys.stderr.write(f"[nth_web] channel size db error: {e}\n")
+            self._error(500, "size query failed")
+            return
+        finally:
+            if db is not None:
+                try:
+                    db.close()
+                except sqlite3.Error:
+                    pass
+        total = (content_chars + name_chars
+                 + count * JSON_OVERHEAD_CHARS_PER_MESSAGE)
+        self._json({"ok": True, "channel": ch, "message_count": count,
+                    "estimated_tokens": round(total / 4)})
+
+    def _handle_dm_size(self, dm_key: str) -> None:
+        """Token estimate for one DM thread — the DM analogue of the above.
+
+        DM rows have no channel to group by, so this groups the inbox by
+        participant set and sums the requested thread. Sizes the FULL thread
+        with no LIMIT, mirroring the unbounded channel path: sizing a recent
+        window would silently undercount an old conversation. Only the
+        grouping keys and per-row lengths are pulled, so memory stays bounded
+        however large the inbox is.
+        """
+        ident = self._require_operator()
+        if ident is None:
+            return
+        operator_id = ident.member_id
+        db = None
+        try:
+            db = sqlite3.connect(str(self.db_path), timeout=5)
+            db.row_factory = sqlite3.Row
+            db.execute("PRAGMA busy_timeout=3000")
+            rows = db.execute(
+                "SELECT member_id, recipients, LENGTH(content) AS clen, "
+                "  LENGTH(member_name) AS nlen FROM messages "
+                "WHERE recipients IS NOT NULL "
+                "  AND recipients NOT IN ('', '[]')").fetchall()
+        except sqlite3.Error as e:
+            sys.stderr.write(f"[nth_web] dm size db error: {e}\n")
+            self._error(500, "size query failed")
+            return
+        finally:
+            if db is not None:
+                try:
+                    db.close()
+                except sqlite3.Error:
+                    pass
+        count = 0
+        total_chars = 0
+        for r in rows:
+            key, _others = dm_thread_key(r, operator_id)
+            if not key:
+                # The audit fallback lets an all-seeing operator size an
+                # agent-to-agent thread. That crosses the participant boundary,
+                # but only within the same audit scope ?with= already grants,
+                # and returns strictly less: a count, not the content.
+                key = dm_audit_thread_key(r)
+            if key != dm_key:
+                continue
+            count += 1
+            total_chars += ((r["clen"] or 0) + (r["nlen"] or 0)
+                            + JSON_OVERHEAD_CHARS_PER_MESSAGE)
+        self._json({"ok": True, "dm": dm_key, "message_count": count,
+                    "estimated_tokens": round(total_chars / 4)})
+
+    def _handle_prune(self) -> None:
+        """Destructive storage maintenance for the Data page. Trusted operator
+        only; same-origin already enforced in do_POST.
+
+        Body: {action, older_than_days?, channel?, dry_run?}.
+          - prune_attachments       — attachment files older than N days (all channels).
+          - prune_archived_messages — messages (+ their attachments) in ARCHIVED
+                                       channels older than N days.
+          - delete_channel          — one channel's messages + attachments +
+                                       membership + the channel row itself.
+          - reclaim                 — VACUUM only (manual "reclaim space").
+
+        SAFETY: dry_run defaults to TRUE (a body with no dry_run key changes
+        nothing and just previews counts/bytes). The agent inbox is never
+        deletable. Files are unlinked before rows are deleted (see
+        _unlink_attachment_files). Real runs VACUUM afterward so freed pages
+        actually return to disk, and report the real bytes reclaimed."""
+        # Auth first (Aragorn): gate before parsing/validating the body so an
+        # untrusted-but-same-origin caller can't even probe the validation path.
+        if self._require_trusted_operator("prune storage") is None:
+            return
+        body = self._read_json_body(max_bytes=2048)
+        if body is None:
+            return
+        if not isinstance(body, dict):
+            self._error(400, "invalid body")
+            return
+        action = body.get("action")
+        if action not in ("prune_attachments", "prune_archived_messages",
+                           "delete_channel", "reclaim"):
+            self._error(400, "unknown action")
+            return
+        dry_run = body.get("dry_run", True)
+        if not isinstance(dry_run, bool):
+            self._error(400, "dry_run must be a boolean")
+            return
+        older_than_days = body.get("older_than_days")
+        if action in ("prune_attachments", "prune_archived_messages"):
+            # bool is an int subclass — reject True/False sneaking in as a count.
+            if (not isinstance(older_than_days, int) or isinstance(older_than_days, bool)
+                    or older_than_days < 0):
+                self._error(400, "older_than_days must be a non-negative integer")
+                return
+        target_channel = None
+        if action == "delete_channel":
+            target_channel = body.get("channel")
+            if not isinstance(target_channel, str) or not target_channel.strip():
+                self._error(400, "channel required for delete_channel")
+                return
+            target_channel = target_channel.strip()
+            if target_channel == AGENT_INBOX_CHANNEL:
+                self._error(400, "the agent inbox cannot be deleted")
+                return
+
+        db = None
+        try:
+            # Autocommit (isolation_level=None) so we can BEGIN IMMEDIATE around
+            # the deletes and run VACUUM (which cannot execute inside a
+            # transaction) afterward on the same connection.
+            db = sqlite3.connect(str(self.db_path), timeout=10, isolation_level=None)
+            db.row_factory = sqlite3.Row
+            db.execute("PRAGMA busy_timeout=8000")
+            if action == "reclaim":
+                result = self._prune_reclaim(db, dry_run)
+            elif action == "prune_attachments":
+                result = self._prune_attachments(db, older_than_days, dry_run)
+            elif action == "prune_archived_messages":
+                result = self._prune_archived_messages(db, older_than_days, dry_run)
+            else:  # delete_channel
+                result = self._prune_delete_channel(db, target_channel, dry_run)
+        except sqlite3.Error as e:
+            # Generic to the client, detail to the log: sqlite text names
+            # tables, columns and the DB path. Same rule as /api/cull.
+            sys.stderr.write(f"[nth_web] prune db error: {e}\n")
+            self._error(500, "prune failed")
+            return
+        finally:
+            if db is not None:
+                try:
+                    db.close()
+                except sqlite3.Error:
+                    pass
+        self._json({"ok": True, "action": action, "dry_run": dry_run, **result})
+
+    @staticmethod
+    def _db_logical_bytes(db: sqlite3.Connection) -> int:
+        pc = db.execute("PRAGMA page_count").fetchone()[0]
+        ps = db.execute("PRAGMA page_size").fetchone()[0]
+        return pc * ps
+
+    @staticmethod
+    def _vacuum(db: sqlite3.Connection) -> bool:
+        """Run VACUUM to return freed pages to disk. Returns True on success,
+        False if it couldn't run (e.g. the exclusive lock exceeded busy_timeout
+        under live agent traffic).
+
+        By the time this is called the destructive deletes have ALREADY
+        committed, so a VACUUM that can't acquire the lock must be a soft,
+        retryable warning — never a 500 that hides the successful prune and
+        loses the freed-bytes figure (Sauron). The freed disk is reclaimed on
+        the next successful VACUUM (any prune, or the manual 'Reclaim' button)."""
+        try:
+            db.execute("VACUUM")
+            return True
+        except sqlite3.Error:
+            return False
+
+    @staticmethod
+    def _delete_message_reads(db: sqlite3.Connection, msg_ids) -> None:
+        """Reap message_reads rows for deleted messages. message_reads is one
+        row per (message × reader) and is frequently the LARGEST table in a busy
+        channel; the messages→message_reads FK is declared but never enforced
+        (foreign_keys is off, no ON DELETE CASCADE), so deleting messages strands
+        these rows and undercuts the whole reclaim goal unless we sweep them
+        explicitly (Sauron). Chunked to respect SQLite's bound-variable limit."""
+        for i in range(0, len(msg_ids), 400):
+            chunk = msg_ids[i:i + 400]
+            ph = ",".join("?" for _ in chunk)
+            db.execute(f"DELETE FROM message_reads WHERE message_id IN ({ph})", chunk)
+
+    def _prune_reclaim(self, db, dry_run) -> Dict[str, Any]:
+        """VACUUM the DB to return freed pages to disk. Dry-run reports the
+        freelist bytes that WOULD be reclaimed; a real run VACUUMs and reports
+        the actual shrink (before − after), or marks vacuum_deferred if the
+        VACUUM couldn't acquire its lock."""
+        if dry_run:
+            freelist = db.execute("PRAGMA freelist_count").fetchone()[0]
+            page_size = db.execute("PRAGMA page_size").fetchone()[0]
+            return {"counts": {}, "file_errors": 0, "would_free_bytes": {
+                    "attachments": 0, "db": freelist * page_size}}
+        before = self._db_logical_bytes(db)
+        vacuumed = self._vacuum(db)
+        after = self._db_logical_bytes(db) if vacuumed else before
+        res = {"counts": {}, "file_errors": 0,
+               "freed_bytes": {"attachments": 0, "db": max(0, before - after)}}
+        if not vacuumed:
+            res["vacuum_deferred"] = True
+        return res
+
+    def _prune_attachments(self, db, older_than_days, dry_run) -> Dict[str, Any]:
+        """Delete attachment files older than N days across every channel
+        (rows + on-disk files). Frees disk immediately; DB rows freed are
+        reclaimed by the trailing VACUUM."""
+        cutoff = (datetime.now(timezone.utc)
+                  - timedelta(days=older_than_days)).isoformat()
+        try:
+            rows = db.execute(
+                "SELECT id, path, bytes FROM attachments WHERE created_at < ?",
+                (cutoff,)).fetchall()
+        except sqlite3.Error:
+            rows = []  # no attachments table yet → nothing to prune
+        paths = [r["path"] for r in rows]
+        if dry_run:
+            # Stat real files for an honest preview; fall back to the bytes column.
+            would = 0
+            for r in rows:
+                sz = None
+                if r["path"]:
+                    try:
+                        sz = Path(r["path"]).stat().st_size
+                    except OSError:
+                        sz = None
+                would += sz if sz is not None else (r["bytes"] or 0)
+            return {"counts": {"attachments": len(rows)}, "file_errors": 0,
+                    "would_free_bytes": {"attachments": would, "db": 0}}
+        freed_files, file_errors = _unlink_attachment_files(paths)
+        before = self._db_logical_bytes(db)
+        ids = [r["id"] for r in rows]
+        # BEGIN IMMEDIATE for parity with the other prune paths: one atomic
+        # row-set delete rather than per-chunk autocommits (Sauron/Aragorn).
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            self._delete_by_ids(db, "attachments", ids)
+            db.execute("COMMIT")
+        except sqlite3.Error:
+            db.execute("ROLLBACK")
+            raise
+        vacuumed = self._vacuum(db)
+        after = self._db_logical_bytes(db) if vacuumed else before
+        res = {"counts": {"attachments": len(ids)}, "file_errors": file_errors,
+               "freed_bytes": {"attachments": freed_files, "db": max(0, before - after)}}
+        if not vacuumed:
+            res["vacuum_deferred"] = True
+        return res
+
+    def _prune_archived_messages(self, db, older_than_days, dry_run) -> Dict[str, Any]:
+        """Delete messages in ARCHIVED channels older than N days, plus the
+        attachments those messages own (rows + files). Active channels are never
+        touched — only channels the operator has already archived."""
+        cutoff = (datetime.now(timezone.utc)
+                  - timedelta(days=older_than_days)).isoformat()
+        archived = [r["code"] for r in db.execute(
+            "SELECT code FROM channels WHERE archived_at IS NOT NULL"
+        ).fetchall()]
+        if not archived:
+            empty = {"messages": 0, "attachments": 0}
+            key = "would_free_bytes" if dry_run else "freed_bytes"
+            return {"counts": empty, "file_errors": 0, key: {"attachments": 0, "db": 0}}
+        placeholders = ",".join("?" for _ in archived)
+        msg_ids = [r["id"] for r in db.execute(
+            f"SELECT id FROM messages WHERE channel IN ({placeholders}) "
+            "AND created_at < ?", (*archived, cutoff)).fetchall()]
+        att_rows = self._attachments_for_messages(db, msg_ids)
+        paths = [r["path"] for r in att_rows]
+        if dry_run:
+            would = self._stat_or_bytes(att_rows)
+            return {"counts": {"messages": len(msg_ids), "attachments": len(att_rows)},
+                    "file_errors": 0,
+                    "would_free_bytes": {"attachments": would, "db": 0}}
+        freed_files, file_errors = _unlink_attachment_files(paths)
+        before = self._db_logical_bytes(db)
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            self._delete_by_ids(db, "attachments", [r["id"] for r in att_rows])
+            self._delete_message_reads(db, msg_ids)
+            self._delete_by_ids(db, "messages", msg_ids)
+            db.execute("COMMIT")
+        except sqlite3.Error:
+            db.execute("ROLLBACK")
+            raise
+        vacuumed = self._vacuum(db)
+        after = self._db_logical_bytes(db) if vacuumed else before
+        res = {"counts": {"messages": len(msg_ids), "attachments": len(att_rows)},
+               "file_errors": file_errors,
+               "freed_bytes": {"attachments": freed_files, "db": max(0, before - after)}}
+        if not vacuumed:
+            res["vacuum_deferred"] = True
+        return res
+
+    def _prune_delete_channel(self, db, channel, dry_run) -> Dict[str, Any]:
+        """Delete ONE channel wholesale: its messages + attachments (rows +
+        files) + membership + the channel row. Membership teardown routes
+        through _remove_from_channel per member so tasks are released, locks
+        dropped, agent_channels cleaned, and agent-global sessions revoked when
+        this was the member's final presence — no orphans. The agent inbox is
+        rejected earlier and can never reach here."""
+        att_rows = self._channel_attachments(db, channel)
+        msg_count = db.execute(
+            "SELECT COUNT(*) FROM messages WHERE channel = ?", (channel,)).fetchone()[0]
+        member_ids = [r["id"] for r in db.execute(
+            "SELECT id FROM members WHERE channel = ?", (channel,)).fetchall()]
+        if dry_run:
+            would = self._stat_or_bytes(att_rows)
+            return {"counts": {"messages": msg_count, "attachments": len(att_rows),
+                               "members": len(member_ids)}, "file_errors": 0,
+                    "would_free_bytes": {"attachments": would, "db": 0}}
+        freed_files, file_errors = _unlink_attachment_files([r["path"] for r in att_rows])
+        before = self._db_logical_bytes(db)
+        now = now_iso()
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            for mid in member_ids:
+                _remove_from_channel(db, channel, mid, now)
+            # Residual channel-scoped rows not tied to a specific member.
+            self._delete_by_ids(db, "attachments", [r["id"] for r in att_rows])
+            # message_reads has no FK cascade — reap by the channel's message ids
+            # BEFORE the messages go (Sauron).
+            db.execute("DELETE FROM message_reads WHERE message_id IN "
+                       "(SELECT id FROM messages WHERE channel = ?)", (channel,))
+            db.execute("DELETE FROM messages WHERE channel = ?", (channel,))
+            db.execute("DELETE FROM tasks WHERE channel = ?", (channel,))
+            db.execute("DELETE FROM locks WHERE channel = ?", (channel,))
+            # Belt-and-suspenders: sweep any agent_channels placement for this
+            # channel that lacked a members row (so no orphan points at the now
+            # deleted channels.code) (Sauron).
+            db.execute("DELETE FROM agent_channels WHERE channel = ?", (channel,))
+            db.execute("DELETE FROM channels WHERE code = ?", (channel,))
+            db.execute("COMMIT")
+        except sqlite3.Error:
+            db.execute("ROLLBACK")
+            raise
+        vacuumed = self._vacuum(db)
+        after = self._db_logical_bytes(db) if vacuumed else before
+        res = {"counts": {"messages": msg_count, "attachments": len(att_rows),
+                          "members": len(member_ids)}, "file_errors": file_errors,
+               "freed_bytes": {"attachments": freed_files, "db": max(0, before - after)}}
+        if not vacuumed:
+            res["vacuum_deferred"] = True
+        return res
+
+    # ── prune helpers ────────────────────────────────────────────────────────
+    @staticmethod
+    def _attachments_for_messages(db, msg_ids):
+        """[{id, path, bytes}] for the given message ids (empty if none / no
+        attachments table). Chunked IN() so a huge id list can't blow the SQL
+        variable limit."""
+        if not msg_ids:
+            return []
+        out = []
+        try:
+            for i in range(0, len(msg_ids), 400):
+                chunk = msg_ids[i:i + 400]
+                ph = ",".join("?" for _ in chunk)
+                out.extend(db.execute(
+                    f"SELECT id, path, bytes FROM attachments "
+                    f"WHERE message_id IN ({ph})", chunk).fetchall())
+        except sqlite3.Error:
+            return []
+        return out
+
+    @staticmethod
+    def _channel_attachments(db, channel):
+        """[{id, path, bytes}] for every attachment in a channel (empty if no
+        attachments table)."""
+        try:
+            return db.execute(
+                "SELECT id, path, bytes FROM attachments WHERE channel = ?",
+                (channel,)).fetchall()
+        except sqlite3.Error:
+            return []
+
+    @staticmethod
+    def _stat_or_bytes(att_rows) -> int:
+        """Sum of on-disk file sizes (falling back to the stored `bytes` column
+        when a file is missing) — the honest 'would free' figure for a preview."""
+        total = 0
+        for r in att_rows:
+            sz = None
+            if r["path"]:
+                try:
+                    sz = Path(r["path"]).stat().st_size
+                except OSError:
+                    sz = None
+            total += sz if sz is not None else (r["bytes"] or 0)
+        return total
+
+    @staticmethod
+    def _delete_by_ids(db, table, ids) -> None:
+        """DELETE FROM <table> WHERE id IN (ids), chunked to respect SQLite's
+        bound-variable limit. `table` is a trusted internal literal, never user
+        input; ids are always parameterized."""
+        for i in range(0, len(ids), 400):
+            chunk = ids[i:i + 400]
+            ph = ",".join("?" for _ in chunk)
+            db.execute(f"DELETE FROM {table} WHERE id IN ({ph})", chunk)
 
     def _handle_questions(self) -> None:
         """Pending multiple-choice questions addressed to the operator.
