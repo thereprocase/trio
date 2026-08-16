@@ -89,6 +89,67 @@ for label, installed in (("hub-service", hub_service), ("hub/spoke", hub_spoke))
           + (f" — MISSING: {', '.join(missing)}" if missing else ""),
           not missing)
 
+# ── Data files, not just modules ───────────────────────────────────────
+# nth_web.py composes its page from server/web/ at IMPORT time. That is a
+# dependency the import-closure walk above cannot see: it is data, not an
+# `import`. Missing it is the same total-but-invisible failure — the repo runs
+# fine, the installed copy raises before serving anything.
+
+web_copied = re.findall(r'cp -R "\$SCRIPT_DIR/server/web"', text)
+check("setup.sh: both install paths copy server/web/ recursively "
+      f"(found {len(web_copied)})", len(web_copied) == 2)
+
+
+def declared_assets() -> list:
+    """Read WEB_CSS_FILES / WEB_JS_FILES out of nth_web.py without importing."""
+    tree = ast.parse((SERVER / "nth_web.py").read_text())
+    names = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        for target in node.targets:
+            if getattr(target, "id", None) in ("WEB_CSS_FILES", "WEB_JS_FILES"):
+                names += [el.value for el in node.value.elts]
+    return names
+
+
+assets = declared_assets()
+check(f"nth_web.py declares its web assets ({len(assets)} found)", len(assets) > 1)
+absent = [a for a in assets + ["index.html"] if not (SERVER / "web" / a).exists()]
+check("every declared web asset exists on disk"
+      + (f" — MISSING: {', '.join(absent)}" if absent else ""), not absent)
+
+# ── The real guard: build what setup.sh installs, and import it ────────
+# Everything above reads setup.sh and believes it. This does not: it copies
+# ONLY the files setup.sh names into an empty tree and imports nth_web there.
+# Delete either `cp -R server/web` line and this goes red, which is exactly
+# what the named-module lists failed to do for three releases.
+import os
+import shutil
+import subprocess
+import tempfile
+
+staging = Path(tempfile.mkdtemp(prefix="nth_install_"))
+try:
+    dest = staging / "server"
+    dest.mkdir()
+    for f in sorted(hub_spoke):
+        if (SERVER / f).exists():
+            shutil.copy(SERVER / f, dest / f)
+    if web_copied:                      # only if setup.sh actually says to
+        shutil.copytree(SERVER / "web", dest / "web")
+
+    env = dict(os.environ, NTH_HOME=str(staging / "home"),
+               PYTHONPATH=str(dest))
+    proc = subprocess.run([sys.executable, "-c", "import nth_web"],
+                          capture_output=True, text=True, timeout=120, env=env)
+    detail = (proc.stderr or proc.stdout).strip().splitlines()
+    check("a tree containing only what setup.sh installs can import nth_web"
+          + (f" — {detail[-1][:160]}" if proc.returncode and detail else ""),
+          proc.returncode == 0)
+finally:
+    shutil.rmtree(staging, ignore_errors=True)
+
 print()
 if failures:
     print(f"FAILED ({len(failures)}): " + "; ".join(failures))
