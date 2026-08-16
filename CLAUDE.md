@@ -21,8 +21,9 @@ a channel as a browser UI. Serves the fleet/channel index at `/` in landing
 mode, or one channel's dashboard when given a channel code.
 
 **Browser source:** `server/web/` — the client is ordinary source, not a Python
-string. `index.html` is the skeleton; `css/00-themes.css` … `css/50-responsive.css`
-are ordered cascade layers; `js/app.js` is the client. `nth_web.py` composes them
+string. `index.html` is the skeleton; `css/00-tokens.css` … `css/40-responsive.css`
+are ordered cascade layers; `js/01-store.js` … `js/90-boot.js` are the client, 21
+modules each hanging a namespace off `window.Trio`. `nth_web.py` composes them
 into one inlined HTML response — no bundler, no build step, no generated artifact.
 
 ⚠️ **`server/web/` is read at IMPORT time, not per request.** `nth_web.py` raises
@@ -34,10 +35,15 @@ named file list is exactly what drifted for the Python modules), and
 `tests/test-install-manifest.py` stages only what `setup.sh` names into an empty
 tree and imports `nth_web` there to prove it.
 
-⚠️ **`WEB_CSS_FILES` order is the cascade order**, and `js/app.js` is ONE file on
-purpose: the client is a single IIFE whose functions share one closure, so
-splitting it across `<script>` tags breaks it — in the browser, where this repo's
-tests would never see it. `tests/test-web-bundle.py` pins both.
+⚠️ **Both file orders are load-bearing.** `WEB_CSS_FILES` is the cascade order.
+`WEB_JS_FILES` is a dependency order: each module is its own IIFE, so it may
+only be listed after everything it reads at definition time (`06-core` requires
+`01-store` and `02-api`; `11-conversation` requires `10-markdown`; `90-boot`
+requires all of them). The numeric prefixes ARE that order — keep them honest,
+because `tests/test-web-bundle.py` asserts the declaration equals `sorted()` of
+the directory listing, and separately asserts the specific edges that make the
+numbering meaningful. Get either wrong and the page breaks in the browser,
+where this repo's tests would never see it.
 
 **Operator tooling:** `server/nth_console.py` (stdlib DB tailer — dumps full channel history into terminal scrollback then follows) and `server/nth_dashboard.py` (Rich dashboard — per-agent engagement signals like read latency, queue depth, @-reply rate; for 3-8 agent rooms).
 

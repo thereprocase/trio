@@ -29,7 +29,7 @@ function baseContext() {
   vm.createContext(context); return context;
 }
 const cx = baseContext();
-['01-store.js', '02-api.js', '05-loader.js', '04-events.js', '00-core.js', '06-ui.js', '20-workspace.js']
+['01-store.js', '02-api.js', '05-loader.js', '04-events.js', '06-core.js', '09-ui.js', '20-workspace.js']
   .forEach(m => vm.runInContext(fs.readFileSync(WEB_JS(m), 'utf8'), cx));
 
 let failures = 0;

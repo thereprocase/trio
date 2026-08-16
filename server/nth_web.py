@@ -8101,29 +8101,40 @@ WEB_CSS_FILES = (
     "css/40-responsive.css",    # @media overrides — must stay last
 )
 
-# Load order is a real dependency order, not a filing convention. Each file is
-# its own IIFE hanging a namespace off `window.Trio`, so a module may only be
-# listed after every module it reads at definition time:
+# Load order is a real dependency order. Each file is its own IIFE hanging a
+# namespace off `window.Trio`, so a module may only be listed after every
+# module it reads at definition time:
 #
-#   01-store / 02-api / 05-loader / 04-events   plumbing, no dependants
-#   00-core                                     reads store; defines boot()
-#   03-router                                   reads store
-#   10-markdown … 14-lightbox                   rendering, read core + api
-#   20-workspace / 30-agents / 40-preferences   features, read everything above
-#   07-lifecycle / 08-sidebar                   mount machinery
-#   90-boot                                     runs last; mounts the features
+#   01-store / 02-api          plumbing everything else builds on
+#   03-router / 04-events      read the store / the api
+#   05-loader                  standalone
+#   06-core                    requires store + api; defines boot()
+#   07-lifecycle / 08-sidebar  mount machinery
+#   09-ui                      toasts, modals, confirmations
+#   10-markdown … 14-lightbox  rendering; read core, api and ui
+#   20-workspace … 46-data     features; read everything above
+#   90-boot                    runs last; mounts the features
+#
+# THE FILENAME PREFIXES ARE THE ORDER, and that is worth keeping true. This
+# tuple used to run 02 before 00 — core installed a fallback `Trio.api` that
+# won whenever it loaded first, quietly costing api.upload() and the error
+# normalisation — so the prefixes said one thing and the tuple did another, and
+# the obvious tidy-up ("surely 00 goes first") was a silent breakage. Core now
+# REQUIRES store and api rather than shadowing them, and is renumbered to 06
+# (ui to 09) to match. The declaration must therefore equal sorted(), which
+# tests/test-web-bundle.py checks against the DIRECTORY rather than against
+# this tuple — an independent oracle, as the CSS half already had.
 #
 # 99-test-hook is stripped from the served bundle by _strip_test_hook and
 # exists only so the Node DOM harness can reach the module registry.
 WEB_JS_FILES = (
-    "js/01-store.js", "js/02-api.js", "js/05-loader.js", "js/04-events.js",
-    "js/00-core.js", "js/03-router.js", "js/10-markdown.js",
-    "js/11-conversation.js", "js/06-ui.js", "js/12-composer.js",
-    "js/13-file-links.js", "js/14-lightbox.js",
-    "js/20-workspace.js", "js/30-agents.js", "js/40-preferences.js",
-    "js/45-notifications.js", "js/46-data.js",
-    "js/07-lifecycle.js", "js/08-sidebar.js", "js/90-boot.js",
-    "js/99-test-hook.js",
+    "js/01-store.js", "js/02-api.js", "js/03-router.js", "js/04-events.js",
+    "js/05-loader.js", "js/06-core.js", "js/07-lifecycle.js",
+    "js/08-sidebar.js", "js/09-ui.js", "js/10-markdown.js",
+    "js/11-conversation.js", "js/12-composer.js", "js/13-file-links.js",
+    "js/14-lightbox.js", "js/20-workspace.js", "js/30-agents.js",
+    "js/40-preferences.js", "js/45-notifications.js", "js/46-data.js",
+    "js/90-boot.js", "js/99-test-hook.js",
 )
 
 

@@ -125,9 +125,25 @@ function readStream(base, url, ms) {
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'nth_served_'));
-const PORT = 8700 + (process.pid % 900);
-const BASE = `http://127.0.0.1:${PORT}`;
-const BOOTSTRAP = `
+
+// Ask the OS for a free port rather than deriving one from the pid. The pid
+// form (8700 + pid % 900) collides whenever two runs draw congruent pids, and
+// it collides with anything already on that port — including a server this
+// suite itself left behind. The failure mode is bad: the health check times
+// out and the test reports a clean, confusing FAIL that passes on the next
+// run. Observed exactly that under run-all.sh.
+function freePort() {
+  return new Promise((resolve, reject) => {
+    const probe = require('net').createServer();
+    probe.on('error', reject);
+    probe.listen(0, '127.0.0.1', () => {
+      const { port } = probe.address();
+      probe.close(() => resolve(port));
+    });
+  });
+}
+let PORT, BASE;
+const bootstrapFor = (port) => `
 import sys, pathlib, json
 sys.path.insert(0, ${JSON.stringify(path.join(ROOT, 'server'))})
 import nth_server as srv
@@ -139,13 +155,28 @@ srv.nth_send(channel=ch, member_id=ada, message='First message in the served pag
 srv.nth_send(channel=ch, member_id=bo, message='@Ada please look at this')
 import nth_web as web
 web.DB_PATH = srv.DB_PATH
-sys.argv = ["nth_web.py", "served", "--port", ${JSON.stringify(String(PORT))}]
+sys.argv = ["nth_web.py", "served", "--port", ${JSON.stringify(String(port))}]
 web.main()
 `;
 
 let child;
+
+// Clean up on signals too, not only on the normal exit path. Without this a
+// Ctrl-C or a CI timeout that SIGKILLs the runner orphans the python child —
+// which is still holding a port — and leaks the scratch DB directory.
+function cleanup() {
+  if (child) { try { child.kill('SIGKILL'); } catch (e) { /* already gone */ } }
+  try { fs.rmSync(tmp, { recursive: true, force: true }); } catch (e) { /* gone */ }
+}
+for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+  process.on(sig, () => { cleanup(); process.exit(130); });
+}
+process.on('exit', cleanup);
+
 (async () => {
-  child = spawn('python3', ['-c', BOOTSTRAP], { cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'] });
+  PORT = await freePort();
+  BASE = `http://127.0.0.1:${PORT}`;
+  child = spawn('python3', ['-c', bootstrapFor(PORT)], { cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'] });
   let serverLog = '';
   child.stdout.on('data', d => { serverLog += d; });
   child.stderr.on('data', d => { serverLog += d; });
@@ -308,7 +339,6 @@ let child;
   console.log('FAIL: the smoke test itself threw — ' + e.stack);
   failures.push('harness');
 }).finally(() => {
-  if (child) { try { child.kill('SIGKILL'); } catch (e) { /* already gone */ } }
-  fs.rmSync(tmp, { recursive: true, force: true });
+  cleanup();
   process.exit(failures.length ? 1 : 0);
 });

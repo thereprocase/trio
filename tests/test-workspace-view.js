@@ -40,8 +40,8 @@ loadModule('01-store.js', base);
 loadModule('02-api.js', base);
 loadModule('05-loader.js', base);
 loadModule('04-events.js', base);
-loadModule('00-core.js', base);
-loadModule('06-ui.js', base);
+loadModule('06-core.js', base);
+loadModule('09-ui.js', base);
 loadModule('20-workspace.js', base);
 loadModule('40-preferences.js', base);
 
@@ -215,7 +215,7 @@ function routeFor(search) {
   loadModule('01-store.js', cx);
   loadModule('02-api.js', cx);
   loadModule('04-events.js', cx);
-  loadModule('00-core.js', cx);
+  loadModule('06-core.js', cx);
   return cx.Trio.state.conversation;
 }
 

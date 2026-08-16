@@ -48,7 +48,7 @@ function baseContext() {
 function loadModule(name, ctx) { vm.runInContext(fs.readFileSync(WEB_JS(name), 'utf8'), ctx); }
 
 const cx = baseContext();
-['01-store.js', '02-api.js', '05-loader.js', '04-events.js', '00-core.js', '06-ui.js', '20-workspace.js'].forEach(m => loadModule(m, cx));
+['01-store.js', '02-api.js', '05-loader.js', '04-events.js', '06-core.js', '09-ui.js', '20-workspace.js'].forEach(m => loadModule(m, cx));
 // Shared focus-spy element for the task-title input so we can assert autofocus.
 const taskFocusEl = mkEl();
 cx.document.getElementById = (id) => (id === 'new-task-title' ? taskFocusEl : mkEl());

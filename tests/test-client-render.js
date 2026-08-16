@@ -612,7 +612,7 @@ check('notifications: real message-event dispatch never throws for an old or a l
   assert.doesNotThrow(() => H.Trio.events.dispatchEvent(new cx.window.CustomEvent('message', { detail: live })));
 });
 
-// Cross-channel chimes: the workspace-wide SSE stream (00-core.js's
+// Cross-channel chimes: the workspace-wide SSE stream (06-core.js's
 // startWorkspaceEvents, operator-only) delivers messages from every channel,
 // not just the one currently open — including the open channel itself,
 // which the per-channel stream ALSO delivers. Two things follow: (1) a

@@ -27,7 +27,7 @@ context.window = context;
 context.globalThis = context;
 vm.createContext(context);
 for (const name of ['01-store.js', '02-api.js', '05-loader.js', '04-events.js',
-                    '00-core.js', '06-ui.js', '20-workspace.js']) {
+                    '06-core.js', '09-ui.js', '20-workspace.js']) {
   vm.runInContext(fs.readFileSync(WEB_JS(name), 'utf8'), context);
 }
 

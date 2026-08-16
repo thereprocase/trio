@@ -85,34 +85,53 @@ check(f"WEB_CSS_FILES declares every layer on disk, in prefix order "
       f"({len(disk_css_files)} found)",
       list(web.WEB_CSS_FILES) == disk_css_files)
 
-# JS cannot use the same trick. Load order here is a DEPENDENCY order, not the
-# filename order: 02-api.js must run before 00-core.js, because core installs a
-# reduced fallback `Trio.api` only if none exists yet, and in filename order
-# that fallback wins — leaving the app with no api.upload() and no error
-# normalisation. So the directory can only prove the SET, and the parts of the
-# order that actually matter are spelled out below as separate claims. Sorting
-# WEB_JS_FILES fails those, which is the point.
-check(f"WEB_JS_FILES declares every module on disk, none extra "
+# JS gets the SAME independent oracle as CSS. It did not used to: load order
+# was a dependency order that CONTRADICTED the filename prefixes (02 before 00,
+# because core installed a fallback Trio.api that won if it loaded first), so
+# the directory could only prove the set and the order was asserted as six
+# hand-picked claims. Four of those six were satisfied by a plain sort anyway,
+# so they asserted nothing the naming already gave — and the tuple still had
+# unasserted edges, which is what made a reviewer call it scar tissue rather
+# than a contract.
+#
+# Core now requires the store and the api instead of shadowing them, and the
+# files were renumbered so the prefixes tell the truth. That buys back a real
+# oracle: reorder the tuple ANY way and this fails, without anyone having to
+# have predicted which pair would matter.
+check(f"WEB_JS_FILES declares every module on disk, in prefix order "
       f"({len(disk_js_files)} found)",
-      sorted(web.WEB_JS_FILES) == disk_js_files)
+      list(web.WEB_JS_FILES) == disk_js_files)
 
+# The prefixes only mean something if the dependencies actually run that way.
+# These are the definition-time reads that the numbering has to keep satisfied
+# — stated so that renumbering a file to a "tidier" slot cannot quietly break
+# it, and so the sorted-order check above is grounded in why rather than in
+# convention alone.
 order = {name: i for i, name in enumerate(web.WEB_JS_FILES)}
 for earlier, later, why in (
-    ("js/02-api.js", "js/00-core.js",
-     "core installs a reduced fallback Trio.api unless the real one exists"),
-    ("js/01-store.js", "js/00-core.js",
-     "core writes session state into the store during boot()"),
-    ("js/00-core.js", "js/90-boot.js",
-     "boot calls Trio.boot()"),
+    ("js/01-store.js", "js/06-core.js",
+     "core requires the store to exist and throws if it does not"),
+    ("js/02-api.js", "js/06-core.js",
+     "core requires the api to exist and throws if it does not"),
+    ("js/06-core.js", "js/11-conversation.js",
+     "the conversation resolves avatar tones through Trio.avatarTone"),
+    ("js/06-core.js", "js/12-composer.js",
+     "the composer publishes onto Trio.actions"),
+    ("js/06-core.js", "js/20-workspace.js",
+     "the workspace resolves avatar tones through Trio.avatarTone"),
+    ("js/09-ui.js", "js/46-data.js",
+     "the data page confirms through Trio.ui"),
+    ("js/10-markdown.js", "js/11-conversation.js",
+     "the conversation renders message bodies through the markdown module"),
+    ("js/06-core.js", "js/90-boot.js", "boot calls Trio.boot()"),
     ("js/07-lifecycle.js", "js/90-boot.js",
      "boot mounts every feature through Trio.lifecycle"),
     ("js/20-workspace.js", "js/90-boot.js",
      "boot mounts the workspace feature by name"),
-    ("js/10-markdown.js", "js/11-conversation.js",
-     "the conversation renders message bodies through the markdown module"),
 ):
     check(f"{earlier} is declared before {later} — {why}",
-          order.get(earlier, -1) < order.get(later, -1) and earlier in order)
+          earlier in order and later in order
+          and order.get(earlier, -1) < order.get(later, -1))
 
 check("the test hook is declared last, after everything it inspects",
       web.WEB_JS_FILES[-1] == "js/99-test-hook.js")

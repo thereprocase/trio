@@ -10,18 +10,21 @@
   function validDmKey(key) { return typeof key === 'string' && key.length > 0 && key.length <= 512 && /^[A-Za-z0-9_,:-]+$/.test(key); }
   const conversationKind = initialDm ? (validDmKey(initialDm) ? 'dm' : 'unknown') : (initialChannel ? 'channel' : 'unknown');
   const conversationKey = initialDm ? (validDmKey(initialDm) ? initialDm : '') : initialChannel;
-  root.state = root.state || { channel: '', messages: new Map(), meta: null, members: new Map() };
+  // 01-store owns the state object and 02-api owns the request layer. Both
+  // always ship, so this module REQUIRES them rather than shadowing them.
+  //
+  // It used to install fallbacks — `root.state = root.state || {…}` and a
+  // cut-down `root.api = root.api || {…}`. Both branches were dead in every
+  // real load, and they inverted the file order: core had to be declared AFTER
+  // 01 and 02, or its reduced api won and the app silently lost api.upload()
+  // and the error normalisation. So the numeric prefixes lied about the load
+  // order, and the obvious tidy-up — "00 should come first" — was a silent
+  // breakage. Failing loudly here lets the declared order match the filenames.
+  if (!root.state) throw new Error('Trio core requires js/01-store.js to load first');
+  if (!root.api) throw new Error('Trio core requires js/02-api.js to load first');
   root.state.channel = initialChannel;
   root.state.conversation = { kind: conversationKind, key: conversationKey };
   root.events = root.events || new EventTarget();
-  root.api = root.api || {
-    url(path, channelScoped = true) {
-      if (!channelScoped || !root.state.channel) return path;
-      return path + (path.includes('?') ? '&' : '?') + 'channel=' + encodeURIComponent(root.state.channel);
-    },
-    async get(path, channelScoped = true) { const response = await fetch(this.url(path, channelScoped)); if (!response.ok) throw new Error(`${response.status} ${path}`); return response.json(); },
-    async post(path, body, channelScoped = true) { const response = await fetch(this.url(path, channelScoped), { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) }); if (!response.ok) throw new Error(`${response.status} ${path}`); return response.json(); },
-  };
   root.actions = root.actions || {};
   // ── Avatar tone assignment ──────────────────────────────────────────
   // Two call sites (11-conversation.js, 20-workspace.js) used to each keep
