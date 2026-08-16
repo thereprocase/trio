@@ -331,11 +331,22 @@
     button.innerHTML = `<span class="nav-hash">${icon === 'hash' ? '#' : navIcon(icon)}</span><span class="nav-label">${esc(label)}</span>${meta}`;
     button.addEventListener('click', onClick); return button;
   }
-  function section(title, items, add, onAdd = createChannel, addLabel = 'Create channel') {
+  function section(title, items, add, onAdd = createChannel, addLabel = 'Create channel', emptyText = '') {
     const wrap = document.createElement('section'); wrap.className = 'nav-section';
     const head = document.createElement('div'); head.className = 'nav-head'; head.innerHTML = `<h3>${esc(title)}</h3>`;
     if (add) { const button = document.createElement('button'); button.type = 'button'; button.className = 'add-btn'; button.setAttribute('aria-label', addLabel); button.title = addLabel; button.innerHTML = navIcon('plus'); button.addEventListener('click', onAdd); head.append(button); }
-    wrap.append(head); items.forEach(item => wrap.append(item)); return wrap;
+    wrap.append(head);
+    // An empty section used to render as a bare heading, so genuine emptiness
+    // was indistinguishable from a rendering bug — and on first run the entire
+    // sidebar was three headings and a 16px "+" with no words at all. Say that
+    // it is empty, and let the caller word it.
+    if (!items.length && emptyText) {
+      const empty = document.createElement('p');
+      empty.className = 'nav-empty';
+      empty.textContent = emptyText;
+      wrap.append(empty);
+    }
+    items.forEach(item => wrap.append(item)); return wrap;
   }
   function itemWithAdd(item, onAdd, addLabel) {
     const row = document.createElement('div'); row.className = 'nav-item-row';
@@ -369,9 +380,12 @@
     const channelItems = nav.active.map(c => navItem(c.code, 'hash', () => openChannel(c.code), c.unread_mentions || '', state.view === 'conversation' && !state.dmKey && state.channel === c.code, (c.unread || 0) > 0));
     if (!channelItems.length && state.workspaceLoading) { const loading = document.createElement('div'); loading.className = 'nav-loading'; loading.textContent = 'Loading channels…'; channelItems.push(loading); }
     rail.append(section('Workspace', workspaceItems));
-    rail.append(section('Channels', channelItems, true));
-    rail.append(section('Direct Messages', nav.yours.map(d => dmItem(d)), true, openDmDialog, 'Start direct message'));
-    rail.append(section('Agent-to-Agent', nav.agentAudit.map(d => dmItem(d, true))));
+    rail.append(section('Channels', channelItems, true, createChannel, 'Create channel',
+                        'No channels yet — use + to make one.'));
+    rail.append(section('Direct Messages', nav.yours.map(d => dmItem(d)), true, openDmDialog, 'Start direct message',
+                        'No direct messages yet.'));
+    rail.append(section('Agent-to-Agent', nav.agentAudit.map(d => dmItem(d, true)), false, createChannel, 'Create channel',
+                        'No agent-to-agent threads yet.'));
     const operator = state.operator || state.meta?.operator || {}; const opName = operator.name || 'Workspace'; const opAvatar = $('operator-avatar'); const opLabel = $('operator-name'); const opRole = $('operator-role');
     if (opAvatar) { opAvatar.textContent = initials(opName); opAvatar.className = 'operator-avatar tone-' + avatarTone(opName); }
     if (opLabel) opLabel.textContent = opName; if (opRole) opRole.textContent = operator.name ? 'Workspace owner' : 'Live agent coordination';
@@ -456,7 +470,19 @@
     if (!dataReady('channels')) { recentList.innerHTML = `<div class="home-loading">${SPIN}<span>Loading channels…</span></div>`; }
     else {
       const chans = selectors.recentChannels();
-      if (!chans.length) { const p = document.createElement('p'); p.textContent = 'No active channels.'; p.className = 'home-empty'; recentList.append(p); }
+      // A brand new operator's only route to a first channel used to be a bare
+      // "+" glyph in the sidebar, and this line was a flat full stop. Put the
+      // action in the empty state.
+      if (!chans.length) {
+        const p = document.createElement('p'); p.className = 'home-empty';
+        p.textContent = 'No active channels yet. ';
+        const b = document.createElement('button');
+        b.type = 'button'; b.className = 'btn primary';
+        b.textContent = 'Create your first channel';
+        b.addEventListener('click', createChannel);
+        p.append(b);
+        recentList.append(p);
+      }
       for (const c of chans) { const b = document.createElement('button'); b.type = 'button'; b.className = 'home-channel'; b.innerHTML = `<strong>#${esc(c.code)}</strong><span>${esc(c.topic || 'No topic')}</span><small>${esc(String(c.members?.length || 0))} members${c.unread ? ` · ${esc(String(c.unread))} unread` : ''}</small>`; b.addEventListener('click', () => openChannel(c.code)); recentList.append(b); }
     }
     recent.append(recentList);
@@ -1305,6 +1331,11 @@
     list.innerHTML = '';
     if (state.searchLoading) { list.innerHTML = '<p class="home-empty">Searching…</p>'; return; }
     if (!query) { list.innerHTML = '<p class="home-empty">Start typing to search.</p>'; return; }
+    // "Your workspace contains no match" is a claim about the DATA. It must not
+    // be shown when the search never ran — a query the server rejected as too
+    // short, or a request that failed, both used to render as "No results.",
+    // which is a factual falsehood about the operator's own workspace.
+    if (state.searchNotice) { list.innerHTML = `<p class="home-empty">${esc(state.searchNotice)}</p>`; return; }
     if (!results.length) { list.innerHTML = '<p class="home-empty">No results.</p>'; return; }
     const q = query.toLowerCase();
     for (const r of results) {
@@ -1320,8 +1351,18 @@
     }
   }
   function escRe(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+  // The server requires at least 2 characters and answers 400 below that. The
+  // client knows the rule, so it says so instead of issuing a request whose
+  // rejection it would then have to interpret.
+  const SEARCH_MIN = 2;
   async function doSearch(q) {
+    state.searchNotice = '';
     if (!q) { renderSearchResults(''); return; }
+    if (q.trim().length < SEARCH_MIN) {
+      state.searchNotice = `Type at least ${SEARCH_MIN} characters to search.`;
+      renderSearchResults(q, []);
+      return;
+    }
     state.searchLoading = true; renderSearchResults(q, []);
     if (searchController) { try { searchController.abort(); } catch {} }
     searchController = new AbortController();
@@ -1330,7 +1371,14 @@
       if (!resp.ok) throw new Error('search failed');
       const data = await resp.json();
       renderSearchResults(q, data.results || []);
-    } catch (e) { if (e.name !== 'AbortError') { console.warn('search failed', e); renderSearchResults(q, []); } }
+    } catch (e) {
+      if (e.name !== 'AbortError') {
+        console.warn('search failed', e);
+        // A failed search is not an empty workspace. Say which happened.
+        state.searchNotice = 'Search is unavailable right now.';
+        renderSearchResults(q, []);
+      }
+    }
     finally { state.searchLoading = false; }
   }
   function channelStatus(member) {
@@ -1779,5 +1827,5 @@
   function pollAgents() { return (Trio.agents?.refresh?.() || Promise.resolve()).then(() => { renderFacePile(); refreshDrawerMembers(); }); }
   function mount() { refresh(); renderFacePile(); if (!refreshInterval) refreshInterval = setInterval(refresh, 15000); if (!agentsInterval) agentsInterval = setInterval(pollAgents, 5000); unroute = Trio.router?.on?.(onRoute); wsl = onWorkspaceUpdate; Trio.events?.addEventListener?.('workspace:updated', wsl); Trio.events?.addEventListener?.('roster', renderFacePile); Trio.events?.addEventListener?.('roster', refreshDrawerMembers); Trio.events?.addEventListener?.('message', onMessageForDrawer); Trio.events?.addEventListener?.('message', onMessageLiveRefresh); const searchBtn = $('search-btn'); if (searchBtn) { searchBtn.addEventListener('click', openSearch); } const detailsBtn = $('details-btn'); if (detailsBtn) { detailsClick = showDetails; detailsBtn.addEventListener('click', detailsClick); } const drawerClose = $('channel-drawer-close'); if (drawerClose) drawerClose.addEventListener('click', closeDetails); const drawerResize = $('channel-drawer-resize'); if (drawerResize) drawerResize.addEventListener('pointerdown', startDrawerResize); const menuButton = $('channel-more-btn'); if (menuButton) { menuButtonClick = openChannelMenu; menuButton.addEventListener('click', menuButtonClick); } const accountTrigger = $('account-trigger'); if (accountTrigger) { accountTriggerClick = openAccountMenu; accountTrigger.addEventListener('click', accountTriggerClick); } menuClick = event => { if (!event.target.closest('#channel-menu, #channel-more-btn')) closeChannelMenu(); if (!event.target.closest('#account')) closeAccountMenu(); }; menuKeydown = event => { if (event.key === 'Escape') { closeChannelMenu(); closeDetails(); closeAccountMenu(); } }; document.addEventListener('click', menuClick); document.addEventListener('keydown', menuKeydown); searchKeydown = onSearchKey; document.addEventListener('keydown', searchKeydown); }
   function unmount() { closeChannelMenu(); closeDetails(); if (drawerResizeEnd) drawerResizeEnd(); if (refreshInterval) { clearInterval(refreshInterval); refreshInterval = null; } if (agentsInterval) { clearInterval(agentsInterval); agentsInterval = null; } if (unroute) { unroute(); unroute = null; } if (wsl) { Trio.events?.removeEventListener?.('workspace:updated', wsl); wsl = null; } Trio.events?.removeEventListener?.('roster', renderFacePile); Trio.events?.removeEventListener?.('roster', refreshDrawerMembers); Trio.events?.removeEventListener?.('message', onMessageForDrawer); Trio.events?.removeEventListener?.('message', onMessageLiveRefresh); clearTimeout(liveRefreshDebounce); clearTimeout(drawerActivityDebounce); const searchBtn = $('search-btn'); if (searchBtn && openSearch) searchBtn.removeEventListener('click', openSearch); const detailsBtn = $('details-btn'); if (detailsBtn && detailsClick) detailsBtn.removeEventListener('click', detailsClick); const drawerClose = $('channel-drawer-close'); if (drawerClose) drawerClose.removeEventListener('click', closeDetails); const drawerResize = $('channel-drawer-resize'); if (drawerResize) drawerResize.removeEventListener('pointerdown', startDrawerResize); const menuButton = $('channel-more-btn'); if (menuButton && menuButtonClick) menuButton.removeEventListener('click', menuButtonClick); const accountTrigger = $('account-trigger'); if (accountTrigger && accountTriggerClick) accountTrigger.removeEventListener('click', accountTriggerClick); closeAccountMenu(); if (menuClick) document.removeEventListener('click', menuClick); if (menuKeydown) document.removeEventListener('keydown', menuKeydown); if (searchKeydown) document.removeEventListener('keydown', searchKeydown); }
-  Trio.workspace = {init: mount, mount, unmount, render: renderRail, renderFacePile, refresh, archive, archiveCurrent, openChannel, openDm, openDmByKey, openDmDialog, dmTargets, groupNavigation, attentionCount, selectors, showView, search: openSearch, modal, toast, showDetails, channelStatus, toolSuffix, usageTone, resetLabel, contextBadge, formatTokenEstimate, refreshDrawerActivity, refreshDrawerMembers, messageCountLabel, createChannel, openTaskModal, detailMember, renderSubagentList, openAccountMenu, closeAccountMenu, dismissQuestion, undismissQuestion, isQuestionDismissed, trendChip, dailyChangeLine, projectionLine};
+  Trio.workspace = {init: mount, mount, unmount, render: renderRail, renderFacePile, refresh, archive, archiveCurrent, openChannel, openDm, openDmByKey, openDmDialog, dmTargets, groupNavigation, attentionCount, selectors, showView, search: openSearch, doSearch, modal, toast, showDetails, channelStatus, toolSuffix, usageTone, resetLabel, contextBadge, formatTokenEstimate, refreshDrawerActivity, refreshDrawerMembers, messageCountLabel, createChannel, openTaskModal, detailMember, renderSubagentList, openAccountMenu, closeAccountMenu, dismissQuestion, undismissQuestion, isQuestionDismissed, trendChip, dailyChangeLine, projectionLine};
 })();

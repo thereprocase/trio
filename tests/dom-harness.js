@@ -495,6 +495,9 @@ function buildSandbox() {
     URL, URLSearchParams, TextEncoder, TextDecoder, NodeFilter,
     Map, Set, WeakMap, Promise, JSON, Math, Date, RegExp, Array, Object, String, Number, Boolean, Error,
     EventTarget, Event, CustomEvent,
+    // Used by 20-workspace's search (it aborts the in-flight request on each
+    // keystroke) and by 05-loader. Node has a real one; no need to stub.
+    AbortController,
   });
   window.webkitAudioContext = window.AudioContext;
   window.__TRIO_TEST__ = {};        // truthy → nth_web.py's hook publishes helpers here

@@ -212,7 +212,20 @@
     const grid = document.createElement('div'); grid.className = 'roster-grid';
     let list = (Trio.store.get('agents.list') || state.agents || []).map(viewModel).filter(matches);
     const query = (state.agentsSearch || '').trim().toLowerCase(); if (query) list = list.filter(vm => `${vm.name} ${vm.provider} ${vm.model}`.toLowerCase().includes(query));
-    if (!list.length) { const empty = document.createElement('div'); empty.className = 'empty'; empty.innerHTML = '<div class="e-ic">✦</div><h3>No agents match</h3><p>Try another filter or invite someone new to the workspace.</p>'; grid.append(empty); }
+    if (!list.length) {
+      const empty = document.createElement('div'); empty.className = 'empty';
+      // "Nothing matched your filter" and "this server cannot answer" are
+      // different facts and must not share a message — one is the operator's
+      // to fix, the other is not theirs at all.
+      if (state.agentsUnavailable) {
+        empty.innerHTML = '<div class="e-ic">✦</div><h3>Managed agents are off on this server</h3><p>This hub runs without the agent supervisor, so there is no roster to show. Nothing is wrong with your workspace.</p>';
+      } else if (state.agentsError) {
+        empty.innerHTML = `<div class="e-ic">✦</div><h3>Could not load the roster</h3><p>${esc(state.agentsError.message || 'The server did not answer.')}</p>`;
+      } else {
+        empty.innerHTML = '<div class="e-ic">✦</div><h3>No agents match</h3><p>Try another filter or invite someone new to the workspace.</p>';
+      }
+      grid.append(empty);
+    }
     // "Select all" acts on what's currently VISIBLE (filter + search), which is
     // how the operator narrows a bulk target: filter to Resting, select all,
     // archive. Selecting the hidden remainder would be a nasty surprise.
@@ -824,12 +837,29 @@
       state.agents = data.agents || [];
       Trio.store.set('agents.list', data.agents || []);
       Trio.store.set('agents.loading', false);
+      // Cleared on success, or a hub that recovers keeps telling the operator
+      // managed agents are off until they reload the page.
+      state.agentsError = null;
+      state.agentsUnavailable = false;
       render(data.agents);
       if (state.view === 'roster') {
         const roster = document.getElementById('trio-roster-view');
         if (roster && !roster.hidden) renderPage(roster);
       }
-    } catch (e) { console.warn(e); }
+    } catch (e) {
+      console.warn(e);
+      // Remember WHY the list is empty. A server without the agent supervisor
+      // answers 409 for every agent call, and swallowing that left the roster
+      // showing "No agents match — try another filter", which sends the
+      // operator round the filters and the search box before they finally hit
+      // "New agent" and get the real reason in a toast.
+      state.agentsError = e;
+      state.agentsUnavailable = e && e.status === 409;
+      if (state.view === 'roster') {
+        const roster = document.getElementById('trio-roster-view');
+        if (roster && !roster.hidden) renderPage(roster);
+      }
+    }
   }
   function renderActivityEvent(e) {
     const time = e.ts ? new Date(e.ts).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' }) : '';

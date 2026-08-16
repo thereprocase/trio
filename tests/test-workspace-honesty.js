@@ -203,6 +203,133 @@ check(`without one, the button follows the prompt's verb rather than "Save" `
       + `(${inferred})`,
       inferred === 'Archive');
 
+// ── 5. Error text must read as a sentence, not a stack trace ───────────────
+{
+  const cases = [
+    [403, 'not a trusted operator', /guest|trusted/i, 'a 403 explains the trust tier'],
+    [409, 'managed agents are disabled on this server', /managed agents/i,
+     "a server's own sentence is preferred over a generic one"],
+    [413, '', /too large/i, 'a 413 with no detail still says what went wrong'],
+    [404, '/api/whatever', /no longer here/i,
+     'a bare path is rejected as machine text, not shown to a person'],
+    [500, '500 /api/x', /error/i, 'a status echo is rejected as machine text'],
+  ];
+  for (const [status, detail, want, label] of cases) {
+    const msg = Trio.api.humanize(status, detail);
+    check(`${label} (${status} -> "${msg}")`, want.test(msg));
+    check(`  …and it does not leak the endpoint path (${status})`,
+          !/\/api\//.test(msg));
+  }
+}
+
+// …and the request layer must actually USE it. Calling humanize() directly
+// proves the mapping; it does not prove request() calls it, and reverting the
+// call site alone survived a version of this test that stopped there.
+{
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = () => Promise.resolve({
+    ok: false, status: 403,
+    text: async () => JSON.stringify({ error: 'not a trusted operator' }),
+  });
+  cx.window.fetch = globalThis.fetch;
+  try {
+    let thrown = null;
+    try { await Trio.api.get('/api/send'); } catch (e) { thrown = e; }
+    check(`a real failed request throws a human message (${thrown && thrown.message})`,
+          thrown && !/^\d{3} \/api\//.test(thrown.message));
+    check('…and keeps the machine detail on the error for the console',
+          thrown && thrown.status === 403 && /trusted/.test(thrown.detail || ''));
+  } finally {
+    globalThis.fetch = realFetch;
+    cx.window.fetch = realFetch;
+  }
+}
+
+// ── 6. Search must not claim an empty workspace it never searched ──────────
+// Asserted on state.searchNotice rather than on the rendered list: dom-harness
+// documents that a DOCUMENT-level querySelector always returns null, so
+// reading the results panel here would test the harness, not the client.
+// renderSearchResults branches on exactly this value, one line above the
+// "No results." branch it has to pre-empt.
+{
+  const realFetch = globalThis.fetch;
+  let fetched = 0;
+  globalThis.fetch = () => { fetched++; return Promise.reject(new Error('boom')); };
+  cx.window.fetch = globalThis.fetch;
+  try {
+    Trio.workspace.search();                 // opens the dialog
+
+    // A one-character query is REJECTED BY THE SERVER (400, min 2 chars). It
+    // used to render as "No results." — a claim about the operator's own
+    // workspace that the search never actually made.
+    await Trio.workspace.doSearch('a');
+    check(`a 1-character query says to keep typing (${state.searchNotice})`,
+          /at least/i.test(state.searchNotice || ''));
+    check('…and does not spend a request finding that out', fetched === 0);
+
+    // A search that FAILS is also not an empty workspace.
+    await Trio.workspace.doSearch('deploy');
+    check(`a failed search says it is unavailable rather than reporting zero `
+          + `hits (${state.searchNotice})`,
+          /unavailable/i.test(state.searchNotice || ''));
+    check('…and it did reach the network for that one', fetched === 1);
+
+    // A successful search clears the notice, or the panel would keep showing
+    // the last failure over real results.
+    globalThis.fetch = () => Promise.resolve({
+      ok: true, json: async () => ({ results: [] }) });
+    cx.window.fetch = globalThis.fetch;
+    await Trio.workspace.doSearch('deploy');
+    check(`a successful search clears the notice so real results can show `
+          + `(${JSON.stringify(state.searchNotice)})`,
+          !state.searchNotice);
+  } finally {
+    globalThis.fetch = realFetch;
+    cx.window.fetch = realFetch;
+  }
+}
+
+// ── 7. "No agents match" vs "this server has no agents" ────────────────────
+// A hub without the agent supervisor answers 409 to every agent call. The
+// roster swallowed that and printed "No agents match — try another filter",
+// which sends the operator round the filters and the search box; the only way
+// to learn the truth was to click "New agent" and read the toast.
+{
+  const realGet = Trio.api.get;
+  const panel = document.createElement('div');
+  try {
+    const err409 = Object.assign(new Error('That is not enabled on this server.'),
+                                 { status: 409 });
+    Trio.api.get = () => Promise.reject(err409);
+    await Trio.agents.refresh();
+    Trio.agents.renderPage(panel);
+    let text = panel.textContent || '';
+    check(`a 409 roster says managed agents are off (${text.slice(0, 60).trim()})`,
+          /managed agents are off/i.test(text));
+    check('…and does NOT blame the operator\'s filter',
+          !/No agents match/i.test(text));
+
+    // A different failure is neither "off" nor "no match".
+    Trio.api.get = () => Promise.reject(Object.assign(new Error('The server hit an error handling that.'), { status: 500 }));
+    await Trio.agents.refresh();
+    Trio.agents.renderPage(panel);
+    text = panel.textContent || '';
+    check(`a non-409 failure reports a load error (${text.slice(0, 60).trim()})`,
+          /could not load/i.test(text) && !/No agents match/i.test(text));
+
+    // Recovery must clear it, or the page keeps lying after the hub comes back.
+    Trio.api.get = () => Promise.resolve({ ok: true, agents: [] });
+    await Trio.agents.refresh();
+    Trio.agents.renderPage(panel);
+    text = panel.textContent || '';
+    check(`once the roster loads, the empty state is about the FILTER again `
+          + `(${text.slice(0, 60).trim()})`,
+          /No agents match/i.test(text) && !/managed agents are off/i.test(text));
+  } finally {
+    Trio.api.get = realGet;
+  }
+}
+
 console.log('\n' + passed + ' passed, ' + failures.length + ' failed');
 if (failures.length) failures.forEach(f => console.log('  ✗ ' + f));
 process.exit(failures.length ? 1 : 0);
