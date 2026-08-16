@@ -318,6 +318,39 @@ def get_db() -> sqlite3.Connection:
             FOREIGN KEY (channel) REFERENCES channels(code)
         )
     """)
+    # Per-reader read state, for the workspace sidebar's unread counts.
+    #
+    # Deliberately NOT members.last_read. That column is a single high-water
+    # mark per member per channel: it answers "how far have I scrolled" and
+    # cannot answer "which messages have I not seen", because reading the
+    # newest message would mark every older one read. The sidebar needs the
+    # set, so the set is what is stored.
+    #
+    # Rows are written for the WEB operator only. Agents advance their
+    # watermark through trio_ack and never consult this table, so the two
+    # mechanisms do not interact and this stays one row per message the
+    # operator has actually seen.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS message_reads (
+            message_id  INTEGER NOT NULL,
+            member_id   TEXT NOT NULL,
+            read_at     TEXT NOT NULL,
+            PRIMARY KEY (message_id, member_id),
+            FOREIGN KEY (message_id) REFERENCES messages(id)
+        )
+    """)
+    # Covers the "has THIS member read THIS message" existence probe that the
+    # unread subqueries run per candidate row.
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_message_reads_member
+        ON message_reads (member_id, message_id)
+    """)
+    # Covers cleanup by message, so deleting a message's read rows is a lookup
+    # rather than a full scan.
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_message_reads_message
+        ON message_reads (message_id)
+    """)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS tasks (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,

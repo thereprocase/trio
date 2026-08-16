@@ -3363,6 +3363,8 @@ class NthWebHandler(BaseHTTPRequestHandler):
             self._handle_upload()
         elif parsed.path == "/api/stt/transcribe":
             self._handle_transcribe()
+        elif parsed.path == "/api/messages/mark-read":
+            self._handle_message_read()
         else:
             self._error(404, "not found")
 
@@ -3918,6 +3920,82 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 except sqlite3.Error:
                     pass
         self._json({"ok": True, "id": mid})
+
+
+    def _handle_message_read(self) -> None:
+        """Mark messages read, or unread, for the operator.
+
+        OPERATOR-ONLY, and that is a privacy boundary rather than a
+        convenience: `member_id` comes from the resolved identity and is never
+        read from the body, so one reader cannot write or clear another
+        reader's read state. A guest has no sidebar to keep unread counts for,
+        so it has no business writing rows here at all.
+
+        Idempotent in both directions — INSERT OR IGNORE and a DELETE that
+        matches nothing both succeed — because the client marks a visible
+        message read on every scroll pass and must not care whether it already
+        did. `updated` is therefore the number of ids ACCEPTED, not the number
+        of rows changed; the client uses it to confirm the batch landed, and
+        reporting rows-changed would make a correct repeat look like a failure.
+        """
+        ident = self._require_operator()
+        if ident is None:
+            return
+        operator_id = ident.member_id
+        body = self._read_json_body(max_bytes=65536)
+        if body is None:
+            return
+        ids = body.get("ids")
+        read = body.get("read", True)
+        # bool is a subclass of int, so `isinstance(i, int)` alone would accept
+        # [True, False] and then write message_id=1/0 rows against real ids.
+        if (not isinstance(ids, list)
+                or not all(isinstance(i, int) and not isinstance(i, bool)
+                           for i in ids)):
+            self._error(400, "ids must be a list of integers")
+            return
+        if not isinstance(read, bool):
+            self._error(400, "read must be a boolean")
+            return
+        # Bounded so one request cannot pin the write lock on a WAL database
+        # the EventHub polls twice a second. The client batches per visible
+        # screenful, which is far below this.
+        if len(ids) > 1000:
+            self._error(400, "too many ids (max 1000)")
+            return
+        if not ids:
+            self._json({"ok": True, "updated": 0})
+            return
+        db = None
+        try:
+            db = sqlite3.connect(str(self.db_path), timeout=5)
+            db.execute("PRAGMA busy_timeout=3000")
+            if read:
+                now = now_iso()
+                db.executemany(
+                    "INSERT OR IGNORE INTO message_reads "
+                    "(message_id, member_id, read_at) VALUES (?, ?, ?)",
+                    [(mid, operator_id, now) for mid in ids])
+            else:
+                db.executemany(
+                    "DELETE FROM message_reads "
+                    "WHERE message_id = ? AND member_id = ?",
+                    [(mid, operator_id) for mid in ids])
+            db.commit()
+        except sqlite3.Error as e:
+            # Same reasoning as /api/cull: this handler is new on this branch,
+            # so echoing sqlite's text would INTRODUCE the leak rather than
+            # inherit it. Its messages name tables and columns.
+            sys.stderr.write(f"[nth_web] mark-read db error: {e}\n")
+            self._error(500, "mark-read failed")
+            return
+        finally:
+            if db is not None:
+                try:
+                    db.close()
+                except sqlite3.Error:
+                    pass
+        self._json({"ok": True, "updated": len(ids)})
 
 
     def _handle_delete(self) -> None:
