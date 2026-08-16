@@ -2,6 +2,29 @@
 
 ## Open
 
+### Features dropped in the workspace-UI port (decide, don't rediscover)
+**Since:** 2026-08-16 | **Status:** deliberate, open to reversal
+
+Replacing the single-pane client (`js/app.js`) with the workspace UI dropped
+four things. One was restored; these three were not, and are recorded here so
+the choice is visible rather than discovered later as a regression.
+
+- **In-channel filter box** (`#filter` + the "filter active" banner). Narrowed
+  the VISIBLE message list in place. Largely subsumed by full-history search on
+  Ctrl/Cmd+K, which is strictly more capable but a different gesture — search
+  opens a panel, the filter narrowed the conversation you were reading.
+  Reinstate if in-place narrowing turns out to be the thing people used.
+- **Channel stats + sparkline** (`#chanstats`, `#sparkline`). Message-rate
+  panel in the roster sidebar. Partly replaced by the usage panel and the
+  details drawer's channel size.
+- **Per-member stats drill-down** (`renderMemberStatsHTML`). Per-agent message
+  rates on roster expand. Partly replaced by the roster's context % and status.
+
+Restored instead: **Alt+1..9 / Alt+A / Alt+0 target picker** — addressing a
+message at specific agents is the core operator gesture here, and it had gone
+from one keystroke to typed `@` autocomplete. See `tests/test-target-picker.js`.
+
+
 ### v9 plan — see PLAN-2026-08-15-v9.md
 **Since:** 2026-08-15 | **Status:** planned, not started
 

@@ -166,7 +166,12 @@
     bar.replaceChildren();
     state.selectedTargets.forEach(id => {
       const chip = document.createElement('button'); chip.type = 'button'; chip.className = 'target-chip';
-      chip.textContent = '@' + targetName(id) + ' ×'; chip.title = 'Remove target';
+      chip.textContent = '@' + targetName(id) + ' ×';
+      // Name the shortcut on the thing it acts on, so Alt+N is discoverable
+      // instead of folklore. Digits past 9 simply have no shortcut.
+      const slot = targetOrder().indexOf(id) + 1;
+      chip.title = slot >= 1 && slot <= 9
+        ? `Remove target (Alt+${slot} toggles)` : 'Remove target';
       chip.onclick = () => { state.selectedTargets.delete(id); renderTargets(); saveDraft(); };
       bar.append(chip);
     });
@@ -201,6 +206,34 @@
     hint.className = 'composer-hint';
     hint.textContent = `${outsiders.join(', ')} won't be notified — this is a private DM. Message them directly to reach them.`;
     bar.append(hint);
+  }
+  // The numbered order behind Alt+1..9. Sorted by name so a given agent keeps
+  // the same digit across renders — a hash or roster-insertion order would
+  // renumber people as the room changes, which makes the shortcut unusable.
+  // The operator is excluded: you cannot address yourself.
+  function targetOrder() {
+    const opId = state.operator?.id || state.meta?.operator?.id;
+    return [...(state.members instanceof Map ? state.members.values() : [])]
+      .filter(m => m && m.id && m.id !== opId)
+      .sort((a, b) => String(a.name || a.id).localeCompare(String(b.name || b.id)))
+      .map(m => m.id);
+  }
+  function toggleTarget(id) {
+    if (state.selectedTargets.has(id)) state.selectedTargets.delete(id);
+    else state.selectedTargets.add(id);
+    renderTargets(); saveDraft(); updateSendState();
+  }
+  function clearTargets() {
+    if (!state.selectedTargets.size) return;
+    state.selectedTargets.clear();
+    renderTargets(); saveDraft(); updateSendState();
+  }
+  // Alt+A is a toggle, not an "add all": pressing it twice returns to a
+  // broadcast rather than leaving every agent selected.
+  function toggleAllTargets() {
+    const all = targetOrder();
+    if (state.selectedTargets.size >= all.length && all.length) clearTargets();
+    else { state.selectedTargets = new Set(all); renderTargets(); saveDraft(); updateSendState(); }
   }
   function setTargets(ids) { state.selectedTargets = new Set(ids || []); renderTargets(); }
   function insertTarget(id) { if (id) { state.selectedTargets.add(id); renderTargets(); input()?.focus(); } }
@@ -665,6 +698,20 @@
         else if (event.key === 'Escape') { event.preventDefault(); closeAutocomplete(); }
         return;
       }
+      // Alt+1..9 toggles a recipient, Alt+A all, Alt+0 clears. Restored from
+      // the client this one replaced: addressing a message to specific agents
+      // is the core operator gesture here, and it had gone from one keystroke
+      // to typing "@", waiting for the autocomplete, arrowing and tabbing.
+      // Not offered inside a DM, where the recipient is already fixed.
+      if (event.altKey && !event.ctrlKey && !event.metaKey && !state.dmTargetId) {
+        if (event.key >= '1' && event.key <= '9') {
+          const id = targetOrder()[Number(event.key) - 1];
+          if (id) { toggleTarget(id); event.preventDefault(); }
+          return;
+        }
+        if (event.key === '0') { clearTargets(); event.preventDefault(); return; }
+        if (event.key === 'a' || event.key === 'A') { toggleAllTargets(); event.preventDefault(); return; }
+      }
       // contenteditable would otherwise insert a <div>/<br> on Enter; handle it
       // ourselves so the tree stays flat (plain \n) — Enter sends, Shift+Enter
       // inserts a newline.
@@ -750,5 +797,5 @@
   // update — so the router hook alone would read stale state (Bug C).
   function refresh() { loadDraft(); loadComposerAux(); setInputState(input()); }
   Object.assign(actions, { sendMessage: send, setTargets, insertTarget, uploadImage: upload, toggleDictation, stopDictation, buildSendPayload });
-  Trio.composer = { init, mount, unmount, render: renderTargets, refresh, send, setTargets, insertTarget, upload, toggleDictation, stopDictation, buildSendPayload, syncReadOnly, setDictationButtonState };
+  Trio.composer = { init, mount, unmount, render: renderTargets, refresh, send, setTargets, insertTarget, targetOrder, toggleTarget, clearTargets, toggleAllTargets, upload, toggleDictation, stopDictation, buildSendPayload, syncReadOnly, setDictationButtonState };
 })();
