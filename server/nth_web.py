@@ -3250,6 +3250,8 @@ class NthWebHandler(BaseHTTPRequestHandler):
             self._handle_agent_activity(path.split("/")[3], parsed)
         elif self.landing_mode and path == "/api/landing":
             self._json(_landing_snapshot(self.db_path))
+        elif path == "/api/channels":
+            self._handle_channels(parsed)
         elif path == "/api/meta":
             ch = self._channel_for_request(parsed)
             if ch is None:
@@ -5020,6 +5022,126 @@ class NthWebHandler(BaseHTTPRequestHandler):
         else:
             raise AgentActionError(400, f"unknown action: {action}")
         return bool(ok)
+
+    def _handle_channels(self, parsed) -> None:
+        """Channel list for the workspace sidebar: every channel with its
+        member count, last activity, a short preview, and the operator's
+        unread and unread-mention counts.
+
+        OPERATOR-ONLY. This enumerates every channel in the shared DB, and the
+        previews quote real message bodies — one of which could be from a room
+        the caller is not in. A guest is confined to the channel it was served
+        and does not get a switcher, so there is nothing here it may see.
+
+        Distinct from /api/landing, which is the FLEET view: node check-ins,
+        heartbeat liveness, message totals. That answers "what is running";
+        this answers "what needs me", which is per-operator and needs read
+        state. The overlap is transitional — landing goes away when the
+        workspace client replaces the landing page.
+        """
+        _token, ident, _is_new = self._resolve_identity()
+        if not is_all_seeing(ident.member_id):
+            self._error(403, "operator only")
+            return
+        archived = (parse_qs(parsed.query).get("archived", ["0"])[0] == "1")
+        operator_id = ident.member_id
+        db = None
+        try:
+            db = sqlite3.connect(str(self.db_path), timeout=5)
+            db.row_factory = sqlite3.Row
+            db.execute("PRAGMA busy_timeout=3000")
+            rows = db.execute(
+                "SELECT c.code, c.status, c.pinned_message_id, c.archived_at, "
+                "  (SELECT COUNT(*) FROM members m "
+                "     WHERE m.channel = c.code AND m.active = 1) AS members, "
+                "  (SELECT MAX(created_at) FROM messages msg "
+                "     WHERE msg.channel = c.code) AS last_at, "
+                "  (SELECT COUNT(*) FROM ("
+                # Capped to the most recent 500 (idx_messages_channel_id serves
+                # this as an index scan) so a long-lived busy channel's unread
+                # count stays bounded per poll instead of walking its whole
+                # history every refresh, for every open dashboard.
+                "     SELECT id, member_id, recipients FROM messages "
+                "     WHERE channel = c.code ORDER BY id DESC LIMIT 500"
+                "   ) recent "
+                "     WHERE recent.member_id != ? "
+                # A DM is addressed, not broadcast: it must not raise the
+                # channel's unread badge for someone who cannot read it.
+                "     AND (recent.recipients IS NULL OR recent.recipients = '' "
+                "          OR recent.recipients = '[]') "
+                "     AND NOT EXISTS (SELECT 1 FROM message_reads mr "
+                "                     WHERE mr.message_id = recent.id "
+                "                       AND mr.member_id = ?)"
+                "  ) AS unread, "
+                # Mention-scoped subset of the same set, for the number badge;
+                # plain unread drives the dot. instr() on the QUOTED id is an
+                # exact substring test — no LIKE wildcards, which matters
+                # because an operator id contains '_'. NULL mentions give NULL
+                # from instr and are not counted, as intended.
+                "  (SELECT COUNT(*) FROM ("
+                "     SELECT id, member_id, recipients, mentions FROM messages "
+                "     WHERE channel = c.code ORDER BY id DESC LIMIT 500"
+                "   ) recent "
+                "     WHERE recent.member_id != ? "
+                "     AND (recent.recipients IS NULL OR recent.recipients = '' "
+                "          OR recent.recipients = '[]') "
+                "     AND instr(recent.mentions, ?) > 0 "
+                "     AND NOT EXISTS (SELECT 1 FROM message_reads mr "
+                "                     WHERE mr.message_id = recent.id "
+                "                       AND mr.member_id = ?)"
+                "  ) AS unread_mentions "
+                "FROM channels c WHERE c.code != ? "
+                + ("AND c.archived_at IS NOT NULL " if archived
+                   else "AND c.archived_at IS NULL ") +
+                "ORDER BY last_at DESC",
+                (operator_id, operator_id,
+                 operator_id, f'"{operator_id}"', operator_id,
+                 AGENT_INBOX_CHANNEL)).fetchall()
+            channels = []
+            for r in rows:
+                last_at = r["last_at"]
+                preview = ""
+                topic = ""
+                if r["pinned_message_id"] is not None:
+                    pinned = db.execute(
+                        "SELECT content FROM messages WHERE id = ?",
+                        (r["pinned_message_id"],)).fetchone()
+                    if pinned is not None:
+                        topic = (pinned["content"] or "").strip()
+                        if topic.startswith("[channel created]"):
+                            topic = topic[len("[channel created]"):].strip()
+                if last_at is not None:
+                    prow = db.execute(
+                        "SELECT member_name, content FROM messages "
+                        "WHERE channel = ? ORDER BY id DESC LIMIT 1",
+                        (r["code"],)).fetchone()
+                    if prow is not None:
+                        who = (prow["member_name"] or "").strip()
+                        body = (prow["content"] or "").replace("\n", " ").strip()
+                        preview = (f"{who}: {body}" if who else body)[:80]
+                channels.append({
+                    "code": r["code"],
+                    "status": r["status"],
+                    "topic": topic,
+                    "members": r["members"],
+                    "last_at": last_at,
+                    "preview": preview,
+                    "archived_at": r["archived_at"],
+                    "unread": r["unread"] or 0,
+                    "unread_mentions": r["unread_mentions"] or 0,
+                })
+        except sqlite3.Error as e:
+            sys.stderr.write(f"[nth_web] channels db error: {e}\n")
+            self._error(500, "channel list failed")
+            return
+        finally:
+            if db is not None:
+                try:
+                    db.close()
+                except sqlite3.Error:
+                    pass
+        self._json({"ok": True, "archived": archived,
+                    "count": len(channels), "channels": channels})
 
     def _handle_search(self, parsed) -> None:
         """Full-history search: substring match over this channel's stored

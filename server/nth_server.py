@@ -409,6 +409,13 @@ def get_db() -> sqlite3.Connection:
     # Migration: add pinned_message_id column (v2 feature)
     for col, table, defn in [
         ("pinned_message_id", "channels", "INTEGER"),
+        # Channel archive. Reversible by design: archiving stamps these and
+        # nothing else, so membership, tasks and history survive and a restore
+        # is a single UPDATE back to NULL. Nullable TEXT rather than a status
+        # value because `status` already means something else (active/ended)
+        # and overloading it would make "archived" and "ended" the same state.
+        ("archived_at", "channels", "TEXT"),
+        ("archived_by", "channels", "TEXT"),
         ("mentions", "messages", "TEXT NOT NULL DEFAULT ''"),
         # v7.1: #pound references — "talked about" without pinging. Separate
         # from mentions so the monitor can choose to notify on @ only while
