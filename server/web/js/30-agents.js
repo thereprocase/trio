@@ -496,7 +496,7 @@
         + discreteSlider('wake', 'Wake policy', WAKE_STEPS, WAKE_STEPS.includes(vm.wakePolicy) ? vm.wakePolicy : 'all')
         + '<span class="cfg-hint">How much wakes this agent — <b>all</b>: every message · <b>about</b>: @/#-mentions of it + bangs · <b>at</b>: only @-mentions + bangs.</span></div>';
       const effortBlock = '<div class="cfg-block" id="cfg-effort">'
-        + effortSlider(effortsForModel(vm.provider, vm.model), vm.effort, { defaultLabel: effortDefaultLabel(vm.provider, vm.model), modelDefault: modelDefaultEffort(vm.provider, vm.model) }) + '</div>';
+        + effortSlider(effortsForModel(vm.provider, vm.model), vm.effort, { modelDefault: modelDefaultEffort(vm.provider, vm.model) }) + '</div>';
       const cfgEditor = '<div class="cfg-editor">' + placementsBlock + wakeBlock + effortBlock
         + '<div class="cfg-foot"><button type="button" class="mbtn primary" data-cfg-save disabled>Save changes</button></div></div>';
       sections = section('Lifecycle', life)
@@ -560,7 +560,11 @@
   // `current` (if given and not already in `efforts`) is kept as an option
   // rather than dropped — an agent already running at "max" must not lose
   // that from the list just because live discovery came back stale/thin.
-  function effortOptions(efforts, selected, { defaultLabel = 'Model default' } = {}) {
+  // Bulk edit only. Its empty value IS describable — the agents selected may
+  // run different models, so "each model's own default" is a real instruction
+  // to the server (an empty effort means exactly that), unlike the single-agent
+  // slider's old "Default" step, which named nothing.
+  function effortOptions(efforts, selected, { defaultLabel = "Each model's own default" } = {}) {
     const all = current => current && !efforts.includes(current) ? [...efforts, current] : efforts;
     const list = all(selected);
     const opts = list.map(e => `<option value="${esc(e)}"${e === selected ? ' selected' : ''}>${esc(e)}</option>`).join('');
@@ -583,19 +587,47 @@
       localStorage.setItem(EFFORT_KEY, JSON.stringify(map));
     } catch { /* private mode / quota — non-fatal */ }
   }
+  // First-run choices, when the operator has never picked for this
+  // provider/model. Every control below resolves in the same order: what you
+  // chose last, then what the model itself defaults to, then these. There is
+  // no "Default" option to select — the control always shows a real value,
+  // which is what makes "default to the last thing you picked" expressible.
+  const FIRST_RUN = { provider: 'claude', model: 'opus', effort: 'medium' };
+  // Preferred provider first, then the rest in the order the hub reported.
+  function orderedProviders(list) {
+    const seen = (list || []).map(p => String(p).toLowerCase());
+    return [...seen].sort((a, b) => (a === FIRST_RUN.provider ? -1 : 0)
+                                  - (b === FIRST_RUN.provider ? -1 : 0));
+  }
+  // The provider column already says which vendor; the option text should read
+  // like a name, not an internal id.
+  const PROVIDER_LABELS = { claude: 'Claude', codex: 'Codex' };
+  const providerLabel = p => PROVIDER_LABELS[p] || capWord(p);
+  // The effort a control should START on: what you chose last for this exact
+  // model, else what the model itself runs on its own, else the first-run
+  // preference if the model offers it, else the middle of its ladder.
+  function initialEffortFor(provider, model) {
+    const efforts = effortsForModel(provider, model);
+    if (!efforts.length) return '';
+    const remembered = lastEffort(provider, model);
+    if (remembered && efforts.includes(remembered)) return remembered;
+    const own = modelDefaultEffort(provider, model);
+    if (own && efforts.includes(own)) return own;
+    if (efforts.includes(FIRST_RUN.effort)) return FIRST_RUN.effort;
+    return efforts[Math.floor((efforts.length - 1) / 2)];
+  }
   const capWord = s => (s ? s.charAt(0).toUpperCase() + s.slice(1) : s);
-  // The scale tick is a SHORT label — the leftmost step is the special
-  // "Default" (not a magnitude), the rest are the capitalized effort names.
-  const tickLabel = step => step === '' || step == null ? 'Default' : capWord(step);
+  // Every step is a real level now, so every tick is just its name.
+  const tickLabel = step => capWord(step || '');
   // The live readout / aria value shows the full model-default label at step 0,
   // otherwise the capitalized effort. (Rendered case is authored here, not via
   // CSS text-transform, so the multi-word default label isn't title-cased.)
-  const valueDisplay = (step, defaultLabel) => step === '' || step == null ? defaultLabel : capWord(step);
+  const valueDisplay = step => capWord(step || '');
   // A discrete slider over ["" (model default), ...efforts]. The visible knob
   // drives a hidden <input name="effort"> so the form reads exactly like the
   // old <select>. `selected` (an agent's current / last-picked effort) that
   // isn't in the discovered list is appended rather than dropped.
-  function effortSlider(efforts, selected, { defaultLabel = 'Not set', modelDefault = '' } = {}) {
+  function effortSlider(efforts, selected, { modelDefault = '' } = {}) {
     // Nothing to choose from yet. Say which of the two reasons it is rather
     // than rendering a ladder the model may not have — the operator can act on
     // "pick a model", and cannot act on an invented low/medium/high.
@@ -607,9 +639,13 @@
         + `<label>Reasoning effort</label><p class="hint">${why}</p>`
         + `<input type="hidden" name="effort" value="${esc(selected || '')}"></div>`;
     }
+    // No unset step. It used to lead with '' rendered as "Default", which
+    // named a behaviour nobody could state; the control now always sits on a
+    // real level, chosen by initialEffortFor() — last used, else the model's
+    // own default, else the first-run preference.
     const sel = selected || '';
-    const steps = ['', ...efforts];
-    if (sel && !steps.includes(sel)) steps.push(sel);
+    const steps = [...efforts];
+    if (sel && !steps.includes(sel)) steps.unshift(sel);
     const idx = Math.max(0, steps.indexOf(sel));
     const n = steps.length;
     // Ticks are absolutely positioned at each thumb stop (i/(n-1)) so the label
@@ -618,8 +654,8 @@
       const pct = n > 1 ? (i / (n - 1)) * 100 : 0;
       return `<span class="${i === idx ? 'on' : ''}" style="left:${pct}%">${esc(tickLabel(s))}</span>`;
     }).join('');
-    const display = esc(valueDisplay(sel, defaultLabel));
-    return `<div class="field effort-field" data-steps="${esc(JSON.stringify(steps))}" data-default-label="${esc(defaultLabel)}">`
+    const display = esc(valueDisplay(sel));
+    return `<div class="field effort-field" data-steps="${esc(JSON.stringify(steps))}">`
       + `<label for="effort-range">Reasoning effort <span class="hint" id="effort-hint">${modelDefault ? 'this model runs ' + esc(modelDefault) + ' on its own' : ''}</span></label>`
       + `<div class="effort-slider"><div class="effort-track"><input type="range" id="effort-range" class="effort-range" min="0" max="${n - 1}" step="1" value="${idx}" aria-describedby="effort-value" aria-valuetext="${display}"><div class="effort-scale">${scale}</div></div><output id="effort-value" class="effort-value">${display}</output></div>`
       + `<input type="hidden" name="effort" value="${esc(sel)}">`
@@ -636,12 +672,11 @@
     // than throwing and killing the control.
     let steps; try { steps = JSON.parse(field.dataset.steps || '[""]'); } catch { steps = ['']; }
     if (!Array.isArray(steps) || !steps.length) steps = [''];
-    const defaultLabel = field.dataset.defaultLabel || 'Model default';
     const sync = () => {
       const i = Number(range.value);
       const value = steps[i] ?? '';
       hidden.value = value;
-      const display = valueDisplay(value, defaultLabel);
+      const display = valueDisplay(value);
       out.textContent = display;
       range.setAttribute('aria-valuetext', display); // SR reads "medium", not "3"
       ticks.forEach((t, ti) => t.classList.toggle('on', ti === i));
@@ -649,15 +684,6 @@
     };
     range.addEventListener('input', sync); sync();
     return { sync };
-  }
-  // The unset position is labelled "Not set", not "Model default": what the
-  // model would do on its own is INFORMATION (shown in the hint), whereas
-  // "Default" reads as a choice whose behaviour nobody can state. The unset
-  // position still exists so the slider cannot silently auto-select the lowest
-  // level for an agent the operator never touched — create() refuses to submit
-  // while it is unset, so the choice ends up explicit either way.
-  function effortDefaultLabel(provider, model) {
-    return 'Not set';
   }
   function modelDefaultEffort(provider, model) {
     return effortModelEntry(provider, model)?.default_effort || '';
@@ -792,7 +818,7 @@
       const newSteps = ['', ...efforts];
       if (curSteps.length === newSteps.length && curSteps.every((s, i) => s === newSteps[i])) return;
       effortHost.innerHTML = effortSlider(efforts, effortValue(),
-        { defaultLabel: effortDefaultLabel(vm.provider, vm.model) });
+        );
       wireEffortSlider(effortHost, () => refreshDirty());
       const h = effortHost.querySelector('#effort-hint'); if (h) h.textContent = effortHint(vm.provider);
       refreshDirty();
@@ -828,8 +854,9 @@
       return id ? { ...model, id, name: model.name || model.displayName || id } : null;
     }).filter(Boolean);
   }
-  function modelOptions(models) {
-    return normalizeModels(models).map(model => `<option value="${esc(model.id)}">${esc(model.name)}</option>`).join('');
+  function modelOptions(models, selected = '') {
+    return normalizeModels(models).map(model =>
+      `<option value="${esc(model.id)}"${model.id === selected ? ' selected' : ''}>${esc(model.name)}</option>`).join('');
   }
   function permissionOptions(selected = 'balanced') {
     return `<select name="permission_profile">${PERMISSION_PROFILES.map(([value, label]) => `<option value="${value}"${value === selected ? ' selected' : ''}>${label}</option>`).join('')}</select>`;
@@ -922,18 +949,23 @@
   function unmount() { compactionPolls.forEach(timer => clearTimeout(timer)); compactionPolls.clear(); }
   async function create() {
     await loadDiscovery();
-    const providers = state.providers.map(p => `<option value="${esc(p)}">${esc(p)}</option>`).join('');
-    const defaultProvider = state.providers[0] || 'codex';
+    const ordered = orderedProviders(state.providers);
+    const defaultProvider = ordered[0] || FIRST_RUN.provider;
+    const providers = ordered.map(p => `<option value="${esc(p)}"${p === defaultProvider ? ' selected' : ''}>${esc(providerLabel(p))}</option>`).join('');
     const defaultModels = normalizeModels(state.agentModels[defaultProvider]);
-    const models = modelOptions(state.agentModels[defaultProvider]);
-    const defaultModelId = defaultModels[0]?.id || '';
-    const initialEffort = lastEffort(defaultProvider, defaultModelId) || '';
+    // Prefer the first-run model when the hub offers it, so a fresh operator
+    // lands on Opus rather than on whatever happens to sort first.
+    const defaultModelId = (defaultModels.find(m => m.id === FIRST_RUN.model)
+                            || defaultModels.find(m => m.default)
+                            || defaultModels[0])?.id || '';
+    const models = modelOptions(state.agentModels[defaultProvider], defaultModelId);
+    const initialEffort = initialEffortFor(defaultProvider, defaultModelId);
     const createChanCodes = (state.channels || []).filter(c => !c.archived).map(c => c.code);
     const channelsField = createChanCodes.length
       ? `<fieldset class="field"><legend>Channels <span class="hint">optional — place later if blank</span></legend>${channelListMarkup(createChanCodes, new Set())}</fieldset>`
       : '';
     let channelApi = null;
-    const effortControl = `<div id="effort-control">${effortSlider(effortsForModel(defaultProvider, defaultModelId), initialEffort, { defaultLabel: effortDefaultLabel(defaultProvider, defaultModelId), modelDefault: modelDefaultEffort(defaultProvider, defaultModelId) })}</div>`;
+    const effortControl = `<div id="effort-control">${effortSlider(effortsForModel(defaultProvider, defaultModelId), initialEffort, { modelDefault: modelDefaultEffort(defaultProvider, defaultModelId) })}</div>`;
     const html = `<label class="field">Name <span class="hint">optional — assigned automatically if blank</span><input name="name" pattern="[A-Za-z0-9_]{1,32}" placeholder="Leave blank for a random character name"></label><label class="field">Provider <select name="provider">${providers}</select></label><label class="field">Model <select name="model">${models}</select></label>${effortControl}<label class="field">Working directory <input name="cwd" placeholder="/path/to/project"></label><label class="field">Permission profile ${permissionOptions()}</label>${channelsField}`;
     Trio.ui.modal('Create agent', html, async node => {
       const f = new FormData(node.querySelector('form'));
@@ -945,13 +977,9 @@
       const channels = channelApi ? [...channelApi.getSelected()] : [];
       if (!provider) { Trio.ui.toast('Provider is required'); return; }
       if (!model) { Trio.ui.toast('Model is required'); return; }
-      // Explicit, not defaulted. The slider starts unset so it cannot silently
-      // pick the lowest level for an agent nobody configured; refusing to
-      // submit while it is unset is what turns that into a real choice rather
-      // than an opaque "Default" whose behaviour nobody can state.
-      if (!effort && effortsForModel(provider, model).length) {
-        Trio.ui.toast('Choose a reasoning effort for this model'); return;
-      }
+      // The control always carries a real level, so there is nothing to
+      // validate here — and remembering it is what makes the next agent for
+      // this model start where the operator left off.
       rememberEffort(provider, model, effort);
       const key = 'create:' + name;
       if (pendingAgentActions.has(key)) return;
@@ -978,7 +1006,12 @@
       const efforts = effortsForModel(p, m);
       const prev = effortHost.querySelector('input[name="effort"]')?.value ?? '';
       const keep = prev === '' || efforts.includes(prev) ? prev : (lastEffort(p, m) || '');
-      effortHost.innerHTML = effortSlider(efforts, keep, { defaultLabel: effortDefaultLabel(p, m), modelDefault: modelDefaultEffort(p, m) });
+      // Same resolution as first paint: keep what is on screen if this model
+      // offers it, else fall back through remembered -> model default ->
+      // first-run. Switching Sonnet(max) -> Haiku(no max) must land somewhere
+      // real rather than on an empty slider.
+      const next = (keep && efforts.includes(keep)) ? keep : initialEffortFor(p, m);
+      effortHost.innerHTML = effortSlider(efforts, next, { modelDefault: modelDefaultEffort(p, m) });
       wireEffortSlider(effortHost);
     };
     if (effortHost) wireEffortSlider(effortHost);
@@ -989,5 +1022,5 @@
     });
     modelField?.addEventListener('change', rebuildEffort);
   }
-  Trio.agents = { init, mount, unmount, render, renderPage, refresh, loadDiscovery, normalizeModels, modelOptions, permissionOptions, viewModel, actionCaps, actionLabel, statusIcon, formatLastActive, action, create, effortsForModel, effortOptions, effortSlider, wireEffortSlider, lastEffort, rememberEffort, selection, toggleSelected, clearSelection, bulkAction, reportBulk, bulkAttributeJobs, showBulkAttributes, showBulkChannels, showBulkCompact };
+  Trio.agents = { init, mount, unmount, render, renderPage, refresh, loadDiscovery, normalizeModels, modelOptions, orderedProviders, providerLabel, initialEffortFor, FIRST_RUN, permissionOptions, viewModel, actionCaps, actionLabel, statusIcon, formatLastActive, action, create, effortsForModel, effortOptions, effortSlider, wireEffortSlider, lastEffort, rememberEffort, selection, toggleSelected, clearSelection, bulkAction, reportBulk, bulkAttributeJobs, showBulkAttributes, showBulkChannels, showBulkCompact };
 })();

@@ -89,6 +89,10 @@ UI_PATHS = frozenset((
     "/settings", "/preferences",  # the prefs view, both spellings
     "/archive",
     "/data",
+    # The fleet index: hosts, check-ins and a channel list across the whole
+    # deployment. A different question from "my workspace", so a different
+    # path — "/" belongs to the app.
+    "/fleet",
 ))
 
 # Claude Code's own statusline state — module-level so tests can point it at a
@@ -3387,16 +3391,19 @@ class NthWebHandler(BaseHTTPRequestHandler):
         if path in UI_PATHS:
             # Mint a cookie on first visit so /api/meta + /api/events carry it.
             token, _ident, is_new = self._resolve_identity()
-            # In landing mode "/" is the fleet index — but a request that NAMES
-            # a conversation is asking for the dashboard, and must get the app.
-            # Without this, /c/<code> (which redirects here) and every deep link
-            # the client itself writes serve the fleet page instead, leaving the
-            # channel dashboard unreachable in the only mode where managed
-            # agents are enabled.
-            query = parse_qs(parsed.query)
-            wants_conversation = bool(query.get("channel") or query.get("dm"))
-            body = (LANDING_HTML if self.landing_mode and not wants_conversation
-                    else INDEX_HTML)
+            # The APP is what "/" serves, in either mode. The workspace client
+            # has its own Home — channels, DMs, attention, tasks, agents — and
+            # that is what an operator refreshing the page expects to land on.
+            # Landing mode used to serve the fleet index here instead, so a
+            # plain reload dropped you out of your workspace onto a different
+            # page; and since managed agents are only enabled in landing mode,
+            # anyone who wanted agents had to live on the fleet page.
+            #
+            # The fleet index is still served, at /fleet — it answers a
+            # genuinely different question (which hosts and channels exist
+            # across the deployment) and nothing about it belongs on the path
+            # people reload all day.
+            body = LANDING_HTML if path == "/fleet" else INDEX_HTML
             self._serve_html(body, set_cookie_token=token if is_new else None)
         elif self.landing_mode and path.startswith("/c/"):
             code = path[3:].rstrip("/")
@@ -4009,6 +4016,11 @@ class NthWebHandler(BaseHTTPRequestHandler):
             # runtime will extend.
             "runtime": runtimes["claude"],
             "runtimes": runtimes,
+            # The dispatcher's allowlist, verbatim. The client builds its
+            # provider picker from this; without it, it fell back to the KEYS
+            # of `runtimes` — which is hardcoded to claude alone — so Codex
+            # never appeared as an option however well it was working.
+            "providers": list(get_supervisor().providers()),
             "supervisor": {"live_agents": len(get_supervisor().live_ids())},
         })
 

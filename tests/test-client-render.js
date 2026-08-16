@@ -325,9 +325,16 @@ check('effortOptions renders a <select>-ready option list with the current value
 // (create: always; edit: any agent still on its model default, since
 // vm.effort is '' there). A real "Model default" option, selected by
 // default, is what a blank/'' selection must resolve to.
-check('effortOptions: no selection defaults to a real "Model default" option, not the first effort', () => {
+check('effortOptions: no selection lands on a real empty option, not the first effort', () => {
+  // Bulk edit only. The empty value has a statable meaning here — the selected
+  // agents may run different models, and an empty effort tells the server to
+  // use each one's own default — so the label says that rather than "Default".
+  // What must NOT happen is the browser auto-selecting "low" for every agent
+  // the operator never touched.
   const html = H.Trio.agents.effortOptions(['low', 'medium', 'high'], '');
-  assert.ok(html.startsWith('<option value="" selected>Model default</option>'));
+  // The label is escaped on the way out (the apostrophe becomes &#39;), which
+  // is correct — assert the structure and the sense, not the raw bytes.
+  assert.ok(/^<option value="" selected>[^<]*default<\/option>/.test(html), html);
   assert.ok(!html.includes('<option value="low" selected>'));
 });
 check('effortOptions: a custom default label can name the resolved level', () => {
