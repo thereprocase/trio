@@ -1,158 +1,63 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="light-1">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>nth_web</title>
-<!--__TRIO_STYLES__-->
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Atrium — chat with your agents</title>
+  <script>
+    /* Apply the saved theme/font BEFORE first paint, so a boot hiccup can never
+       leave the hardcoded default theme showing. Mirrors 40-preferences
+       readFromStorage()'s legacy mapping; preferences.mount() re-applies later. */
+    try {
+      var __p = JSON.parse(localStorage.getItem('trio.preferences.v1') || '{}');
+      var __t = __p.theme === 'dark' ? 'dark-3' : __p.theme === 'light' ? 'light-1' : __p.theme;
+      if (__t) document.documentElement.dataset.theme = __t;
+      if (__p.font) document.documentElement.dataset.font = __p.font;
+    } catch (e) {}
+  </script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600;9..144,700&family=Hanken+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <!--__TRIO_STYLES__-->
 </head>
 <body>
-<div id="guest-modal" style="display:none">
-  <div class="guest-card">
-    <h2>Identify yourself</h2>
-    <p>Tailscale didn't recognise your connection, so you're joining as a <b>Guest</b>.
-       Agents will see you as untrusted and self-declared — they should not treat your
-       messages as authoritative.</p>
-    <p class="dim">If you should be identified via Tailscale, connect via your tailnet
-       IP and reload.</p>
-    <label>Display name
-      <input id="guest-name" type="text" maxlength="40" placeholder="e.g. Bob" autocomplete="off">
-    </label>
-    <div class="guest-err" id="guest-err"></div>
-    <button id="guest-submit">Join as Guest</button>
+  <div class="app" id="app">
+    <div class="scrim-nav" id="scrim-nav" hidden></div>
+    <aside class="sidebar" aria-label="Workspace navigation">
+      <header class="brand">
+        <div class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="#ffffff"><path d="M 0.049804 0.049804 v 23.900391 l 3.625,-6.216209 v -13.762307 h 16.560547 v 13.940838 l 3.714844,6.037678 v -23.900391 z"/><path d="M 11.827954 7.466405 a 2.4615514,2.4615514 0 0 0 -2.460937,2.460938 a 2.4615514,2.4615514 0 0 0 0.002,0.0332 h -0.0059 v 7.947266 h 4.929687 v -7.947266 h -0.0059 a 2.4615514,2.4615514 0 0 0 0.002,-0.0332 a 2.4615514,2.4615514 0 0 0 -2.460938,-2.460938 z"/></svg></div>
+        <div><div class="brand-name">Atrium</div><div class="brand-sub">your agent workspace</div></div>
+        <button class="icon-btn sidebar-toggle" id="sidebar-toggle" type="button" aria-label="Collapse sidebar" title="Collapse sidebar" aria-expanded="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m11 9-3 3 3 3M17 9l-3 3 3 3"/></svg></button>
+      </header>
+      <nav class="nav-scroll" id="workspace-rail" aria-label="Channels">
+        <div class="rail-boot" aria-hidden="true">
+          <section class="nav-section"><div class="nav-head"><h3>Workspace</h3></div></section>
+          <section class="nav-section"><div class="nav-head"><h3>Channels</h3></div><div class="nav-loading">Loading channels…</div></section>
+          <section class="nav-section"><div class="nav-head"><h3>Direct Messages</h3><button class="add-btn" type="button" aria-label="Start direct message" title="Start direct message"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg></button></div></section>
+          <section class="nav-section"><div class="nav-head"><h3>Agent-to-Agent</h3></div></section>
+        </div>
+      </nav>
+      <footer class="side-foot" id="account"><div class="account-bar"><button class="account-trigger" id="account-trigger" type="button" aria-expanded="false" aria-controls="account-items" aria-label="Account menu" title="Account menu — preferences, archive, data"><span class="operator-avatar" id="operator-avatar" aria-hidden="true">?</span><div class="who"><div class="n" id="operator-name">Workspace</div><div class="s" id="operator-role">Live agent coordination</div></div><svg class="account-caret" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 15 6-6 6 6"/></svg></button><button id="theme-toggle" class="icon-btn" type="button" aria-label="Toggle theme" title="Toggle theme"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8Z"/></svg></button></div><div class="account-items" id="account-items" aria-hidden="true" inert></div></footer>
+      <button class="sidebar-resize" id="sidebar-resize" type="button" aria-label="Resize sidebar" aria-valuemin="56" aria-valuemax="480" aria-valuenow="300"><span aria-hidden="true"></span></button>
+    </aside>
+    <main class="conversation-shell">
+      <header class="conversation-header topbar"><button class="icon-btn nav-toggle hamb" id="nav-toggle" aria-label="Open navigation"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button><div class="tt"><h1 id="h-channel">Atrium</h1><p class="topic" id="h-meta">Connecting…</p></div><div class="topbar-actions"><span class="conn" id="h-conn" aria-live="polite"><span class="d"></span><span class="conn-label">connecting</span></span><div class="face-pile" id="face-pile" aria-label="Channel members"></div><button class="icon-btn" id="search-btn" type="button" aria-label="Search messages" title="Search (Ctrl/Cmd+K)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.2-3.2"/></svg></button><button class="icon-btn" id="details-btn" type="button" aria-label="Conversation details" title="Conversation details"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M13 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-7"/><path d="M9 9h5M9 13h6M9 17h4"/></svg></button><button class="icon-btn" id="channel-more-btn" type="button" aria-label="More channel actions" title="More channel actions" aria-haspopup="menu" aria-expanded="false"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg></button></div></header>
+      <div class="private-banner hidden" id="private-banner"><span>Private conversation</span></div>
+      <section class="messages msgs" id="messages" tabindex="0" aria-live="polite" aria-label="Messages"></section>
+      <section class="composer-shell composer-wrap"><button class="jump-latest hidden" id="jump-latest" type="button">Jump to latest</button><div class="composer-inner"><div id="target-bar" class="target-row"></div><div id="attachment-strip"></div><div id="input" class="composer-input" contenteditable="true" role="textbox" aria-multiline="true" aria-label="Message" data-placeholder="Message the room…"></div><div class="composer-actions comp-bar"><button id="attach-btn" class="icon-btn comp-tool" type="button" aria-label="Attach image" title="Attach image"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m21 11.5-8.5 8.5a5 5 0 0 1-7-7L14 4.5a3.3 3.3 0 0 1 4.7 4.7L10 17a1.6 1.6 0 0 1-2.3-2.3l7.6-7.6"/></svg></button><span class="dictate-wrap"><button id="dictate-btn" class="icon-btn comp-tool" type="button" aria-label="Dictate" title="Dictate" aria-pressed="false"><svg class="mic-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M6 11a6 6 0 0 0 12 0M12 17v4"/></svg><svg class="stop-icon" viewBox="0 0 24 24" fill="currentColor" hidden><rect x="6" y="6" width="12" height="12" rx="2"/></svg></button><span id="dictate-meter" class="dictate-meter" hidden aria-hidden="true"><span class="bar"></span><span class="bar"></span><span class="bar"></span><span class="bar"></span><span class="bar"></span></span><span id="dictate-status" class="dictate-status" hidden></span></span><span class="comp-spacer"></span><span class="comp-hint">Enter to send</span><button id="send" class="send-btn" type="button"><span>Send</span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 14-7-3 14-4-5-7-2Z"/><path d="m12 14 7-9"/></svg></button></div></div></section>
+    </main>
+    <aside class="channel-drawer" id="channel-drawer" role="dialog" aria-labelledby="channel-drawer-title" aria-hidden="true">
+      <button class="channel-drawer-resize" id="channel-drawer-resize" type="button" aria-label="Resize channel details sidebar" aria-valuemin="320" aria-valuemax="560" aria-valuenow="380"><span aria-hidden="true"></span></button>
+      <header class="channel-drawer-head"><h2 id="channel-drawer-title">Channel details</h2><button class="icon-btn" id="channel-drawer-close" type="button" aria-label="Close channel details" title="Close"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="m6 6 12 12M18 6 6 18"/></svg></button></header>
+      <div class="channel-drawer-body" id="channel-drawer-body"></div>
+    </aside>
   </div>
-</div>
-<div id="app">
-  <header>
-    <a class="pill" id="btn-home" href="/" title="back to the hub landing page">⌂ fleet</a>
-    <span class="title" id="h-channel">trio#…</span>
-    <span class="meta" id="h-meta">connecting…</span>
-    <span class="spacer"></span>
-    <select id="theme-picker" title="color theme">
-      <optgroup label="Dark">
-        <option value="midnight">Midnight</option>
-        <option value="nord">Nord</option>
-        <option value="dracula">Dracula</option>
-        <option value="pve-dark">Proxmox</option>
-        <option value="solarized">Solarized</option>
-        <option value="synthwave">Synthwave</option>
-        <option value="vaporwave">Vaporwave</option>
-        <option value="popart">Pop Art</option>
-        <option value="lcars">LCARS</option>
-        <option value="bluebubble">Walled Garden</option>
-      </optgroup>
-      <optgroup label="Light">
-        <option value="light">Daylight</option>
-        <option value="pve-light">Clean</option>
-        <option value="paper">Paper</option>
-      </optgroup>
-      <optgroup label="Retro">
-        <option value="crt">CRT Green</option>
-        <option value="amber">Amber Mono</option>
-        <option value="dosblue">DOS Blue</option>
-        <option value="gameboy">Game Boy</option>
-        <option value="win31">Windows 3.1</option>
-      </optgroup>
-    </select>
-    <select id="font-picker" title="message font">
-      <option value='"JetBrains Mono", "Fira Code", "Cascadia Code", ui-monospace, Menlo, monospace'>JetBrains Mono (default)</option>
-      <option value='"Fira Code", ui-monospace, Menlo, monospace'>Fira Code</option>
-      <option value='"Cascadia Code", "Cascadia Mono", ui-monospace, Consolas, monospace'>Cascadia Code</option>
-      <option value='"Hack", ui-monospace, Menlo, monospace'>Hack</option>
-      <option value='"IBM Plex Mono", ui-monospace, Menlo, monospace'>IBM Plex Mono</option>
-      <option value='"Source Code Pro", ui-monospace, Menlo, monospace'>Source Code Pro</option>
-      <option value='"Iosevka", "Iosevka Term", "Iosevka Fixed", ui-monospace, Menlo, monospace'>Iosevka</option>
-      <option value='Menlo, Monaco, ui-monospace, monospace'>Menlo</option>
-      <option value='Monaco, Menlo, ui-monospace, monospace'>Monaco</option>
-      <option value='Consolas, "Cascadia Mono", ui-monospace, monospace'>Consolas</option>
-      <option value='"SF Mono", "SFMono-Regular", ui-monospace, Menlo, monospace'>SF Mono</option>
-      <option value='"Atkinson Hyperlegible Next", "Atkinson Hyperlegible", -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Arial, sans-serif'>Atkinson Hyperlegible</option>
-      <option value='-apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "Helvetica Neue", "Helvetica", "Arial", sans-serif' disabled>Walled Garden</option>
-    </select>
-    <input id="filter" type="text" placeholder="filter messages…" spellcheck="false">
-    <span class="pill" id="btn-search" title="search the full channel history">🔍 search</span>
-    <span class="pill on" id="btn-side" title="show/hide the roster sidebar">roster</span>
-    <span class="pill on" id="btn-msgnum" title="show each message's #number in the left margin">#nums</span>
-    <span class="pill" id="btn-compact" title="clamp every message body to 3 lines">compact</span>
-    <span class="pill" id="btn-notify" title="desktop notifications on @you">🔔 off</span>
-    <span class="pill" id="btn-sound" title="play a chime on new messages (scope in settings when on)">🔊 off</span>
-    <span class="pill" id="btn-settings" title="settings">⚙ settings</span>
-    <span class="pill" id="btn-mobile-roster" title="show roster &amp; context">☰</span>
-    <span class="pill conn bad" id="h-conn">● disconnected</span>
-  </header>
-  <div id="settings-panel" hidden>
-    <h3>Settings</h3>
-  </div>
-
-  <div id="mobile-scrim"></div>
-  <div id="chat-wrap">
-    <div id="new-bar" title="jump to the first unread message"></div>
-    <div id="chat"></div>
-    <button id="jump-btn">↓ latest<span class="count" id="jump-count" style="display:none">0</span></button>
-  </div>
-
-  <aside id="side">
-    <section>
-      <div id="filter-banner">filter active — showing matching messages only. click to clear.</div>
-      <div class="side-head">
-        <h2 id="r-heading">Members</h2>
-        <button id="side-close" aria-label="Close sidebar" title="Close sidebar">✕</button>
-      </div>
-      <div id="r-list"></div>
-    </section>
-    <section id="chanstats-wrap">
-      <h2>Channel stats</h2>
-      <div id="chanstats"></div>
-      <div id="sparkline"></div>
-    </section>
-  </aside>
-
-  <div id="composer">
-    <div id="preview">(broadcast — all connected members receive this)</div>
-    <div id="target-bar"></div>
-    <div id="attach-strip"></div>
-    <div id="stt-banner" role="status" aria-live="polite" hidden></div>
-    <div id="stt-viz" hidden>
-      <canvas id="stt-wave" width="300" height="30"></canvas>
-      <div id="stt-spinner" class="stt-spinner" hidden></div>
-      <span id="stt-viz-label" role="status" aria-live="polite"></span>
-    </div>
-    <input type="file" id="file-input" accept="image/png,image/jpeg,image/gif,image/webp" multiple style="display:none">
-    <div id="input-row">
-      <div id="completions"></div>
-      <button id="attach-btn" title="attach image (or paste / drop into the box)">🖼</button>
-      <button id="mic-btn" title="dictate (speech to text)" aria-label="dictate">🎤</button>
-      <div id="input-stack">
-        <div id="input-highlight" aria-hidden="true"></div>
-        <textarea id="input" rows="1" placeholder="Message — @ to mention, Enter to send"></textarea>
-      </div>
-      <button id="send-btn">Send</button>
-    </div>
-    <div id="hint">
-      <kbd>Enter</kbd> send
-      <kbd>Shift+Enter</kbd> newline
-      <kbd>@</kbd> mention
-      <kbd>Tab</kbd> accept completion
-      <kbd>Esc</kbd> dismiss
-      <kbd>↑/↓</kbd> navigate
-      <kbd>Alt+1..9</kbd> toggle target
-      <kbd>Alt+A</kbd> all
-      <kbd>Alt+0</kbd> clear
-      <kbd>Ctrl+B</kbd> roster
-      <kbd>paste / drop</kbd> image
-      <span style="margin-left:14px;color:var(--dim)">click a message to expand/collapse in compact mode</span>
-    </div>
-  </div>
-</div>
-
-<div id="search-panel" hidden>
-  <div class="search-head">
-    <input id="search-input" type="text" placeholder="search all history…" autocomplete="off" spellcheck="false">
-    <button id="search-close" title="close (Esc)" aria-label="close search">×</button>
-  </div>
-  <div id="search-status"></div>
-  <div id="search-results"></div>
-</div>
-<!--__TRIO_SCRIPTS__-->
+  <div class="sr-only" id="trio-aria-live" aria-live="polite" aria-atomic="true"></div>
+  <div class="toast-wrap" id="trio-toasts" popover="manual"></div>
+  <div class="channel-menu" id="channel-menu" role="menu" aria-label="Channel actions" hidden></div>
+  <aside class="agent-drawer" id="trio-agents" hidden></aside>
+  <dialog id="trio-control-modal"></dialog>
+  <dialog id="trio-archives"></dialog>
+  <!--__TRIO_SCRIPTS__-->
 </body>
 </html>

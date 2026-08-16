@@ -8001,20 +8001,37 @@ WEB_SOURCE_DIR = Path(__file__).resolve().parent / "web"
 
 # Cascade order — later layers override earlier ones.
 WEB_CSS_FILES = (
-    "css/00-themes.css",        # :root tokens and every named theme
-    "css/10-shell.css",         # header, settings drawer, search panel
-    "css/20-conversation.css",  # chat rows, sigils, file links, ack badges
-    "css/30-roster.css",        # roster sidebar, channel stats, fatal errors
-    "css/40-composer.css",      # composer, targets, dictation, attachments
-    "css/50-responsive.css",    # @media overrides — must stay last
+    "css/00-tokens.css",        # :root design tokens and the named themes
+    "css/10-shell.css",         # sidebar, topbar, drawers, dialogs, toasts
+    "css/20-conversation.css",  # message rows, ask cards, attachments
+    "css/30-workspace.css",     # home/inbox/tasks/roster/prefs pages
+    "css/40-responsive.css",    # @media overrides — must stay last
 )
 
-# One file today. The client is a single IIFE whose functions all share one
-# closure, so it cannot be split across <script> tags without first rewriting
-# its scoping — a split would leave each half unable to see the other. The
-# tuple exists so that rewrite can land file-by-file without touching the
-# serving path.
-WEB_JS_FILES = ("js/app.js",)
+# Load order is a real dependency order, not a filing convention. Each file is
+# its own IIFE hanging a namespace off `window.Trio`, so a module may only be
+# listed after every module it reads at definition time:
+#
+#   01-store / 02-api / 05-loader / 04-events   plumbing, no dependants
+#   00-core                                     reads store; defines boot()
+#   03-router                                   reads store
+#   10-markdown … 14-lightbox                   rendering, read core + api
+#   20-workspace / 30-agents / 40-preferences   features, read everything above
+#   07-lifecycle / 08-sidebar                   mount machinery
+#   90-boot                                     runs last; mounts the features
+#
+# 99-test-hook is stripped from the served bundle by _strip_test_hook and
+# exists only so the Node DOM harness can reach the module registry.
+WEB_JS_FILES = (
+    "js/01-store.js", "js/02-api.js", "js/05-loader.js", "js/04-events.js",
+    "js/00-core.js", "js/03-router.js", "js/10-markdown.js",
+    "js/11-conversation.js", "js/06-ui.js", "js/12-composer.js",
+    "js/13-file-links.js", "js/14-lightbox.js",
+    "js/20-workspace.js", "js/30-agents.js", "js/40-preferences.js",
+    "js/45-notifications.js", "js/46-data.js",
+    "js/07-lifecycle.js", "js/08-sidebar.js", "js/90-boot.js",
+    "js/99-test-hook.js",
+)
 
 
 def _read_web_source(relative_path: str) -> str:
@@ -8042,6 +8059,26 @@ def _strip_test_hook(html: str) -> str:
     return re.sub(
         r"\n\s*// __TRIO_TEST_HOOK_START__.*?// __TRIO_TEST_HOOK_END__",
         "", html, flags=re.DOTALL)
+
+
+# The pure ask-picker helpers live in nth_ask_client.js rather than inline in
+# a web/ module for one reason: they are require()-able under Node, so they can
+# be unit-tested. The `isAskChoices` gate is the render predicate for every
+# interactive question — when it is wrong, every picker silently degrades to
+# plain text, which is exactly the kind of failure a browser-only bundle hides.
+# .resolve() follows the symlinked dev install back to the repo directory where
+# the sibling .js actually lives. The trailing CommonJS export guard is dropped
+# from the inlined copy; in the browser it would be dead code.
+def _load_ask_helpers() -> str:
+    try:
+        js = Path(__file__).resolve().with_name("nth_ask_client.js").read_text(
+            encoding="utf-8")
+    except OSError as exc:
+        raise RuntimeError(
+            "required web source missing: nth_ask_client.js — it must be "
+            "installed alongside nth_web.py"
+        ) from exc
+    return js.split("if (typeof module")[0].rstrip()
 
 
 def _web_speech_lang(code: str) -> str:
@@ -8082,6 +8119,7 @@ def _render_web_source(relative_path: str) -> str:
         .replace("/*__ANIMAL_EMOJIS__*/", json.dumps([e for _, e in ANIMAL_EMOJIS]))
         .replace("/*__ANIMAL_NAMES__*/",  json.dumps([n for n, _ in ANIMAL_EMOJIS]))
         .replace("/*__STT_LANG__*/'en-US'", json.dumps(_web_speech_lang(STT_LANGUAGE)))
+        .replace("/*__ASK_HELPERS__*/", _load_ask_helpers())
     )
 
 

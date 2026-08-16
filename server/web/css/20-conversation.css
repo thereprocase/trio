@@ -1,292 +1,276 @@
-  #chat-wrap { grid-row: 2 / 3; grid-column: 1 / 2; position: relative; overflow: hidden; }
-  #chat { height: 100%; overflow-y: auto; padding: 14px 16px; scroll-behavior: smooth; }
-  /* Message numbers (#N): a per-message left-margin tag, hidden unless #chat
-     carries .show-msg-nums. The number rests at the message's vertical centre;
-     via position:sticky it pins just inside the viewport edge once that centre
-     would scroll out of view, so it stays visible beside its message and then
-     leaves with the message once it's fully off-screen. Pure CSS — the gutter
-     spans the full message height and flex-centres the sticky number. */
-  .msg-num-gutter { display: none; }
-  /* position:relative is also set on .msg below for hover actions/pins; repeated
-     here so this gutter's absolute/full-height centring can't silently break if
-     that unrelated rule is ever changed. */
-  #chat.show-msg-nums .msg { padding-left: 52px; position: relative; }
-  #chat.show-msg-nums .msg-num-gutter {
-    display: flex; align-items: center; justify-content: flex-end;
-    position: absolute; left: 0; top: 0; height: 100%; width: 46px;
-    pointer-events: none; }
-  /* NB: no overflow:auto/hidden/scroll on .msg-num-gutter (or any ancestor up to
-     #chat) — that would make the gutter the sticky scroll-container and break the
-     number's position:sticky. The large-id overflow guard lives on the sticky
-     span itself (own-overflow is safe), not on an ancestor. */
-  #chat.show-msg-nums .msg-num {
-    position: sticky; top: 10px; bottom: 10px;
-    max-width: 100%; overflow: hidden; text-overflow: ellipsis;
-    font-size: 10px; line-height: 1.2; color: var(--dim);
-    font-variant-numeric: tabular-nums; white-space: nowrap;
-    pointer-events: auto; user-select: text; cursor: text; }
-  #chat.show-msg-nums .msg.targeted .msg-num { color: var(--accent); }
-  /* Walled Garden draws each message as a chat bubble (its own padding, an 18px
-     radius and a ::before tail), so padding the bubble would print the number
-     inside it. Indent the column instead and hang the gutter in that margin,
-     leaving the bubble geometry untouched. */
-  :root[data-theme="bluebubble"] #chat.show-msg-nums { padding-left: 46px; }
-  :root[data-theme="bluebubble"] #chat.show-msg-nums .msg { padding-left: 14px; }
-  :root[data-theme="bluebubble"] #chat.show-msg-nums .msg-num-gutter {
-    left: -42px; width: 36px; }
-  .msg { margin-bottom: 12px; word-wrap: break-word; cursor: pointer; padding: 6px 10px 8px;
-         border-radius: var(--card-radius); border-left: 3px solid transparent; margin-left: -10px; }
-  .msg:hover { background: var(--hover); }
-  .msg .head { font-size: 11px; color: var(--dim); margin-bottom: 4px;
-               display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-  .msg .head .time { cursor: help; }
-  .msg .author { font-weight: 600; }
-  .msg .mentions-bar { font-size: 11px; margin: 2px 0 4px;
-                       display: flex; gap: 4px; flex-wrap: wrap; align-items: center; }
-  .msg .mentions-bar .to-label { color: var(--dim); font-size: 10px;
-                                  text-transform: uppercase; letter-spacing: 0.5px;
-                                  margin-right: 2px; }
-  .msg .mentions-bar .mchip { display: inline-flex; align-items: center; gap: 3px;
-                               padding: 1px 7px 1px 5px; border-radius: 10px;
-                               background: color-mix(in srgb, var(--mention) 15%, transparent);
-                               color: var(--mention);
-                               border: 1px solid color-mix(in srgb, var(--mention) 30%, transparent);
-                               font-weight: 600; }
-  .msg .mentions-bar .mchip .manimal { font-size: 13px; line-height: 1; }
-  /* #pound references bar — "about" someone, not "to" them. Muted vs. @ pings. */
-  .msg .refs-bar { font-size: 11px; margin: 2px 0 4px;
-                   display: flex; gap: 4px; flex-wrap: wrap; align-items: center; }
-  .msg .refs-bar .to-label { color: var(--dim); font-size: 10px;
-                              text-transform: uppercase; letter-spacing: 0.5px;
-                              margin-right: 2px; }
-  .msg .refs-bar .mchip { display: inline-flex; align-items: center; gap: 3px;
-                          padding: 1px 7px 1px 5px; border-radius: 10px;
-                          background: var(--ref-chip-bg);
-                          color: var(--ref-chip);
-                          border: 1px solid var(--ref-chip-border);
-                          font-weight: 500; }
-  .msg .refs-bar .mchip .manimal { font-size: 13px; line-height: 1; }
-  /* !bangs bar — UNFILTERABLE. Loudest visual; rendered above @mentions. */
-  .msg .bangs-bar { font-size: 12px; margin: 2px 0 4px;
-                    display: flex; gap: 4px; flex-wrap: wrap; align-items: center; }
-  .msg .bangs-bar .to-label { color: var(--bang-chip); font-size: 10px; font-weight: 700;
-                               text-transform: uppercase; letter-spacing: 1px;
-                               margin-right: 2px;
-                               padding: 1px 5px; border-radius: 3px;
-                               background: var(--bang-label-bg); }
-  .msg .bangs-bar .mchip { display: inline-flex; align-items: center; gap: 3px;
-                           padding: 1px 7px 1px 5px; border-radius: 10px;
-                           background: var(--bang-chip-bg);
-                           color: var(--bang-chip);
-                           border: 1px solid var(--bang-chip-border);
-                           font-weight: 700; }
-  .msg .bangs-bar .mchip .manimal { font-size: 13px; line-height: 1; }
-  .msg .body { word-wrap: break-word; overflow-wrap: break-word; }
-  .msg .body.plain { white-space: pre-wrap; }
-  /* Valid @mentions stay visible in the prose itself, not only in the
-     routing bar above the message. The member-colored inset makes adjacent
-     mentions distinguishable while the shared mention color preserves the
-     meaning across themes. */
-  /* Text-forward mention: a member-colored dot + member-tinted text, faint
-     tint behind. The dot carries the "who" color pop; text stays legible on
-     every theme via color-mix toward the theme foreground. @all falls back to
-     the theme --mention color (no per-member color is set for it). */
-  .msg .body .inline-mention {
-    display: inline-block; padding: 0 5px; margin: 0 1px; border-radius: 5px;
-    background: color-mix(in srgb, var(--mention-member-color, var(--mention)) 11%, transparent);
-    /* Mix mostly toward --fg so contrast tracks the theme's own body text.
-       Mixing mostly toward the pastel palette colour reads fine on dark
-       themes and measured as low as 1.30:1 on the light ones — the words
-       carrying the routing meaning were the only unreadable thing on screen. */
-    color: color-mix(in srgb, var(--mention-member-color, var(--mention)) 30%, var(--fg));
-    font-weight: 700; overflow-wrap: anywhere;
-  }
-  .msg .body .inline-mention::before {
-    content: ""; display: inline-block; width: 6px; height: 6px; border-radius: 50%;
-    background: var(--mention-member-color, var(--mention));
-    margin-right: 4px; vertical-align: 1px;
-  }
-  /* @all broadcast — a celebratory rainbow shimmer so "ping everyone" reads
-     louder than a single-member @mention. The gradient is clipped to the glyphs
-     and slowly panned; the dot is a static rainbow bead. Targets the pseudo-
-     member id "all" that decorateInlineSigil sets on the span. Motion is
-     disabled under prefers-reduced-motion (the static rainbow still reads). */
-  .msg .body .inline-mention[data-member-id="all"] {
-    background: linear-gradient(90deg,
-      #ff5f5f, #ffb347, #ffe66d, #7ede7e, #62d7ef, #8eb9ff, #d070d7, #ff5f5f);
-    background-size: 200% 100%;
-    /* A BACKING PLATE, not the glyphs. Clipping the gradient to the text made
-       @all unreadable on every light theme (measured 1.02-1.17:1 at the pale
-       stops) — the loudest signal in the product was the least visible thing on
-       screen. Text stays --fg so the word is legible in all 18 themes. */
-    color: var(--fg);
-    text-shadow: 0 0 3px var(--bg);
-    animation: at-all-shimmer 3s linear infinite;
-    font-weight: 800;
-  }
-  .msg .body .inline-mention[data-member-id="all"]::before {
-    background: conic-gradient(#ff5f5f, #ffb347, #ffe66d, #7ede7e,
-      #62d7ef, #8eb9ff, #d070d7, #ff5f5f);
-  }
-  @keyframes at-all-shimmer {
-    0%   { background-position:   0% 50%; }
-    100% { background-position: 200% 50%; }
-  }
-  @media (prefers-reduced-motion: reduce) {
-    .msg .body .inline-mention[data-member-id="all"] { animation: none; }
-  }
-  /* #pound reference inline — same chip+dot mechanism as @, but tinted from the
-     muted "about" green (matches .refs-bar) and lighter weight so it reads
-     quieter than an @ping. Dot stays member-colored to keep the "who". */
-  .msg .body .inline-ref {
-    display: inline-block; padding: 0 5px; margin: 0 1px; border-radius: 5px;
-    background: rgba(126, 222, 126, 0.08);
-    color: color-mix(in srgb, #9ccf9c, var(--fg) 32%);
-    font-weight: 500; white-space: nowrap;
-  }
-  .msg .body .inline-ref::before {
-    content: ""; display: inline-block; width: 6px; height: 6px; border-radius: 50%;
-    background: var(--mention-member-color, #9ccf9c);
-    margin-right: 4px; vertical-align: 1px;
-  }
-  /* !bang alert inline — same mechanism, tinted from the loud coral (matches
-     .bangs-bar) with heavier weight so it reads louder than an @ping. Dot stays
-     member-colored to keep the "who". */
-  .msg .body .inline-bang {
-    display: inline-block; padding: 0 5px; margin: 0 1px; border-radius: 5px;
-    background: rgba(255, 132, 112, 0.16);
-    color: color-mix(in srgb, #ff8470, var(--fg) 18%);
-    font-weight: 800; white-space: nowrap;
-  }
-  .msg .body .inline-bang::before {
-    content: ""; display: inline-block; width: 6px; height: 6px; border-radius: 50%;
-    background: var(--mention-member-color, #ff8470);
-    margin-right: 4px; vertical-align: 1px;
-  }
-  .msg .body > *:first-child { margin-top: 0; }
-  .msg .body > *:last-child { margin-bottom: 0; }
-  .msg .body p { margin: 4px 0; white-space: pre-wrap; }
-  #chat .msg .body code.mdic { background: rgba(var(--ov),0.08); border: 1px solid rgba(var(--ov),0.1);
-                         border-radius: 3px; padding: 0 4px; font-family: ui-monospace, Menlo, Monaco, monospace;
-                         font-size: 0.92em; }
-  #chat .msg .body pre.mdcode { background: rgba(var(--ov),0.05); border: 1px solid rgba(var(--ov),0.1);
-                          border-radius: 4px; padding: 6px 8px; margin: 4px 0;
-                          font-family: ui-monospace, Menlo, Monaco, monospace; font-size: 0.9em;
-                          white-space: pre-wrap; overflow-x: auto; }
-  .msg .body strong { font-weight: 700; }
-  /* Validated file paths — clickable "reveal in Finder" links. Distinct from
-     plain links: code-tinted chip + a subtle 📁 affordance, dotted underline. */
-  #chat .msg .body a.file-link {
-    color: var(--accent); text-decoration: underline; text-decoration-style: dotted;
-    text-underline-offset: 2px; cursor: pointer;
-    background: rgba(var(--ov),0.06); border-radius: 3px; padding: 0 3px;
-    transition: background 0.12s ease, color 0.12s ease;
-  }
-  .file-links-unavailable { padding: 6px 12px; font-size: 11px; color: var(--dim);
-                            background: var(--bg2); border-bottom: 1px solid var(--border); }
-  .file-link-note { font-size: 0.85em; color: var(--err); white-space: normal; }
-  /* Game Boy's --err is identical to --accent and to the body text colour, so
-     colour alone cannot signal failure. The strike-through is a shape cue that
-     survives any palette. */
-  #chat .msg .body a.file-link.file-link-err { text-decoration-line: line-through underline; }
-  #chat .msg .body a.file-link::after { content: " 📁"; font-size: 0.82em; opacity: 0.65; }
-  #chat .msg .body a.file-link:hover { background: rgba(var(--ov),0.12); }
-  #chat .msg .body a.file-link:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
-  #chat .msg .body a.file-link.file-link-ok  { background: rgba(var(--ok-rgb, 80,200,120),0.22); }
-  #chat .msg .body a.file-link.file-link-err {
-    color: var(--err); background: rgba(var(--ov),0.10); text-decoration-style: wavy;
-  }
-  .msg .body em { font-style: italic; }
-  .msg .body del { opacity: 0.7; }
-  .msg .body a { color: var(--accent2); text-decoration: underline; }
-  .msg .body h1, .msg .body h2, .msg .body h3,
-  .msg .body h4, .msg .body h5, .msg .body h6 {
-    margin: 8px 0 4px; font-weight: 700; line-height: 1.25; }
-  .msg .body h1 { font-size: 1.35em; border-bottom: 1px solid rgba(var(--ov),0.15); padding-bottom: 2px; }
-  .msg .body h2 { font-size: 1.2em; border-bottom: 1px solid rgba(var(--ov),0.1); padding-bottom: 2px; }
-  .msg .body h3 { font-size: 1.1em; }
-  .msg .body h4 { font-size: 1.0em; }
-  .msg .body h5 { font-size: 0.95em; opacity: 0.9; }
-  .msg .body h6 { font-size: 0.9em; opacity: 0.8; }
-  .msg .body ul, .msg .body ol { margin: 4px 0; padding-left: 22px; }
-  .msg .body ul ul, .msg .body ol ol,
-  .msg .body ul ol, .msg .body ol ul { margin: 0; }
-  .msg .body li { margin: 1px 0; }
-  .msg .body li.task { list-style: none; margin-left: -18px; }
-  .msg .body li.task input { margin-right: 6px; vertical-align: -1px; }
-  .msg .body blockquote { margin: 4px 0; padding: 2px 10px; border-left: 3px solid var(--accent2);
-                          background: rgba(var(--ov),0.03); color: rgba(var(--ov),0.85); }
-  .msg .body hr { border: 0; border-top: 1px solid rgba(var(--ov),0.18); margin: 8px 0; }
-  .msg .body table { border-collapse: collapse; margin: 4px 0; font-size: 0.95em; }
-  .msg .body th, .msg .body td { border: 1px solid rgba(var(--ov),0.15); padding: 4px 8px; }
-  .msg .body th { background: rgba(var(--ov),0.06); font-weight: 700; text-align: left; }
-  .msg.compact .body {
-    display: -webkit-box;
-    -webkit-line-clamp: 3;
-    -webkit-box-orient: vertical;
-    overflow: hidden;
-  }
-  .msg.compact .body::after { content: ""; }
-  .msg.system .body { color: var(--dim); font-style: italic; }
-  .msg.mine .author { color: var(--accent2); }
-  .msg.targeted { background: var(--hover); border-left-color: var(--mention); }
-  .msg.filtered-out { display: none; }
-  .msg.dm-hidden { display: none; }
-  body.dm-mode .acks { display: none; }  /* two participants; ack badges are noise */
+/* Conversation and composer: data-driven Atrium surface. */
+.messages { overflow:auto; padding:24px clamp(16px,4vw,52px); display:flex; flex-direction:column; gap:14px; background:var(--bg); }
+.conversation-empty { margin:auto; max-width:360px; color:var(--ink-3); text-align:center; }
+.message { max-width:min(760px,92%); align-self:flex-start; padding:13px 16px; border:1px solid var(--line); border-radius:var(--r-md,16px); background:var(--bubble-agent,var(--surface)); box-shadow:var(--shadow-sm); }
+.message.own { align-self:flex-end; color:var(--bubble-me-ink,#fff); background:var(--bubble-me,var(--accent)); border-color:transparent; }
+.message.private { box-shadow:inset 3px 0 var(--warm),var(--shadow-sm); }
+.message-head { display:flex; align-items:center; gap:8px; margin-bottom:5px; font-size:12px; color:var(--ink-3); }
+.message.own .message-head { color:color-mix(in srgb,var(--bubble-me-ink,#fff) 80%,transparent); }
+.message-head strong { color:inherit; font-size:13px; }
+.message-role { border-radius:99px; padding:1px 7px; font-size:10px; font-weight:700; text-transform:uppercase; background:var(--bg-sink); color:var(--ink-3); }
+.message.own .message-role { background:color-mix(in srgb,var(--bubble-me-ink,#fff) 20%,transparent); color:var(--bubble-me-ink,#fff); }
+.role-human { background:var(--accent-tint); color:var(--accent-strong); }
+.message-head time { margin-left:auto; white-space:nowrap; }
+.message-id { display:none; }
+body.message-numbers .message-id { display:inline; }
+.message-actions-menu { display:flex; gap:6px; justify-content:flex-end; margin-top:6px; }
+.message-actions-menu button { padding:4px 10px; border:0; border-radius:999px; background:var(--bg-sink); color:var(--ink-3); font-size:11px; cursor:pointer; }
+.message-actions-menu button:hover { background:var(--surface-hover); color:var(--ink); }
+/* Copy affordances — per-message markdown + per-code-block source. */
+.copy-btn { display:inline-grid; place-items:center; width:26px; height:26px; padding:0; border:0; border-radius:8px; background:transparent; color:var(--ink-3); cursor:pointer; transition:background .15s var(--ease),color .15s var(--ease); }
+.copy-btn:hover { background:var(--surface-hover); color:var(--ink); }
+.copy-btn:focus-visible { outline:2px solid var(--focus); outline-offset:1px; }
+.copy-btn svg { width:15px; height:15px; display:block; }
+.copy-btn.copied { color:var(--accent-strong); }
+.message-tools { display:flex; gap:4px; margin-top:2px; opacity:0; transition:opacity .15s var(--ease); }
+.message.msg.me .message-tools { justify-content:flex-end; }
+.message.msg:hover .message-tools, .message-tools:focus-within { opacity:1; }
+.code-block { position:relative; }
+/* Reserve room on the right so the corner button never overlaps code — it's
+   permanently visible on touch (@media hover:none below), so the gap is kept
+   even when the button is hidden to avoid a reflow on hover. */
+.code-block pre.mdcode { padding-right:42px; }
+.code-block .code-copy { position:absolute; top:6px; right:6px; background:var(--surface); box-shadow:var(--shadow-sm); opacity:0; transition:opacity .15s var(--ease),background .15s var(--ease),color .15s var(--ease); }
+.code-block:hover .code-copy, .code-block .code-copy:focus-visible { opacity:1; }
+.code-block .code-copy:hover { background:var(--surface-hover); color:var(--ink); }
+@media (hover:none) { .message-tools, .code-block .code-copy { opacity:1; } }
 
-  /* Ack badges — one per member. Emoji is the identity; colored ring
-     is a secondary signal. Read = full opacity, pending = dim + desaturated. */
-  .acks { display: inline-flex; gap: 3px; margin-left: auto; align-items: center; }
-  .ack-badge { display: inline-flex; align-items: center; justify-content: center;
-               width: 20px; height: 20px; border-radius: 50%;
-               font-size: 13px; line-height: 1;
-               background: transparent;
-               border: 1.5px solid transparent;
-               cursor: pointer;
-               user-select: none; }
-  .ack-badge.read    { opacity: 1; }
-  .ack-badge.pending { opacity: 0.35; filter: grayscale(0.7); }
-  .ack-badge.self    { display: none; }
+.message-body { overflow-wrap:anywhere; line-height:1.55; }
+.message-body p:first-child { margin-top:0; }.message-body p:last-child { margin-bottom:0; }
+.message-body pre,.message-body code { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; background:var(--code-bg); color:var(--code-ink); border-radius:6px; }.message-body pre { overflow:auto; padding:10px; }
+.message-body a { color:inherit; text-decoration:underline; }.message-body.system,.message.retracted { color:var(--ink-3); font-size:13px; background:transparent; border-style:dashed; }
+/* GFM tables. The renderer wraps every table in .md-table; the wrapper scrolls
+   horizontally so a table wider than the (max-content, capped) bubble never
+   collapses its columns into a mangled stack — it just scrolls. The table
+   sizes to its content (no width:100%, which would defeat the scroll). Header
+   cells stay on one line; body cells wrap. */
+.message-body .md-table { overflow-x:auto; margin:9px 0; max-width:100%; }
+.message-body table { border-collapse:collapse; border:1px solid var(--line); border-radius:8px; font-size:13px; line-height:1.45; }
+.message-body th,.message-body td { padding:7px 12px; text-align:left; vertical-align:top; border-bottom:1px solid var(--line-soft); }
+.message-body th { background:var(--surface-2); color:var(--ink); font-weight:700; white-space:nowrap; }
+.message-body td { color:inherit; }
+.message-body tr:last-child td { border-bottom:0; }
+.message-body th + th,.message-body td + td { border-left:1px solid var(--line-soft); }
+.message.own .message-body table { border-color:var(--bubble-me-ink,#fff); }
+.message.own .message-body th { background:color-mix(in srgb,var(--bubble-me-ink,#fff) 16%,transparent); }
+.message.own .message-body th,.message.own .message-body td,.message.own .message-body th+th,.message.own .message-body td+td,.message.own .message-body tr td { border-color:color-mix(in srgb,var(--bubble-me-ink,#fff) 30%,transparent); }
+/* Validated file paths — clickable "reveal in Finder" links. Distinct from
+   plain links: code-tinted chip + a subtle 📁 affordance, dotted underline.
+   The JS layer (13-file-links.js) creates <a class="file-link" role="button">
+   with NO href, so without this block they render as inert-looking plain
+   text and the reveal interaction is effectively invisible. */
+.message-body a.file-link {
+  color: var(--accent-strong); text-decoration: underline; text-decoration-style: dotted;
+  text-underline-offset: 2px; cursor: pointer;
+  background: var(--accent-tint); border-radius: var(--r-sm); padding: 0 3px;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+.message-body a.file-link::after { content: " 📁"; font-size: 0.82em; opacity: 0.65; }
+.message-body a.file-link:hover { background: color-mix(in srgb, var(--accent-tint) 75%, var(--accent)); }
+.message-body a.file-link:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+.message-body a.file-link.file-link-ok { background: #dcecdf; }
+.message-body a.file-link.file-link-err { color: #a34444; background: #f8dddd; text-decoration-style: wavy; }
+/* Own-message bubbles are accent-colored with light ink — keep the chip readable. */
+.message.own .message-body a.file-link { color: var(--bubble-me-ink, #fff); background: color-mix(in srgb, var(--bubble-me-ink, #fff) 18%, transparent); }
+.message.own .message-body a.file-link:hover { background: color-mix(in srgb, var(--bubble-me-ink, #fff) 28%, transparent); }
+.message.own .message-body a.file-link.file-link-err { color: #fff; background: rgba(163, 68, 68, 0.55); }
+.edited-mark { opacity:.7; font-size:.82em; }.private-badge,.confidence { border-radius:99px; padding:1px 7px; font-size:10px; font-weight:700; text-transform:uppercase; }.private-badge { background:var(--warm-soft); color:var(--warm); }.confidence-low { background:#f8dddd; color:#a34444; }.confidence-medium { background:#f6eac5; color:#806216; }.confidence-high { background:#dcecdf; color:#37724a; }
+.message-targets { display:flex; flex-wrap:wrap; gap:5px; margin:0 0 8px; }.target-group { display:flex; align-items:center; gap:4px; font-size:11px; color:var(--ink-3); }.target-chip,.attachment-pill { border:0; border-radius:99px; padding:3px 8px; background:var(--accent-tint); color:var(--accent-strong); font:inherit; font-size:12px; }.sigil { font-weight:700; }.sigil-mention { color:var(--accent-strong); }.sigil-ref { color:#96701d; }.sigil-bang { color:var(--warm); }
+.day-separator { align-self:center; margin:8px 0; padding:3px 10px; border-radius:99px; background:var(--bg-sink); color:var(--ink-3); font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.04em; }
+.older-toggle { align-self:center; margin:6px 0 10px; padding:6px 14px; border:1px solid var(--line); border-radius:99px; background:var(--surface); color:var(--accent-strong); font:inherit; font-size:12px; font-weight:700; cursor:pointer; transition:background .18s var(--ease), border-color .18s var(--ease); }
+.older-toggle:hover { background:var(--accent-tint); border-color:var(--accent); }
+.older-toggle:focus-visible { outline:2px solid var(--focus); outline-offset:2px; }
+.unread-divider { align-self:center; margin:12px 0; padding:3px 10px; border-radius:99px; background:var(--warm-soft); color:var(--warm); font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.04em; }
+.reply-context { display:inline-flex; font-size:11px; color:var(--accent-strong); margin-bottom:6px; text-decoration:none; }
+.reply-context:hover { text-decoration:underline; }
+.task-chip { border-radius:99px; padding:1px 7px; font-size:10px; font-weight:700; text-transform:uppercase; background:var(--accent-tint); color:var(--accent-strong); }
+.message.question { border-color:var(--accent); }
+.message-attachment { display:inline-block; border-radius:var(--r-sm); overflow:hidden; border:1px solid var(--line); }
+.message-attachment img { display:block; max-width:260px; max-height:220px; object-fit:cover; cursor:zoom-in; }
+.message-attachment img.error { display:none; }
+/* Image lightbox — shared gallery viewer (Trio.lightbox). The <dialog> is
+   sized to its image so a click on the dimmed surround lands on the backdrop
+   (configureDialog closes on that). Every control is position:fixed to the
+   viewport so it stays put at any image size, and every color is a token so
+   the viewer stays cohesive across all themes. */
+.lightbox { max-width:calc(100vw - 48px); max-height:calc(100vh - 48px); border:0; background:transparent; padding:0; overflow:visible; }
+.lightbox::backdrop { background:rgba(0,0,0,.78); backdrop-filter:blur(2px); }
+.lightbox-stage { display:flex; align-items:center; justify-content:center; }
+.lightbox-img { display:block; max-width:calc(100vw - 96px); max-height:calc(100vh - 96px); border-radius:var(--r-md); box-shadow:var(--shadow-lg); transform-origin:center center; transition:transform .12s var(--ease); cursor:zoom-in; touch-action:none; user-select:none; -webkit-user-drag:none; }
+.lightbox-img[hidden] { display:none; }   /* [hidden] must beat display:block above */
+.lightbox-img.zoomed { cursor:grab; }
+.lightbox-img.dragging { cursor:grabbing; transition:none; }
+.lightbox-close { position:fixed; top:16px; right:18px; z-index:var(--z-toast); display:flex; align-items:center; justify-content:center; width:44px; height:44px; padding:0; border:0; border-radius:var(--r-full); background:var(--surface); color:var(--ink); font-size:30px; line-height:1; box-shadow:var(--shadow-md); cursor:pointer; opacity:.9; transition:opacity .2s var(--ease); }
+.lightbox-close:hover { opacity:1; }
+.lightbox-nav { position:fixed; top:50%; transform:translateY(-50%); z-index:var(--z-toast); display:flex; align-items:center; justify-content:center; width:46px; height:46px; padding:0; border:0; border-radius:var(--r-full); background:var(--surface); color:var(--ink); font-size:26px; line-height:1; box-shadow:var(--shadow-md); cursor:pointer; opacity:.85; transition:opacity .2s var(--ease); }
+.lightbox-nav:hover { opacity:1; }
+.lightbox-prev { left:18px; }
+.lightbox-next { right:18px; }
+.lightbox-nav[hidden], .lightbox-counter[hidden] { display:none; }
+.lightbox-toolbar { position:fixed; left:50%; bottom:20px; transform:translateX(-50%); z-index:var(--z-toast); display:flex; align-items:center; gap:2px; padding:4px; border-radius:var(--r-full); background:var(--surface); box-shadow:var(--shadow-md); }
+.lightbox-tool { display:flex; align-items:center; justify-content:center; min-width:34px; height:34px; padding:0 10px; border:0; border-radius:var(--r-full); background:transparent; color:var(--ink); font-size:18px; font-weight:700; line-height:1; cursor:pointer; }
+.lightbox-tool:hover { background:var(--surface-hover); }
+.lightbox-zoom-label { font-family:var(--font-body); font-size:12px; font-weight:600; color:var(--ink-2); min-width:52px; }
+.lightbox-counter { position:fixed; left:50%; top:16px; transform:translateX(-50%); z-index:var(--z-toast); padding:4px 12px; border-radius:var(--r-full); background:var(--surface); color:var(--ink-2); font-size:12px; font-weight:600; box-shadow:var(--shadow-sm); }
+.lightbox button:focus-visible, .lightbox-img:focus-visible { outline:2px solid var(--focus); outline-offset:2px; }
+.lightbox-error { font:600 15px var(--font-body); padding:24px 28px; border-radius:var(--r-md); background:var(--surface); color:var(--ink); box-shadow:var(--shadow-lg); }
+body.compact .message { padding:8px 10px; }
+body.compact .messages { padding:14px clamp(12px,3vw,40px); gap:8px; }
+body.compact .composer-shell { padding:8px clamp(12px,3vw,40px) 12px; }
+body.compact .day-separator, body.compact .unread-divider { margin:4px 0; }
+.home-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); gap:12px; margin-bottom:20px; }
+.home-card { display:flex; flex-direction:column; align-items:flex-start; gap:4px; padding:14px; border:1px solid var(--line); border-radius:var(--r-md); background:var(--surface); text-align:left; }
+.home-card .home-count { font-size:22px; font-weight:800; color:var(--accent); }
+.home-card small { color:var(--ink-3); }
+.home-recent h2 { font-size:13px; text-transform:uppercase; letter-spacing:.06em; color:var(--ink-3); margin:0 0 8px; }
+.home-empty { color:var(--ink-3); }
+.home-channel { display:block; width:100%; padding:8px 10px; border:0; border-radius:var(--r-sm); background:var(--bg-sink); color:var(--ink); text-align:left; margin-bottom:6px; }
+.attention-list { display:grid; gap:10px; }
+.attention-item { padding:12px; border:1px solid var(--line); border-radius:var(--r-md); background:var(--surface); border-left:3px solid var(--line); }
+.attention-item.severity-high { border-left-color:var(--warm); }
+.attention-item.severity-medium { border-left-color:var(--warn); }
+.attention-item small { display:block; color:var(--ink-3); margin:4px 0; }
+.attention-actions { display:flex; gap:8px; margin-top:8px; }
+.attention-actions button { padding:6px 10px; border-radius:8px; border:0; background:var(--bg-sink); color:var(--ink); font-weight:700; }
+.task-filters { display:flex; gap:6px; margin-bottom:12px; }
+.task-filters button { padding:5px 10px; border:0; border-radius:99px; background:var(--bg-sink); color:var(--ink-3); font-size:12px; font-weight:700; }
+.task-filters button.active { background:var(--accent); color:#fff; }
+.task-list { display:grid; gap:8px; }
+.task-row { display:grid; gap:4px; padding:10px; border:1px solid var(--line); border-radius:var(--r-md); background:var(--surface); }
+.task-row b { color:var(--accent); }
+.task-count { font-size:12px; color:var(--ink-3); margin-top:10px; }
+.search-modal { max-width:min(640px,calc(100vw - 32px)); border:0; border-radius:var(--r-lg); background:var(--surface-2); padding:16px; }
+.search-modal::backdrop { background:rgba(0,0,0,.7); }
+.search-modal form { display:grid; gap:8px; }
+.search-input { width:100%; padding:10px 12px; border:1px solid var(--line); border-radius:var(--r-md); background:var(--surface); color:var(--ink); }
+.search-results { max-height:60vh; overflow-y:auto; }
+.search-result { width:100%; text-align:left; padding:10px; border:0; border-bottom:1px solid var(--line-soft); background:transparent; color:var(--ink); }
+.search-result:hover { background:var(--bg-sink); }
+.search-meta { display:block; font-size:11px; color:var(--ink-3); margin-bottom:3px; }
+.search-body { display:block; font-size:13px; }
+.search-body mark { background:var(--accent-tint); color:var(--ink); padding:0 2px; border-radius:3px; }
+.archive-modal { max-width:min(520px,calc(100vw - 32px)); max-height:calc(100vh - 32px); overflow:auto; border:0; border-radius:var(--r-lg); background:var(--surface-2); padding:16px; }
+.archive-modal::backdrop { background:rgba(0,0,0,.7); }
+.archive-modal h3 { font-size:13px; text-transform:uppercase; letter-spacing:.06em; color:var(--ink-3); margin:16px 0 8px; }
+.archive-search { width:100%; padding:8px 12px; border:1px solid var(--line); border-radius:var(--r-md); background:var(--surface); color:var(--ink); }
+.archive-row { display:flex; justify-content:space-between; align-items:center; padding:8px 0; border-bottom:1px solid var(--line-soft); }
+.archive-actions { display:flex; gap:6px; }
+.archive-actions button { padding:4px 10px; border:0; border-radius:8px; background:var(--bg-sink); color:var(--ink); font-size:12px; }
+.archive-actions .archive-note { align-self:center; font-size:11.5px; color:var(--ink-3); font-style:italic; }
+.attachment-pill.loading { opacity:.7; cursor:wait; }
+.ask-card { position:relative; margin-top:8px; padding:14px 16px 13px; border:1px solid var(--line); border-radius:var(--r-lg); background:var(--surface); box-shadow:var(--shadow-sm); display:flex; flex-direction:column; gap:11px; max-width:100%; }
+.ask-card.dismissed { padding:10px 14px; background:var(--surface-2); }
+.ask-head { display:flex; align-items:center; justify-content:space-between; gap:10px; }
+.ask-eyebrow { font-size:11px; font-weight:700; letter-spacing:.06em; text-transform:uppercase; color:var(--accent-strong); }
+.ask-dismiss { flex:none; width:26px; height:26px; margin:-5px -5px -5px 0; border-radius:8px; display:grid; place-items:center; color:var(--ink-3); transition:background .15s var(--ease), color .15s var(--ease); }
+.ask-dismiss:hover { background:var(--surface-hover); color:var(--ink); }
+.ask-dismiss svg { width:16px; height:16px; }
+.ask-body { display:flex; flex-direction:column; gap:9px; }
+.ask-section { font-size:11px; font-weight:700; letter-spacing:.05em; text-transform:uppercase; color:var(--ink-3); }
+.ask-question { margin:0; font-size:15px; font-weight:600; line-height:1.4; color:var(--ink); }
+.ask-options { display:flex; flex-direction:column; gap:6px; }
+.ask-option { display:flex; align-items:center; gap:10px; padding:9px 12px; border:1px solid var(--line); border-radius:12px; background:var(--surface-2); color:var(--ink); cursor:pointer; font-size:13.5px; line-height:1.35; transition:border-color .14s var(--ease), background .14s var(--ease); }
+.ask-option:hover { border-color:var(--accent); }
+.ask-option input { width:16px; height:16px; flex:none; accent-color:var(--accent); }
+.ask-option input:disabled { cursor:default; }
+.ask-option:has(input:disabled) { cursor:default; }
+.ask-option.selected { border-color:var(--accent); background:var(--accent-tint); font-weight:600; }
+.ask-option:has(input:focus-visible) { outline:2px solid var(--focus); outline-offset:2px; }
+.ask-custom { width:100%; box-sizing:border-box; padding:9px 12px; border:1px solid var(--line); border-radius:12px; background:var(--surface-2); color:var(--ink); font:inherit; font-size:13.5px; transition:border-color .14s var(--ease), box-shadow .14s var(--ease); }
+.ask-custom:focus { outline:none; border-color:var(--accent); box-shadow:0 0 0 3px var(--focus); }
+.ask-custom::placeholder { color:var(--ink-3); }
+.ask-foot { display:flex; align-items:center; gap:10px; margin-top:1px; }
+.ask-send { margin-left:auto; border:0; border-radius:10px; padding:9px 18px; background:var(--accent); color:#fff; font:inherit; font-size:13px; font-weight:700; box-shadow:var(--shadow-sm); transition:background .16s var(--ease), transform .12s var(--ease-soft); }
+.ask-send:hover { background:var(--accent-strong); }
+.ask-send:active { transform:scale(.96); }
+.ask-nav { border:1px solid var(--line); border-radius:10px; padding:8px 15px; background:var(--surface-2); color:var(--ink-2); font:inherit; font-size:13px; font-weight:600; transition:background .15s var(--ease), color .15s var(--ease); }
+.ask-nav:hover:not(:disabled) { background:var(--surface-hover); color:var(--ink); }
+.ask-nav:disabled { opacity:.4; cursor:default; }
+.ask-nav.primary { margin-left:auto; background:var(--accent); color:#fff; border-color:transparent; }
+.ask-nav.primary:hover:not(:disabled) { background:var(--accent-strong); color:#fff; }
+.ask-dots { display:flex; align-items:center; gap:6px; margin:0 auto; }
+.ask-dot { width:8px; height:8px; padding:0; border:0; border-radius:50%; background:var(--line); cursor:pointer; transition:background .15s var(--ease), box-shadow .15s var(--ease); }
+.ask-dot.done { background:color-mix(in oklab, var(--accent) 55%, var(--line)); }
+.ask-dot.on { background:var(--accent); box-shadow:0 0 0 3px var(--accent-tint); }
+.ask-dismissed-bar { display:flex; align-items:center; gap:10px; color:var(--ink-3); font-size:12.5px; }
+.ask-undo { margin-left:auto; border:0; background:none; color:var(--accent-strong); font:inherit; font-size:12.5px; font-weight:700; cursor:pointer; }
+.ask-undo:hover { text-decoration:underline; }
+.ask-note { color:var(--ink-3); font-size:12.5px; }
+.ask-note.done { color:color-mix(in oklab, var(--accent) 66%, var(--ink)); font-weight:600; }.message-attachments { display:flex; flex-wrap:wrap; gap:8px; margin-top:10px; }.message-attachment { display:block; max-width:260px; color:inherit; }.message-attachment img { display:block; max-width:100%; max-height:220px; border-radius:8px; border:1px solid var(--line); }.unread-divider { display:flex; align-items:center; gap:8px; color:var(--accent-strong); font-size:11px; font-weight:700; text-transform:uppercase; }.unread-divider::before,.unread-divider::after { content:""; height:1px; flex:1; background:var(--accent-tint); }
+.composer-shell { position:relative; padding:12px clamp(16px,4vw,52px) 20px; border-top:1px solid var(--line); background:var(--surface); }.composer-shell textarea { width:100%; min-height:44px; max-height:180px; resize:vertical; border:1px solid var(--line); border-radius:var(--r-sm,12px); padding:12px; background:var(--surface-2); }.composer-actions { display:flex; justify-content:space-between; margin-top:8px; }.send-btn { border:0; border-radius:10px; padding:8px 15px; color:#fff; background:var(--accent); font-weight:700; }.send-btn:disabled { opacity:.45; cursor:not-allowed; }.attachment-pill { margin:0 5px 8px 0; }.target-chip { margin:0 5px 7px 0; cursor:pointer; }.dictating .composer-shell { box-shadow:inset 0 3px var(--warm); }
+/* Inline note when a DM @-targets someone who isn't a participant: the mention
+   is inert (won't wake/reach them, per narrow_wake) but the send is NOT blocked.
+   Muted so it teaches without nagging. */
+.composer-hint { display:inline-block; margin:0 0 7px; font-size:12px; color:var(--ink-3); font-style:italic; }
+.dictate-wrap { display:inline-flex; align-items:center; gap:8px; }
+/* LOTC: the SVG UA stylesheet has no `[hidden]{display:none}` rule — that's
+   an HTML-namespace default only, and Chrome (and every other engine) does
+   NOT apply it to <svg> elements. So toggling the `hidden` attribute on
+   .mic-icon/.stop-icon did nothing visually: both were always rendered, and
+   #dictate-btn's `display:grid` with no explicit placement auto-stacked the
+   two visible children into separate implicit rows instead of overlapping —
+   the "offset mic + white square" (the stop icon's rect, styled #fff below,
+   showing through). Needs an explicit rule since the browser won't infer it. */
+#dictate-btn svg[hidden] { display:none; }
+#dictate-btn .stop-icon { color:#fff; }
+#dictate-btn.recording { background:#e0393e; color:#fff; animation:dictate-pulse 1.6s ease-in-out infinite; }
+#dictate-btn.recording:hover { background:#c62f34; }
+#dictate-btn.processing { opacity:.7; }
+@keyframes dictate-pulse { 0%,100% { box-shadow:0 0 0 0 rgba(224,57,62,.45); } 50% { box-shadow:0 0 0 6px rgba(224,57,62,0); } }
+/* LOTC: these had no `:not([hidden])` guard, so the unconditional `display`
+   here always beat the UA `[hidden]{display:none}` rule (same specificity,
+   author sheet wins on source order) — the meter/status rendered even at
+   rest, regardless of the `hidden` attribute JS was correctly toggling. */
+.dictate-meter:not([hidden]) { display:inline-flex; align-items:center; gap:2px; height:18px; }
+.dictate-meter .bar { --level:0.15; width:3px; height:100%; border-radius:2px; background:#e0393e; transform:scaleY(var(--level)); transform-origin:bottom; transition:transform .08s linear; }
+.dictate-status:not([hidden]) { font-size:12px; color:var(--muted,#8a8f98); white-space:nowrap; }
 
-  /* Watermark pins — animal emoji parked at the highest message a given
-     member has read. One pin per member, migrates forward as they ack. */
-  .msg { position: relative; }
-  .watermark-pins { position: absolute; right: 6px; bottom: 2px;
-                    display: flex; gap: 3px; pointer-events: none;
-                    opacity: 0.9; }
-  .watermark-pin { font-size: 16px; line-height: 1;
-                   transition: transform 0.35s ease;
-                   text-shadow: 0 0 2px var(--bg), 0 0 2px var(--bg); }
-  .watermark-pin.self { filter: drop-shadow(0 0 3px var(--accent)); }
-  .watermark-pin.ctx-ringed { border-radius: 50%; padding: 2px; }
-  .watermark-pin.here { animation: here-pulse 1.8s ease-in-out infinite; }
-  @keyframes here-pulse {
-    0%, 100% { transform: translateX(0); opacity: 0.95; }
-    50%      { transform: translateX(-3px); opacity: 0.55; }
-  }
+/* Atrium message rhythm: avatar, author line, and soft asymmetric bubbles. */
+.messages{gap:0;padding:22px max(24px,7vw) 10px}.message.msg{display:flex;align-items:flex-start;gap:12px;max-width:820px;width:100%;align-self:center;padding:3px 0;border:0;border-radius:0;background:transparent;box-shadow:none}.message.msg.me{flex-direction:row-reverse}.message.msg .message-avatar{margin-top:2px;background:linear-gradient(150deg,var(--accent),var(--accent-strong));color:#fff;box-shadow:inset 0 0 0 1px rgba(255,255,255,.16)}.message.msg.me .message-avatar{background:var(--warm)}.message.msg .message-content{min-width:0;max-width:72%;display:flex;flex-direction:column}.message.msg.me .message-content{align-items:flex-end}.message.msg .message-head{display:flex;align-items:baseline;gap:8px;margin:0 4px 3px;border:0;padding:0;font-size:12px;color:var(--ink-3)}.message.msg .message-head strong{font-size:13.5px;font-weight:700;color:var(--ink)}.message.msg .message-role{padding:0;background:none;color:var(--ink-3);font-size:11px;font-weight:500;text-transform:none}.message.msg .message-head time{font-size:11px;color:var(--ink-3)}.message.msg .bubble{width:max-content;max-width:100%;padding:11px 15px;border-radius:6px 18px 18px 18px;background:var(--bubble-agent);color:var(--bubble-agent-ink);border:1px solid var(--line-soft);box-shadow:var(--shadow-sm);font-size:14.5px;line-height:1.55;word-wrap:break-word}.message.msg.me .bubble{background:var(--bubble-me);color:var(--bubble-me-ink);border-color:transparent;border-radius:18px 6px 18px 18px;box-shadow:var(--shadow-md)}.message.msg.private .bubble{box-shadow:inset 3px 0 var(--warm),var(--shadow-sm)}.message.msg.me.private .bubble{box-shadow:var(--shadow-md),inset -3px 0 var(--warm)}.message.msg .message-targets,.message.msg .message-attachments,.message.msg .ask-card{max-width:100%}.message.msg .message-controls{justify-content:flex-end}.message.msg .message-controls button{border-radius:999px}.message.msg .message-body p{margin:0}.message.msg .message-body p+p{margin-top:7px}.message.msg .message-body a{color:var(--accent-strong);text-underline-offset:2px}.message.msg.me .message-body a{color:#fff}.day-separator{align-self:center;margin:18px 0 20px;padding:3px 12px;border-radius:999px;background:var(--surface);box-shadow:var(--shadow-sm);color:var(--ink-3);font-size:11.5px;font-weight:700;letter-spacing:.05em;text-transform:none}.private-banner{max-width:820px;margin:0 auto 4px;padding:0 26px}.private-banner:not(.hidden){display:block}.private-banner span{display:block;padding:8px 14px;border-radius:12px;background:var(--accent-tint);color:var(--accent-strong);font-size:12.5px;font-weight:600}
+@media(max-width:640px){.messages{padding-left:16px;padding-right:16px}.message.msg .message-content{max-width:calc(100% - 44px)}.message.msg .message-head{gap:6px}.message.msg .message-role{display:none}.message.msg .bubble{font-size:14px;padding:10px 13px}}
+.message.msg .message-avatar.tone-coral{background:linear-gradient(150deg,#e07a6a,#c04f4a)}
+.message.msg .message-avatar.tone-indigo{background:linear-gradient(150deg,#6c7ae0,#4a52b0)}
+.message.msg .message-avatar.tone-eucalyptus{background:linear-gradient(150deg,#4c9a7d,#2f6b54)}
+.message.msg .message-avatar.tone-amber{background:linear-gradient(150deg,#e0a24d,#c9772f)}
+.message.msg .message-avatar.tone-plum{background:linear-gradient(150deg,#a05c8c,#6f3f64)}
+.composer-shell{border-top:0;background:var(--bg);padding:8px 26px 20px}.composer-shell .composer-inner{padding:8px;background:var(--surface-2);border:1px solid var(--line);border-radius:var(--r-lg);box-shadow:var(--shadow-md)}.composer-shell textarea{border:0;box-shadow:none;background:transparent;resize:none;min-height:42px;padding:8px 10px 2px}.composer-shell textarea:focus{border:0;box-shadow:none}.composer-shell .comp-bar{padding:0 4px 2px}
+/* Contenteditable message box — transparent field inside the .composer-inner
+   surface, mirroring the old textarea. Renders @-mention chips inline as you
+   type (buildMentionHtml in 12-composer.js). */
+.composer-shell .composer-input{ border:0; box-shadow:none; background:transparent; min-height:42px; max-height:180px; overflow-y:auto; padding:8px 10px 2px; outline:none; white-space:pre-wrap; overflow-wrap:break-word; word-break:break-word; line-height:1.5; cursor:text; }
+.composer-shell .composer-input:empty::before{ content:attr(data-placeholder); color:var(--ink-3); pointer-events:none; }
+.composer-shell .composer-input[aria-readonly="true"]{ cursor:default; color:var(--ink-3); }
+/* Chips render slightly tighter inside the input than in message bodies. */
+.composer-input .inline-mention,.composer-input .inline-all{ padding:1px 4px; }
+/* Agent-to-agent audit marker: a read-only badge distinct from archived DMs. */
+.private-banner.audit{text-align:center}.private-banner.audit span{display:inline-flex;align-items:center;gap:7px;padding:6px 12px;border:1px solid color-mix(in oklab,var(--warm) 45%,var(--line));border-radius:999px;background:var(--warm-soft);box-shadow:var(--shadow-sm);color:color-mix(in oklab,var(--warm) 78%,var(--ink));font-size:11.5px;font-weight:800;letter-spacing:.02em}.private-banner.audit span::before{content:"↔";font-size:14px;line-height:1}
 
-  /* Jump-to-latest */
-  #jump-btn { position: absolute; right: 18px; bottom: 14px;
-              background: var(--accent); color: var(--bg); border: none; padding: 6px 12px;
-              border-radius: 18px; cursor: pointer; font-weight: 600; font-size: 11px;
-              box-shadow: 0 4px 14px rgba(0,0,0,0.5); display: none; z-index: 5; }
-  #jump-btn.show { display: block; }
-  #jump-btn:hover { background: var(--accent-hi); }
-  #jump-btn .count { background: var(--err); color: white;
-                     border-radius: 10px; padding: 1px 6px; margin-left: 4px; font-size: 10px; }
-  /* top "N new messages" bar — jump to the first unread */
-  #new-bar { position: absolute; left: 50%; top: 10px; transform: translateX(-50%);
-             background: var(--mention); color: var(--bg); border: none; z-index: 6;
-             padding: 5px 14px; border-radius: 16px; font-size: 11px; font-weight: 600;
-             cursor: pointer; box-shadow: 0 4px 14px rgba(0,0,0,0.5); display: none;
-             user-select: none; }
-  #new-bar.show { display: block; }
-  #new-bar:hover { filter: brightness(1.1); }
-  /* "new messages" divider before the first unread message */
-  .unread-divider { display: flex; align-items: center; gap: 8px; margin: 10px 4px;
-                    color: var(--mention); font-size: 10px; font-weight: 600;
-                    text-transform: uppercase; letter-spacing: 0.6px; }
-  .unread-divider::before, .unread-divider::after { content: ""; flex: 1; height: 1px;
-                    background: var(--mention); }
+/* Lifecycle notices are quiet timeline annotations, not authored messages. */
+.message.msg.system-message{width:100%;max-width:820px;align-self:center;padding:8px 0;border:0;background:transparent;box-shadow:none}
+.message.msg.system-message .message-content{width:100%;max-width:none;align-items:flex-start}
+.message.msg.system-message .message-body.system{width:100%;box-sizing:border-box;padding:0;border:0;border-radius:0;background:transparent;box-shadow:none;color:var(--ink-3);font-size:13px;line-height:1.4;text-align:left}
+@media(max-width:640px){.message.msg.system-message .message-content{max-width:none}}
+.attachment-thumb{position:relative;width:72px;height:72px;border-radius:var(--r-sm);overflow:hidden;border:1px solid var(--line);cursor:zoom-in}
+.attachment-thumb img{display:block;width:100%;height:100%;object-fit:cover}
+.attachment-thumb .rm{position:absolute;top:2px;right:2px;width:20px;height:20px;padding:0;border:0;border-radius:999px;background:rgba(0,0,0,.55);color:#fff;font-size:14px;line-height:1;cursor:pointer}
+.attachment-thumb .rm:hover{background:rgba(0,0,0,.75)}
+.attachment-thumb .loading-mask{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:var(--bg-sink);color:var(--ink-3);font-size:18px}
 
-  /* ── Roster sidebar ── */
+/* ── inline mention rendering (sent messages) ──────────────────────────── */
+/* Tinted mention chip — same palette as the roster/facepile tones. data-tone
+   (not the .tone-* classes) so it never inherits the avatar GRADIENT background. */
+.inline-mention{ border-radius:6px; padding:0 3px; font-weight:700; }
+.inline-mention[data-tone="coral"]{ background:color-mix(in oklab,#c04f4a 20%,transparent); color:#a83f39; }
+.inline-mention[data-tone="indigo"]{ background:color-mix(in oklab,#4a52b0 20%,transparent); color:#4149a0; }
+.inline-mention[data-tone="eucalyptus"]{ background:color-mix(in oklab,#2f6b54 20%,transparent); color:#2c6350; }
+.inline-mention[data-tone="amber"]{ background:color-mix(in oklab,#c9772f 24%,transparent); color:#8f6220; }
+.inline-mention[data-tone="plum"]{ background:color-mix(in oklab,#6f3f64 22%,transparent); color:#6f3f64; }
+
+/* @all / !all — animated rainbow shimmer text (background-clip:text). */
+@keyframes mhl-shimmer{ to{ background-position:200% center; } }
+.inline-all{ border-radius:6px; padding:0 3px; font-weight:700; background-image:linear-gradient(100deg,#e07a6a,#e0a24d,#4c9a7d,#6c7ae0,#a05c8c,#e07a6a); background-size:200% auto; animation:mhl-shimmer 3s linear infinite; -webkit-background-clip:text; background-clip:text; color:transparent; -webkit-text-fill-color:transparent; }
+@media (prefers-reduced-motion:reduce){ .inline-all{ animation:none; } }
+/* Own-message bubble is accent-coloured with white text, so a translucent tone
+   tint washes out (see screenshot). Mirror the file-link treatment: white text
+   on a translucent-white pill — legible on the blue bubble regardless of tone. */
+.message.own .inline-mention,.message.msg.me .inline-mention{ background:color-mix(in srgb,#fff 22%,transparent); color:#fff; }
