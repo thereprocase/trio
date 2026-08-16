@@ -60,6 +60,7 @@ import nth_supervisor as nsup
 import nth_agent_manager as nam
 import nth_request_log as nrl
 import nth_usage as nusage
+import nth_conversation as nconv
 from nth_constants import (ANIMAL_EMOJIS, animal_for, animal_for_channel,
                            NTH_VERSION, project_context, AGENT_INBOX_CHANNEL, can_see, is_all_seeing,
                            parse_recipients, narrow_wake)
@@ -2450,50 +2451,42 @@ CHANNEL_CODE_RE = re.compile(r"^[a-z0-9][a-z0-9\-]{0,31}$")
 # scattered across topics; new ones go through the global agent inbox), and to
 # a reader that is one conversation. Keying on participants is what merges
 # them; keying on channel is what split them in the first place.
+#
+# The key itself lives in nth_conversation.py and is VIEWER-INDEPENDENT — see
+# that module for why. What is viewer-relative (who the counterparts are, what
+# the thread is called, whether it is yours or one you are auditing) is derived
+# from the key here, and never folded back into it.
 def dm_thread_key(message, operator_id: str) -> Tuple[str, List[str]]:
-    """Unified-inbox key and peer ids for one DM row involving the operator.
+    """(key, counterparts) for a DM row the operator is part of.
 
     Returns ("", []) when the operator is not a participant, so callers can
-    use the empty key as "not one of mine".
+    keep using the empty key to mean "not one of mine". The key is the same
+    string every viewer sees for this conversation; only `counterparts` is
+    relative to the operator.
     """
-    participants = set(parse_recipients(message["recipients"]))
-    participants.add(message["member_id"])
-    if operator_id not in participants:
+    people = nconv.message_participants(
+        message["member_id"], parse_recipients(message["recipients"]))
+    if operator_id not in people:
         return "", []
-    others = sorted(participants - {operator_id})
-    if not others:
+    key = nconv.canonical_dm_key(people)
+    if not key:
         return "", []
-    # A 1:1 thread is keyed by the peer alone, so it stays stable and readable
-    # in a URL. Group threads take a prefix so a group of one can never collide
-    # with the 1:1 thread for that same person.
-    key = others[0] if len(others) == 1 else "group:" + ",".join(others)
-    return key, others
+    return key, nconv.counterparts(key, operator_id)
 
 
 def dm_audit_thread_key(message) -> str:
-    """Stable participant key for a DM row the operator is NOT part of.
+    """Key for a DM row the operator is NOT part of — an agent-to-agent thread
+    surfaced read-only for audit.
 
-    These are agent-to-agent conversations, surfaced read-only for audit.
+    Identical in form to dm_thread_key's: a conversation does not change its
+    name because of who is looking at it.
     """
-    participants = set(parse_recipients(message["recipients"]))
-    participants.add(message["member_id"])
-    return ",".join(sorted(participants)) if len(participants) > 1 else ""
+    people = nconv.message_participants(
+        message["member_id"], parse_recipients(message["recipients"]))
+    return nconv.canonical_dm_key(people)
 
 
-def participants_in_key(thread_key: str) -> List[str]:
-    """The member ids named by a thread key, for any of the three key shapes.
-
-    Callers used to do `key.split(",")`, which is right for a 1:1 key (a bare
-    id) and for an audit key ("a,b") but WRONG for a group key: splitting
-    "group:a,b" yields ["group:a", "b"], and "group:a" matches no member, so
-    every membership test against it silently failed. Parse in one place so
-    the three shapes cannot drift apart again.
-    """
-    if not thread_key:
-        return []
-    if thread_key.startswith("group:"):
-        thread_key = thread_key[len("group:"):]
-    return [part for part in thread_key.split(",") if part]
+participants_in_key = nconv.participants_in_key
 
 
 # ── agent control plane (supervisor-backed) ──
@@ -6512,7 +6505,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
         # and the conversation stayed gone. Re-derive and say what is true.
         result = {"ok": True, "kind": kind, "key": key, "archived": archived}
         if kind == "dm":
-            still = self._agent_archived_stamp(key)
+            still = self._agent_archived_stamp(key, ident.member_id)
             if still and not archived:
                 result["archived"] = True
                 result["agent_archived"] = True
@@ -6525,10 +6518,17 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 result["agent_archived"] = bool(still)
         self._json(result)
 
-    def _agent_archived_stamp(self, thread_key: str) -> str:
-        """Newest archive stamp if EVERY participant of `thread_key` is an
-        archived agent, else "". Mirrors all_archived() in _handle_dms."""
-        ids = participants_in_key(thread_key)
+    def _agent_archived_stamp(self, thread_key: str, viewer_id: str = "") -> str:
+        """Newest archive stamp if every COUNTERPART in `thread_key` is an
+        archived agent, else "". Mirrors all_archived() in _handle_dms.
+
+        The viewer is excluded deliberately: a canonical key names every
+        participant including the operator, and the operator is a human with no
+        `agents` row — counting them would make this return "" for every one of
+        the operator's own threads.
+        """
+        ids = (nconv.counterparts(thread_key, viewer_id) if viewer_id
+               else participants_in_key(thread_key))
         if not ids:
             return ""
         db = None

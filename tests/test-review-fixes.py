@@ -32,6 +32,7 @@ SERVER = Path(__file__).resolve().parent.parent / "server"
 sys.path.insert(0, str(SERVER))
 import nth_server as srv    # noqa: E402
 import nth_web as web       # noqa: E402
+import nth_conversation as nconv  # noqa: E402
 
 failures = []
 
@@ -145,30 +146,55 @@ try:
         db.commit()
     finally:
         db.close()
+    k_alice = nconv.canonical_dm_key([alice, op])
     _st, d1 = http(port, "/api/dms")
     check("dms: the operator's own thread is listed",
-          alice in {t["key"] for t in d1["your_dms"]})
+          k_alice in {t["key"] for t in d1["your_dms"]})
 
     # Bury it under agent-to-agent DM traffic far exceeding the window.
     bulk_messages(CH, bob, "Bob", 2100, recipients=[carol])
     _st, d2 = http(port, "/api/dms")
     check("dms: the operator's thread SURVIVES 2100 unrelated agent DMs — "
           "the window is per-owner, not global",
-          alice in {t["key"] for t in d2["your_dms"]})
-    _st, d3 = http(port, f"/api/dms?with={alice}")
+          k_alice in {t["key"] for t in d2["your_dms"]})
+    _st, d3 = http(port, f"/api/dms?with={k_alice}")
     check("dms: and its history is still readable",
           any("private word" in m["content"] for m in d3["messages"]))
 
     # ── 3. group thread keys must parse correctly ───────────────────────────
-    check("keys: a group key's participants parse without the prefix",
-          web.participants_in_key("group:" + ",".join(sorted([alice, carol])))
+    check("keys: a key names every participant, sorted",
+          nconv.participants_in_key(nconv.canonical_dm_key([carol, alice]))
           == sorted([alice, carol]))
-    check("keys: a 1:1 key is a single participant",
-          web.participants_in_key(alice) == [alice])
-    check("keys: an audit key splits on commas",
-          web.participants_in_key(f"{bob},{carol}") == [bob, carol])
+    check("keys: the prefixed wire form parses to the same participants",
+          nconv.participants_in_key("dm:" + ",".join(sorted([alice, carol])))
+          == sorted([alice, carol]))
+    check("keys: a set with fewer than two people is not a conversation",
+          nconv.canonical_dm_key([alice]) == "")
     check("keys: an empty key has no participants",
-          web.participants_in_key("") == [])
+          nconv.participants_in_key("") == [])
+    check("keys: counterparts are viewer-relative, the key is not",
+          nconv.counterparts(nconv.canonical_dm_key([alice, op]), op) == [alice])
+
+    # The key is PERSISTED (dm_archives.thread_key is half a primary key), so
+    # it must be identical across processes — not merely within one. A set's
+    # iteration order is stable inside a process but varies between them under
+    # hash randomisation, so an unsorted key would compare equal to itself here
+    # and still fail to match a row written by the hub yesterday.
+    import subprocess
+    probe = (
+        "import sys; sys.path.insert(0, %r); import nth_conversation as c; "
+        "print(c.canonical_dm_key(%r))" % (str(SERVER), [carol, alice, bob]))
+    seen = set()
+    for seed in ("0", "1", "12345"):
+        out = subprocess.run([sys.executable, "-c", probe], capture_output=True,
+                             text=True, timeout=30,
+                             env={**__import__("os").environ,
+                                  "PYTHONHASHSEED": seed})
+        seen.add(out.stdout.strip())
+    check(f"keys: identical across processes under different hash seeds "
+          f"({len(seen)} distinct value(s)) — the key is persisted, so an "
+          f"order that varies per process would orphan every archive row",
+          len(seen) == 1 and seen.pop() == ",".join(sorted([alice, bob, carol])))
 
     # ── 4. archive state must be expressible and honestly reported ──────────
     db = srv.get_db()
@@ -181,10 +207,11 @@ try:
         db.commit()
     finally:
         db.close()
+    k_carol = nconv.canonical_dm_key([carol, op])
     http(port, "/api/archives", "POST",
-         {"kind": "dm", "key": carol, "archived": True})
+         {"kind": "dm", "key": k_carol, "archived": True})
     _st, d4 = http(port, "/api/dms?archived=1")
-    t_carol = {t["key"]: t for t in d4["your_dms"]}.get(carol, {})
+    t_carol = {t["key"]: t for t in d4["your_dms"]}.get(k_carol, {})
     check("archive: a self-archived thread says so explicitly",
           t_carol.get("self_archived") is True
           and t_carol.get("agent_archived") is False)
@@ -204,7 +231,7 @@ try:
     finally:
         db.close()
     _st, d5 = http(port, "/api/dms?archived=1")
-    t2 = {t["key"]: t for t in d5["your_dms"]}.get(carol, {})
+    t2 = {t["key"]: t for t in d5["your_dms"]}.get(k_carol, {})
     check("archive: BOTH causes are reported independently — the payload can "
           "describe a thread archived by you AND by its agent",
           t2.get("self_archived") is True and t2.get("agent_archived") is True)
@@ -212,7 +239,7 @@ try:
     # Restoring clears only YOUR archive; the server must say the thread is
     # still hidden rather than claim success.
     st_r, r_body = http(port, "/api/archives", "POST",
-                        {"kind": "dm", "key": carol, "archived": False})
+                        {"kind": "dm", "key": k_carol, "archived": False})
     check("archive: restore reports the EFFECTIVE state, not the requested "
           "one — it does not claim the thread is back when it is not",
           st_r == 200 and r_body.get("archived") is True
@@ -221,7 +248,7 @@ try:
           "agent" in (r_body.get("note") or "").lower())
     _st, d6 = http(port, "/api/dms?archived=0")
     check("archive: the thread is indeed still not in the active list",
-          carol not in {t["key"] for t in d6["your_dms"]})
+          k_carol not in {t["key"] for t in d6["your_dms"]})
 
     # ── 5. delete_channel must refuse an unknown channel ────────────────────
     st_d, _ = http(port, "/api/prune", "POST",

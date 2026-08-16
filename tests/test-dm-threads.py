@@ -30,6 +30,7 @@ SERVER = Path(__file__).resolve().parent.parent / "server"
 sys.path.insert(0, str(SERVER))
 import nth_server as srv    # noqa: E402
 import nth_web as web       # noqa: E402
+import nth_conversation as nconv  # noqa: E402
 
 failures = []
 
@@ -120,29 +121,41 @@ try:
     mine = {t["key"]: t for t in body["your_dms"]}
     audit = {t["key"]: t for t in body["agent_dms"]}
 
-    check("threading: a 1:1 thread is keyed by the peer id", alice in mine)
+    k_alice = nconv.canonical_dm_key([alice, op])
+    k_group = nconv.canonical_dm_key([alice, carol, op])
+    check("threading: a 1:1 thread is keyed by its participant set",
+          k_alice in mine)
     check("threading: rows in DIFFERENT channels merge into ONE thread",
-          len([k for k in mine if k == alice]) == 1)
+          len([k for k in mine if k == k_alice]) == 1)
     check("threading: the merged thread's latest is the newest row, "
-          "whichever channel it came from", mine[alice]["last_id"] == m2)
+          "whichever channel it came from", mine[k_alice]["last_id"] == m2)
     check("threading: a group DM is a SEPARATE thread, not folded into the 1:1",
-          any(k.startswith("group:") for k in mine))
-    check("threading: the group key names every peer",
-          any(k == "group:" + ",".join(sorted([alice, carol])) for k in mine))
+          k_group in mine and k_group != k_alice)
+    check("threading: the group key names every participant",
+          set(nconv.participants_in_key(k_group)) == {alice, carol, op})
+    # The property the canonical key exists for: the SAME conversation has the
+    # SAME name whoever is asking, so a thread link can be shared and a search
+    # hit can be attributed to a thread.
+    check("threading: the key is viewer-INDEPENDENT — it does not change with "
+          "who is looking",
+          nconv.canonical_dm_key([alice, op])
+          == nconv.canonical_dm_key([op, alice]))
+    check("threading: and it names the whole participant set, not 'the other "
+          "person'", op in nconv.participants_in_key(k_alice))
 
     check("audit: a conversation the operator is not in is listed separately",
           len(audit) == 1)
     check("audit: and is NOT mixed into the operator's own threads",
           not any(bob in k and carol in k for k in mine))
 
-    check("unread: peer DMs start unread", mine[alice]["unread"] == 2)
+    check("unread: peer DMs start unread", mine[k_alice]["unread"] == 2)
     http(port, "/api/messages/mark-read", "POST", {"ids": [m1]})
     _st, b2 = http(port, "/api/dms")
     check("unread: marking one read decrements the thread",
-          {t["key"]: t for t in b2["your_dms"]}[alice]["unread"] == 1)
+          {t["key"]: t for t in b2["your_dms"]}[k_alice]["unread"] == 1)
 
     # ── ?with= returns the merged history ───────────────────────────────────
-    _st, thread = http(port, f"/api/dms?with={alice}")
+    _st, thread = http(port, f"/api/dms?with={k_alice}")
     contents = [m["content"] for m in thread["messages"]]
     check("with: returns this thread's messages oldest-first",
           contents == ["first, from dmroom", "second, from otherroom"])
@@ -153,15 +166,15 @@ try:
 
     # ── archiving a DM thread ───────────────────────────────────────────────
     st_a, _ = http(port, "/api/archives", "POST",
-                   {"kind": "dm", "key": alice, "archived": True})
+                   {"kind": "dm", "key": k_alice, "archived": True})
     check("archive: archiving a DM thread succeeds", st_a == 200)
     _st, b3 = http(port, "/api/dms")
     check("archive: it leaves the active list",
-          alice not in {t["key"] for t in b3["your_dms"]})
+          k_alice not in {t["key"] for t in b3["your_dms"]})
     _st, b4 = http(port, "/api/dms?archived=1")
     check("archive: and appears in the archived list",
-          alice in {t["key"] for t in b4["your_dms"]})
-    _st, arch_thread = http(port, f"/api/dms?with={alice}&archived=1")
+          k_alice in {t["key"] for t in b4["your_dms"]})
+    _st, arch_thread = http(port, f"/api/dms?with={k_alice}&archived=1")
     check("archive: its history is still readable from the archive view",
           len(arch_thread["messages"]) == 2)
 
@@ -171,10 +184,10 @@ try:
     _st, b5 = http(port, "/api/dms")
     check("archive: a NEWER message un-archives the thread by itself — "
           "the reason the marker is a watermark, not a flag",
-          alice in {t["key"] for t in b5["your_dms"]})
+          k_alice in {t["key"] for t in b5["your_dms"]})
 
     st_r, _ = http(port, "/api/archives", "POST",
-                   {"kind": "dm", "key": alice, "archived": False})
+                   {"kind": "dm", "key": k_alice, "archived": False})
     check("archive: explicit restore succeeds", st_r == 200)
 
     # ── archiving the AGENT archives your threads with it ───────────────────
@@ -195,16 +208,15 @@ try:
         db.close()
     _st, b6 = http(port, "/api/dms")
     check("agent archive: archiving the AGENT hides your thread with it",
-          alice not in {t["key"] for t in b6["your_dms"]})
+          k_alice not in {t["key"] for t in b6["your_dms"]})
     _st, b7 = http(port, "/api/dms?archived=1")
     got = {t["key"]: t for t in b7["your_dms"]}
-    check("agent archive: the thread shows up as archived", alice in got)
+    check("agent archive: the thread shows up as archived", k_alice in got)
     check("agent archive: flagged as agent_archived so the client can say "
           "restoring means unarchiving the agent",
-          got.get(alice, {}).get("agent_archived") is True)
+          got.get(k_alice, {}).get("agent_archived") is True)
     check("agent archive: a GROUP thread with one live peer stays active",
-          any(k.startswith("group:") for k in
-              {t["key"] for t in b6["your_dms"]}))
+          k_group in {t["key"] for t in b6["your_dms"]})
 
     # ── channel archive ─────────────────────────────────────────────────────
     st_c, _ = http(port, "/api/archives", "POST",
@@ -224,7 +236,7 @@ try:
                    {"kind": "nonsense", "key": "x", "archived": True})
     check("validation: kind must be channel or dm", st_v == 400)
     st_v2, _ = http(port, "/api/archives", "POST",
-                    {"kind": "dm", "key": alice, "archived": "yes"})
+                    {"kind": "dm", "key": k_alice, "archived": "yes"})
     check("validation: archived must be a boolean", st_v2 == 400)
     st_v3, _ = http(port, "/api/archives", "POST",
                     {"kind": "channel", "key": "no-such-channel",
@@ -257,7 +269,7 @@ try:
         check("authz: and no DM content leaks in the refusal",
               "first, from dmroom" not in json.dumps(body_g))
         st_ga, _ = http(port, "/api/archives", "POST",
-                        {"kind": "dm", "key": alice, "archived": True})
+                        {"kind": "dm", "key": k_alice, "archived": True})
         check("authz: a guest cannot archive", st_ga == 403)
     finally:
         web.NthWebHandler._resolve_identity = _real
