@@ -1785,7 +1785,16 @@ class EventHub:
             db.row_factory = sqlite3.Row
             db.execute("PRAGMA busy_timeout=2000")
             members = self._fetch_roster(db)
-            q.put_nowait(json.dumps({"type": "roster", "members": members}))
+            # `channel` is not decoration. The client multiplexes two SSE
+            # streams — this per-channel one and the operator's workspace-wide
+            # one — and applies a roster only when it belongs to the channel on
+            # screen, because the workspace stream also carries the agent-inbox
+            # roster, which lists every agent ever created. Without this field
+            # the comparison is undefined === "smoke" and the roster is never
+            # applied at all: no member names, so no @mention chips, no
+            # facepile, and nameFor() falling back to raw member ids.
+            q.put_nowait(json.dumps(
+                {"type": "roster", "channel": self.channel, "members": members}))
             q.put_nowait(json.dumps(
                 {"type": "context", "sessions": _read_context_snapshots()}))
             rows = db.execute(
@@ -2012,7 +2021,11 @@ class EventHub:
                     snapshot = json.dumps(members, sort_keys=True)
                     if snapshot != self._last_roster_snapshot:
                         self._last_roster_snapshot = snapshot
-                        self._broadcast({"type": "roster", "members": members})
+                        # Stamped with the channel for the same reason as the
+                        # initial roster above — the client filters on it.
+                        self._broadcast({"type": "roster",
+                                         "channel": self.channel,
+                                         "members": members})
 
                     # Context rings: cheap (few tiny local files); broadcast
                     # only when the payload actually changed. The age fields
