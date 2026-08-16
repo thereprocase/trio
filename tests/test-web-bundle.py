@@ -11,14 +11,17 @@ composition preserves three things, so each gets a test here:
   * ORDER — CSS cascades in list order and scripts execute in list order.
     Reordering WEB_CSS_FILES is a real visual change with no diff in any .css
     file, so the order is asserted against the page, not against the tuple.
-  * SCOPE — the client is a single IIFE whose functions all share one closure.
-    Split across two <script> tags it stops working, and it stops working at
-    runtime in the browser, where this suite would never see it.
+  * SCOPE — each JS module is its own IIFE communicating only through the
+    window.Trio namespace. A module that leaks a bare global, or one placed
+    before something it reads at definition time, breaks at runtime in the
+    browser, where this suite would never see it.
 
 Usage: python tests/test-web-bundle.py
 """
 import os
 import re
+import shutil
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -49,17 +52,20 @@ check("the composed bundle is a complete document",
 # A surviving marker means a substitution silently missed its file — the
 # per-file rendering's one new failure mode over the old single pass.
 leftover = [m for m in ("<!--__TRIO_STYLES__-->", "<!--__TRIO_SCRIPTS__-->",
-                        "/*__ANIMAL_EMOJIS__*/", "/*__ANIMAL_NAMES__*/",
-                        "/*__STT_LANG__*/") if m in served]
+                        "/*__STT_LANG__*/", "/*__ASK_HELPERS__*/")
+            if m in served]
 check("no template marker survives into the served page"
       + (f" — LEFT: {', '.join(leftover)}" if leftover else ""), not leftover)
-check("the emoji list was injected as real JSON",
-      re.search(r"const ANIMAL_EMOJIS = \[", served) is not None)
 check("the dictation language was injected as a quoted tag",
-      re.search(r'const STT_WEB_LANG = "[a-z]{2}-[A-Z]{2}"', served) is not None)
+      re.search(r'recognition\.lang = "[a-z]{2}-[A-Z]{2}"', served) is not None)
 check("the Character icon attribution reaches the Settings drawer",
       "SVG Repo" in served
       and "creativecommons.org/licenses/by/4.0/" in served)
+# The ask helpers are a separate file so Node can require() them; if the
+# injection silently no-ops, every interactive question renders as plain text
+# with a ReferenceError in the console and nothing server-side to notice.
+check("the ask helpers were injected, not left as a comment",
+      "function isAskChoices(" in served and "function composeAnswer(" in served)
 
 # ── the declaration must match the directory ───────────────────────────
 # GROUND TRUTH IS THE DIRECTORY, NOT THE TUPLE. Deriving the expectation from
@@ -78,9 +84,38 @@ disk_js_files = [f"js/{p.name}" for p in sorted((WEB / "js").iterdir())
 check(f"WEB_CSS_FILES declares every layer on disk, in prefix order "
       f"({len(disk_css_files)} found)",
       list(web.WEB_CSS_FILES) == disk_css_files)
-check(f"WEB_JS_FILES declares every script on disk, in prefix order "
+
+# JS cannot use the same trick. Load order here is a DEPENDENCY order, not the
+# filename order: 02-api.js must run before 00-core.js, because core installs a
+# reduced fallback `Trio.api` only if none exists yet, and in filename order
+# that fallback wins — leaving the app with no api.upload() and no error
+# normalisation. So the directory can only prove the SET, and the parts of the
+# order that actually matter are spelled out below as separate claims. Sorting
+# WEB_JS_FILES fails those, which is the point.
+check(f"WEB_JS_FILES declares every module on disk, none extra "
       f"({len(disk_js_files)} found)",
-      list(web.WEB_JS_FILES) == disk_js_files)
+      sorted(web.WEB_JS_FILES) == disk_js_files)
+
+order = {name: i for i, name in enumerate(web.WEB_JS_FILES)}
+for earlier, later, why in (
+    ("js/02-api.js", "js/00-core.js",
+     "core installs a reduced fallback Trio.api unless the real one exists"),
+    ("js/01-store.js", "js/00-core.js",
+     "core writes session state into the store during boot()"),
+    ("js/00-core.js", "js/90-boot.js",
+     "boot calls Trio.boot()"),
+    ("js/07-lifecycle.js", "js/90-boot.js",
+     "boot mounts every feature through Trio.lifecycle"),
+    ("js/20-workspace.js", "js/90-boot.js",
+     "boot mounts the workspace feature by name"),
+    ("js/10-markdown.js", "js/11-conversation.js",
+     "the conversation renders message bodies through the markdown module"),
+):
+    check(f"{earlier} is declared before {later} — {why}",
+          order.get(earlier, -1) < order.get(later, -1) and earlier in order)
+
+check("the test hook is declared last, after everything it inspects",
+      web.WEB_JS_FILES[-1] == "js/99-test-hook.js")
 
 # ── content: nothing is dropped ────────────────────────────────────────
 page_css = "".join(re.findall(r"<style[^>]*>\n(.*?)</style>", served, re.DOTALL))
@@ -92,7 +127,11 @@ for name in disk_css_files:
     body = web._render_web_source(name)
     check(f"{name} reaches the page ({len(body)} chars)", body in page_css)
 for name in disk_js_files:
-    body = web._strip_test_hook(web._render_web_source(name))
+    # 99-test-hook.js is deliberately gutted on the way out (see below), so it
+    # is the one module whose disk content must NOT appear verbatim.
+    if name == "js/99-test-hook.js":
+        continue
+    body = web._render_web_source(name)
     check(f"{name} reaches the page ({len(body)} chars)", body in page_js)
 
 check("the page carries no CSS beyond the declared layers",
@@ -101,19 +140,55 @@ check("the page carries no CSS beyond the declared layers",
 # ── order: the cascade is the contract ─────────────────────────────────
 seen = [m.group(1) for m in
         re.finditer(r'<(?:style|script) data-trio-source="([^"]+)"', served)]
-check("every layer is inlined exactly once, in cascade order",
-      seen == disk_css_files + disk_js_files)
+# CSS is checked against the directory (an independent oracle); JS against the
+# declaration, whose order the constraints above already pin. What this adds
+# for JS is that the composer emits each module exactly once and in the order
+# it was told to — a duplicate <script> would re-run a module's IIFE and
+# re-register its listeners.
+check("every layer is inlined exactly once, in declared order",
+      seen == disk_css_files + list(web.WEB_JS_FILES))
 
-# Order asserted against real content too, not only the tags: the responsive
-# overrides must land after the tokens they override.
-check("CSS layers are inlined in cascade order",
-      served.index("@media (max-width: 768px)") > served.index(":root {"))
+# Order asserted against real content too, not only the tags: a correct list of
+# data-trio-source attributes with the bodies emitted in some other order would
+# pass everything above and still cascade wrong. Probes are the layer bodies
+# themselves rather than a hardcoded selector, so changing a breakpoint or
+# renaming a token does not fake a failure here.
+first_css = web._render_web_source(disk_css_files[0])
+last_css = web._render_web_source(disk_css_files[-1])
+check(f"{disk_css_files[-1]} is inlined after {disk_css_files[0]} — the last "
+      f"layer overrides the first, so their order in the page is the cascade",
+      served.index(last_css) > served.index(first_css))
 
-# ── scope: one closure, one script tag ─────────────────────────────────
-check("the client ships as a single <script> — splitting it breaks the closure",
-      len(re.findall(r"<script[^>]*>", served)) == len(web.WEB_JS_FILES) == 1)
-check("the whole IIFE is contiguous in one block",
-      page_js.count("})();") >= 1 and "(() => {" in page_js)
+# ── scope: one <script> per module, each parsing on its own ────────────
+# Counted by data-trio-source: index.html carries its own inline script (the
+# pre-paint theme restore, which must run before any layer loads), and a bare
+# count would fold that in and drift the moment another is added.
+check(f"every declared module gets its own <script> tag "
+      f"({len(web.WEB_JS_FILES)} expected)",
+      len(re.findall(r'<script data-trio-source="js/', served))
+      == len(web.WEB_JS_FILES))
+
+# The modules share nothing but the window.Trio namespace, so each must be a
+# complete program by itself. A module that opened a brace or a closure and
+# never closed it would still concatenate into a page that *looks* fine here
+# while swallowing the next module's source into its own scope — the browser
+# would be the first thing to notice. Parsing each rendered body alone is the
+# direct test of that, and it checks what ships (post-substitution), not what
+# is on disk.
+node = shutil.which("node")
+if not node:
+    print("SKIP: per-module parse — node not installed")
+else:
+    tmpdir = Path(tempfile.mkdtemp(prefix="nth_bundle_js_"))
+    for name in web.WEB_JS_FILES:
+        probe = tmpdir / name.replace("/", "_")
+        probe.write_text(web._render_web_source(name), encoding="utf-8")
+        result = subprocess.run([node, "--check", str(probe)],
+                                capture_output=True, text=True, timeout=60)
+        check(f"{name} parses as a standalone program"
+              + ("" if result.returncode == 0
+                 else f" — {result.stderr.strip().splitlines()[-1:]}"),
+              result.returncode == 0)
 
 # ── the test hook never ships ──────────────────────────────────────────
 check("the test hook is stripped from the served bundle",

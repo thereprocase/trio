@@ -74,6 +74,23 @@ HISTORY_LIMIT = 200          # messages sent to a client on /api/history
 HUB_IDLE_REAP_S = 300        # retire a channel's EventHub after this long unwatched
 SSE_HEARTBEAT_SEC = 20       # keep-alive comment interval
 
+# Paths that serve the app shell rather than data. The workspace client routes
+# with history.pushState, so these URLs appear in the address bar and get
+# bookmarked, reloaded and pasted — every one of them has to return the same
+# page or the app 404s on refresh. The client's own table (web/js/03-router.js)
+# maps each to a view; this set is the server half of that contract and must
+# list every path in it.
+UI_PATHS = frozenset((
+    "/", "/index.html",
+    "/inbox", "/attention",      # the attention view, both spellings
+    "/messages",
+    "/tasks",
+    "/agents", "/roster",        # the roster view, both spellings
+    "/settings", "/preferences",  # the prefs view, both spellings
+    "/archive",
+    "/data",
+))
+
 # Claude Code's own statusline state — module-level so tests can point it at a
 # fixture instead of the real user's file.
 STATUSLINE_STATE_PATH = Path.home() / ".claude" / "statusline-state.json"
@@ -3324,7 +3341,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
             # before an identity cookie exists.
             self._serve_avatar(path)
             return
-        if path == "/" or path == "/index.html":
+        if path in UI_PATHS:
             # Mint a cookie on first visit so /api/meta + /api/events carry it.
             token, _ident, is_new = self._resolve_identity()
             body = LANDING_HTML if self.landing_mode else INDEX_HTML
@@ -3337,12 +3354,18 @@ class NthWebHandler(BaseHTTPRequestHandler):
             if not self._channel_exists(code):
                 self._error(404, f"no such channel: {code}")
                 return
-            token, _ident, is_new = self._resolve_identity()
-            # The channel code passed CHANNEL_CODE_RE, so this substitution
-            # cannot inject into the script context.
-            body = INDEX_HTML.replace(
-                "/*__API_QS__*/''", json.dumps(f"?channel={code}"))
-            self._serve_html(body, set_cookie_token=token if is_new else None)
+            # This used to serve the dashboard inline, substituting
+            # "?channel=<code>" into a /*__API_QS__*/'' marker in the client.
+            # The workspace client has no such marker — it reads ?channel=
+            # straight off location.search — so the substitution would no-op
+            # and every /c/<code> link would quietly open the default channel
+            # instead of the one asked for. Redirecting reaches the same page
+            # by the route the client already understands. The code passed
+            # CHANNEL_CODE_RE, so it is safe in a Location header.
+            self.send_response(302)
+            self.send_header("Location", f"/?channel={code}")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
         elif path == "/api/health":
             self._handle_health()
         elif path == "/api/usage":
@@ -8100,24 +8123,22 @@ def _web_speech_lang(code: str) -> str:
     }.get(code.lower(), code)
 
 
-# Composed at import time — the same one-shot substitutions the single literal
-# used to take, now applied per source file: inject the emoji list so
-# server-side animal_for() and client-side animalFor() stay in sync, give web
-# dictation the same language as the local path, and drop the test hook from
-# the shipped bundle.
+# Composed at import time. Each marker occurs in exactly one source file, and
+# keeps working whichever file it later moves to, so per-file rendering is
+# equivalent to the single pass the monolithic literal used to take.
+#
+# The animal-emoji injection that used to live here is gone: it existed to keep
+# the old client's animalFor() in sync with the server's, and the workspace
+# client draws identities from the checked-in SVG avatars plus a tone hash
+# instead. The server still computes animal names for the roster payload — only
+# the client-side copy of the table is obsolete. A dead no-op replace() would
+# read like a live contract to whoever touches this next.
 
 
 def _render_web_source(relative_path: str) -> str:
-    """Read one browser source and apply the import-time substitutions.
-
-    Per-file is equivalent to the old single pass over the whole page: each
-    marker occurs in exactly one source, and a marker keeps working whichever
-    file it later moves to.
-    """
+    """Read one browser source and apply the import-time substitutions."""
     return (
         _read_web_source(relative_path)
-        .replace("/*__ANIMAL_EMOJIS__*/", json.dumps([e for _, e in ANIMAL_EMOJIS]))
-        .replace("/*__ANIMAL_NAMES__*/",  json.dumps([n for n, _ in ANIMAL_EMOJIS]))
         .replace("/*__STT_LANG__*/'en-US'", json.dumps(_web_speech_lang(STT_LANGUAGE)))
         .replace("/*__ASK_HELPERS__*/", _load_ask_helpers())
     )

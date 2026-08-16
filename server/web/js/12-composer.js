@@ -457,6 +457,11 @@
     if (!Speech) throw new Error('Browser speech recognition is unavailable');
     const myGen = dictationGen; // captured now — stopDictation()/unmount() bump this
     recognition = new Speech(); recognition.continuous = true; recognition.interimResults = true;
+    // Same language as the server-side Whisper path. Left unset, the browser
+    // transcribes in ITS OWN locale — so an NTH_STT_LANG=fr deployment would
+    // return French from /api/stt/transcribe and English from the browser,
+    // decided by nothing but which dictation route the visitor's device took.
+    recognition.lang = /*__STT_LANG__*/'en-US';
     let finalText = '';
     recognition.onresult = event => { let interim = ''; for (let i = event.resultIndex; i < event.results.length; i++) event.results[i].isFinal ? finalText += event.results[i][0].transcript : interim += event.results[i][0].transcript; inputValue((inputValue() + ' ' + finalText + interim).trim()); updateSendState(); };
     recognition.onend = () => { recognition = null; stopMeter(); document.body.classList.remove('dictating'); setDictationButtonState(false); };
