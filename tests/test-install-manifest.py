@@ -34,12 +34,17 @@ def check(name, cond):
 
 text = SETUP.read_text()
 
-# List A — hub-service deploy: a `for f in a.py b.py ...; do` loop.
-loop = re.search(r"for f in ((?:[\w./\\$]+\.py\s*\\?\s*)+);\s*do", text)
-hub_service = set(re.findall(r"(\w+\.py)", loop.group(1))) if loop else set()
+# Both lists carry .js as well as .py: nth_ask_client.js is read at import time
+# like any module, and matching only *.py silently truncated list A at the first
+# .js entry — which read as "the loop was not found" rather than as a miss.
+INSTALLED_FILE = r"\w+\.(?:py|js)"
+
+# List A — hub-service deploy: a `for f in a.py b.js ...; do` loop.
+loop = re.search(r"for f in ((?:[\w./\\$]+\.(?:py|js)\s*\\?\s*)+);\s*do", text)
+hub_service = set(re.findall(f"({INSTALLED_FILE})", loop.group(1))) if loop else set()
 
 # List B — hub/spoke install: individual `cp "$SCRIPT_DIR/server/x.py" ...`.
-hub_spoke = set(re.findall(r'cp "\$SCRIPT_DIR/server/(\w+\.py)"', text))
+hub_spoke = set(re.findall(rf'cp "\$SCRIPT_DIR/server/({INSTALLED_FILE})"', text))
 
 check("setup.sh: the hub-service copy loop was found and is non-empty",
       len(hub_service) > 3)
@@ -124,31 +129,45 @@ check("every declared web asset exists on disk"
 # ONLY the files setup.sh names into an empty tree and imports nth_web there.
 # Delete either `cp -R server/web` line and this goes red, which is exactly
 # what the named-module lists failed to do for three releases.
+#
+# BOTH lists get staged, not just one. They are separate deploy targets — the
+# systemd hub service runs nth_web.py out of the list-A tree — and the checks
+# above only relate them through the Python import graph, which a data
+# dependency like nth_ask_client.js is invisible to. Staging list B alone left
+# a file droppable from list A with the whole suite still green.
 import os
 import shutil
 import subprocess
 import tempfile
 
-staging = Path(tempfile.mkdtemp(prefix="nth_install_"))
-try:
-    dest = staging / "server"
-    dest.mkdir()
-    for f in sorted(hub_spoke):
-        if (SERVER / f).exists():
-            shutil.copy(SERVER / f, dest / f)
-    if web_copied:                      # only if setup.sh actually says to
-        shutil.copytree(SERVER / "web", dest / "web")
 
-    env = dict(os.environ, NTH_HOME=str(staging / "home"),
-               PYTHONPATH=str(dest))
-    proc = subprocess.run([sys.executable, "-c", "import nth_web"],
-                          capture_output=True, text=True, timeout=120, env=env)
-    detail = (proc.stderr or proc.stdout).strip().splitlines()
-    check("a tree containing only what setup.sh installs can import nth_web"
-          + (f" — {detail[-1][:160]}" if proc.returncode and detail else ""),
-          proc.returncode == 0)
-finally:
-    shutil.rmtree(staging, ignore_errors=True)
+def staged_import(label: str, installed: set) -> None:
+    staging = Path(tempfile.mkdtemp(prefix="nth_install_"))
+    try:
+        dest = staging / "server"
+        dest.mkdir()
+        for f in sorted(installed):
+            if (SERVER / f).exists():
+                shutil.copy(SERVER / f, dest / f)
+        if web_copied:                  # only if setup.sh actually says to
+            shutil.copytree(SERVER / "web", dest / "web")
+
+        env = dict(os.environ, NTH_HOME=str(staging / "home"),
+                   PYTHONPATH=str(dest))
+        proc = subprocess.run([sys.executable, "-c", "import nth_web"],
+                              capture_output=True, text=True, timeout=120,
+                              env=env)
+        detail = (proc.stderr or proc.stdout).strip().splitlines()
+        check(f"a tree containing only what setup.sh's {label} list installs "
+              "can import nth_web"
+              + (f" — {detail[-1][:160]}" if proc.returncode and detail else ""),
+              proc.returncode == 0)
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+
+
+staged_import("hub-service", hub_service)
+staged_import("hub/spoke", hub_spoke)
 
 print()
 if failures:
