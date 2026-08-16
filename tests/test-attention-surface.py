@@ -136,15 +136,36 @@ try:
     check("questions: answering it removes it from the queue",
           q_mine not in {q["id"] for q in body2["questions"]})
 
-    # A reply with no selection is just a comment, not an answer.
+    # A PROSE reply counts as answering too.
+    #
+    # This assertion was inverted by the LOTC review. It previously required a
+    # structured `selection`, which meant an answer typed as words — or sent
+    # from MCP, or from a second client — left the question in the queue
+    # permanently, with no dismiss path. The asking agent reads the reply words
+    # natively (that is the documented MCP contract), so a prose reply really
+    # does answer it and really does unblock the agent.
     q2 = raw_message(
         CH, alice, "Alice", "And deploy?",
         choices=json.dumps({"target": op, "mode": "one",
                             "question": "Deploy?", "options": ["y", "n"]}))
-    raw_message(CH, op, op_name, "hmm let me think", reply_to=q2)
+    _st, before_q2 = http(port, "/api/questions")
+    check("questions: a new question enters the queue",
+          q2 in {q["id"] for q in before_q2["questions"]})
+    raw_message(CH, op, op_name, "yes, deploy it", reply_to=q2)
     _st, body3 = http(port, "/api/questions")
-    check("questions: a reply WITHOUT a selection does not count as answering",
-          q2 in {q["id"] for q in body3["questions"]})
+    check("questions: a prose reply with no selection ALSO clears it — "
+          "the agent reads the words, so it is a real answer",
+          q2 not in {q["id"] for q in body3["questions"]})
+
+    # But a reply from someone ELSE must not clear the operator's question.
+    q3 = raw_message(
+        CH, alice, "Alice", "Third?",
+        choices=json.dumps({"target": op, "mode": "one",
+                            "question": "Third?", "options": ["y", "n"]}))
+    raw_message(CH, bob, "Bob", "not my call", reply_to=q3)
+    _st, body3b = http(port, "/api/questions")
+    check("questions: someone else's reply does NOT clear your question",
+          q3 in {q["id"] for q in body3b["questions"]})
 
     # ── mentions ────────────────────────────────────────────────────────────
     m1 = raw_message(CH, alice, "Alice", f"@{op_name} take a look",

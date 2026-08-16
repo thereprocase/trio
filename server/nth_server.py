@@ -4515,6 +4515,12 @@ def nth_cleanup(channel: str = "", all_ended: bool = False) -> str:
                 return json.dumps({"error": f'Channel "{channel}" is still active. End it first with nth_end.'})
             db.execute("DELETE FROM locks WHERE channel = ?", (channel,))
             db.execute("DELETE FROM tasks WHERE channel = ?", (channel,))
+            # Read receipts first: the message_reads -> messages FK is declared
+            # but never enforced (PRAGMA foreign_keys is off, no ON DELETE
+            # CASCADE), so deleting the messages first strands every receipt
+            # permanently in what is often the largest table in a busy channel.
+            db.execute("DELETE FROM message_reads WHERE message_id IN "
+                       "(SELECT id FROM messages WHERE channel = ?)", (channel,))
             db.execute("DELETE FROM messages WHERE channel = ?", (channel,))
             db.execute("DELETE FROM members WHERE channel = ?", (channel,))
             _doomed_files.append((_purge_channel_attachments(db, channel), channel))
@@ -4528,6 +4534,9 @@ def nth_cleanup(channel: str = "", all_ended: bool = False) -> str:
                 code = row["code"]
                 db.execute("DELETE FROM locks WHERE channel = ?", (code,))
                 db.execute("DELETE FROM tasks WHERE channel = ?", (code,))
+                # Same unenforced-FK reasoning as the single-channel path above.
+                db.execute("DELETE FROM message_reads WHERE message_id IN "
+                           "(SELECT id FROM messages WHERE channel = ?)", (code,))
                 db.execute("DELETE FROM messages WHERE channel = ?", (code,))
                 db.execute("DELETE FROM members WHERE channel = ?", (code,))
                 _doomed_files.append((_purge_channel_attachments(db, code), code))

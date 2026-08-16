@@ -1194,6 +1194,13 @@ def _parse_sigils_against_roster(
 # channel's real context footprint, which is the number being asked for.
 JSON_OVERHEAD_CHARS_PER_MESSAGE = 80
 
+# Ceiling on a reported unread count. The count is computed over the WHOLE
+# channel (see _handle_channels) and stops as soon as it exceeds this, so the
+# number is exact up to the cap and honestly flagged past it. A badge does not
+# need to distinguish 900 from 4,000; it does need to never say 0 when mail is
+# waiting.
+UNREAD_COUNT_CAP = 500
+
 
 def _is_lock_error(exc: sqlite3.OperationalError) -> bool:
     """True when a SQLite OperationalError is a transient write-lock/busy
@@ -1613,10 +1620,13 @@ def _unlink_attachment_files(paths: List[str]) -> Tuple[int, int]:
     `bytes` column for freed-space accounting: it stats each file so the returned
     figure is the real disk space reclaimed.
 
-    Returns (freed_bytes, error_count). `error_count` counts only genuine unlink
-    failures (permissions, I/O) — never a missing file."""
+    Returns (freed_bytes, failed_paths). `failed_paths` holds only genuine
+    unlink failures (permissions, I/O) — never a missing file. The PATHS are
+    returned, not just a count: "file_errors: 3" tells an operator nothing they
+    can act on, and the caller keeps those attachment rows so a retry can still
+    find the files."""
     freed = 0
-    errors = 0
+    failed: List[str] = []
     for p in paths:
         if not p:
             continue
@@ -1630,8 +1640,8 @@ def _unlink_attachment_files(paths: List[str]) -> Tuple[int, int]:
         except FileNotFoundError:
             pass       # already gone — idempotent, not an error
         except OSError:
-            errors += 1
-    return freed, errors
+            failed.append(p)
+    return freed, failed
 
 
 def _event_visible_to(event: Dict[str, Any], viewer_id: Optional[str],
@@ -2468,6 +2478,22 @@ def dm_audit_thread_key(message) -> str:
     participants = set(parse_recipients(message["recipients"]))
     participants.add(message["member_id"])
     return ",".join(sorted(participants)) if len(participants) > 1 else ""
+
+
+def participants_in_key(thread_key: str) -> List[str]:
+    """The member ids named by a thread key, for any of the three key shapes.
+
+    Callers used to do `key.split(",")`, which is right for a 1:1 key (a bare
+    id) and for an audit key ("a,b") but WRONG for a group key: splitting
+    "group:a,b" yields ["group:a", "b"], and "group:a" matches no member, so
+    every membership test against it silently failed. Parse in one place so
+    the three shapes cannot drift apart again.
+    """
+    if not thread_key:
+        return []
+    if thread_key.startswith("group:"):
+        thread_key = thread_key[len("group:"):]
+    return [part for part in thread_key.split(",") if part]
 
 
 # ── agent control plane (supervisor-backed) ──
@@ -3395,7 +3421,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
             # now cached too; both together close it.
             _token, ident, _is_new = self._resolve_identity()
             if ident.source == IDENTITY_SOURCE_PENDING:
-                self._error(403, "identity required — POST /api/identify first")
+                self._error(403, "pick a name to join this channel first")
                 return
             self._json(STT.health())
         elif path.startswith("/api/attachment/"):
@@ -3555,7 +3581,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
             self._error(400, "invalid JSON")
             return None
 
-    def _require_operator(self):
+    def _require_operator(self, verb: str = "manage agents"):
         """Gate the agent control plane to a trusted operator.
 
         The same tiers as the local-path endpoints: a local shell, or a
@@ -3568,8 +3594,8 @@ class NthWebHandler(BaseHTTPRequestHandler):
         assumption this can make."""
         _t, ident, _n = self._resolve_identity()
         if ident.source not in LOCAL_PATH_ALLOWED_SOURCES:
-            self._error(403,
-                        "only a trusted operator (local or tailnet) can manage agents")
+            self._error(403, "only a trusted operator (local or tailnet) "
+                             f"can {verb}")
             return None
         return ident
 
@@ -3975,7 +4001,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
             return
         _token, ident, _is_new = self._resolve_identity()
         if ident.source == IDENTITY_SOURCE_PENDING:
-            self._error(403, "identity required — POST /api/identify first")
+            self._error(403, "pick a name to join this channel first")
             return
         ch = self._channel_for_request(urlparse(self.path))
         if ch is None:
@@ -4084,10 +4110,22 @@ class NthWebHandler(BaseHTTPRequestHandler):
             db.execute("PRAGMA busy_timeout=3000")
             if read:
                 now = now_iso()
-                db.executemany(
-                    "INSERT OR IGNORE INTO message_reads "
-                    "(message_id, member_id, read_at) VALUES (?, ?, ?)",
-                    [(mid, operator_id, now) for mid in ids])
+                # INSERT ... SELECT so only ids that name a REAL message are
+                # stored. Accepting arbitrary integers made this table grow
+                # without any bound or reclaim path: every prune scopes its
+                # cleanup to ids drawn FROM messages, so a row for an id that
+                # never existed was collected by nothing, ever. 1000 fabricated
+                # ids per request, forever, is pure disk growth.
+                #
+                # Chunked to stay under SQLite's bound-variable limit.
+                for i in range(0, len(ids), 400):
+                    chunk = ids[i:i + 400]
+                    ph = ",".join("?" for _ in chunk)
+                    db.execute(
+                        "INSERT OR IGNORE INTO message_reads "
+                        "(message_id, member_id, read_at) "
+                        f"SELECT id, ?, ? FROM messages WHERE id IN ({ph})",
+                        [operator_id, now, *chunk])
             else:
                 db.executemany(
                     "DELETE FROM message_reads "
@@ -4126,7 +4164,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
             return
         _token, ident, _is_new = self._resolve_identity()
         if ident.source == IDENTITY_SOURCE_PENDING:
-            self._error(403, "identity required — POST /api/identify first")
+            self._error(403, "pick a name to join this channel first")
             return
         ch = self._channel_for_request(urlparse(self.path))
         if ch is None:
@@ -5151,7 +5189,9 @@ class NthWebHandler(BaseHTTPRequestHandler):
         """
         _token, ident, _is_new = self._resolve_identity()
         if not is_all_seeing(ident.member_id):
-            self._error(403, "operator only")
+            self._error(403, "only the hub operator can see all channels — "
+                             "open the dashboard on the hub machine, or "
+                             "over Tailscale")
             return
         archived = (parse_qs(parsed.query).get("archived", ["0"])[0] == "1")
         operator_id = ident.member_id
@@ -5166,40 +5206,49 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 "     WHERE m.channel = c.code AND m.active = 1) AS members, "
                 "  (SELECT MAX(created_at) FROM messages msg "
                 "     WHERE msg.channel = c.code) AS last_at, "
+                # UNREAD IS COUNTED OVER THE WHOLE CHANNEL, stopping once
+                # the cap is exceeded — NOT over "the newest 500 messages".
+                #
+                # The window used to define the CANDIDATE SET, which made the
+                # count wrong rather than merely approximate: with 600 unread,
+                # reading the newest 500 reported 0 while 100 were still
+                # unread, because the remaining 100 were outside the window
+                # entirely. Since the client marks visible messages read on
+                # every scroll pass, an operator reached that state just by
+                # scrolling. A badge that reads 0 when mail is waiting is worse
+                # than one that admits a limit.
+                #
+                # LIMIT cap+1 lets SQLite stop as soon as it has enough to know
+                # the answer is "more than cap", so the common backlog case is
+                # FASTER than the old windowed form (8ms vs 15ms measured over
+                # 50 channels x 4k messages) and only the all-read case pays
+                # for the full anti-join walk.
                 "  (SELECT COUNT(*) FROM ("
-                # Capped to the most recent 500 (idx_messages_channel_id serves
-                # this as an index scan) so a long-lived busy channel's unread
-                # count stays bounded per poll instead of walking its whole
-                # history every refresh, for every open dashboard.
-                "     SELECT id, member_id, recipients FROM messages "
-                "     WHERE channel = c.code ORDER BY id DESC LIMIT 500"
-                "   ) recent "
-                "     WHERE recent.member_id != ? "
+                "     SELECT 1 FROM messages m "
+                "     WHERE m.channel = c.code AND m.member_id != ? "
                 # A DM is addressed, not broadcast: it must not raise the
                 # channel's unread badge for someone who cannot read it.
-                "     AND (recent.recipients IS NULL OR recent.recipients = '' "
-                "          OR recent.recipients = '[]') "
-                "     AND NOT EXISTS (SELECT 1 FROM message_reads mr "
-                "                     WHERE mr.message_id = recent.id "
-                "                       AND mr.member_id = ?)"
-                "  ) AS unread, "
+                "       AND (m.recipients IS NULL OR m.recipients = '' "
+                "            OR m.recipients = '[]') "
+                "       AND NOT EXISTS (SELECT 1 FROM message_reads mr "
+                "                       WHERE mr.message_id = m.id "
+                "                         AND mr.member_id = ?) "
+                "     LIMIT " + str(UNREAD_COUNT_CAP + 1) + ")) AS unread, "
                 # Mention-scoped subset of the same set, for the number badge;
                 # plain unread drives the dot. instr() on the QUOTED id is an
                 # exact substring test — no LIKE wildcards, which matters
                 # because an operator id contains '_'. NULL mentions give NULL
                 # from instr and are not counted, as intended.
                 "  (SELECT COUNT(*) FROM ("
-                "     SELECT id, member_id, recipients, mentions FROM messages "
-                "     WHERE channel = c.code ORDER BY id DESC LIMIT 500"
-                "   ) recent "
-                "     WHERE recent.member_id != ? "
-                "     AND (recent.recipients IS NULL OR recent.recipients = '' "
-                "          OR recent.recipients = '[]') "
-                "     AND instr(recent.mentions, ?) > 0 "
-                "     AND NOT EXISTS (SELECT 1 FROM message_reads mr "
-                "                     WHERE mr.message_id = recent.id "
-                "                       AND mr.member_id = ?)"
-                "  ) AS unread_mentions "
+                "     SELECT 1 FROM messages m "
+                "     WHERE m.channel = c.code AND m.member_id != ? "
+                "       AND (m.recipients IS NULL OR m.recipients = '' "
+                "            OR m.recipients = '[]') "
+                "       AND instr(m.mentions, ?) > 0 "
+                "       AND NOT EXISTS (SELECT 1 FROM message_reads mr "
+                "                       WHERE mr.message_id = m.id "
+                "                         AND mr.member_id = ?) "
+                "     LIMIT " + str(UNREAD_COUNT_CAP + 1) + ")) AS unread_mentions "
                 "FROM channels c WHERE c.code != ? "
                 + ("AND c.archived_at IS NOT NULL " if archived
                    else "AND c.archived_at IS NULL ") +
@@ -5207,6 +5256,19 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 (operator_id, operator_id,
                  operator_id, f'"{operator_id}"', operator_id,
                  AGENT_INBOX_CHANNEL)).fetchall()
+            # ONE query for every channel's newest message, rather than one
+            # per channel inside the loop. That N+1 was the dominant cost of
+            # this endpoint — measured 164ms at 200 channels, growing linearly
+            # with the sidebar, on every dashboard refresh.
+            previews = {}
+            for prow in db.execute(
+                    "SELECT m.channel, m.member_name, m.content FROM messages m "
+                    "JOIN (SELECT channel, MAX(id) AS top FROM messages "
+                    "      GROUP BY channel) newest "
+                    "  ON newest.channel = m.channel AND newest.top = m.id"
+            ).fetchall():
+                previews[prow["channel"]] = prow
+
             channels = []
             for r in rows:
                 last_at = r["last_at"]
@@ -5221,10 +5283,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
                         if topic.startswith("[channel created]"):
                             topic = topic[len("[channel created]"):].strip()
                 if last_at is not None:
-                    prow = db.execute(
-                        "SELECT member_name, content FROM messages "
-                        "WHERE channel = ? ORDER BY id DESC LIMIT 1",
-                        (r["code"],)).fetchone()
+                    prow = previews.get(r["code"])
                     if prow is not None:
                         who = (prow["member_name"] or "").strip()
                         body = (prow["content"] or "").replace("\n", " ").strip()
@@ -5237,8 +5296,14 @@ class NthWebHandler(BaseHTTPRequestHandler):
                     "last_at": last_at,
                     "preview": preview,
                     "archived_at": r["archived_at"],
-                    "unread": r["unread"] or 0,
-                    "unread_mentions": r["unread_mentions"] or 0,
+                    # Report the cap, not cap+1, and say so — the client
+                    # renders "500+" rather than a precise-looking 501.
+                    "unread": min(r["unread"] or 0, UNREAD_COUNT_CAP),
+                    "unread_capped": (r["unread"] or 0) > UNREAD_COUNT_CAP,
+                    "unread_mentions": min(r["unread_mentions"] or 0,
+                                           UNREAD_COUNT_CAP),
+                    "unread_mentions_capped": (
+                        (r["unread_mentions"] or 0) > UNREAD_COUNT_CAP),
                 })
         except sqlite3.Error as e:
             sys.stderr.write(f"[nth_web] channels db error: {e}\n")
@@ -5266,7 +5331,9 @@ class NthWebHandler(BaseHTTPRequestHandler):
             # all_seeing=True is passed to subscribe() below, so this gate is
             # what makes that safe: a non-operator must never be handed a
             # stream that deliberately skips the per-viewer withholding.
-            self._error(403, "operator only")
+            self._error(403, "only the hub operator can watch every channel — "
+                             "open the dashboard on the hub machine, or over "
+                             "Tailscale")
             return
 
         if not self.landing_mode:
@@ -5391,31 +5458,29 @@ class NthWebHandler(BaseHTTPRequestHandler):
         self.wfile.write(payload)
 
     def _require_trusted_operator(self, verb: str):
-        """An all-seeing operator whose identity comes from a TRUSTED source —
-        local shell or Tailscale peer — exactly the tier /api/cull requires.
+        """The storage/prune tier. IDENTICAL to _require_operator today.
 
-        The storage figures expose the size of every channel, including private
-        DM traffic in the shared inbox, so a self-declared guest (the weakest
-        tier, and reachable once --tailnet binds 0.0.0.0) must be refused.
-        Returns the identity, or None after writing the error response.
+        It exists as a named seam, not as an extra check. These endpoints
+        expose DB-wide figures — including the volume of private DM traffic in
+        the shared inbox — and prune destroys data, so if the operator gate is
+        ever widened, this is the call site that must NOT widen with it.
 
-        THE SOURCE CHECK BELOW IS REDUNDANT TODAY, deliberately kept. On this
-        branch is_all_seeing() matches on the id PREFIX (`_op_l_` / `_op_t_`),
-        which already encodes the trust source and fails `_op_g_` closed, so
-        _require_operator alone admits exactly the same set. Mutation testing
-        confirms it: deleting this check changes no reachable behaviour. It
-        stays because the two are independent statements of one rule — if an
-        identity is ever minted whose prefix and source disagree, this refuses
-        it. Do not read its green tests as evidence that it is load-bearing.
+        An earlier version of this docstring claimed the wrapper added a
+        second, independent check on top of an id-PREFIX test. That was wrong
+        about its own codebase: _require_operator gates on `ident.source`
+        against LOCAL_PATH_ALLOWED_SOURCES and never examines a prefix, so the
+        extra `source in CULL_ALLOWED_SOURCES` test compared the same field to
+        a byte-identical tuple. That is a tautology, not defence in depth, and
+        a comment asserting a safety property the code does not have is worse
+        than no comment. The duplicate test is gone; the seam remains.
+
+        If the prefix/source invariant is ever worth enforcing, it belongs
+        where identities are MINTED, as one check protecting every consumer.
         """
-        ident = self._require_operator()
-        if ident is None:
-            return None
-        if ident.source not in CULL_ALLOWED_SOURCES:
-            self._error(403, f"only a trusted operator (local or tailnet) "
-                             f"can {verb}")
-            return None
-        return ident
+        # Passes the verb through rather than writing a second 403 of its
+        # own: _require_operator has already answered the request, and writing
+        # twice puts two HTTP responses on one connection.
+        return self._require_operator(verb)
 
     def _handle_storage(self, parsed) -> None:
         """Workspace-wide storage overview: total DB size, attachment totals,
@@ -5528,7 +5593,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
             return
         _token, ident, _is_new = self._resolve_identity()
         if ident.source == IDENTITY_SOURCE_PENDING:
-            self._error(403, "identity required — POST /api/identify first")
+            self._error(403, "pick a name to join this channel first")
             return
         if is_all_seeing(ident.member_id):
             size_where = "channel = ?"
@@ -5561,12 +5626,21 @@ class NthWebHandler(BaseHTTPRequestHandler):
     def _handle_dm_size(self, dm_key: str) -> None:
         """Token estimate for one DM thread — the DM analogue of the above.
 
-        DM rows have no channel to group by, so this groups the inbox by
-        participant set and sums the requested thread. Sizes the FULL thread
-        with no LIMIT, mirroring the unbounded channel path: sizing a recent
-        window would silently undercount an old conversation. Only the
-        grouping keys and per-row lengths are pulled, so memory stays bounded
-        however large the inbox is.
+        DM rows have no channel column to group by, so this narrows to rows
+        that actually name one of the thread's participants and groups those
+        by participant set.
+
+        The narrowing is not just cost. The previous version selected EVERY DM
+        row in the database and filtered in Python, which was a full table scan
+        growing with total message count (measured 423ms at 800k rows, with no
+        ceiling), and its docstring claimed a bound it did not have: per-row
+        memory was bounded, row COUNT was not. It also disagreed with
+        /api/dms, which windows at 2000 — so this endpoint would report a token
+        count for messages the thread view could never show.
+
+        instr() on each QUOTED participant id is an exact substring test
+        against the recipients JSON; Python still confirms the full thread key
+        per row, so the SQL only has to be a superset.
         """
         ident = self._require_operator()
         if ident is None:
@@ -5577,11 +5651,23 @@ class NthWebHandler(BaseHTTPRequestHandler):
             db = sqlite3.connect(str(self.db_path), timeout=5)
             db.row_factory = sqlite3.Row
             db.execute("PRAGMA busy_timeout=3000")
-            rows = db.execute(
-                "SELECT member_id, recipients, LENGTH(content) AS clen, "
-                "  LENGTH(member_name) AS nlen FROM messages "
-                "WHERE recipients IS NOT NULL "
-                "  AND recipients NOT IN ('', '[]')").fetchall()
+            # Superset filter: any row naming a participant, or sent by one.
+            # A thread's rows always satisfy at least one of these.
+            people = participants_in_key(dm_key) or [dm_key]
+            people = [pid for pid in people if pid][:16]
+            if not people:
+                rows = []
+            else:
+                clauses = " OR ".join(
+                    ["instr(recipients, ?) > 0"] * len(people)
+                    + ["member_id = ?"] * len(people))
+                rows = db.execute(
+                    "SELECT member_id, recipients, LENGTH(content) AS clen, "
+                    "  LENGTH(member_name) AS nlen FROM messages "
+                    "WHERE recipients IS NOT NULL "
+                    "  AND recipients NOT IN ('', '[]') "
+                    f"  AND ({clauses})",
+                    [f'"{pid}"' for pid in people] + people).fetchall()
         except sqlite3.Error as e:
             sys.stderr.write(f"[nth_web] dm size db error: {e}\n")
             self._error(500, "size query failed")
@@ -5680,6 +5766,9 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 result = self._prune_archived_messages(db, older_than_days, dry_run)
             else:  # delete_channel
                 result = self._prune_delete_channel(db, target_channel, dry_run)
+        except AgentActionError as e:
+            self._error(e.status, e.message)
+            return
         except sqlite3.Error as e:
             # Generic to the client, detail to the log: sqlite text names
             # tables, columns and the DB path. Same rule as /api/cull.
@@ -5700,22 +5789,43 @@ class NthWebHandler(BaseHTTPRequestHandler):
         ps = db.execute("PRAGMA page_size").fetchone()[0]
         return pc * ps
 
+    # A DB above this size is not VACUUMed as a side effect of a prune; the
+    # operator has to ask for it explicitly via the `reclaim` action.
+    #
+    # VACUUM takes an EXCLUSIVE lock and rewrites the whole file. Measured: 1s
+    # at 160MB, 3.6s at 560MB — and during that window concurrent writers with
+    # the ordinary 3000ms busy_timeout do not merely wait, they FAIL: an agent
+    # calling trio_send gets "database is locked" as a 500. Reclaiming disk is
+    # never worth breaking live agent traffic without the operator choosing
+    # that trade, and this branch's own prune feature is what will eventually
+    # produce databases this size.
+    VACUUM_INLINE_MAX_BYTES = 128 * 1024 * 1024
+
     @staticmethod
     def _vacuum(db: sqlite3.Connection) -> bool:
-        """Run VACUUM to return freed pages to disk. Returns True on success,
-        False if it couldn't run (e.g. the exclusive lock exceeded busy_timeout
-        under live agent traffic).
+        """Run VACUUM to return freed pages to disk. True on success, False if
+        it could not run (the exclusive lock exceeded busy_timeout under live
+        traffic).
 
         By the time this is called the destructive deletes have ALREADY
-        committed, so a VACUUM that can't acquire the lock must be a soft,
+        committed, so a VACUUM that cannot acquire the lock must be a soft,
         retryable warning — never a 500 that hides the successful prune and
-        loses the freed-bytes figure (Sauron). The freed disk is reclaimed on
-        the next successful VACUUM (any prune, or the manual 'Reclaim' button)."""
+        loses the freed-bytes figure."""
         try:
             db.execute("VACUUM")
             return True
         except sqlite3.Error:
             return False
+
+    def _vacuum_if_small(self, db: sqlite3.Connection) -> Tuple[bool, str]:
+        """VACUUM only if the file is small enough to compact without stalling
+        other writers. Returns (vacuumed, reason_if_skipped)."""
+        if self._db_logical_bytes(db) > self.VACUUM_INLINE_MAX_BYTES:
+            return False, ("The deletions are saved. Disk space wasn't "
+                           "reclaimed because this database is large enough "
+                           "that compacting it would briefly block agents "
+                           "from writing — run Reclaim when that's convenient.")
+        return self._vacuum(db), ""
 
     @staticmethod
     def _delete_message_reads(db: sqlite3.Connection, msg_ids) -> None:
@@ -5747,6 +5857,12 @@ class NthWebHandler(BaseHTTPRequestHandler):
                "freed_bytes": {"attachments": 0, "db": max(0, before - after)}}
         if not vacuumed:
             res["vacuum_deferred"] = True
+            # A bare `vacuum_deferred: true` next to `freed_bytes.db: 0` reads
+            # as failure, and the operator runs the whole prune again. The
+            # deletes DID commit; only the disk reclaim was postponed.
+            res["note"] = vacuum_note or (
+                "The deletions are saved. Disk space wasn't reclaimed yet "
+                "because the database was busy — run Reclaim later to finish.")
         return res
 
     def _prune_attachments(self, db, older_than_days, dry_run) -> Dict[str, Any]:
@@ -5775,9 +5891,15 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 would += sz if sz is not None else (r["bytes"] or 0)
             return {"counts": {"attachments": len(rows)}, "file_errors": 0,
                     "would_free_bytes": {"attachments": would, "db": 0}}
-        freed_files, file_errors = _unlink_attachment_files(paths)
+        freed_files, failed_paths = _unlink_attachment_files(paths)
+        file_errors = len(failed_paths)
         before = self._db_logical_bytes(db)
-        ids = [r["id"] for r in rows]
+        # Keep the rows whose file could NOT be removed. Deleting them would
+        # strand those files with nothing pointing at them, so a retry could
+        # never find them — which contradicts the files-first ordering this
+        # helper exists to provide.
+        stuck = set(failed_paths)
+        ids = [r["id"] for r in rows if r["path"] not in stuck]
         # BEGIN IMMEDIATE for parity with the other prune paths: one atomic
         # row-set delete rather than per-chunk autocommits (Sauron/Aragorn).
         db.execute("BEGIN IMMEDIATE")
@@ -5787,12 +5909,24 @@ class NthWebHandler(BaseHTTPRequestHandler):
         except sqlite3.Error:
             db.execute("ROLLBACK")
             raise
-        vacuumed = self._vacuum(db)
+        vacuumed, vacuum_note = self._vacuum_if_small(db)
         after = self._db_logical_bytes(db) if vacuumed else before
         res = {"counts": {"attachments": len(ids)}, "file_errors": file_errors,
-               "freed_bytes": {"attachments": freed_files, "db": max(0, before - after)}}
+               "freed_bytes": {"attachments": freed_files,
+                               "db": max(0, before - after)}}
+        if failed_paths:
+            # The paths, not just a count: an operator seeing "3" has no idea
+            # which three or what to do. These are files the server could not
+            # delete (usually permissions).
+            res["file_error_paths"] = failed_paths[:50]
         if not vacuumed:
             res["vacuum_deferred"] = True
+            # A bare `vacuum_deferred: true` next to `freed_bytes.db: 0` reads
+            # as failure, and the operator runs the whole prune again. The
+            # deletes DID commit; only the disk reclaim was postponed.
+            res["note"] = vacuum_note or (
+                "The deletions are saved. Disk space wasn't reclaimed yet "
+                "because the database was busy — run Reclaim later to finish.")
         return res
 
     def _prune_archived_messages(self, db, older_than_days, dry_run) -> Dict[str, Any]:
@@ -5816,27 +5950,46 @@ class NthWebHandler(BaseHTTPRequestHandler):
         paths = [r["path"] for r in att_rows]
         if dry_run:
             would = self._stat_or_bytes(att_rows)
-            return {"counts": {"messages": len(msg_ids), "attachments": len(att_rows)},
-                    "file_errors": 0,
-                    "would_free_bytes": {"attachments": would, "db": 0}}
-        freed_files, file_errors = _unlink_attachment_files(paths)
+            return {"counts": {"messages": len(msg_ids),
+                               "attachments": len(att_rows)},
+                    "file_errors": 0, "db_bytes_estimated": True,
+                    "would_free_bytes": {
+                        "attachments": would,
+                        "db": self._est_message_bytes(db, msg_ids)}}
+        freed_files, failed_paths = _unlink_attachment_files(paths)
+        file_errors = len(failed_paths)
         before = self._db_logical_bytes(db)
+        stuck = set(failed_paths)
         db.execute("BEGIN IMMEDIATE")
         try:
-            self._delete_by_ids(db, "attachments", [r["id"] for r in att_rows])
+            self._delete_by_ids(db, "attachments",
+                                [r["id"] for r in att_rows
+                                 if r["path"] not in stuck])
             self._delete_message_reads(db, msg_ids)
             self._delete_by_ids(db, "messages", msg_ids)
             db.execute("COMMIT")
         except sqlite3.Error:
             db.execute("ROLLBACK")
             raise
-        vacuumed = self._vacuum(db)
+        vacuumed, vacuum_note = self._vacuum_if_small(db)
         after = self._db_logical_bytes(db) if vacuumed else before
         res = {"counts": {"messages": len(msg_ids), "attachments": len(att_rows)},
                "file_errors": file_errors,
-               "freed_bytes": {"attachments": freed_files, "db": max(0, before - after)}}
+               "freed_bytes": {"attachments": freed_files,
+                               "db": max(0, before - after)}}
+        if failed_paths:
+            # The paths, not just a count: an operator seeing "3" has no idea
+            # which three or what to do. These are files the server could not
+            # delete (usually permissions).
+            res["file_error_paths"] = failed_paths[:50]
         if not vacuumed:
             res["vacuum_deferred"] = True
+            # A bare `vacuum_deferred: true` next to `freed_bytes.db: 0` reads
+            # as failure, and the operator runs the whole prune again. The
+            # deletes DID commit; only the disk reclaim was postponed.
+            res["note"] = vacuum_note or (
+                "The deletions are saved. Disk space wasn't reclaimed yet "
+                "because the database was busy — run Reclaim later to finish.")
         return res
 
     def _prune_delete_channel(self, db, channel, dry_run) -> Dict[str, Any]:
@@ -5845,7 +5998,16 @@ class NthWebHandler(BaseHTTPRequestHandler):
         through _remove_from_channel per member so tasks are released, locks
         dropped, agent_channels cleaned, and agent-global sessions revoked when
         this was the member's final presence — no orphans. The agent inbox is
-        rejected earlier and can never reach here."""
+        rejected earlier and can never reach here.
+
+        Raises AgentActionError(404) for an unknown channel. Without that, a
+        mistyped code on the single most destructive operation in the product
+        deleted nothing and still answered `ok: true` with all-zero counts —
+        a green checkmark while the channel sat untouched in the sidebar.
+        """
+        if db.execute("SELECT 1 FROM channels WHERE code = ?",
+                      (channel,)).fetchone() is None:
+            raise AgentActionError(404, f"no such channel: {channel}")
         att_rows = self._channel_attachments(db, channel)
         msg_count = db.execute(
             "SELECT COUNT(*) FROM messages WHERE channel = ?", (channel,)).fetchone()[0]
@@ -5853,10 +6015,23 @@ class NthWebHandler(BaseHTTPRequestHandler):
             "SELECT id FROM members WHERE channel = ?", (channel,)).fetchall()]
         if dry_run:
             would = self._stat_or_bytes(att_rows)
-            return {"counts": {"messages": msg_count, "attachments": len(att_rows),
-                               "members": len(member_ids)}, "file_errors": 0,
-                    "would_free_bytes": {"attachments": would, "db": 0}}
-        freed_files, file_errors = _unlink_attachment_files([r["path"] for r in att_rows])
+            chan_ids = [r[0] for r in db.execute(
+                "SELECT id FROM messages WHERE channel = ?",
+                (channel,)).fetchall()]
+            return {"counts": {"messages": msg_count,
+                               "attachments": len(att_rows),
+                               "members": len(member_ids)},
+                    "file_errors": 0, "db_bytes_estimated": True,
+                    "would_free_bytes": {
+                        "attachments": would,
+                        "db": self._est_message_bytes(db, chan_ids)}}
+        # Unlike the two prune paths above, the channel row itself is going
+        # away here, so keeping an attachment row would leave it pointing at a
+        # channel that no longer exists. Delete regardless and report the paths
+        # so the operator can remove the files by hand.
+        freed_files, failed_paths = _unlink_attachment_files(
+            [r["path"] for r in att_rows])
+        file_errors = len(failed_paths)
         before = self._db_logical_bytes(db)
         now = now_iso()
         db.execute("BEGIN IMMEDIATE")
@@ -5881,13 +6056,25 @@ class NthWebHandler(BaseHTTPRequestHandler):
         except sqlite3.Error:
             db.execute("ROLLBACK")
             raise
-        vacuumed = self._vacuum(db)
+        vacuumed, vacuum_note = self._vacuum_if_small(db)
         after = self._db_logical_bytes(db) if vacuumed else before
         res = {"counts": {"messages": msg_count, "attachments": len(att_rows),
                           "members": len(member_ids)}, "file_errors": file_errors,
-               "freed_bytes": {"attachments": freed_files, "db": max(0, before - after)}}
+               "freed_bytes": {"attachments": freed_files,
+                               "db": max(0, before - after)}}
+        if failed_paths:
+            # The paths, not just a count: an operator seeing "3" has no idea
+            # which three or what to do. These are files the server could not
+            # delete (usually permissions).
+            res["file_error_paths"] = failed_paths[:50]
         if not vacuumed:
             res["vacuum_deferred"] = True
+            # A bare `vacuum_deferred: true` next to `freed_bytes.db: 0` reads
+            # as failure, and the operator runs the whole prune again. The
+            # deletes DID commit; only the disk reclaim was postponed.
+            res["note"] = vacuum_note or (
+                "The deletions are saved. Disk space wasn't reclaimed yet "
+                "because the database was busy — run Reclaim later to finish.")
         return res
 
     # ── prune helpers ────────────────────────────────────────────────────────
@@ -5920,6 +6107,30 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 (channel,)).fetchall()
         except sqlite3.Error:
             return []
+
+    @staticmethod
+    def _est_message_bytes(db, msg_ids) -> int:
+        """Rough DB bytes the given messages occupy, for a dry-run preview.
+
+        Previews used to report `db: 0` for every destructive action, so
+        "delete this channel" previewed as *12,000 messages, 0 bytes freed*
+        and the real run then reported hundreds of MB. Zero is an assertion of
+        nothing, and it made the preview useless for the one decision it
+        exists to support. This is an estimate and the caller labels it as
+        one, but an estimate beats a confident lie.
+        """
+        if not msg_ids:
+            return 0
+        total = 0
+        for i in range(0, len(msg_ids), 400):
+            chunk = msg_ids[i:i + 400]
+            ph = ",".join("?" for _ in chunk)
+            total += db.execute(
+                "SELECT COALESCE(SUM(LENGTH(CAST(content AS BLOB))), 0) + "
+                "       COALESCE(SUM(LENGTH(CAST(COALESCE(member_name, '') "
+                "                                AS BLOB))), 0) "
+                f"FROM messages WHERE id IN ({ph})", chunk).fetchone()[0]
+        return total
 
     @staticmethod
     def _stat_or_bytes(att_rows) -> int:
@@ -5963,10 +6174,20 @@ class NthWebHandler(BaseHTTPRequestHandler):
             db = sqlite3.connect(str(self.db_path), timeout=5)
             db.row_factory = sqlite3.Row
             db.execute("PRAGMA busy_timeout=3000")
+            # ANY reply from the operator counts as answering, not only one
+            # carrying a structured `selection`.
+            #
+            # The picker sends a selection, but the MCP contract is explicit
+            # that the asking agent reads the ordinary reply WORDS — so a prose
+            # answer, or one sent from MCP or a second client, is a real answer
+            # and unblocks the agent. Requiring `selection` left those
+            # questions in the operator's queue permanently, with no dismiss
+            # path and no way to review what they had already answered. If a
+            # reply was actually a clarifying question, the agent asks again
+            # and a new row appears; that is recoverable, a stuck queue is not.
             answered = {(r["channel"], r["reply_to"]) for r in db.execute(
                 "SELECT channel, reply_to FROM messages "
                 "WHERE member_id = ? AND reply_to IS NOT NULL "
-                "  AND COALESCE(selection, '') != '' "
                 "  AND EXISTS (SELECT 1 FROM channels c "
                 "              WHERE c.code = messages.channel "
                 "                AND c.archived_at IS NULL)",
@@ -6103,7 +6324,19 @@ class NthWebHandler(BaseHTTPRequestHandler):
             return
         _token, ident, _is_new = self._resolve_identity()
         if ident.source == IDENTITY_SOURCE_PENDING:
-            self._error(403, "identity required — POST /api/identify first")
+            self._error(403, "pick a name to join this channel first")
+            return
+        # In LANDING mode the channel comes from ?channel= and is validated
+        # only for SHAPE, so "channel-scoped" would really mean
+        # "any-channel-scoped": a guest who has identified could read the task
+        # board — descriptions, results, claimants — of every channel in the
+        # DB by iterating codes. Upstream's single-channel mode is unaffected
+        # (the channel is fixed by the process), but the workspace this branch
+        # exists to enable runs in landing mode, so the cross-channel read has
+        # to be operator-gated exactly like its ten siblings.
+        if self.landing_mode and not is_all_seeing(ident.member_id):
+            self._error(403, "only the hub operator can read another "
+                             "channel's tasks")
             return
         # Active work first, terminal states last.
         order = ("CASE status WHEN 'open' THEN 0 WHEN 'claimed' THEN 1 "
@@ -6121,6 +6354,8 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 "FROM tasks WHERE channel = ? "
                 f"ORDER BY {order}, id", (ch,)).fetchall()
             tasks = []
+            name_cache: Dict[str, str] = {}
+            now = now_iso()
             for r in rows:
                 try:
                     deps = json.loads(r["blocked_by"] or "[]")
@@ -6128,10 +6363,24 @@ class NthWebHandler(BaseHTTPRequestHandler):
                     # A malformed blocked_by must not take the whole board
                     # down; an empty dependency list is the safe reading.
                     deps = []
+                # Resolved names, not raw ids. This board is read-only by
+                # design — the only useful thing left is knowing WHO to go and
+                # ask, and "claimed by ag_7f3c91" does not tell you that.
+                # /api/mentions and /api/dms already resolve; this did not.
                 tasks.append({
                     "id": r["id"],
                     "posted_by": r["posted_by"],
+                    "posted_by_name": resolve_display_name(
+                        db, r["posted_by"], name_cache),
                     "claimed_by": r["claimed_by"],
+                    "claimed_by_name": (resolve_display_name(
+                        db, r["claimed_by"], name_cache)
+                        if r["claimed_by"] else ""),
+                    # An expired lease means the claim was abandoned; without
+                    # this an abandoned task looks identical to live work.
+                    "stale": bool(r["lease_expires_at"]
+                                  and r["lease_expires_at"] < now
+                                  and r["status"] == "claimed"),
                     "status": r["status"],
                     "description": r["description"] or "",
                     "result": r["result"] or "",
@@ -6253,8 +6502,59 @@ class NthWebHandler(BaseHTTPRequestHandler):
                     db.close()
                 except sqlite3.Error:
                     pass
-        self._json({"ok": True, "kind": kind, "key": key,
-                    "archived": archived})
+        # Report the EFFECTIVE state, not the state that was requested.
+        #
+        # A DM thread can also be archived because every counterpart is an
+        # archived AGENT, which is derived from agents.archived_at and cannot
+        # be cleared from here. Un-archiving such a thread deletes a
+        # dm_archives row that may not exist, changes nothing observable, and
+        # used to answer {"archived": false} — so the client reported success
+        # and the conversation stayed gone. Re-derive and say what is true.
+        result = {"ok": True, "kind": kind, "key": key, "archived": archived}
+        if kind == "dm":
+            still = self._agent_archived_stamp(key)
+            if still and not archived:
+                result["archived"] = True
+                result["agent_archived"] = True
+                result["agent_archived_at"] = still
+                result["note"] = ("Your archive was cleared, but this "
+                                  "conversation stays archived because every "
+                                  "participant is an archived agent. Restore "
+                                  "the agent to bring it back.")
+            else:
+                result["agent_archived"] = bool(still)
+        self._json(result)
+
+    def _agent_archived_stamp(self, thread_key: str) -> str:
+        """Newest archive stamp if EVERY participant of `thread_key` is an
+        archived agent, else "". Mirrors all_archived() in _handle_dms."""
+        ids = participants_in_key(thread_key)
+        if not ids:
+            return ""
+        db = None
+        try:
+            db = sqlite3.connect(str(self.db_path), timeout=5)
+            db.row_factory = sqlite3.Row
+            stamps = []
+            for member_id in ids:
+                row = db.execute(
+                    "SELECT archived_at FROM agents WHERE id = ?",
+                    (member_id,)).fetchone()
+                if row is None or not row["archived_at"]:
+                    return ""
+                stamps.append(row["archived_at"])
+            return max(stamps)
+        except sqlite3.Error:
+            # Degrade to "not agent-archived": the caller uses this only to
+            # add an explanation, and inventing one from a failed read would
+            # be worse than omitting it.
+            return ""
+        finally:
+            if db is not None:
+                try:
+                    db.close()
+                except sqlite3.Error:
+                    pass
 
     def _handle_dms(self, parsed) -> None:
         """The operator's unified, cross-channel DM surface.
@@ -6278,15 +6578,42 @@ class NthWebHandler(BaseHTTPRequestHandler):
             db = sqlite3.connect(str(self.db_path), timeout=5)
             db.row_factory = sqlite3.Row
             db.execute("PRAGMA busy_timeout=3000")
-            rows = db.execute(
+            # TWO SEPARATE WINDOWS, not one global one.
+            #
+            # A single `ORDER BY id DESC LIMIT 2000` over every DM row in the
+            # database let agent-to-agent traffic EVICT the operator's own
+            # conversations: 2,100 unrelated agent DMs and `your_dms` came back
+            # empty, while /api/channel-size?dm= still reported messages in a
+            # thread this endpoint claimed did not exist. The operator's inbox
+            # must be bounded by its OWN size, never by someone else's volume.
+            #
+            # instr() on the QUOTED id is an exact substring test against the
+            # recipients JSON — no LIKE wildcards, and an id that merely
+            # CONTAINS the operator's does not match. Python still confirms
+            # membership per row; this only narrows the window.
+            quoted_op = f'"{operator_id}"'
+            dm_select = (
                 "SELECT m.*, (mr.member_id IS NOT NULL) AS is_read "
                 "FROM messages m "
                 "LEFT JOIN message_reads mr "
                 "  ON mr.message_id = m.id AND mr.member_id = ? "
                 "WHERE m.recipients IS NOT NULL "
-                "  AND m.recipients NOT IN ('', '[]') "
-                "ORDER BY m.id DESC LIMIT 2000",
-                (operator_id,)).fetchall()
+                "  AND m.recipients NOT IN ('', '[]') ")
+            own_rows = db.execute(
+                dm_select
+                + "  AND (m.member_id = ? OR instr(m.recipients, ?) > 0) "
+                  "ORDER BY m.id DESC LIMIT 2000",
+                (operator_id, operator_id, quoted_op)).fetchall()
+            audit_rows = db.execute(
+                dm_select
+                + "  AND m.member_id != ? AND instr(m.recipients, ?) = 0 "
+                  "ORDER BY m.id DESC LIMIT 2000",
+                (operator_id, operator_id, quoted_op)).fetchall()
+            # Each list stays newest-first, and a thread lives entirely in one
+            # of them (it either involves the operator or it does not), so the
+            # "first row seen for a thread is its latest" rule below still
+            # holds across the concatenation.
+            rows = list(own_rows) + list(audit_rows)
             name_cache: Dict[str, str] = {operator_id: ident.display_name}
 
             def display_name(member_id: str) -> str:
@@ -6357,22 +6684,44 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 # inside the DM list.
                 return max((archived_agents.get(i) or "") for i in ids)
 
+            # TWO INDEPENDENT REASONS a thread can be hidden, reported
+            # separately. They used to collapse into one `archived` flag, and
+            # that flag could not describe a thread that was BOTH archived by
+            # you and archived because its agent was: the client would tell the
+            # operator "unarchive the agent", they would do exactly that, and
+            # the thread would still be gone because their own watermark
+            # survived. Having followed the only instruction available and
+            # failed, there was nothing else to try.
             for key, thread in yours.items():
                 marker = archive_map.get(key)
-                # The marker is a watermark: a message NEWER than it means the
-                # thread has spoken since you archived it, so it is live again.
-                thread["archived"] = bool(
-                    marker and thread["last_id"] <= marker["archived_through_id"])
-                thread["archived_at"] = (marker["archived_at"]
-                                         if thread["archived"] else None)
+                # `self_archived` is a WATERMARK test: a message newer than the
+                # marker means the thread has spoken since you archived it, so
+                # it is live again on its own.
+                thread["self_archived"] = bool(
+                    marker
+                    and thread["last_id"] <= marker["archived_through_id"])
+                thread["self_archived_at"] = (marker["archived_at"]
+                                              if thread["self_archived"]
+                                              else None)
                 stamp = all_archived(thread["member_ids"])
                 thread["agent_archived"] = bool(stamp)
-                if stamp and not thread["archived"]:
-                    # Archived because the agent was, not by an explicit DM
-                    # archive. The client reads agent_archived to explain that
-                    # restoring means unarchiving the agent.
-                    thread["archived"] = True
-                    thread["archived_at"] = stamp
+                thread["agent_archived_at"] = stamp or None
+                # `archived` stays as the effective OR so existing readers keep
+                # working; the two causes above are what a client needs to say
+                # what to actually DO about it.
+                thread["archived"] = (thread["self_archived"]
+                                      or thread["agent_archived"])
+                thread["archived_at"] = (thread["self_archived_at"]
+                                         or thread["agent_archived_at"])
+
+            # Keep the UNFILTERED maps for the ?with= lookup below. Filtering
+            # first meant `requested` was None whenever the thread's archive
+            # state disagreed with the `archived` query param — which is
+            # exactly when ?with= is used from the archive browser — so it
+            # always fell through to parsing the raw key instead of using the
+            # thread it had already built.
+            all_yours = dict(yours)
+            all_agent_threads = dict(agent_threads)
 
             yours = {k: t for k, t in yours.items()
                      if bool(t["archived"]) == archived}
@@ -6399,7 +6748,8 @@ class NthWebHandler(BaseHTTPRequestHandler):
                     if key == with_id:
                         matched.append(r)
                 latest = matched[0]["id"] if matched else 0
-                requested = yours.get(with_id) or agent_threads.get(with_id)
+                requested = (all_yours.get(with_id)
+                             or all_agent_threads.get(with_id))
                 # An agent-archived thread reads as archived here too, so
                 # opening it from the archive browser (which asks archived=1)
                 # actually returns its history instead of an empty thread.
@@ -6407,7 +6757,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
                     (marker and latest
                      and latest <= marker["archived_through_id"])
                     or all_archived((requested or {}).get("member_ids")
-                                    or with_id.split(",")))
+                                    or participants_in_key(with_id)))
                 if thread_is_archived == archived:
                     for r in reversed(matched):
                         # Two-arg call on purpose. Upstream's _message_event
@@ -6466,8 +6816,19 @@ class NthWebHandler(BaseHTTPRequestHandler):
         body = self._read_json_body(max_bytes=4096)
         if body is None:
             return
-        topic = (body.get("topic") or "").strip()[:500]
-        code = (body.get("code") or "").strip().lower()
+        # Type-check BEFORE calling any string method. `(body.get("code") or
+        # "")` passes a non-empty NON-string straight through, so {"code":
+        # 12345} reached .strip() and raised AttributeError — and do_POST has
+        # no wrapping handler, so the connection was dropped with no status
+        # line at all instead of answering 400.
+        raw_topic = body.get("topic")
+        raw_code = body.get("code")
+        for field, value in (("topic", raw_topic), ("code", raw_code)):
+            if value is not None and not isinstance(value, str):
+                self._error(400, f"{field} must be a string")
+                return
+        topic = (raw_topic or "").strip()[:500]
+        code = (raw_code or "").strip().lower()
         if not code and topic:
             code = re.sub(r"[^a-z0-9-]", "-", topic.lower())
             code = re.sub(r"-+", "-", code).strip("-")[:32]
@@ -6564,7 +6925,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
         q = q[:200]
         _token, ident, _is_new = self._resolve_identity()
         if ident.source == IDENTITY_SOURCE_PENDING:
-            self._error(403, "identity required — POST /api/identify first")
+            self._error(403, "pick a name to join this channel first")
             return
         # Escape LIKE wildcards so a query like "50%" is a literal substring.
         esc = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
@@ -6766,7 +7127,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
 
         token, ident, _is_new = self._resolve_identity()
         if ident.source == IDENTITY_SOURCE_PENDING:
-            self._error(403, "identity required — POST /api/identify first")
+            self._error(403, "pick a name to join this channel first")
             return
 
         db = None
@@ -7033,7 +7394,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
             return
         _token, ident, _is_new = self._resolve_identity()
         if ident.source == IDENTITY_SOURCE_PENDING:
-            self._error(403, "identity required — POST /api/identify first")
+            self._error(403, "pick a name to join this channel first")
             return
         # Removing a member is destructive and roster-wide — restrict it to
         # trusted identities (a local shell or a Tailscale-verified peer). A
@@ -7445,7 +7806,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
         so there is nothing here to scope by channel in landing mode."""
         _token, ident, _is_new = self._resolve_identity()
         if ident.source == IDENTITY_SOURCE_PENDING:
-            self._error(403, "identity required — POST /api/identify first")
+            self._error(403, "pick a name to join this channel first")
             return
         # Bound concurrency before reading the (up to 25 MB) body, so a burst of
         # uploads can't buffer N×MAX_STT_BYTES or pile up behind the worker lock.
@@ -7553,7 +7914,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
             return
         _token, ident, _is_new = self._resolve_identity()
         if ident.source == IDENTITY_SOURCE_PENDING:
-            self._error(403, "identity required — POST /api/identify first")
+            self._error(403, "pick a name to join this channel first")
             return
         row = None
         db = None
