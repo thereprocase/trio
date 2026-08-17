@@ -36,11 +36,12 @@
   const inspiredThemes = themes.filter(theme => theme.family === 'inspired');
   const THEME_CARD_WIDTH = 104;
   const THEME_CARD_GAP = 10;
-  // Keep incomplete rows visually balanced. The widest layout uses at most two
-  // rows; as space narrows, only reduce the column count when a whole card no
-  // longer fits, yielding 7 -> 4/3 -> 3/2/2 and 10 -> 5/5 -> 4/3/3 -> 3/3/2/2.
+  // Keep incomplete rows visually balanced, but never split a group that can
+  // still fit in one row. Once it overflows, reduce only when a whole card no
+  // longer fits: 7 -> 4/3 -> 3/2/2 and 10 -> 5/5 -> 4/3/3 -> 3/3/2/2.
   function themeGridColumns(count, availableWidth) {
     const fit = Math.max(1, Math.floor((availableWidth + THEME_CARD_GAP) / (THEME_CARD_WIDTH + THEME_CARD_GAP)));
+    if (fit >= count) return count;
     return Math.min(Math.ceil(count / 2), fit);
   }
   const themeIds = themes.map(theme => theme.id);

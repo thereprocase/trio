@@ -171,7 +171,8 @@ check('Inspired cards have name-only labels and a toggle mode',
   && inspired.every(theme => theme.family === 'inspired'
   && !theme.description && ['light', 'dark'].includes(theme.mode)));
 check('theme picker balances every group as its available width changes',
-  base.Trio.preferences.themeGridColumns(7, 720) === 4
+  base.Trio.preferences.themeGridColumns(6, 720) === 6
+  && base.Trio.preferences.themeGridColumns(7, 720) === 4
   && base.Trio.preferences.themeGridColumns(7, 340) === 3
   && base.Trio.preferences.themeGridColumns(8, 720) === 4
   && base.Trio.preferences.themeGridColumns(8, 340) === 3
