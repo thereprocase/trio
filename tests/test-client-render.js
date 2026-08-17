@@ -295,9 +295,24 @@ check('effortsForModel reads the model-specific list from discovered models, not
   assert.deepStrictEqual(Array.from(H.Trio.agents.effortsForModel('claude', 'haiku')), ['low', 'medium', 'high']);
   assert.deepStrictEqual(Array.from(H.Trio.agents.effortsForModel('codex', 'fake-codex')), ['low', 'high']);
 });
-check('effortsForModel falls back to a safe default for an undiscovered model', () => {
+check('effortsForModel offers NOTHING for an undiscovered model, rather than inventing a ladder', () => {
+  // It used to return ['low','medium','high'] here. That is wrong for nearly
+  // every real model — Codex offers xhigh/max/ultra, Haiku has no max — so the
+  // operator was shown levels the model does not have and picked one that was
+  // then silently coerced. An empty list makes the picker say "choose a model
+  // first" instead of guessing.
   H.Trio.state.agentModels = { claude: [] };
-  assert.deepStrictEqual(Array.from(H.Trio.agents.effortsForModel('claude', 'unknown-model')), ['low', 'medium', 'high']);
+  assert.deepStrictEqual(Array.from(H.Trio.agents.effortsForModel('claude', 'unknown-model')), []);
+});
+check('the effort control explains itself when there is nothing to choose from', () => {
+  const html = H.Trio.agents.effortSlider([], '');
+  assert.ok(/choose a model first/i.test(html),
+    'an empty effort list must say why, not render an empty slider: ' + html);
+  assert.ok(!/type="range"/.test(html), 'no slider should be rendered with no steps');
+});
+check('an existing agent keeps its effort visible even if discovery is thin', () => {
+  const html = H.Trio.agents.effortSlider([], 'ultra');
+  assert.ok(/ultra/.test(html), 'the current value must survive a failed discovery');
 });
 check('effortOptions renders a <select>-ready option list with the current value selected', () => {
   const html = H.Trio.agents.effortOptions(['low', 'high'], 'high');

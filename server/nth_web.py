@@ -3387,7 +3387,16 @@ class NthWebHandler(BaseHTTPRequestHandler):
         if path in UI_PATHS:
             # Mint a cookie on first visit so /api/meta + /api/events carry it.
             token, _ident, is_new = self._resolve_identity()
-            body = LANDING_HTML if self.landing_mode else INDEX_HTML
+            # In landing mode "/" is the fleet index — but a request that NAMES
+            # a conversation is asking for the dashboard, and must get the app.
+            # Without this, /c/<code> (which redirects here) and every deep link
+            # the client itself writes serve the fleet page instead, leaving the
+            # channel dashboard unreachable in the only mode where managed
+            # agents are enabled.
+            query = parse_qs(parsed.query)
+            wants_conversation = bool(query.get("channel") or query.get("dm"))
+            body = (LANDING_HTML if self.landing_mode and not wants_conversation
+                    else INDEX_HTML)
             self._serve_html(body, set_cookie_token=token if is_new else None)
         elif self.landing_mode and path.startswith("/c/"):
             code = path[3:].rstrip("/")

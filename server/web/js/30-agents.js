@@ -7,7 +7,11 @@
   state.agentFilter = state.agentFilter || 'all';
   state.agentsSearch = state.agentsSearch || '';
   state.providers = state.providers || ['codex', 'claude'];
-  state.agentModels = state.agentModels || { codex: ['o4-mini', 'gpt-4.1'], claude: ['claude-sonnet-4-20250801', 'claude-opus-4-20250801'] };
+  // Empty until /api/agent-models answers. It used to be seeded with a
+  // hardcoded catalogue, which meant a failed discovery silently offered
+  // models that do not exist — the picker showed two stale Claude ids and two
+  // stale Codex ones, and nothing told the operator the list was invented.
+  state.agentModels = state.agentModels || {};
   state.discoveryLoading = false;
   let discoveryPromise = null;
   const pendingAgentActions = new Set();
@@ -492,7 +496,7 @@
         + discreteSlider('wake', 'Wake policy', WAKE_STEPS, WAKE_STEPS.includes(vm.wakePolicy) ? vm.wakePolicy : 'all')
         + '<span class="cfg-hint">How much wakes this agent — <b>all</b>: every message · <b>about</b>: @/#-mentions of it + bangs · <b>at</b>: only @-mentions + bangs.</span></div>';
       const effortBlock = '<div class="cfg-block" id="cfg-effort">'
-        + effortSlider(effortsForModel(vm.provider, vm.model), vm.effort, { defaultLabel: effortDefaultLabel(vm.provider, vm.model) }) + '</div>';
+        + effortSlider(effortsForModel(vm.provider, vm.model), vm.effort, { defaultLabel: effortDefaultLabel(vm.provider, vm.model), modelDefault: modelDefaultEffort(vm.provider, vm.model) }) + '</div>';
       const cfgEditor = '<div class="cfg-editor">' + placementsBlock + wakeBlock + effortBlock
         + '<div class="cfg-foot"><button type="button" class="mbtn primary" data-cfg-save disabled>Save changes</button></div></div>';
       sections = section('Lifecycle', life)
@@ -536,9 +540,14 @@
   function effortModelEntry(provider, modelId) {
     return normalizeModels(state.agentModels[provider]).find(m => m.id === modelId);
   }
+  // [] when the model is not in the discovered catalogue. This used to fall
+  // back to ['low','medium','high'], which is wrong for nearly every model:
+  // Codex offers xhigh/max/ultra and Haiku has no max. Presenting a ladder the
+  // model does not have is worse than presenting none, because the operator
+  // picks a value that is then silently coerced.
   function effortsForModel(provider, modelId) {
     const model = effortModelEntry(provider, modelId);
-    return Array.isArray(model?.efforts) && model.efforts.length ? model.efforts : ['low', 'medium', 'high'];
+    return Array.isArray(model?.efforts) && model.efforts.length ? model.efforts : [];
   }
   // LOTC/Frodo: with no "use the model's own default" option, the browser
   // auto-selects the FIRST <option> whenever `selected` matches nothing —
@@ -586,7 +595,18 @@
   // drives a hidden <input name="effort"> so the form reads exactly like the
   // old <select>. `selected` (an agent's current / last-picked effort) that
   // isn't in the discovered list is appended rather than dropped.
-  function effortSlider(efforts, selected, { defaultLabel = 'Model default' } = {}) {
+  function effortSlider(efforts, selected, { defaultLabel = 'Not set', modelDefault = '' } = {}) {
+    // Nothing to choose from yet. Say which of the two reasons it is rather
+    // than rendering a ladder the model may not have — the operator can act on
+    // "pick a model", and cannot act on an invented low/medium/high.
+    if (!efforts.length) {
+      const why = selected
+        ? `Currently ${esc(selected)}. The available levels for this model could not be loaded.`
+        : 'Choose a model first — each one offers different levels.';
+      return `<div class="field effort-field effort-unavailable">`
+        + `<label>Reasoning effort</label><p class="hint">${why}</p>`
+        + `<input type="hidden" name="effort" value="${esc(selected || '')}"></div>`;
+    }
     const sel = selected || '';
     const steps = ['', ...efforts];
     if (sel && !steps.includes(sel)) steps.push(sel);
@@ -600,7 +620,7 @@
     }).join('');
     const display = esc(valueDisplay(sel, defaultLabel));
     return `<div class="field effort-field" data-steps="${esc(JSON.stringify(steps))}" data-default-label="${esc(defaultLabel)}">`
-      + `<label for="effort-range">Reasoning effort <span class="hint" id="effort-hint"></span></label>`
+      + `<label for="effort-range">Reasoning effort <span class="hint" id="effort-hint">${modelDefault ? 'this model runs ' + esc(modelDefault) + ' on its own' : ''}</span></label>`
       + `<div class="effort-slider"><div class="effort-track"><input type="range" id="effort-range" class="effort-range" min="0" max="${n - 1}" step="1" value="${idx}" aria-describedby="effort-value" aria-valuetext="${display}"><div class="effort-scale">${scale}</div></div><output id="effort-value" class="effort-value">${display}</output></div>`
       + `<input type="hidden" name="effort" value="${esc(sel)}">`
       + `</div>`;
@@ -630,9 +650,17 @@
     range.addEventListener('input', sync); sync();
     return { sync };
   }
+  // The unset position is labelled "Not set", not "Model default": what the
+  // model would do on its own is INFORMATION (shown in the hint), whereas
+  // "Default" reads as a choice whose behaviour nobody can state. The unset
+  // position still exists so the slider cannot silently auto-select the lowest
+  // level for an agent the operator never touched — create() refuses to submit
+  // while it is unset, so the choice ends up explicit either way.
   function effortDefaultLabel(provider, model) {
-    const m = effortModelEntry(provider, model);
-    return m?.default_effort ? `Model default (${m.default_effort})` : 'Model default';
+    return 'Not set';
+  }
+  function modelDefaultEffort(provider, model) {
+    return effortModelEntry(provider, model)?.default_effort || '';
   }
   // Sauron: when an effort change takes hold differs by provider. Codex re-reads
   // effort fresh every turn; Claude fixes it in the process argv at spawn, so
@@ -905,7 +933,7 @@
       ? `<fieldset class="field"><legend>Channels <span class="hint">optional — place later if blank</span></legend>${channelListMarkup(createChanCodes, new Set())}</fieldset>`
       : '';
     let channelApi = null;
-    const effortControl = `<div id="effort-control">${effortSlider(effortsForModel(defaultProvider, defaultModelId), initialEffort, { defaultLabel: effortDefaultLabel(defaultProvider, defaultModelId) })}</div>`;
+    const effortControl = `<div id="effort-control">${effortSlider(effortsForModel(defaultProvider, defaultModelId), initialEffort, { defaultLabel: effortDefaultLabel(defaultProvider, defaultModelId), modelDefault: modelDefaultEffort(defaultProvider, defaultModelId) })}</div>`;
     const html = `<label class="field">Name <span class="hint">optional — assigned automatically if blank</span><input name="name" pattern="[A-Za-z0-9_]{1,32}" placeholder="Leave blank for a random character name"></label><label class="field">Provider <select name="provider">${providers}</select></label><label class="field">Model <select name="model">${models}</select></label>${effortControl}<label class="field">Working directory <input name="cwd" placeholder="/path/to/project"></label><label class="field">Permission profile ${permissionOptions()}</label>${channelsField}`;
     Trio.ui.modal('Create agent', html, async node => {
       const f = new FormData(node.querySelector('form'));
@@ -917,6 +945,13 @@
       const channels = channelApi ? [...channelApi.getSelected()] : [];
       if (!provider) { Trio.ui.toast('Provider is required'); return; }
       if (!model) { Trio.ui.toast('Model is required'); return; }
+      // Explicit, not defaulted. The slider starts unset so it cannot silently
+      // pick the lowest level for an agent nobody configured; refusing to
+      // submit while it is unset is what turns that into a real choice rather
+      // than an opaque "Default" whose behaviour nobody can state.
+      if (!effort && effortsForModel(provider, model).length) {
+        Trio.ui.toast('Choose a reasoning effort for this model'); return;
+      }
       rememberEffort(provider, model, effort);
       const key = 'create:' + name;
       if (pendingAgentActions.has(key)) return;
@@ -943,7 +978,7 @@
       const efforts = effortsForModel(p, m);
       const prev = effortHost.querySelector('input[name="effort"]')?.value ?? '';
       const keep = prev === '' || efforts.includes(prev) ? prev : (lastEffort(p, m) || '');
-      effortHost.innerHTML = effortSlider(efforts, keep, { defaultLabel: effortDefaultLabel(p, m) });
+      effortHost.innerHTML = effortSlider(efforts, keep, { defaultLabel: effortDefaultLabel(p, m), modelDefault: modelDefaultEffort(p, m) });
       wireEffortSlider(effortHost);
     };
     if (effortHost) wireEffortSlider(effortHost);
