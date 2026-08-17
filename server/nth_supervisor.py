@@ -30,6 +30,7 @@ import json
 import math
 import os
 import re
+import secrets
 import shlex
 import shutil
 import signal
@@ -1248,9 +1249,61 @@ class AgentSupervisor:
                 db.execute(
                     "UPDATE agents SET session_id = ?, last_active_at = ? WHERE id = ?",
                     (session_id, now_iso(), agent_id))
+            self._register_sessions(db, agent_id, session_id)
             db.commit()
         finally:
             db.close()
+
+    def _register_sessions(self, db, agent_id: str, fingerprint: str) -> None:
+        """Anchor the activity hooks to this agent's channels.
+
+        The hooks find a session by FINGERPRINT — the raw Claude Code session
+        id — and stamp last_seen/last_tool_* on it. Until this ran, the only
+        thing that ever created a sessions row was the agent choosing to call
+        trio_connect. An agent that posts with trio_send and never connects
+        (perfectly legal — it is handed its member id at spawn) therefore had
+        no row for the hooks to write to, so it sat at whatever its member row
+        last said and never showed working or a tool. Observed live: of two
+        agents created ninety seconds apart, the one that connected reported
+        status correctly and the one that did not read idle forever.
+
+        Status is infrastructure, so it cannot depend on the agent's goodwill.
+        We know the fingerprint here (this is the instant we capture it) and
+        the placements are just the agent's members rows, so we register the
+        row ourselves. If the agent does connect later it mints its own, newer
+        row and the hooks follow that one — the scope always takes the newest
+        live session per channel.
+        """
+        if not fingerprint:
+            return
+        try:
+            placements = [r[0] for r in db.execute(
+                "SELECT channel FROM members WHERE id = ? AND active = 1",
+                (agent_id,))]
+            for channel in placements:
+                exists = db.execute(
+                    "SELECT 1 FROM sessions WHERE member_id = ? AND channel = ? "
+                    "AND fingerprint = ? AND revoked_at IS NULL LIMIT 1",
+                    (agent_id, channel, fingerprint)).fetchone()
+                if exists:
+                    continue
+                now = now_iso()
+                # last_read starts at the member's watermark, not 0: this row is
+                # a telemetry anchor, and seeding it at 0 would advertise every
+                # message in the channel as unread for a session that has in
+                # fact read up to the member watermark.
+                db.execute(
+                    "INSERT INTO sessions (session_token, member_id, channel, "
+                    "role, pid, fingerprint, connected_at, last_seen, last_read) "
+                    "VALUES (?, ?, ?, 'primary', NULL, ?, ?, ?, "
+                    " COALESCE((SELECT last_read FROM members WHERE id = ? "
+                    "           AND channel = ?), 0))",
+                    ("s_" + secrets.token_hex(16), agent_id, channel,
+                     fingerprint, now, now, agent_id, channel))
+        except sqlite3.Error:
+            # Telemetry must never take down a spawn. Without the row the agent
+            # simply reports as it did before this change.
+            pass
 
     def _set_state(self, agent_id: str, state: str, *,
                    pid: Optional[int] = None, session_id: Optional[str] = None,
