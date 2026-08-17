@@ -3,7 +3,7 @@
   const Trio = window.Trio;
   async function boot() {
     const mountFeatures = () => {
-      ['conversation', 'workspace', 'agents', 'preferences', 'gameboyControls', 'router', 'composer'].forEach(name => {
+      ['conversation', 'workspace', 'agents', 'preferences', 'gameboyControls', 'ipodControls', 'router', 'composer'].forEach(name => {
         const feature = Trio[name];
         if (!feature) return;
         // Isolate each mount: one feature throwing must not skip the rest —

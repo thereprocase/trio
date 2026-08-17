@@ -45,7 +45,7 @@
   }
 
   function visible(element) {
-    if (!element || element === controller || controller?.contains(element)) return false;
+    if (!element || element.closest?.('[data-inspired-controller]')) return false;
     if (element.hidden || element.closest('[hidden],[inert],[aria-hidden="true"]')) return false;
     const style = getComputedStyle(element);
     if (style.display === 'none' || style.visibility === 'hidden') return false;
@@ -177,7 +177,8 @@
     const node = document.createElement('aside');
     node.id = 'gameboy-controls';
     node.className = 'gameboy-controls';
-    node.setAttribute('aria-label', 'Game Boy workspace controller');
+    node.dataset.inspiredController = '';
+    node.setAttribute('aria-label', 'Link Cable workspace controller');
     node.hidden = true;
     node.innerHTML = `
       <div class="gb-dpad" role="group" aria-label="D-pad">
@@ -218,7 +219,7 @@
     }
     preferenceListener = sync;
     Trio.events?.addEventListener?.('preferences:changed', preferenceListener);
-    focusListener = event => { if (!controller?.contains(event.target)) lastFocused = event.target; };
+    focusListener = event => { if (!event.target.closest?.('[data-inspired-controller]')) lastFocused = event.target; };
     document.addEventListener('focusin', focusListener);
     sync();
   }
@@ -232,7 +233,8 @@
   }
 
   Trio.gameboyControls = {
-    mount, unmount, press, move, directionalScore, isGameboyTheme,
+    mount, unmount, press, move, activate, back, start, selectRegion, focusTarget,
+    directionalScore, isGameboyTheme,
     actionLabels: ACTION_LABELS,
   };
 })();

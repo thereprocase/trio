@@ -91,21 +91,25 @@ check(f"WEB_CSS_FILES declares every layer on disk, in prefix order "
       f"({len(disk_css_files)} found)",
       list(web.WEB_CSS_FILES) == disk_css_files)
 
-# Historic presets must be full component skins. A token-only preset would
+# Inspired presets must be full component skins. A token-only preset would
 # technically appear in the picker while still rendering the same modern
 # rounded cards, which is precisely the failure this feature is meant to avoid.
 tokens_css = (WEB / "css" / "00-tokens.css").read_text(encoding="utf-8")
 historic_css = (WEB / "css" / "35-historic.css").read_text(encoding="utf-8")
-for preset in ("historic-win98", "historic-gameboy", "historic-geocities"):
+for preset in ("historic-win98", "historic-gameboy", "historic-geocities",
+               "inspired-ipod", "inspired-messenger", "inspired-slack"):
     check(f"{preset} declares design tokens and a component skin",
           f'[data-theme="{preset}"]' in tokens_css
           and historic_css.count(f'[data-theme="{preset}"]') >= 12)
-check("historic skins include platform-native control vocabularies",
+check("Inspired skins include platform-native control vocabularies",
       "::-webkit-scrollbar-button" in historic_css
       and "border-left:8px solid #20251a" in historic_css
       and "border:6px ridge #0ff" in historic_css
       and ".gb-dpad" in historic_css
-      and ".gb-round" in historic_css)
+      and ".gb-round" in historic_css
+      and ".ipod-wheel" in historic_css
+      and "repeating-linear-gradient(0deg,#d9d9d9" in historic_css
+      and "background:#3f0e40" in historic_css)
 check("retired Windows 3.1 preset is absent from tokens and component skins",
       "historic-win31" not in tokens_css and "historic-win31" not in historic_css)
 

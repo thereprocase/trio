@@ -156,18 +156,20 @@ check('messageCountLabel: empty state reads "0"', messageCountLabel() === '0');
 // cares how many presets there are or what they are called.
 const lights = base.Trio.preferences.lightThemes;
 const darks = base.Trio.preferences.darkThemes;
-const historic = base.Trio.preferences.historicThemes;
+const inspired = base.Trio.preferences.inspiredThemes;
 check('every preset is either light or dark, and both modes are offered',
   lights.length > 0 && darks.length > 0
   && lights.every(t => t.mode === 'light') && darks.every(t => t.mode === 'dark'));
 check('no preset id appears in both modes',
   lights.every(l => !darks.some(d => d.id === l.id)));
-check('historic interface set includes the three distinct platforms',
-  historic.map(theme => theme.id).join(',') ===
-    'historic-win98,historic-gameboy,historic-geocities');
-check('historic interfaces carry picker descriptions and a toggle mode',
-  historic.every(theme => theme.family === 'historic'
-    && theme.description && ['light', 'dark'].includes(theme.mode)));
+check('Inspired set includes all six distinct platforms',
+  inspired.map(theme => theme.id).join(',') ===
+    'historic-win98,historic-gameboy,historic-geocities,inspired-ipod,inspired-messenger,inspired-slack');
+check('Inspired cards have name-only labels and a toggle mode',
+  inspired.map(theme => theme.label).join(',') ===
+    'Dial Up,Link Cable,Webmaster,Now Playing,Walled Garden,Standup'
+  && inspired.every(theme => theme.family === 'inspired'
+    && !theme.description && ['light', 'dark'].includes(theme.mode)));
 
 const aLight = lights[lights.length - 1].id;   // not the default, so a no-op shows
 const aDark = darks[darks.length - 1].id;

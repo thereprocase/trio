@@ -138,7 +138,7 @@
   --accent:#2c8fd6; --accent-strong:#1f74b8; --accent-tint:#dcebf7;
 }
 
-/* ---- HISTORIC interfaces ----
+/* ---- INSPIRED interfaces ----
    These palettes are deliberately small and period-correct. The component
    vocabulary lives in 35-historic.css, where each preset gets native-feeling
    window chrome and controls rather than merely inheriting modern cards. */
@@ -184,6 +184,48 @@
   --r-xs:0; --r-sm:0; --r-md:0; --r-lg:0; --r-xl:0; --r-full:0;
   --shadow-sm:3px 3px 0 #00ffff; --shadow-md:5px 5px 0 #ff00ff; --shadow-lg:8px 8px 0 #000; --shadow-pop:5px 5px 0 #ffff00;
   --avatar-svg-filter:invert(1);
+}
+[data-theme="inspired-ipod"] {
+  --font-display:"Helvetica Neue",Helvetica,Arial,sans-serif;
+  --font-body:"Helvetica Neue",Helvetica,Arial,sans-serif;
+  --bg:#d8d8d8; --bg-sink:#b8b8b8; --surface:#f7f7f7; --surface-2:#ffffff; --surface-hover:#e9e9e9;
+  --sidebar:#eeeeee; --sidebar-hover:#d8e8f8; --line:#a9a9a9; --line-soft:#d3d3d3;
+  --ink:#111111; --ink-2:#3d3d3d; --ink-3:#707070; --ink-inv:#ffffff;
+  --bubble-agent:#ffffff; --bubble-me:#2879c5; --bubble-me-ink:#ffffff;
+  --code-bg:#ececec; --code-ink:#174c7c;
+  --accent:#2879c5; --accent-strong:#125eaa; --accent-tint:#d9eaf9;
+  --warm:#e26b20; --warm-soft:#f8e5d8; --focus:#2879c5;
+  --st-online:#4d9200; --st-thinking:#d48b00; --st-idle:#888888; --st-offline:#aaaaaa;
+  --r-xs:3px; --r-sm:5px; --r-md:8px; --r-lg:12px; --r-xl:18px; --r-full:999px;
+  --shadow-sm:0 1px 2px rgba(0,0,0,.28); --shadow-md:0 4px 12px rgba(0,0,0,.28); --shadow-lg:0 12px 32px rgba(0,0,0,.35); --shadow-pop:0 8px 24px rgba(0,0,0,.4);
+}
+[data-theme="inspired-messenger"] {
+  --font-display:Helvetica,Arial,sans-serif;
+  --font-body:Helvetica,Arial,sans-serif;
+  --bg:#c9c9c9; --bg-sink:#aaaaaa; --surface:#f1f1f1; --surface-2:#ffffff; --surface-hover:#e5e5e5;
+  --sidebar:#e5e5e5; --sidebar-hover:#c8dcf0; --line:#999999; --line-soft:#cccccc;
+  --ink:#101010; --ink-2:#3c3c3c; --ink-3:#707070; --ink-inv:#ffffff;
+  --bubble-agent:#e5e5ea; --bubble-me:#35c84a; --bubble-me-ink:#071408;
+  --code-bg:#e1e1e1; --code-ink:#084c87;
+  --accent:#1477c9; --accent-strong:#075d9f; --accent-tint:#d6e8f8;
+  --warm:#e19b22; --warm-soft:#f7ebd2; --focus:#1477c9;
+  --st-online:#28a63d; --st-thinking:#d68c12; --st-idle:#888888; --st-offline:#aaaaaa;
+  --r-xs:4px; --r-sm:8px; --r-md:12px; --r-lg:16px; --r-xl:20px; --r-full:999px;
+  --shadow-sm:0 1px 2px rgba(0,0,0,.35); --shadow-md:0 5px 14px rgba(0,0,0,.35); --shadow-lg:0 15px 36px rgba(0,0,0,.4); --shadow-pop:0 8px 24px rgba(0,0,0,.45);
+}
+[data-theme="inspired-slack"] {
+  --font-display:"Helvetica Neue",Helvetica,Arial,sans-serif;
+  --font-body:"Helvetica Neue",Helvetica,Arial,sans-serif;
+  --bg:#ffffff; --bg-sink:#e8e8e8; --surface:#ffffff; --surface-2:#ffffff; --surface-hover:#f8f8f8;
+  --sidebar:#3f0e40; --sidebar-hover:#350d36; --line:#dddddd; --line-soft:#eeeeee;
+  --ink:#1d1c1d; --ink-2:#616061; --ink-3:#868686; --ink-inv:#ffffff;
+  --bubble-agent:#ffffff; --bubble-me:#ffffff; --bubble-me-ink:#1d1c1d;
+  --code-bg:#f8f8f8; --code-ink:#1264a3;
+  --accent:#1264a3; --accent-strong:#0b4c7a; --accent-tint:#e8f5fa;
+  --warm:#e8912d; --warm-soft:#fff2df; --focus:#2bac76;
+  --st-online:#2bac76; --st-thinking:#e8912d; --st-idle:#9a9a9a; --st-offline:#777777;
+  --r-xs:3px; --r-sm:4px; --r-md:6px; --r-lg:8px; --r-xl:10px; --r-full:999px;
+  --shadow-sm:0 1px 1px rgba(0,0,0,.1); --shadow-md:0 4px 12px rgba(0,0,0,.15); --shadow-lg:0 12px 32px rgba(0,0,0,.2); --shadow-pop:0 8px 28px rgba(0,0,0,.25);
 }
 
 /* ---- DARK presets ----

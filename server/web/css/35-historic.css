@@ -1,5 +1,5 @@
 /* ============================================================
-   Historic interface presets
+   Inspired interface presets
 
    These are component skins, not palettes. Each preset changes the visual
    grammar of windows, buttons, fields, menus, messages, state, and navigation
@@ -7,19 +7,24 @@
    normal workspace remains the semantic/layout source of truth.
    ============================================================ */
 
-:root[data-theme^="historic-"] {
+:root[data-theme^="historic-"],
+:root[data-theme^="inspired-"] {
   color-scheme: light;
   font-synthesis: none;
 }
 
-:root[data-theme^="historic-"] body {
+:root[data-theme^="historic-"] body,
+:root[data-theme^="inspired-"] body {
   -webkit-font-smoothing: none;
   text-rendering: optimizeSpeed;
 }
 
 :root[data-theme^="historic-"] *,
 :root[data-theme^="historic-"] *::before,
-:root[data-theme^="historic-"] *::after {
+:root[data-theme^="historic-"] *::after,
+:root[data-theme^="inspired-"] *,
+:root[data-theme^="inspired-"] *::before,
+:root[data-theme^="inspired-"] *::after {
   transition-duration: 0s !important;
   backdrop-filter: none !important;
 }
@@ -45,15 +50,6 @@
 :root[data-theme^="historic-"] .day-separator,
 :root[data-theme^="historic-"] .unread-divider {
   border-radius: 0;
-}
-
-:root[data-theme^="historic-"] .theme-opt .td {
-  display: block;
-  max-width: 17ch;
-  margin-top: 3px;
-  color: var(--ink-3);
-  font-size: 10.5px;
-  line-height: 1.25;
 }
 
 /* The swatches preview component language as well as color. */
@@ -101,6 +97,19 @@
 }
 .swatch[data-theme="historic-geocities"] .a { background: #000066; }
 .swatch[data-theme="historic-geocities"] .b { background: linear-gradient(#f0f,#0ff,#ff0); }
+.swatch[data-theme="inspired-ipod"] {
+  border:1px solid #777; border-radius:7px; background:linear-gradient(#fff,#d6d6d6); padding:3px;
+}
+.swatch[data-theme="inspired-ipod"] .a { border-radius:3px; background:linear-gradient(#5ea6e2,#1265ab); }
+.swatch[data-theme="inspired-ipod"] .b { border-radius:50%; background:radial-gradient(circle,#ddd 0 24%,#fff 25% 53%,#aaa 55% 58%,transparent 59%); }
+.swatch[data-theme="inspired-messenger"] {
+  border:1px solid #777; border-radius:7px; background:repeating-linear-gradient(0deg,#ddd 0 1px,#eee 1px 3px); padding:4px 3px;
+}
+.swatch[data-theme="inspired-messenger"] .a { border-radius:8px 8px 8px 2px; background:linear-gradient(#78e786,#21b43a); }
+.swatch[data-theme="inspired-messenger"] .b { border-radius:8px 8px 2px 8px; background:linear-gradient(#82bff0,#1a76c2); }
+.swatch[data-theme="inspired-slack"] { border:0; border-radius:3px; background:#3f0e40; padding:4px; }
+.swatch[data-theme="inspired-slack"] .a { border-radius:1px; background:#2bac76; }
+.swatch[data-theme="inspired-slack"] .b { border-radius:1px; background:#fff; }
 
 /* ============================================================
    Windows 98 — Win32 bevel hierarchy and active title bars
@@ -773,3 +782,285 @@
 @media (prefers-reduced-motion: reduce) {
   :root[data-theme="historic-geocities"] .conn .d { animation:none; }
 }
+
+/* ============================================================
+   Now Playing — brushed metal, list-menu screen, and click wheel
+   ============================================================ */
+:root[data-theme="inspired-ipod"] { color-scheme:light; --ok:#4d9200; --ok-tint:#e5f1d7; --warn:#ba7900; --warn-tint:#fff2d3; --danger:#b22621; --danger-tint:#f9dfdd; --info:#2879c5; --info-tint:#d9eaf9; }
+:root[data-theme="inspired-ipod"] body {
+  background:#b7b7b7;
+  background-image:repeating-linear-gradient(90deg,rgba(255,255,255,.15) 0 1px,rgba(0,0,0,.025) 1px 3px);
+  font-size:13px;
+}
+:root[data-theme="inspired-ipod"] .app {
+  inset:10px; width:calc(100% - 20px); height:calc(100% - 20px);
+  border:1px solid #777; border-radius:18px; background:#f7f7f7;
+  box-shadow:inset 0 1px #fff,inset 0 -1px #aaa,0 12px 30px rgba(0,0,0,.42); overflow:hidden;
+}
+:root[data-theme="inspired-ipod"] .sidebar { border-right:1px solid #777; background:#eee; }
+:root[data-theme="inspired-ipod"] .brand,
+:root[data-theme="inspired-ipod"] .topbar,
+:root[data-theme="inspired-ipod"] .channel-drawer-head {
+  min-height:37px; padding:7px 10px; border:0; border-bottom:1px solid #555;
+  background:linear-gradient(#fff 0,#d7d7d7 48%,#aaa 51%,#d3d3d3 100%); color:#111; text-shadow:0 1px #fff;
+}
+:root[data-theme="inspired-ipod"] .brand-name,
+:root[data-theme="inspired-ipod"] .topbar h1,
+:root[data-theme="inspired-ipod"] .topbar h2,
+:root[data-theme="inspired-ipod"] .channel-drawer-head h2 { color:#111; font:700 14px var(--font-body); letter-spacing:0; }
+:root[data-theme="inspired-ipod"] .brand-sub,
+:root[data-theme="inspired-ipod"] .topbar .topic { color:#333; }
+:root[data-theme="inspired-ipod"] .brand-mark { border:1px solid #555; border-radius:4px; background:linear-gradient(#70b5ec,#176cb1); box-shadow:inset 0 1px rgba(255,255,255,.7); }
+:root[data-theme="inspired-ipod"] .nav-head h3,
+:root[data-theme="inspired-ipod"] .rail-section h2 { color:#333; font-size:11px; letter-spacing:0; text-transform:none; }
+:root[data-theme="inspired-ipod"] .nav-item,
+:root[data-theme="inspired-ipod"] .dm-item,
+:root[data-theme="inspired-ipod"] .rail-item {
+  min-height:29px; margin:0; padding:5px 19px 5px 9px; border:0; border-bottom:1px solid #c4c4c4; border-radius:0;
+  background:linear-gradient(#fff,#e5e5e5); color:#111; font-weight:700; box-shadow:none;
+}
+:root[data-theme="inspired-ipod"] .nav-item::after,
+:root[data-theme="inspired-ipod"] .dm-item::after,
+:root[data-theme="inspired-ipod"] .rail-item::after { content:"›"; position:absolute; right:8px; color:#555; font-size:18px; line-height:1; }
+:root[data-theme="inspired-ipod"] .nav-item.active,
+:root[data-theme="inspired-ipod"] .dm-item.active,
+:root[data-theme="inspired-ipod"] .rail-item.active { background:linear-gradient(#63abe4,#176db3); color:#fff; text-shadow:0 -1px #07518d; }
+:root[data-theme="inspired-ipod"] .nav-item.active::before { display:none; }
+:root[data-theme="inspired-ipod"] .nav-item.active::after,
+:root[data-theme="inspired-ipod"] .dm-item.active::after,
+:root[data-theme="inspired-ipod"] .rail-item.active::after { color:#fff; }
+:root[data-theme="inspired-ipod"] .messages,
+:root[data-theme="inspired-ipod"] .workspace-view { margin:6px; border:1px solid #777; border-radius:8px; background:#fff; box-shadow:inset 0 1px 3px rgba(0,0,0,.3); }
+:root[data-theme="inspired-ipod"] .message.msg,
+:root[data-theme="inspired-ipod"] .message.msg.me { padding:8px 9px; border:0; border-bottom:1px solid #d5d5d5; border-radius:0; background:#fff; color:#111; box-shadow:none; }
+:root[data-theme="inspired-ipod"] .message.msg.me { border-left:4px solid #2879c5; background:#edf6fd; }
+:root[data-theme="inspired-ipod"] .message.msg .bubble,
+:root[data-theme="inspired-ipod"] .message.msg.me .bubble { padding:0; border:0; border-radius:0; background:transparent; color:inherit; box-shadow:none; }
+:root[data-theme="inspired-ipod"] .icon-btn,
+:root[data-theme="inspired-ipod"] .add-btn,
+:root[data-theme="inspired-ipod"] .btn,
+:root[data-theme="inspired-ipod"] .send-btn,
+:root[data-theme="inspired-ipod"] .reset-prefs,
+:root[data-theme="inspired-ipod"] .message-actions-menu button,
+:root[data-theme="inspired-ipod"] .attention-actions button,
+:root[data-theme="inspired-ipod"] .agent-actions button {
+  min-height:27px; border:1px solid #777; border-radius:5px; background:linear-gradient(#fff,#c7c7c7); color:#111;
+  box-shadow:inset 0 1px #fff,0 1px 1px rgba(0,0,0,.25); text-shadow:0 1px #fff;
+}
+:root[data-theme="inspired-ipod"] .btn:active,
+:root[data-theme="inspired-ipod"] .icon-btn:active,
+:root[data-theme="inspired-ipod"] .send-btn:active { background:linear-gradient(#aaa,#e7e7e7); box-shadow:inset 0 1px 2px rgba(0,0,0,.4); }
+:root[data-theme="inspired-ipod"] .pref-group,
+:root[data-theme="inspired-ipod"] .agent-card,
+:root[data-theme="inspired-ipod"] .roster-grid .agent-card,
+:root[data-theme="inspired-ipod"] .home-card,
+:root[data-theme="inspired-ipod"] .workspace-view .home-channel,
+:root[data-theme="inspired-ipod"] .task-row,
+:root[data-theme="inspired-ipod"] .attention-item,
+:root[data-theme="inspired-ipod"] .att-card,
+:root[data-theme="inspired-ipod"] .ask-card,
+:root[data-theme="inspired-ipod"] .modal,
+:root[data-theme="inspired-ipod"] dialog { border:1px solid #888; border-radius:8px; background:#f5f5f5; box-shadow:0 5px 18px rgba(0,0,0,.35); }
+:root[data-theme="inspired-ipod"] .pref-group h3,
+:root[data-theme="inspired-ipod"] .modal-head { padding:7px 10px; border-bottom:1px solid #777; background:linear-gradient(#fff,#bbb); color:#111; text-shadow:0 1px #fff; }
+:root[data-theme="inspired-ipod"] .composer-input,
+:root[data-theme="inspired-ipod"] input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
+:root[data-theme="inspired-ipod"] textarea,
+:root[data-theme="inspired-ipod"] select,
+:root[data-theme="inspired-ipod"] .pref-select { border:1px solid #777; border-radius:5px; background:#fff; color:#111; box-shadow:inset 0 1px 3px rgba(0,0,0,.28); }
+
+.ipod-controls { display:none; }
+:root[data-theme="inspired-ipod"] .ipod-controls:not([hidden]) {
+  position:fixed; z-index:calc(var(--z-dialog) - 1); right:28px; bottom:24px; width:244px; height:354px; box-sizing:border-box;
+  display:flex; flex-direction:column; align-items:center; gap:14px; padding:18px 20px 12px; border:1px solid #888; border-radius:28px;
+  background:linear-gradient(115deg,#fff,#e6e6e6 48%,#fafafa 72%,#ccc); box-shadow:inset 1px 1px #fff,inset -1px -1px #aaa,0 13px 30px rgba(0,0,0,.42);
+  color:#777; font:700 10px/1 var(--font-body);
+}
+:root[data-theme="inspired-ipod"] .ipod-screen {
+  width:198px; height:91px; box-sizing:border-box; padding:6px 8px; border:2px solid #555; border-radius:6px; overflow:hidden;
+  background:linear-gradient(#eaf7ff,#b9d4e7); box-shadow:inset 1px 1px 4px rgba(0,0,0,.45); color:#111;
+}
+:root[data-theme="inspired-ipod"] .ipod-screen span { display:block; margin:-6px -8px 8px; padding:4px 6px; background:linear-gradient(#fff,#b8c5ce); border-bottom:1px solid #555; font-size:9px; }
+:root[data-theme="inspired-ipod"] .ipod-screen strong { display:block; font-size:13px; }
+:root[data-theme="inspired-ipod"] .ipod-screen i { display:block; width:82%; height:5px; margin-top:15px; border:1px solid #555; background:linear-gradient(90deg,#2879c5 0 58%,#fff 58%); }
+:root[data-theme="inspired-ipod"] .ipod-wheel {
+  position:relative; width:184px; height:184px; flex:none; border:1px solid #aaa; border-radius:50%; outline:none;
+  background:radial-gradient(circle,#fff 0 28%,transparent 28.5%),linear-gradient(145deg,#f9f9f9,#cfcfcf); box-shadow:inset 1px 1px 4px #fff,inset -2px -2px 5px #aaa;
+  touch-action:none; cursor:grab;
+}
+:root[data-theme="inspired-ipod"] .ipod-wheel:active { cursor:grabbing; }
+:root[data-theme="inspired-ipod"] .ipod-wheel button { position:absolute; padding:0; border:0; background:transparent; color:#888; cursor:pointer; font:700 11px/1 Arial,sans-serif; }
+:root[data-theme="inspired-ipod"] .ipod-menu { left:50%; top:20px; translate:-50% 0; }
+:root[data-theme="inspired-ipod"] .ipod-next { right:18px; top:50%; translate:0 -50%; letter-spacing:-3px; }
+:root[data-theme="inspired-ipod"] .ipod-play { left:50%; bottom:18px; translate:-50% 0; letter-spacing:-2px; }
+:root[data-theme="inspired-ipod"] .ipod-prev { left:18px; top:50%; translate:0 -50%; letter-spacing:-3px; }
+:root[data-theme="inspired-ipod"] .ipod-wheel .ipod-select { inset:51px; width:80px; height:80px; border:1px solid #aaa; border-radius:50%; background:linear-gradient(145deg,#f7f7f7,#d3d3d3); box-shadow:inset 1px 1px #fff,1px 1px 2px rgba(0,0,0,.2); }
+:root[data-theme="inspired-ipod"] .ipod-wheel button:active { color:#2879c5; }
+:root[data-theme="inspired-ipod"] .ipod-wheel .ipod-select:active { background:linear-gradient(#ccc,#eee); box-shadow:inset 1px 1px 3px #888; }
+:root[data-theme="inspired-ipod"] .ipod-wheel:focus-visible,
+:root[data-theme="inspired-ipod"] .ipod-wheel button:focus-visible { outline:3px solid #2879c5; outline-offset:3px; }
+:root[data-theme="inspired-ipod"] .ipod-legend { letter-spacing:.07em; color:#777; }
+@media (min-width:861px) {
+  :root[data-theme="inspired-ipod"] .composer-shell { padding-right:286px; }
+  :root[data-theme="inspired-ipod"] .workspace-view,
+  :root[data-theme="inspired-ipod"] .messages { padding-bottom:188px; }
+}
+@media (max-width:860px) {
+  :root[data-theme="inspired-ipod"] .ipod-controls:not([hidden]) { left:50%; right:auto; bottom:8px; width:300px; height:134px; translate:-50% 0; flex-direction:row; justify-content:space-around; padding:8px 12px; border-radius:18px; }
+  :root[data-theme="inspired-ipod"] .ipod-screen { width:112px; height:96px; }
+  :root[data-theme="inspired-ipod"] .ipod-wheel { width:108px; height:108px; }
+  :root[data-theme="inspired-ipod"] .ipod-menu { top:9px; }
+  :root[data-theme="inspired-ipod"] .ipod-next { right:8px; }
+  :root[data-theme="inspired-ipod"] .ipod-play { bottom:8px; }
+  :root[data-theme="inspired-ipod"] .ipod-prev { left:8px; }
+  :root[data-theme="inspired-ipod"] .ipod-wheel .ipod-select { inset:30px; width:48px; height:48px; }
+  :root[data-theme="inspired-ipod"] .ipod-legend { display:none; }
+  :root[data-theme="inspired-ipod"] .workspace-view,
+  :root[data-theme="inspired-ipod"] .messages { padding-bottom:148px; }
+  :root[data-theme="inspired-ipod"] .composer-shell { padding-bottom:142px; }
+}
+
+/* ============================================================
+   Walled Garden — early iOS bars, pinstripes, and speech balloons
+   ============================================================ */
+:root[data-theme="inspired-messenger"] { color-scheme:light; --ok:#28a63d; --ok-tint:#e0f4e4; --warn:#bd7908; --warn-tint:#fff0d2; --danger:#bf201a; --danger-tint:#f8dcd9; --info:#1477c9; --info-tint:#d6e8f8; }
+:root[data-theme="inspired-messenger"] body { background:#111; font-size:14px; }
+:root[data-theme="inspired-messenger"] .app { inset:5px; width:calc(100% - 10px); height:calc(100% - 10px); border:2px solid #000; border-radius:18px; overflow:hidden; background:#ddd; box-shadow:0 0 0 2px #555,0 16px 45px rgba(0,0,0,.65); }
+:root[data-theme="inspired-messenger"] .sidebar { border-right:1px solid #3f4f5b; background:repeating-linear-gradient(0deg,#d5d8da 0 1px,#edf0f2 1px 3px); }
+:root[data-theme="inspired-messenger"] .brand,
+:root[data-theme="inspired-messenger"] .topbar,
+:root[data-theme="inspired-messenger"] .channel-drawer-head,
+:root[data-theme="inspired-messenger"] .detail-hero {
+  min-height:43px; border:0; border-bottom:1px solid #172a39; background:linear-gradient(#b7c9d8 0,#7893aa 49%,#536f88 51%,#6e879c 100%); color:#fff; text-shadow:0 -1px #24394b;
+}
+:root[data-theme="inspired-messenger"] .brand-name,
+:root[data-theme="inspired-messenger"] .topbar h1,
+:root[data-theme="inspired-messenger"] .topbar h2,
+:root[data-theme="inspired-messenger"] .channel-drawer-head h2 { color:#fff; font:700 16px var(--font-body); letter-spacing:0; text-shadow:0 -1px #24394b; }
+:root[data-theme="inspired-messenger"] .brand-sub,
+:root[data-theme="inspired-messenger"] .topbar .topic { color:#eef6fb; }
+:root[data-theme="inspired-messenger"] .brand-mark { border:1px solid #173a19; border-radius:8px; background:linear-gradient(#9bf5a6,#20a934); box-shadow:inset 0 1px rgba(255,255,255,.8); }
+:root[data-theme="inspired-messenger"] .nav-head h3,
+:root[data-theme="inspired-messenger"] .rail-section h2 { color:#47545e; font-size:12px; text-shadow:0 1px #fff; }
+:root[data-theme="inspired-messenger"] .nav-item,
+:root[data-theme="inspired-messenger"] .dm-item,
+:root[data-theme="inspired-messenger"] .rail-item { min-height:37px; margin:0; padding:7px 22px 7px 10px; border:0; border-bottom:1px solid #aaa; border-radius:0; background:rgba(255,255,255,.34); color:#111; box-shadow:inset 0 1px rgba(255,255,255,.7); }
+:root[data-theme="inspired-messenger"] .nav-item::after,
+:root[data-theme="inspired-messenger"] .dm-item::after,
+:root[data-theme="inspired-messenger"] .rail-item::after { content:"›"; position:absolute; right:8px; color:#6c7479; font-size:22px; line-height:1; }
+:root[data-theme="inspired-messenger"] .nav-item.active,
+:root[data-theme="inspired-messenger"] .dm-item.active,
+:root[data-theme="inspired-messenger"] .rail-item.active { background:linear-gradient(#85b8df,#367eae); color:#fff; text-shadow:0 -1px #14517e; box-shadow:inset 0 1px rgba(255,255,255,.55); }
+:root[data-theme="inspired-messenger"] .nav-item.active::before { display:none; }
+:root[data-theme="inspired-messenger"] .messages,
+:root[data-theme="inspired-messenger"] .workspace-view { background:repeating-linear-gradient(0deg,#d9d9d9 0 1px,#eee 1px 3px); }
+:root[data-theme="inspired-messenger"] .message.msg,
+:root[data-theme="inspired-messenger"] .message.msg.me { max-width:78%; margin:8px auto 8px 8px; padding:8px 12px; border:1px solid #a0a0a0; border-radius:15px; background:linear-gradient(#fff,#d6d6d6); color:#111; box-shadow:inset 0 1px rgba(255,255,255,.9),0 1px 2px rgba(0,0,0,.3); }
+:root[data-theme="inspired-messenger"] .message.msg.me { margin-left:auto; margin-right:8px; border-color:#279234; background:linear-gradient(#9ef4a6 0,#45d457 48%,#28b43b 51%,#61dc70 100%); }
+:root[data-theme="inspired-messenger"] .message.msg::after { content:""; position:absolute; left:-8px; bottom:5px; border-width:7px 9px 0 0; border-style:solid; border-color:#d6d6d6 transparent transparent transparent; }
+:root[data-theme="inspired-messenger"] .message.msg.me::after { left:auto; right:-8px; border-width:7px 0 0 9px; border-color:#45c855 transparent transparent transparent; }
+:root[data-theme="inspired-messenger"] .message.msg .bubble,
+:root[data-theme="inspired-messenger"] .message.msg.me .bubble { padding:0; border:0; border-radius:0; background:transparent; color:inherit; box-shadow:none; }
+:root[data-theme="inspired-messenger"] .icon-btn,
+:root[data-theme="inspired-messenger"] .add-btn,
+:root[data-theme="inspired-messenger"] .btn,
+:root[data-theme="inspired-messenger"] .send-btn,
+:root[data-theme="inspired-messenger"] .reset-prefs,
+:root[data-theme="inspired-messenger"] .message-actions-menu button {
+  min-height:29px; border:1px solid #29465d; border-radius:7px; background:linear-gradient(#a8c4d9,#5f829e 48%,#476d8a 51%,#7393ab); color:#fff; box-shadow:inset 0 1px rgba(255,255,255,.55),0 1px 1px rgba(0,0,0,.25); text-shadow:0 -1px #29465d;
+}
+:root[data-theme="inspired-messenger"] .btn:active,
+:root[data-theme="inspired-messenger"] .icon-btn:active,
+:root[data-theme="inspired-messenger"] .send-btn:active { background:linear-gradient(#456b87,#7899b1); }
+:root[data-theme="inspired-messenger"] .pref-group,
+:root[data-theme="inspired-messenger"] .agent-card,
+:root[data-theme="inspired-messenger"] .roster-grid .agent-card,
+:root[data-theme="inspired-messenger"] .home-card,
+:root[data-theme="inspired-messenger"] .workspace-view .home-channel,
+:root[data-theme="inspired-messenger"] .task-row,
+:root[data-theme="inspired-messenger"] .attention-item,
+:root[data-theme="inspired-messenger"] .modal,
+:root[data-theme="inspired-messenger"] dialog { border:1px solid #777; border-radius:10px; background:repeating-linear-gradient(0deg,#ddd 0 1px,#eee 1px 3px); box-shadow:0 8px 22px rgba(0,0,0,.48); }
+:root[data-theme="inspired-messenger"] .pref-group h3,
+:root[data-theme="inspired-messenger"] .modal-head { padding:8px 11px; border-bottom:1px solid #263b4d; background:linear-gradient(#a9bdce,#627e96 50%,#526f87 51%,#6f879d); color:#fff; text-shadow:0 -1px #263b4d; }
+:root[data-theme="inspired-messenger"] .composer-input,
+:root[data-theme="inspired-messenger"] input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
+:root[data-theme="inspired-messenger"] textarea,
+:root[data-theme="inspired-messenger"] select,
+:root[data-theme="inspired-messenger"] .pref-select { border:1px solid #666; border-radius:12px; background:#fff; color:#111; box-shadow:inset 0 2px 4px rgba(0,0,0,.3),0 1px #fff; }
+
+/* ============================================================
+   Standup — channel sidebar, flat message timeline, compact chrome
+   ============================================================ */
+:root[data-theme="inspired-slack"] { color-scheme:light; --ok:#2bac76; --ok-tint:#e1f4ec; --warn:#b76700; --warn-tint:#fff0d9; --danger:#e01e5a; --danger-tint:#fbe3eb; --info:#1264a3; --info-tint:#e1f1fb; }
+:root[data-theme="inspired-slack"] body { background:#fff; font-size:14px; }
+:root[data-theme="inspired-slack"] .app { inset:0; width:100%; height:100%; border:0; border-radius:0; background:#fff; box-shadow:none; }
+:root[data-theme="inspired-slack"] .sidebar { border-right:1px solid #522653; background:#3f0e40; color:#fff; }
+:root[data-theme="inspired-slack"] .side-foot { border-top:1px solid #522653; background:#3f0e40; }
+:root[data-theme="inspired-slack"] .brand { min-height:50px; border:0; border-bottom:1px solid #522653; background:#3f0e40; color:#fff; }
+:root[data-theme="inspired-slack"] .brand:hover { background:#350d36; }
+:root[data-theme="inspired-slack"] .brand-name { color:#fff; font:800 17px var(--font-body); letter-spacing:-.02em; }
+:root[data-theme="inspired-slack"] .brand-sub { color:#c7b7c7; }
+:root[data-theme="inspired-slack"] .brand-mark { border:0; border-radius:5px; background:conic-gradient(from 45deg,#36c5f0 0 25%,#2eb67d 0 50%,#ecb22e 0 75%,#e01e5a 0); }
+:root[data-theme="inspired-slack"] .topbar,
+:root[data-theme="inspired-slack"] .channel-drawer-head { min-height:50px; border:0; border-bottom:1px solid #ddd; background:#fff; color:#1d1c1d; box-shadow:0 1px 0 rgba(0,0,0,.03); }
+:root[data-theme="inspired-slack"] .topbar h1,
+:root[data-theme="inspired-slack"] .topbar h2,
+:root[data-theme="inspired-slack"] .channel-drawer-head h2 { color:#1d1c1d; font:800 16px var(--font-body); letter-spacing:0; }
+:root[data-theme="inspired-slack"] .topbar .topic { color:#616061; }
+:root[data-theme="inspired-slack"] .nav-head h3,
+:root[data-theme="inspired-slack"] .rail-section h2 { color:#c7b7c7; font-size:13px; letter-spacing:0; text-transform:none; }
+:root[data-theme="inspired-slack"] .nav-item,
+:root[data-theme="inspired-slack"] .dm-item,
+:root[data-theme="inspired-slack"] .rail-item { min-height:28px; margin:0; padding:4px 10px 4px 28px; border:0; border-radius:0; color:#d1c3d1; font-weight:400; }
+:root[data-theme="inspired-slack"] .nav-item::before,
+:root[data-theme="inspired-slack"] .dm-item::before,
+:root[data-theme="inspired-slack"] .rail-item::before { content:"#"; display:block; left:10px; top:50%; width:auto; height:auto; border:0; border-radius:0; background:none; color:#b9a7b9; transform:translateY(-50%); }
+:root[data-theme="inspired-slack"] .nav-item::before,
+:root[data-theme="inspired-slack"] .rail-item::before { display:none; }
+:root[data-theme="inspired-slack"] .dm-item::before { content:"●"; color:#2bac76; font-size:9px; }
+:root[data-theme="inspired-slack"] .nav-item.active,
+:root[data-theme="inspired-slack"] .dm-item.active,
+:root[data-theme="inspired-slack"] .rail-item.active { background:#1164a3; color:#fff; box-shadow:none; }
+:root[data-theme="inspired-slack"] .nav-item.active::before,
+:root[data-theme="inspired-slack"] .dm-item.active::before,
+:root[data-theme="inspired-slack"] .rail-item.active::before { color:#fff; }
+:root[data-theme="inspired-slack"] .messages,
+:root[data-theme="inspired-slack"] .workspace-view { background:#fff; }
+:root[data-theme="inspired-slack"] .message.msg,
+:root[data-theme="inspired-slack"] .message.msg.me { padding:8px 18px; border:0; border-radius:0; background:#fff; color:#1d1c1d; box-shadow:none; }
+:root[data-theme="inspired-slack"] .message.msg:hover,
+:root[data-theme="inspired-slack"] .message.msg.me:hover { background:#f8f8f8; }
+:root[data-theme="inspired-slack"] .message.msg .bubble,
+:root[data-theme="inspired-slack"] .message.msg.me .bubble { padding:0; border:0; border-radius:0; background:transparent; color:inherit; box-shadow:none; }
+:root[data-theme="inspired-slack"] .message-head strong { color:#1d1c1d; font-weight:800; }
+:root[data-theme="inspired-slack"] .message-body a { color:#1264a3; }
+:root[data-theme="inspired-slack"] .icon-btn,
+:root[data-theme="inspired-slack"] .add-btn,
+:root[data-theme="inspired-slack"] .btn,
+:root[data-theme="inspired-slack"] .send-btn,
+:root[data-theme="inspired-slack"] .reset-prefs,
+:root[data-theme="inspired-slack"] .message-actions-menu button { min-height:30px; border:1px solid #868686; border-radius:4px; background:#fff; color:#1d1c1d; box-shadow:0 1px 1px rgba(0,0,0,.08); font-weight:700; }
+:root[data-theme="inspired-slack"] .btn.primary,
+:root[data-theme="inspired-slack"] .send-btn { border-color:#007a5a; background:#007a5a; color:#fff; }
+:root[data-theme="inspired-slack"] .btn:hover,
+:root[data-theme="inspired-slack"] .icon-btn:hover { box-shadow:0 1px 3px rgba(0,0,0,.22); }
+:root[data-theme="inspired-slack"] .pref-group,
+:root[data-theme="inspired-slack"] .agent-card,
+:root[data-theme="inspired-slack"] .roster-grid .agent-card,
+:root[data-theme="inspired-slack"] .home-card,
+:root[data-theme="inspired-slack"] .workspace-view .home-channel,
+:root[data-theme="inspired-slack"] .task-row,
+:root[data-theme="inspired-slack"] .attention-item,
+:root[data-theme="inspired-slack"] .modal,
+:root[data-theme="inspired-slack"] dialog { border:1px solid #ddd; border-radius:6px; background:#fff; box-shadow:0 4px 18px rgba(0,0,0,.16); }
+:root[data-theme="inspired-slack"] .pref-group h3,
+:root[data-theme="inspired-slack"] .modal-head { padding:9px 12px; border-bottom:1px solid #ddd; background:#fff; color:#1d1c1d; font-weight:800; }
+:root[data-theme="inspired-slack"] .composer-shell { border-top:0; background:#fff; }
+:root[data-theme="inspired-slack"] .composer-input,
+:root[data-theme="inspired-slack"] input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
+:root[data-theme="inspired-slack"] textarea,
+:root[data-theme="inspired-slack"] select,
+:root[data-theme="inspired-slack"] .pref-select { border:1px solid #868686; border-radius:4px; background:#fff; color:#1d1c1d; box-shadow:inset 0 1px 1px rgba(0,0,0,.08); }
+:root[data-theme="inspired-slack"] .status-chip,
+:root[data-theme="inspired-slack"] .channel-status-chip { border-radius:4px; background:#fff; color:#1d1c1d; }
