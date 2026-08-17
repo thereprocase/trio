@@ -2389,7 +2389,11 @@ def resume_managed_agents(db_path: Path, supervisor) -> List[str]:
         # instruction at all: unreachable forever, not recovered. Treat it
         # as failed instead of resumable.
         # r["agent_id"], not r["id"]: the column selected is agent_id, and
-        # sqlite3.Row raises IndexError for any other name.
+        # sqlite3.Row raises IndexError for any other name. The comprehension
+        # only evaluates its body when a row exists, so this stayed invisible
+        # on an empty agent_channels and raised on every real install — out of
+        # a daemon thread with no handler, killing agent resume outright and
+        # silently. Introduced in e4b22cf.
         placed = {r["agent_id"] for r in db.execute(
             "SELECT DISTINCT agent_id FROM agent_channels").fetchall()}
     finally:
@@ -2417,6 +2421,18 @@ def resume_managed_agents(db_path: Path, supervisor) -> List[str]:
                 continue
             if wake_agent(agent_id, supervisor, db_path) is not None:
                 resumed.append(agent_id)
+        except nsup.ForeignAgentError as e:
+            # MUST precede the generic handler below. ForeignAgentError is a
+            # RuntimeError, so `except Exception` would catch it and answer
+            # "another hub owns this process" by erasing the pid that proves
+            # it — destroying the only ownership record and clearing the way
+            # for the very duplicate this whole path prevents. It would also
+            # park a live, healthy agent in ST_ERRORED, which the router skips,
+            # leaving it permanently deaf with no event that can ever flip it
+            # back. The check above makes this narrow; the race it does not
+            # cover is exactly this branch's subject.
+            sys.stderr.write(f"[nth_web] {e}; not resuming\n")
+            continue
         except Exception:
             try:
                 supervisor._set_state(agent_id, nsup.ST_ERRORED, clear_pid=True)
@@ -2698,8 +2714,13 @@ def build_agent_preamble(name: str, channels: List[str], member_id: str = "",
             f'trio_connect(channel="{c}", name="{name}", '
             f'resume_member_id="{member_id}", '
             f'reclaim_secret="{reclaim_secret}")' for c in channels)
+        # Built from the shared constant, not a copy of it: nth_supervisor's
+        # pid_owns_agent matches this exact phrase in the process argv to
+        # decide ownership, so a reworded preamble here would silently stop
+        # every running agent from being recognised as itself.
         connect_lines = (
-            f" Your Trio member_id is {member_id}. On startup, connect to each "
+            f" {nsup.AGENT_ID_MARKER.format(agent_id=member_id)}"
+            ". On startup, connect to each "
             f"of your channels reclaiming that identity: {joins} — keep the "
             "session_token each returns and pass it to trio_send/trio_poll.")
     return (
@@ -3566,6 +3587,19 @@ class NthWebHandler(BaseHTTPRequestHandler):
         """Run one action against one agent. Raises AgentActionError with the
         HTTP status the single-agent route would have returned; returns the
         action's ok flag. Assumes the operator gate has already passed."""
+        try:
+            return self._apply_agent_action_inner(agent_id, action, params, ident)
+        except nsup.ForeignAgentError as e:
+            # Without this the exception reaches do_POST, where nothing handles
+            # it: socketserver prints a traceback and closes the connection
+            # with no status line at all, so the UI shows a network failure for
+            # a condition the server understands exactly. 409 is the honest
+            # answer — the request conflicts with state the server can see and
+            # the operator can act on, because the message names the pid.
+            raise AgentActionError(409, str(e))
+
+    def _apply_agent_action_inner(self, agent_id: str, action: str,
+                                  params: Dict[str, Any], ident) -> bool:
         sup = get_supervisor()
         # Archived agents are frozen: only unarchive (and archive itself,
         # which is a no-op stamp) can touch them. All other lifecycle
@@ -10211,6 +10245,10 @@ class QuietThreadingHTTPServer(ThreadingHTTPServer):
 AGENT_CONTROL_LEASE_TTL = 60.0
 AGENT_CONTROL_RENEW_INTERVAL = 20.0
 
+# "the row moved under us, try again" — distinct from None (we took it) and
+# from a dict (someone else holds it).
+_RETRY = object()
+
 
 class AgentControlLease:
     """Exactly one hub drives the agents in a given database.
@@ -10269,14 +10307,33 @@ class AgentControlLease:
         # to a full TTL. On the same machine its pid tells us the truth now,
         # so a crashed hub costs a restart no waiting at all. Across hosts the
         # pid is meaningless and the TTL is the only honest answer.
-        if row["host"] == self.host and not nsup._pid_alive(int(row["pid"] or 0)):
+        if row["host"] == self.host and not nsup.pid_alive(int(row["pid"] or 0)):
             return True
         return False
 
     def acquire(self) -> Optional[Dict[str, Any]]:
         """Take the lease. Returns None on success, else the blocking holder."""
+        for _ in range(8):
+            taken = self._acquire_once()
+            if taken is _RETRY:
+                continue
+            return None if taken is None else dict(taken)
+        # A peer releasing and re-inserting in a tight loop could otherwise
+        # spin here forever. Refusing is correct: we genuinely could not take
+        # it, and the caller degrades to read-only rather than hanging before
+        # the port is even bound.
+        return {"holder": "unknown", "pid": None}
+
+    def _acquire_once(self) -> Any:
+        """None = took it, _RETRY = row moved, dict = someone else holds it."""
         now = time.time()
-        db = self._db()
+        try:
+            db = self._db()
+        except sqlite3.Error as e:
+            # Outside the guard this aborted the whole hub at startup over a
+            # briefly-locked database — inconsistent with foreign_owner_pid,
+            # which degrades for exactly this reason.
+            return {"holder": f"<db error: {e}>", "pid": None}
         try:
             try:
                 db.execute(
@@ -10292,7 +10349,7 @@ class AgentControlLease:
             row = db.execute(
                 "SELECT * FROM agent_control_lease WHERE id = 1").fetchone()
             if row is None:                # released between the two statements
-                return self.acquire()
+                return _RETRY
             if not self._takeable(row, now):
                 return dict(row)
             # Compare-and-swap on the holder we just read. Two hubs starting
@@ -10314,7 +10371,16 @@ class AgentControlLease:
 
     def renew(self) -> bool:
         """Extend our hold. False means we no longer own it."""
-        db = self._db()
+        try:
+            db = self._db()
+        except sqlite3.Error:
+            # _db() runs a CREATE TABLE IF NOT EXISTS, so it writes — and a
+            # write can fail on a locked database. Outside this guard the
+            # error escaped into _renew_loop, which has no handler, killing
+            # the daemon thread silently: the lease then expired 60s later and
+            # a second hub took over while this one kept routing. Same reason
+            # the body below returns True on sqlite errors.
+            return True
         try:
             cur = db.execute(
                 "UPDATE agent_control_lease SET expires_at=? "
@@ -10347,15 +10413,31 @@ class AgentControlLease:
     def _renew_loop(self) -> None:
         while not self._stop.wait(self.renew_interval):
             if not self.renew():
-                # Losing the lease does not stop this hub's router, and that is
-                # safe: the supervisor's per-agent ownership check means the
-                # non-owning router skips every agent the other hub actually
-                # holds. Surfacing it matters more than reacting to it — a lost
-                # lease means clock skew or a stalled hub, and both want eyes.
+                # Logging and returning was the worst of the three options: the
+                # thread died, nothing retried, and this hub kept its router,
+                # reaper and hibernation timer running with no lease. Two hubs
+                # then drive disjoint sets of agents indefinitely — the exact
+                # split-ownership state the lease exists to prevent, now silent
+                # apart from one stderr line. Quiesce instead.
                 sys.stderr.write(
                     "[nth_web] WARNING: lost the agent-control lease "
-                    f"({self.holder}); another hub has taken it over\n")
+                    f"({self.holder}); another hub took it over — this hub is "
+                    "dropping to read-only\n")
+                self._quiesce()
                 return
+
+    def _quiesce(self) -> None:
+        """Give up the control plane after losing the lease."""
+        global _ROUTER, _IDLE_REAPER
+        NthWebHandler._agent_control_enabled = False
+        for thread in (_ROUTER, _IDLE_REAPER):
+            try:
+                if thread is not None:
+                    thread.stop()
+            except Exception:
+                pass
+        _ROUTER = None
+        _IDLE_REAPER = None
 
     def start_renewal(self) -> None:
         self._thread = threading.Thread(

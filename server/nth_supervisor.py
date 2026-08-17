@@ -36,6 +36,7 @@ import sqlite3
 import subprocess
 import sys
 import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Deque, Dict, List, Optional
@@ -552,6 +553,15 @@ class ClaudeRuntime:
 # always recoverable across processes; nothing consulted it. These helpers do.
 
 
+OWNER_CACHE_SECONDS = 2.0
+
+# The phrase nth_web's build_agent_preamble puts in every managed agent's
+# --append-system-prompt. Matching on this rather than a bare id means another
+# agent's prompt merely NAMING this agent cannot be mistaken for being it.
+# Keep in sync with nth_web.build_agent_preamble.
+AGENT_ID_MARKER = "Your Trio member_id is {agent_id}"
+
+
 class ForeignAgentError(RuntimeError):
     """A live process for this agent exists under a supervisor that isn't us."""
 
@@ -563,7 +573,29 @@ class ForeignAgentError(RuntimeError):
         self.pid = pid
 
 
-def _pid_alive(pid: int) -> bool:
+def pid_alive(pid: int) -> bool:
+    """Does this pid name a live process?
+
+    The pid <= 0 guard is not defensive padding: os.kill(0, 0) SUCCEEDS — it
+    signals the caller's own process group — so an absent pid read from the
+    database as NULL and coerced to 0 would otherwise report "alive" forever,
+    and whatever it guards could never be reclaimed.
+    """
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        # CPython maps os.kill on Windows to TerminateProcess, which IGNORES
+        # the signal argument. os.kill(pid, 0) there does not probe the
+        # process, it KILLS it — so the liveness check would destroy the very
+        # agent it was asked about. setup.sh advertises Windows Git Bash, so
+        # this path is reachable. tasklist is the probe that doesn't shoot.
+        try:
+            out = subprocess.run(
+                ["tasklist", "/FI", f"PID eq {pid}", "/NH"],
+                capture_output=True, text=True, timeout=5)
+        except (OSError, subprocess.SubprocessError):
+            return False
+        return str(pid) in out.stdout
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -574,6 +606,12 @@ def _pid_alive(pid: int) -> bool:
     except OSError:
         return False
     return True
+
+
+# Retained so nth_web's lease can ask the same question through the name it
+# already imports; the underscore version was reaching across a module
+# boundary for what is plainly shared ownership vocabulary.
+_pid_alive = pid_alive
 
 
 def _pid_cmdline(pid: int) -> str:
@@ -604,12 +642,19 @@ def pid_owns_agent(pid: Optional[int], agent_id: str) -> bool:
     if not pid or int(pid) <= 0:
         return False
     pid = int(pid)
-    if not _pid_alive(pid):
+    if not pid_alive(pid):
         return False
     cmd = _pid_cmdline(pid)
     if not cmd:
         return True
-    return agent_id in cmd
+    # Anchored on the preamble's own wording, not a bare substring search.
+    # Agent ids appear inside --append-system-prompt, which begins with the
+    # operator's base_prompt — so an operator who writes "coordinate with
+    # ag_abc123" puts agent A's id into agent B's argv. If A then dies and its
+    # recorded pid is recycled onto B's process, a bare `agent_id in cmd`
+    # reports A as alive and strands it unspawnable forever. Only the hub
+    # writes this phrase, and it writes it once per process.
+    return AGENT_ID_MARKER.format(agent_id=agent_id) in cmd
 
 
 def agent_binary() -> List[str]:
@@ -893,6 +938,9 @@ class AgentSupervisor:
         self._turn_count: Dict[str, int] = {}
         self._last_msg: Dict[str, str] = {}
         self._agent_locks: Dict[str, threading.RLock] = {}
+        # agent_id -> (monotonic_expiry, owner_pid_or_None). See
+        # foreign_owner_pid: the answer costs a fork and is asked per message.
+        self._owner_cache: Dict[str, tuple] = {}
         self._lock = threading.Lock()
         self._accepting = True
 
@@ -1189,6 +1237,10 @@ class AgentSupervisor:
             cur = db.execute(
                 f"UPDATE agents SET {', '.join(sets)} WHERE id = ?", vals)
             db.commit()
+            if clear_pid or pid is not None:
+                # We just changed who owns this process, so any memoised answer
+                # about that predates our own action.
+                self._forget_owner(agent_id)
             return cur.rowcount
         finally:
             db.close()
@@ -1303,6 +1355,7 @@ class AgentSupervisor:
         with --resume, memory intact. Returns False if the agent was neither
         running nor a known row (no-op)."""
         with self._plock(agent_id):
+            self._refuse_if_foreign(agent_id)
             with self._lock:
                 proc = self._procs.pop(agent_id, None)
             if proc:
@@ -1345,10 +1398,33 @@ class AgentSupervisor:
             extra_dirs=spawn_kw.get("extra_dirs"),
             resume_session_id=row["session_id"] or "")
 
+    def _refuse_if_foreign(self, agent_id: str) -> None:
+        """Raise ForeignAgentError if a process we do not own is alive here.
+
+        Guarding spawn() alone is half an invariant. `agents.pid` is the ONLY
+        cross-process ownership record, so a hub that nulls it for an agent it
+        does not own destroys the evidence — and every later foreign_owner_pid
+        returns None, so the next spawn creates exactly the duplicate this
+        module exists to prevent.
+
+        The immediate damage is as bad as the eventual damage. _procs.pop
+        returns None for an agent we never spawned, so no signal is ever sent:
+        the row says stopped while the process runs on, reachable by nobody and
+        killable through no interface. stop() would even return True, because
+        it reports success on `rows > 0`.
+
+        Every writer of clear_pid=True calls this first.
+        """
+        foreign = self.foreign_owner_pid(agent_id)
+        if foreign is not None:
+            raise ForeignAgentError(agent_id, foreign)
+
     def stop(self, agent_id: str) -> bool:
         """Deliberately halt an agent (state=stopped). Returns False on no-op
-        (unknown agent, not running)."""
+        (unknown agent, not running). Raises ForeignAgentError if the live
+        process belongs to another hub."""
         with self._plock(agent_id):
+            self._refuse_if_foreign(agent_id)
             with self._lock:
                 proc = self._procs.pop(agent_id, None)
                 self._models.pop(agent_id, None)
@@ -1367,6 +1443,7 @@ class AgentSupervisor:
         agent loses the turn it was mid-way through, not its memory. That is
         the difference between interrupt and stop."""
         with self._plock(agent_id):
+            self._refuse_if_foreign(agent_id)
             with self._lock:
                 proc = self._procs.pop(agent_id, None)
                 self._models.pop(agent_id, None)
@@ -1387,6 +1464,13 @@ class AgentSupervisor:
         preamble/MCP config just as it does for wake.
         """
         with self._plock(agent_id):
+            # BEFORE the _set_state below, not after spawn() gets to check.
+            # clear() destroys session_id, and that is irreversible: against a
+            # live process owned by another hub, the spawn() refusal arrives
+            # too late — the transcript is already unresumable and the row is
+            # parked in ST_STOPPED where the router will not route to it. One
+            # click, permanent damage, to an agent this hub never owned.
+            self._refuse_if_foreign(agent_id)
             db = self._db()
             try:
                 row = db.execute(
@@ -1559,6 +1643,16 @@ class AgentSupervisor:
             mine = self._procs.get(agent_id)
         if mine is not None and mine.alive():
             return None
+        # Memoised briefly. The router calls this per routed message for any
+        # agent not running locally, and each miss costs a sqlite connect plus
+        # a fork/exec of ps — a subprocess per message, forever, to re-learn a
+        # fact that changes at most once per agent lifetime. Short enough that
+        # a genuinely departed owner is noticed within a couple of seconds.
+        now = time.monotonic()
+        with self._lock:
+            cached = self._owner_cache.get(agent_id)
+            if cached is not None and cached[0] > now:
+                return cached[1]
         # connect() is inside the guard, not before it: this runs on the spawn
         # path and from the router loop, so a database that is briefly
         # unreadable must degrade to the pre-existing behaviour rather than
@@ -1581,7 +1675,21 @@ class AgentSupervisor:
         # on liveness — so a stale row correctly reads as unowned and we keep
         # the right to restart it.
         pid = row["pid"]
-        return int(pid) if pid_owns_agent(pid, agent_id) else None
+        owner = int(pid) if pid_owns_agent(pid, agent_id) else None
+        with self._lock:
+            self._owner_cache[agent_id] = (
+                time.monotonic() + OWNER_CACHE_SECONDS, owner)
+        return owner
+
+    def _forget_owner(self, agent_id: str) -> None:
+        """Drop the memoised ownership answer for one agent.
+
+        Called wherever this hub changes who owns the process, so the next
+        question is answered from the world rather than from a cache that
+        predates our own action.
+        """
+        with self._lock:
+            self._owner_cache.pop(agent_id, None)
 
     def reserve_starting(self, agent_id: str) -> None:
         """Mark agent_id as having a create in flight, BEFORE its `agents` row

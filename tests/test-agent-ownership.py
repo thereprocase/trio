@@ -34,6 +34,10 @@ sys.path.insert(0, str(SERVER))
 
 _tmp = Path(tempfile.mkdtemp(prefix="nth_owner_"))
 os.environ["NTH_HOME"] = str(_tmp)
+# agent_binary() defaults to the real `claude` CLI. This file's whole job is
+# proving spawn() REFUSES, so if that guard ever regresses the test must fail
+# — not launch a live, billed agent in whatever environment runs the suite.
+os.environ["TRIO_AGENT_CMD"] = f"{sys.executable} {HERE / 'fake_agent.py'}"
 
 import nth_supervisor as nsup    # noqa: E402
 
@@ -48,10 +52,11 @@ def check(name, cond):
 
 
 def live_process_named(agent_id):
-    """A real process with agent_id in its argv, the way a real agent has it."""
+    """A real process carrying the preamble marker, as a real agent does."""
+    marker = nsup.AGENT_ID_MARKER.format(agent_id=agent_id)
     proc = subprocess.Popen(
         [sys.executable, "-c",
-         f"import time # {agent_id}\ntime.sleep(120)"],
+         f"import time # {marker}\ntime.sleep(120)"],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     _spawned.append(proc)
     # ps has to be able to see it before any assertion about it is meaningful.
@@ -100,6 +105,24 @@ check("live pid that is not an agent at all is not owned (pid recycling)",
 for empty in (None, 0, -1):
     check(f"pid {empty!r} is not owned",
           nsup.pid_owns_agent(empty, AGENT) is False)
+
+# os.kill(0, 0) SUCCEEDS — it signals the caller's own process group — so a
+# NULL pid coerced to 0 would read as "alive" forever and whatever it guards
+# could never be reclaimed.
+check("pid_alive(0) is False despite os.kill(0,0) succeeding",
+      nsup.pid_alive(0) is False)
+
+# The documented safety property: when the command line can't be read at all,
+# a live pid resolves to OWNED, because refusing a spawn is recoverable and a
+# duplicate identity is not. Nothing else in this file exercises it, so a
+# mutation flipping it to False would otherwise pass.
+_real_cmdline = nsup._pid_cmdline
+nsup._pid_cmdline = lambda pid: ""
+try:
+    check("an unreadable command line resolves to owned, not unowned",
+          nsup.pid_owns_agent(mine.pid, AGENT) is True)
+finally:
+    nsup._pid_cmdline = _real_cmdline
 
 # ── foreign_owner_pid: what the supervisor concludes from a row ────────────
 db_path = _tmp / "nth.db"

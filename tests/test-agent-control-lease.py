@@ -164,6 +164,39 @@ for t in threads:
 check(f"8 hubs starting simultaneously produce exactly 1 winner "
       f"(got {len(winners)})", len(winners) == 1)
 
+# ── renewal actually extends the hold ─────────────────────────────────────
+# Without this, `expires_at = time.time()` instead of `time.time() + ttl`
+# passes every other check in this file while making renewal a no-op: a live,
+# actively-renewing hub would still lose its lease once the ORIGINAL ttl ran
+# out, and nothing here would notice.
+sqlite3.connect(str(DB)).execute("DELETE FROM agent_control_lease"
+                                 ).connection.commit()
+renewing = lease(ttl=0.4)
+check("renewing hub acquires", renewing.acquire() is None)
+check("renew() reports success while we still hold it", renewing.renew() is True)
+time.sleep(0.3)
+renewing.renew()
+time.sleep(0.3)                       # past the ORIGINAL ttl, inside renewed
+check("a renewed lease is still held past its original expiry",
+      lease().acquire() is not None)
+renewing.release()
+
+# ── the renewal thread runs, and stops ────────────────────────────────────
+sqlite3.connect(str(DB)).execute("DELETE FROM agent_control_lease"
+                                 ).connection.commit()
+threaded = lease(ttl=0.4, renew_interval=0.1)
+check("threaded hub acquires", threaded.acquire() is None)
+threaded.start_renewal()
+time.sleep(0.9)                       # >2 original TTLs
+check("the renewal thread keeps the lease alive on its own",
+      lease().acquire() is not None)
+threaded.stop()
+threaded._thread.join(timeout=2)
+check("stop() ends the renewal thread", not threaded._thread.is_alive())
+gone = sqlite3.connect(str(DB)).execute(
+    "SELECT COUNT(*) FROM agent_control_lease").fetchone()[0]
+check("stop() releases the row so the next hub need not wait", gone == 0)
+
 print()
 if failures:
     print(f"{len(failures)} FAILED: " + ", ".join(failures))
