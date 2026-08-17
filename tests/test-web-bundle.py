@@ -115,7 +115,9 @@ check("Inspired skins include platform-native control vocabularies",
       and ".messages { padding:18px 0 10px; }" in historic_css
       and "-webkit-font-smoothing:antialiased" in historic_css
       and ".conversation-header { padding-left:14px; }" in historic_css
-      and "background:#69386b" in historic_css)
+      and "background:#69386b" in historic_css
+      and ".dm-item > .av {" in historic_css
+      and "border-radius:5px" in historic_css)
 check("retired Windows 3.1 preset is absent from tokens and component skins",
       "historic-win31" not in tokens_css and "historic-win31" not in historic_css)
 

@@ -1032,8 +1032,21 @@
 :root[data-theme="inspired-slack"] .rail-item::before { content:"#"; display:block; left:10px; top:50%; width:auto; height:auto; border:0; border-radius:0; background:none; color:#b9a7b9; transform:translateY(-50%); }
 :root[data-theme="inspired-slack"] .nav-item::before,
 :root[data-theme="inspired-slack"] .rail-item::before { display:none; }
-:root[data-theme="inspired-slack"] .dm-item { padding-left:28px; }
-:root[data-theme="inspired-slack"] .dm-item::before { content:"●"; color:#2bac76; font-size:9px; }
+:root[data-theme="inspired-slack"] .dm-item { padding-left:10px; }
+:root[data-theme="inspired-slack"] .dm-item::before { display:none; }
+:root[data-theme="inspired-slack"] .dm-item > .av {
+  border-radius:5px;
+  box-shadow:inset 0 0 0 1px rgba(255,255,255,.16);
+}
+:root[data-theme="inspired-slack"] .dm-pair .av {
+  border-radius:5px;
+  box-shadow:inset 0 0 0 1px rgba(255,255,255,.16),0 0 0 2px #4a154b;
+}
+:root[data-theme="inspired-slack"] .dm-item .av .st-ring {
+  right:-3px;
+  bottom:-3px;
+  border:2px solid #4a154b;
+}
 :root[data-theme="inspired-slack"] .nav-item.active,
 :root[data-theme="inspired-slack"] .dm-item.active,
 :root[data-theme="inspired-slack"] .rail-item.active { background:#69386b; color:#fff; box-shadow:none; font-weight:500; }
