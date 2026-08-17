@@ -768,10 +768,24 @@
       if (state.dmAudit) {
         if (expected.length && (recips.size !== expected.length || [...recips].some(id => !expected.includes(id)))) return;
       } else {
-        const op = state.operator?.id;
-        if (!op || !recips.has(op)) return;
-        const others = [...recips].filter(id => id !== op);
-        if (expected.length && (others.length !== expected.length || others.some(id => !expected.includes(id)))) return;
+        // operator() falls back to state.meta.operator, which is what every
+        // other call site in this workspace does. Reading state.operator
+        // directly meant a boot that failed to populate it turned the
+        // membership test into "drop everything": the thread listed, opened,
+        // and rendered empty — no error, just an apparently silent agent.
+        const op = operator().id;
+        if (op) {
+          if (!recips.has(op)) return;
+          const others = [...recips].filter(id => id !== op);
+          if (expected.length && (others.length !== expected.length || others.some(id => !expected.includes(id)))) return;
+        } else if (expected.length) {
+          // Identity genuinely unknown. Match on the thread's participants, as
+          // the audit branch above does. The server has already scoped this
+          // thread to what the caller may read, so showing what it returned is
+          // not a disclosure — showing NOTHING is the worse failure, because an
+          // empty conversation reads as "they never replied".
+          if (!expected.some(id => recips.has(id))) return;
+        }
       }
     } else if (isPrivate(msg)) {
       // Channel view (no dmKey): a recipients-scoped DM belongs to the separate

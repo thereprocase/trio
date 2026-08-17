@@ -3459,13 +3459,23 @@ class NthWebHandler(BaseHTTPRequestHandler):
         elif path == "/api/workspace/events":
             self._serve_workspace_sse()
         elif path == "/api/meta":
+            # Deliberately NOT channel-gated. Identity is global: it comes from
+            # the request's transport and _resolve_identity() never consults a
+            # channel — the channel is only echoed back.
+            #
+            # The workspace boots at "/" with NO channel selected and calls this
+            # to learn who it is. While this 400'd, boot() set state.operator =
+            # null for the WHOLE session, and every "am I a party to this?"
+            # check silently answered no. The visible symptom was DMs: the
+            # thread list (built server-side) showed the conversation, and
+            # opening it rendered nothing — not the agent's messages, not your
+            # own — because the client drops any message it cannot confirm you
+            # belong to. Landing mode only; the single-channel handler always
+            # has a channel to return.
             ch = self._channel_for_request(parsed)
-            if ch is None:
-                self._error(400, "channel query param required")
-                return
             token, ident, is_new = self._resolve_identity()
             self._json({
-                "channel": ch,
+                "channel": ch or "",
                 "operator": {
                     "id": ident.member_id,
                     "name": ident.display_name,
