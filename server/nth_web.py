@@ -2388,7 +2388,9 @@ def resume_managed_agents(db_path: Path, supervisor) -> List[str]:
         # empty channel list and (per build_agent_preamble) no reclaim
         # instruction at all: unreachable forever, not recovered. Treat it
         # as failed instead of resumable.
-        placed = {r["id"] for r in db.execute(
+        # r["agent_id"], not r["id"]: the column selected is agent_id, and
+        # sqlite3.Row raises IndexError for any other name.
+        placed = {r["agent_id"] for r in db.execute(
             "SELECT DISTINCT agent_id FROM agent_channels").fetchall()}
     finally:
         db.close()
