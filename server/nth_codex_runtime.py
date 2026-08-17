@@ -104,6 +104,19 @@ class CodexAppServerClient:
         self._request_executor = ThreadPoolExecutor(
             max_workers=8, thread_name_prefix="codex-req")
         self._request_executor_closed = False
+        # Notifications get their own SINGLE-THREADED executor. They used to be
+        # dispatched inline on the reader, which deadlocked the whole runtime:
+        # ensure_started() holds the manager lock across its handshake, the App
+        # Server emits remoteControl/status/changed the moment initialize
+        # returns, and the handler takes that same lock — so the reader blocked
+        # before it could correlate the account/read response, and every Codex
+        # start failed with a 10s timeout. Managed Codex agents could not be
+        # created at all, and model discovery always fell back.
+        # One worker, not eight: notification ORDER is load-bearing
+        # (turn/started must be handled before turn/completed), and a pool
+        # would reorder them.
+        self._notify_executor = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="codex-notify")
 
     def start(self, timeout: float = DEFAULT_TIMEOUT) -> Dict[str, Any]:
         if self.alive():
@@ -228,10 +241,18 @@ class CodexAppServerClient:
                     continue
                 callback = self.on_notification
                 if callback is not None and message.get("method"):
+                    # Off the reader, for the same reason as server requests
+                    # above: the handler takes the manager lock, and holding
+                    # the reader while it waits deadlocks response correlation.
+                    def _run(cb=callback, msg=message):
+                        try:
+                            cb(msg)
+                        except Exception as exc:
+                            self._stderr.append(f"notification callback failed: {exc}")
                     try:
-                        callback(message)
-                    except Exception as exc:
-                        self._stderr.append(f"notification callback failed: {exc}")
+                        self._notify_executor.submit(_run)
+                    except RuntimeError:
+                        pass    # executor shut down mid-close; drop the event
         finally:
             self._closed.set()
             self._fail_pending("Codex App Server closed its output")
@@ -286,6 +307,7 @@ class CodexAppServerClient:
         self._fail_pending("Codex App Server stopped")
         self._request_executor.shutdown(wait=False)
         self._request_executor_closed = True
+        self._notify_executor.shutdown(wait=False)
 
 
 def codex_cli_diagnostics(timeout: float = 5.0) -> Dict[str, Any]:
