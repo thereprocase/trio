@@ -149,7 +149,7 @@
     const themeRow = document.createElement('div'); themeRow.className = 'pref-row pref-row-themes'; themeRow.innerHTML = '<div class="pr-txt"><div class="l">Theme presets</div><div class="d">Choose a palette or an Inspired interface that restyles the controls, windows, navigation, and messages too.</div></div>';
     const themeChoices = document.createElement('div'); themeChoices.className = 'theme-choice';
     [['lightTheme', 'Light default', modernLightThemes], ['darkTheme', 'Dark default', modernDarkThemes], ['theme', 'Inspired', inspiredThemes]].forEach(([key, label, options]) => {
-      const group = document.createElement('div'); group.className = 'theme-choice-group';
+      const group = document.createElement('div'); group.className = `theme-choice-group theme-choice-group-${key}`;
       group.innerHTML = `<div class="theme-group-label">${label}</div>`;
       const choices = document.createElement('div'); choices.className = 'theme-choice';
       options.forEach(option => { const selected = p[key] === option.id; const b = document.createElement('button'); b.type = 'button'; b.className = 'theme-opt' + (selected ? ' on' : ''); b.setAttribute('aria-pressed', selected ? 'true' : 'false'); b.innerHTML = `<span class="swatch" data-theme="${option.id}"><span class="a"></span><span class="b"></span></span><span class="tl">${option.label}</span>`; b.addEventListener('click', () => { selectTheme(option.id); renderPage(panel); }); choices.append(b); });

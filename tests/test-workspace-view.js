@@ -169,7 +169,9 @@ check('Inspired cards have name-only labels and a toggle mode',
   inspired.map(theme => theme.label).join(',') ===
     'Dial Up,Link Cable,Webmaster,Now Playing,Walled Garden,Standup'
   && inspired.every(theme => theme.family === 'inspired'
-    && !theme.description && ['light', 'dark'].includes(theme.mode)));
+  && !theme.description && ['light', 'dark'].includes(theme.mode)));
+check('theme picker exposes a stable group class for the balanced Inspired grid',
+  fs.readFileSync(WEB_JS('40-preferences.js'), 'utf8').includes('theme-choice-group-${key}'));
 
 const aLight = lights[lights.length - 1].id;   // not the default, so a no-op shows
 const aDark = darks[darks.length - 1].id;
