@@ -570,7 +570,11 @@ h1,h2,h3,h4{ margin:0; font-weight:600; }
   display:inline-flex; align-items:center; gap:6px; font-size:11.5px; font-weight:700;
   padding:3px 10px 3px 9px; border-radius:999px;
 }
-.status-chip .st-dot{ width:8px; height:8px; border-radius:50%; }
+/* currentColor, because the state class lands on the CHIP, not on the dot
+   (30-agents.js:189 renders a bare <span class="st-dot">). Anything of the
+   form .st-dot.online would never match, and without a background the dot
+   is an invisible 8px hole. */
+.status-chip .st-dot{ width:8px; height:8px; border-radius:50%; background:currentColor; }
 .status-chip.online{ background:color-mix(in oklab,var(--st-online) 16%, var(--surface)); color:color-mix(in oklab,var(--st-online) 72%, var(--ink)); }
 .status-chip.thinking{ background:color-mix(in oklab,var(--st-thinking) 18%, var(--surface)); color:color-mix(in oklab,var(--st-thinking) 74%, var(--ink)); }
 .status-chip.idle{ background:var(--bg-sink); color:var(--ink-3); }
