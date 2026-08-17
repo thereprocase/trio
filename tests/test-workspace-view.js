@@ -170,8 +170,16 @@ check('Inspired cards have name-only labels and a toggle mode',
     'Dial Up,Link Cable,Webmaster,Now Playing,Walled Garden,Standup'
   && inspired.every(theme => theme.family === 'inspired'
   && !theme.description && ['light', 'dark'].includes(theme.mode)));
-check('theme picker exposes a stable group class for the balanced Inspired grid',
-  fs.readFileSync(WEB_JS('40-preferences.js'), 'utf8').includes('theme-choice-group-${key}'));
+check('theme picker balances every group as its available width changes',
+  base.Trio.preferences.themeGridColumns(7, 720) === 4
+  && base.Trio.preferences.themeGridColumns(7, 340) === 3
+  && base.Trio.preferences.themeGridColumns(8, 720) === 4
+  && base.Trio.preferences.themeGridColumns(8, 340) === 3
+  && base.Trio.preferences.themeGridColumns(9, 720) === 5
+  && base.Trio.preferences.themeGridColumns(9, 340) === 3
+  && base.Trio.preferences.themeGridColumns(10, 720) === 5
+  && base.Trio.preferences.themeGridColumns(10, 454) === 4
+  && base.Trio.preferences.themeGridColumns(10, 340) === 3);
 
 const aLight = lights[lights.length - 1].id;   // not the default, so a no-op shows
 const aDark = darks[darks.length - 1].id;

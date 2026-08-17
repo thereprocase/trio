@@ -649,8 +649,7 @@ h1,h2,h3,h4{ margin:0; font-weight:600; }
 /* theme + accent selectors */
 .theme-choice{ display:flex; gap:10px; flex-wrap:wrap; justify-content:center; }
 .theme-choice-group{ flex:1 1 100%; }
-.theme-choice-group .theme-choice{ margin-top:0; }
-.theme-choice-group-theme .theme-choice{ display:grid; grid-template-columns:repeat(3,104px); }
+.theme-choice-group .theme-choice{ display:grid; grid-template-columns:repeat(var(--theme-columns,3),104px); margin-top:0; }
 .theme-group-label{ font-weight:600; font-size:13px; color:var(--ink-2); margin-bottom:14px; }
 .pref-row-themes{ flex-wrap:wrap; align-items:flex-start; }
 .pref-row-themes .pr-txt{ flex:0 0 100%; margin-bottom:10px; }
@@ -668,7 +667,6 @@ h1,h2,h3,h4{ margin:0; font-weight:600; }
 .theme-opt .swatch .a{ flex:2; background:var(--surface); }
 .theme-opt .swatch .b{ flex:1; background:var(--accent); }
 .theme-opt .tl{ display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-weight:600; font-size:13px; }
-@media(max-width:380px){ .theme-choice-group-theme .theme-choice{ grid-template-columns:repeat(2,104px); } }
 
 /* ============================================================
    modal
