@@ -310,6 +310,48 @@ try:
           "capacity skip is for a seat you already occupy, not a free pass",
           "error" in packed and "full" in packed["error"].lower())
 
+    # ── the agent inbox is exempt from the capacity ceiling ──
+    # MAX_MEMBERS bounds a CONVERSATION. The inbox is the DM routing table:
+    # every agent is auto-placed in it for life and departed agents keep their
+    # rows, so it fills monotonically and the 21st agent ever created finds it
+    # permanently full. Archiving does not free a seat — it sets active = 0 and
+    # leaves the row, which is exactly what the count above is measuring.
+    conn = db()
+    have = conn.execute(
+        "SELECT COUNT(*) FROM members WHERE channel = ?",
+        (srv.AGENT_INBOX_CHANNEL,)).fetchone()[0]
+    for i in range(max(0, srv.MAX_MEMBERS - have) + 3):
+        # Half of them inactive, to pin the specific trap: an operator who
+        # archives every agent to make room still cannot get back in, because
+        # active = 0 rows are counted.
+        conn.execute(
+            "INSERT INTO members (id, channel, name, summary, skills, "
+            "last_seen, joined_at, active) VALUES (?, ?, ?, '', '', ?, ?, ?)",
+            (f"inbox-pad{i:03d}", srv.AGENT_INBOX_CHANNEL, f"InboxPad{i}",
+             srv.now_iso(), srv.now_iso(), i % 2))
+    conn.commit()
+    over = conn.execute(
+        "SELECT COUNT(*) FROM members WHERE channel = ?",
+        (srv.AGENT_INBOX_CHANNEL,)).fetchone()[0]
+    inactive = conn.execute(
+        "SELECT COUNT(*) FROM members WHERE channel = ? AND active = 0",
+        (srv.AGENT_INBOX_CHANNEL,)).fetchone()[0]
+    conn.close()
+    check(f"fixture: the inbox is over MAX_MEMBERS ({over} > {srv.MAX_MEMBERS})",
+          over > srv.MAX_MEMBERS)
+    check("fixture: and some of those rows are archived/inactive", inactive > 0)
+
+    late = connect(summary="x", name="LateArrival",
+                   channel=srv.AGENT_INBOX_CHANNEL)
+    check("a new agent can still join the inbox when it is over capacity",
+          "error" not in late and late.get("member_id"))
+
+    # The exemption must be surgical. A normal channel at the ceiling still
+    # refuses — otherwise this "fix" quietly removes the cap everywhere.
+    still_capped = connect(summary="x", name="Latecomer", channel="chan-packed")
+    check("but an ordinary full channel still refuses a newcomer",
+          "error" in still_capped and "full" in still_capped["error"].lower())
+
     # ── cull retires the global identity too ──
     # Without this the culled agent keeps a durable id AND its reclaim_secret,
     # so it can walk straight back in — and nothing else ever deletes an

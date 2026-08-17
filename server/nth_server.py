@@ -1051,7 +1051,25 @@ def nth_connect(
             # already inside the count, so counting it against the agent would
             # lock a legitimately-placed agent out of a channel that filled up
             # — it would be refused entry to a seat it is still sitting in.
-            if not (reclaiming and reclaimed_existing):
+            #
+            # The agent inbox is EXEMPT. MAX_MEMBERS bounds a conversation —
+            # twenty is how many participants a room can hold and still be a
+            # conference call. The inbox is not a room: it is the DM routing
+            # table, every agent is auto-placed in it for life, and a departed
+            # agent keeps its row (that is what makes the count above a
+            # deliberate high-water mark rather than a census). So the inbox
+            # fills monotonically, and on the 21st agent EVER created it is
+            # full forever — no new agent can join it again on any install.
+            # Archiving does not help: it sets active = 0 and leaves the row.
+            #
+            # Nothing is actually broken about DMs when this fires, which is
+            # the cruel part. The connect path auto-places agents in the inbox
+            # with a direct INSERT that never consults this check, so the agent
+            # CAN receive DMs — it just gets told the inbox is full when it
+            # tries to join explicitly, and reasonably concludes it is cut off.
+            # Observed live: an agent reported "I can't receive DMs" while a DM
+            # to it delivered successfully.
+            if channel != AGENT_INBOX_CHANNEL and not (reclaiming and reclaimed_existing):
                 count = db.execute(
                     "SELECT COUNT(*) FROM members WHERE channel = ?",
                     (channel,),
