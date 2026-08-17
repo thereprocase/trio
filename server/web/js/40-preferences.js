@@ -22,12 +22,12 @@
     { id: 'dark-4', mode: 'dark', label: 'Abyss' },
     { id: 'dark-5', mode: 'dark', label: 'Noir' },
     { id: 'dark-6', mode: 'dark', label: 'Torch' },
-    { id: 'historic-win98', mode: 'light', family: 'inspired', label: 'Dial Up' },
+    { id: 'historic-win98', mode: 'light', family: 'inspired', label: 'Start Menu' },
     { id: 'historic-gameboy', mode: 'light', family: 'inspired', label: 'Link Cable' },
     { id: 'historic-geocities', mode: 'dark', family: 'inspired', label: 'Webmaster' },
     { id: 'inspired-ipod', mode: 'light', family: 'inspired', label: 'Now Playing' },
     { id: 'inspired-messenger', mode: 'light', family: 'inspired', label: 'Walled Garden' },
-    { id: 'inspired-slack', mode: 'light', family: 'inspired', label: 'Standup' },
+    { id: 'inspired-slack', mode: 'light', family: 'inspired', label: 'Threaded' },
   ];
   const lightThemes = themes.filter(theme => theme.mode === 'light');
   const darkThemes = themes.filter(theme => theme.mode === 'dark');

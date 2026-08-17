@@ -167,7 +167,7 @@ check('Inspired set includes all six distinct platforms',
     'historic-win98,historic-gameboy,historic-geocities,inspired-ipod,inspired-messenger,inspired-slack');
 check('Inspired cards have name-only labels and a toggle mode',
   inspired.map(theme => theme.label).join(',') ===
-    'Dial Up,Link Cable,Webmaster,Now Playing,Walled Garden,Standup'
+    'Start Menu,Link Cable,Webmaster,Now Playing,Walled Garden,Threaded'
   && inspired.every(theme => theme.family === 'inspired'
   && !theme.description && ['light', 'dark'].includes(theme.mode)));
 check('theme picker balances every group as its available width changes',
