@@ -2258,6 +2258,7 @@ _SUPERVISOR: Optional["nsup.AgentSupervisor"] = None
 _SUPERVISOR_LOCK = threading.Lock()
 _ROUTER = None
 _IDLE_REAPER = None
+_LEASE = None
 _RUNTIME_HEALTH: Dict[str, Tuple[float, Dict[str, Any]]] = {}
 
 
@@ -10205,6 +10206,165 @@ class QuietThreadingHTTPServer(ThreadingHTTPServer):
         super().handle_error(request, client_address)
 
 
+AGENT_CONTROL_LEASE_TTL = 60.0
+AGENT_CONTROL_RENEW_INTERVAL = 20.0
+
+
+class AgentControlLease:
+    """Exactly one hub drives the agents in a given database.
+
+    The per-agent ownership check in nth_supervisor makes a duplicate process
+    impossible; this makes the race that produces the attempt impossible, which
+    is a different and weaker job. Keeping both is deliberate: the lease is
+    policy (one hub decides when agents wake, hibernate and resume) and the
+    ownership check is the invariant (no agent id ever names two processes). A
+    lease alone would be a lock with no enforcement behind it, and an ownership
+    check alone leaves two hubs permanently fighting over every agent, with the
+    winner decided by scheduling.
+
+    Held in the database rather than in memory or a pidfile for the reason the
+    original bug existed at all: memory cannot be seen by the other process,
+    and the database is the one thing both hubs already share.
+    """
+
+    def __init__(self, db_path: Path, ttl: float = AGENT_CONTROL_LEASE_TTL,
+                 renew_interval: float = AGENT_CONTROL_RENEW_INTERVAL):
+        self.db_path = db_path
+        self.ttl = ttl
+        self.renew_interval = renew_interval
+        # host and pid are recorded separately from the opaque holder id so a
+        # takeover can tell "the holder crashed" from "the holder is on another
+        # machine and I cannot see its process". The uuid makes the id unique
+        # across restarts that reuse a pid.
+        self.host = socket.gethostname()
+        self.pid = os.getpid()
+        self.holder = f"{self.host}:{self.pid}:{uuid.uuid4().hex[:8]}"
+        self._stop = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+
+    def _db(self) -> sqlite3.Connection:
+        db = sqlite3.connect(str(self.db_path), timeout=10)
+        db.row_factory = sqlite3.Row
+        db.execute("PRAGMA busy_timeout=5000")
+        db.execute("""
+            CREATE TABLE IF NOT EXISTS agent_control_lease (
+                id          INTEGER PRIMARY KEY CHECK (id = 1),
+                holder      TEXT NOT NULL,
+                host        TEXT NOT NULL DEFAULT '',
+                pid         INTEGER,
+                acquired_at TEXT NOT NULL,
+                expires_at  REAL NOT NULL
+            )
+        """)
+        return db
+
+    def _takeable(self, row, now: float) -> bool:
+        if row["holder"] == self.holder:
+            return True
+        if float(row["expires_at"] or 0) < now:
+            return True
+        # A hub that died without releasing holds a lease that is valid for up
+        # to a full TTL. On the same machine its pid tells us the truth now,
+        # so a crashed hub costs a restart no waiting at all. Across hosts the
+        # pid is meaningless and the TTL is the only honest answer.
+        if row["host"] == self.host and not nsup._pid_alive(int(row["pid"] or 0)):
+            return True
+        return False
+
+    def acquire(self) -> Optional[Dict[str, Any]]:
+        """Take the lease. Returns None on success, else the blocking holder."""
+        now = time.time()
+        db = self._db()
+        try:
+            try:
+                db.execute(
+                    "INSERT INTO agent_control_lease "
+                    "(id, holder, host, pid, acquired_at, expires_at) "
+                    "VALUES (1,?,?,?,?,?)",
+                    (self.holder, self.host, self.pid, now_iso(),
+                     now + self.ttl))
+                db.commit()
+                return None
+            except sqlite3.IntegrityError:
+                pass                       # someone holds it; evaluate below
+            row = db.execute(
+                "SELECT * FROM agent_control_lease WHERE id = 1").fetchone()
+            if row is None:                # released between the two statements
+                return self.acquire()
+            if not self._takeable(row, now):
+                return dict(row)
+            # Compare-and-swap on the holder we just read. Two hubs starting
+            # together both see the same expired row; only the one whose UPDATE
+            # matches it still wins, because sqlite serializes the writes.
+            cur = db.execute(
+                "UPDATE agent_control_lease SET holder=?, host=?, pid=?, "
+                "acquired_at=?, expires_at=? WHERE id=1 AND holder=?",
+                (self.holder, self.host, self.pid, now_iso(),
+                 now + self.ttl, row["holder"]))
+            db.commit()
+            if cur.rowcount == 1:
+                return None
+            beat = db.execute(
+                "SELECT * FROM agent_control_lease WHERE id = 1").fetchone()
+            return dict(beat) if beat else None
+        finally:
+            db.close()
+
+    def renew(self) -> bool:
+        """Extend our hold. False means we no longer own it."""
+        db = self._db()
+        try:
+            cur = db.execute(
+                "UPDATE agent_control_lease SET expires_at=? "
+                "WHERE id=1 AND holder=?",
+                (time.time() + self.ttl, self.holder))
+            db.commit()
+            return cur.rowcount == 1
+        except sqlite3.Error:
+            # A transient database error is not evidence that we lost the
+            # lease, and treating it as such would hand the control plane away
+            # over a locked write. The TTL covers a genuinely wedged hub.
+            return True
+        finally:
+            db.close()
+
+    def release(self) -> None:
+        try:
+            db = self._db()
+        except sqlite3.Error:
+            return
+        try:
+            db.execute("DELETE FROM agent_control_lease WHERE id=1 AND holder=?",
+                       (self.holder,))
+            db.commit()
+        except sqlite3.Error:
+            pass
+        finally:
+            db.close()
+
+    def _renew_loop(self) -> None:
+        while not self._stop.wait(self.renew_interval):
+            if not self.renew():
+                # Losing the lease does not stop this hub's router, and that is
+                # safe: the supervisor's per-agent ownership check means the
+                # non-owning router skips every agent the other hub actually
+                # holds. Surfacing it matters more than reacting to it — a lost
+                # lease means clock skew or a stalled hub, and both want eyes.
+                sys.stderr.write(
+                    "[nth_web] WARNING: lost the agent-control lease "
+                    f"({self.holder}); another hub has taken it over\n")
+                return
+
+    def start_renewal(self) -> None:
+        self._thread = threading.Thread(
+            target=self._renew_loop, name="agent-control-lease", daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self.release()
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Web dashboard for a trio channel.")
     ap.add_argument("channel", nargs="?", default=None,
@@ -10329,8 +10489,18 @@ def main() -> int:
     if args.no_agent_control:
         NthWebHandler._agent_control_enabled = False
 
-    global _ROUTER, _IDLE_REAPER
+    global _ROUTER, _IDLE_REAPER, _LEASE
     if args.channel is None and not args.no_agent_control:
+        _LEASE = AgentControlLease(db_path)
+        blocking = _LEASE.acquire()
+        if blocking is not None:
+            _LEASE = None
+            NthWebHandler._agent_control_enabled = False
+            print(f"  agents:      read-only — {blocking.get('holder')} "
+                  f"(pid {blocking.get('pid')}) already drives this database")
+            print("               pass --no-agent-control to silence this")
+
+    if _LEASE is not None:
         supervisor = get_supervisor()
         # One cheap poll loop feeds every managed agent the channel traffic its
         # wake policy asks for — replacing N per-agent monitors.
@@ -10344,6 +10514,9 @@ def main() -> int:
         # must not delay binding the port.
         threading.Thread(target=resume_managed_agents,
                          args=(db_path, supervisor), daemon=True).start()
+        # Started only after the control plane is actually up, so a hub that
+        # dies during startup expires its lease instead of holding it.
+        _LEASE.start_renewal()
 
     # Let multiple channel dashboards start without manual port coordination.
     requested_port = args.port
@@ -10400,6 +10573,10 @@ def main() -> int:
     except KeyboardInterrupt:
         pass
     finally:
+        # Released rather than left to expire: the next hub to start should not
+        # have to wait out a TTL for a lease whose holder is deliberately gone.
+        if _LEASE is not None:
+            _LEASE.stop()
         stop_hubs()
 
     return 0
