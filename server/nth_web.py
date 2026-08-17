@@ -2397,6 +2397,21 @@ def resume_managed_agents(db_path: Path, supervisor) -> List[str]:
             if agent_id not in placed:
                 supervisor._set_state(agent_id, nsup.ST_ERRORED, clear_pid=True)
                 continue
+            # The state column says "running" for two different situations:
+            # the process died with the hub and needs reviving, or it is still
+            # running right now. Only the recorded pid tells them apart, and
+            # resuming the second one duplicates a live agent.
+            #
+            # This is not only the two-hub case. SIGTERM on a hub leaves its
+            # agents reparented and very much alive (measured: they survived
+            # SIGTERM and needed SIGKILL), so a single hub restarting into its
+            # own orphans hits this too.
+            owner = supervisor.foreign_owner_pid(agent_id)
+            if owner is not None:
+                sys.stderr.write(
+                    f"[nth_web] agent {agent_id} already runs as pid {owner}; "
+                    f"not resuming\n")
+                continue
             if wake_agent(agent_id, supervisor, db_path) is not None:
                 resumed.append(agent_id)
         except Exception:
@@ -2572,6 +2587,16 @@ class AgentRouter(threading.Thread):
                 if row is None or row[0] in (nsup.ST_STOPPED, nsup.ST_ERRORED):
                     continue
                 if not self.sup.is_running(aid):
+                    # is_running() only sees processes THIS hub owns. Waking on
+                    # that alone is how a second hub spawns a duplicate: it has
+                    # never spawned the agent, so every message it routes looks
+                    # like a cold start. Ask the database who actually owns the
+                    # process before creating a second one.
+                    owner = self.sup.foreign_owner_pid(aid)
+                    if owner is not None:
+                        # The owning hub has its own router feeding this agent;
+                        # we hold no handle and could not feed it if we tried.
+                        continue
                     wake_agent(aid, self.sup, self.db_path)  # re-injects mcp+preamble
                 if chan == AGENT_INBOX_CHANNEL:
                     text = ("Private inbox message. Reply privately in "

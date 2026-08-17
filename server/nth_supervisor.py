@@ -538,6 +538,80 @@ class ClaudeRuntime:
         return result
 
 
+# ── cross-process agent ownership ───────────────────────────────────────────
+#
+# Every liveness check on the spawn path reads AgentSupervisor._procs, which is
+# memory belonging to ONE hub process. That is correct within a process and
+# useless between them: a second nth_web against the same database starts with
+# an empty registry, concludes the agent is dead, and spawns it again. The
+# result is two live processes sharing one member_id and one channel identity,
+# a reclaim_secret rotation apart — observed in the field as two Frost and two
+# Atlas processes, each pair split across two hubs.
+#
+# The database already records the owning pid (`agents.pid`), so ownership was
+# always recoverable across processes; nothing consulted it. These helpers do.
+
+
+class ForeignAgentError(RuntimeError):
+    """A live process for this agent exists under a supervisor that isn't us."""
+
+    def __init__(self, agent_id: str, pid: int):
+        super().__init__(
+            f"agent {agent_id} already runs as pid {pid} under another "
+            f"supervisor; refusing to spawn a duplicate")
+        self.agent_id = agent_id
+        self.pid = pid
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # Exists and belongs to another user. Existence is the question.
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _pid_cmdline(pid: int) -> str:
+    """This pid's command line, or "" when it can't be read."""
+    try:
+        out = subprocess.run(["ps", "-o", "command=", "-p", str(pid)],
+                             capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return out.stdout.strip() if out.returncode == 0 else ""
+
+
+def pid_owns_agent(pid: Optional[int], agent_id: str) -> bool:
+    """True when `pid` is a live process that IS this agent.
+
+    Liveness alone is the wrong test in both directions. Pids get recycled, so
+    a stale row can name a pid that now belongs to something unrelated —
+    treating that as the agent would strand it permanently, unspawnable. Every
+    agent carries its own id in the preamble baked into its argv, so the
+    command line is a positive identity check that survives recycling.
+
+    When the command line can't be read (unsupported platform, hardened
+    process), fall back to bare liveness. Spawning a duplicate is the failure
+    this path exists to prevent, so ambiguity has to resolve to "owned" — a
+    wrongly-refused spawn is visible and recoverable, a duplicate identity is
+    neither.
+    """
+    if not pid or int(pid) <= 0:
+        return False
+    pid = int(pid)
+    if not _pid_alive(pid):
+        return False
+    cmd = _pid_cmdline(pid)
+    if not cmd:
+        return True
+    return agent_id in cmd
+
+
 def agent_binary() -> List[str]:
     """The base argv for launching an agent. Overridable via $TRIO_AGENT_CMD
     (shell-split) so tests can point at a fake stream-json agent. Defaults to
@@ -1165,6 +1239,15 @@ class AgentSupervisor:
                 existing = self._procs.get(agent_id)
                 if existing and existing.alive():
                     return existing
+            # _procs answers "is it running HERE". The database answers "is it
+            # running AT ALL" — and a second hub on the same db has its own
+            # empty _procs, so without this check both hubs pass the guard
+            # above and both spawn. This is the single point where a duplicate
+            # identity can be created, so it is the single point that has to
+            # refuse.
+            foreign = self.foreign_owner_pid(agent_id)
+            if foreign is not None:
+                raise ForeignAgentError(agent_id, foreign)
             permission_mode = PERMISSION_MODES.get(permission_profile, "auto")
             argv = self.runtime.build_spawn_argv(
                 model=model, system_prompt=system_prompt, mcp_config=mcp_config,
@@ -1452,9 +1535,53 @@ class AgentSupervisor:
             db.close()
 
     def is_running(self, agent_id: str) -> bool:
+        """Does THIS supervisor own a live process for the agent?
+
+        Deliberately in-memory only, and deliberately not the whole truth: it
+        is called per routed message, so it stays cheap. Callers that are about
+        to act on a False — spawn it, rotate its secret — must additionally ask
+        foreign_owner_pid(), which is the expensive, authoritative check.
+        """
         with self._lock:
             proc = self._procs.get(agent_id)
         return bool(proc and proc.alive())
+
+    def foreign_owner_pid(self, agent_id: str) -> Optional[int]:
+        """Pid of a live process for this agent that this supervisor does NOT
+        own, or None.
+
+        A process in our own _procs is ours to feed, stop and reap, so it is
+        never "foreign". Anything else alive belongs to another hub, and the
+        only safe move is to leave it be: we cannot feed it (no handle), and
+        spawning alongside it is the duplicate-identity bug.
+        """
+        with self._lock:
+            mine = self._procs.get(agent_id)
+        if mine is not None and mine.alive():
+            return None
+        # connect() is inside the guard, not before it: this runs on the spawn
+        # path and from the router loop, so a database that is briefly
+        # unreadable must degrade to the pre-existing behaviour rather than
+        # raise and wedge every spawn in the process.
+        try:
+            db = self._db()
+        except sqlite3.Error:
+            return None
+        try:
+            row = db.execute(
+                "SELECT pid FROM agents WHERE id = ?", (agent_id,)).fetchone()
+        except sqlite3.Error:
+            return None
+        finally:
+            db.close()
+        if row is None:
+            return None
+        # No special case for "our own dead handle": reaching here means our
+        # handle is not alive, and a row naming a dead pid fails pid_owns_agent
+        # on liveness — so a stale row correctly reads as unowned and we keep
+        # the right to restart it.
+        pid = row["pid"]
+        return int(pid) if pid_owns_agent(pid, agent_id) else None
 
     def reserve_starting(self, agent_id: str) -> None:
         """Mark agent_id as having a create in flight, BEFORE its `agents` row
@@ -1490,7 +1617,14 @@ class AgentSupervisor:
             if agent_id in self._starting or agent_id in self._reserved:
                 return True
             proc = self._procs.get(agent_id)
-        return bool(proc and proc.alive())
+        if proc is not None and proc.alive():
+            return True
+        # A live process under another hub counts as running. Callers use this
+        # to decide whether rotating the agent's reclaim_secret is safe, and
+        # rotating one out from under a process we don't own is B1 again with a
+        # second hub cast as the racing thread — the live agent keeps a secret
+        # the database no longer has, and can never reclaim its identity.
+        return self.foreign_owner_pid(agent_id) is not None
 
     def is_busy(self, agent_id: str) -> bool:
         with self._lock:
