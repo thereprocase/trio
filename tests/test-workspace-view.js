@@ -156,11 +156,18 @@ check('messageCountLabel: empty state reads "0"', messageCountLabel() === '0');
 // cares how many presets there are or what they are called.
 const lights = base.Trio.preferences.lightThemes;
 const darks = base.Trio.preferences.darkThemes;
+const historic = base.Trio.preferences.historicThemes;
 check('every preset is either light or dark, and both modes are offered',
   lights.length > 0 && darks.length > 0
   && lights.every(t => t.mode === 'light') && darks.every(t => t.mode === 'dark'));
 check('no preset id appears in both modes',
   lights.every(l => !darks.some(d => d.id === l.id)));
+check('historic interface set includes the four promised platforms',
+  historic.map(theme => theme.id).join(',') ===
+    'historic-win98,historic-win31,historic-gameboy,historic-geocities');
+check('historic interfaces carry picker descriptions and a toggle mode',
+  historic.every(theme => theme.family === 'historic'
+    && theme.description && ['light', 'dark'].includes(theme.mode)));
 
 const aLight = lights[lights.length - 1].id;   // not the default, so a no-op shows
 const aDark = darks[darks.length - 1].id;

@@ -91,6 +91,21 @@ check(f"WEB_CSS_FILES declares every layer on disk, in prefix order "
       f"({len(disk_css_files)} found)",
       list(web.WEB_CSS_FILES) == disk_css_files)
 
+# Historic presets must be full component skins. A token-only preset would
+# technically appear in the picker while still rendering the same modern
+# rounded cards, which is precisely the failure this feature is meant to avoid.
+tokens_css = (WEB / "css" / "00-tokens.css").read_text(encoding="utf-8")
+historic_css = (WEB / "css" / "35-historic.css").read_text(encoding="utf-8")
+for preset in ("historic-win98", "historic-win31", "historic-gameboy",
+               "historic-geocities"):
+    check(f"{preset} declares design tokens and a component skin",
+          f'[data-theme="{preset}"]' in tokens_css
+          and historic_css.count(f'[data-theme="{preset}"]') >= 12)
+check("historic skins include platform-native control vocabularies",
+      "::-webkit-scrollbar-button" in historic_css
+      and "border-left:8px solid #20251a" in historic_css
+      and "border:6px ridge #0ff" in historic_css)
+
 # JS gets the SAME independent oracle as CSS. It did not used to: load order
 # was a dependency order that CONTRADICTED the filename prefixes (02 before 00,
 # because core installed a fallback Trio.api that won if it loaded first), so

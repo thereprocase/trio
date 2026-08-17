@@ -8285,6 +8285,7 @@ WEB_CSS_FILES = (
     "css/10-shell.css",         # sidebar, topbar, drawers, dialogs, toasts
     "css/20-conversation.css",  # message rows, ask cards, attachments
     "css/30-workspace.css",     # home/inbox/tasks/roster/prefs pages
+    "css/35-historic.css",      # Win98/3.1, Game Boy, and GeoCities component skins
     "css/40-responsive.css",    # @media overrides — must stay last
 )
 

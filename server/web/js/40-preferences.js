@@ -5,9 +5,10 @@
   const cap = s => s.charAt(0).toUpperCase() + s.slice(1);
   const KEY = 'trio.preferences.v1';
   // Each preset is a self-contained design — background family AND accent —
-  // so there's nothing left to pick independently. Light presets stay near
-  // white/off-white (color lives in the accent, not a full-page tint); dark
-  // presets can lean into a moodier color cast.
+  // so there's nothing left to pick independently. Historic presets go one
+  // step further: css/35-historic.css replaces the component language too.
+  // `mode` still records which side of the light/dark quick-toggle remembers
+  // the preset; `family` controls how it is grouped in the picker.
   const themes = [
     { id: 'light-1', mode: 'light', label: 'Sagebrush' },
     { id: 'light-2', mode: 'light', label: 'Frost' },
@@ -21,9 +22,16 @@
     { id: 'dark-4', mode: 'dark', label: 'Abyss' },
     { id: 'dark-5', mode: 'dark', label: 'Noir' },
     { id: 'dark-6', mode: 'dark', label: 'Torch' },
+    { id: 'historic-win98', mode: 'light', family: 'historic', label: 'Windows 98', description: 'Win32 bevels, title bars, and inset fields' },
+    { id: 'historic-win31', mode: 'light', family: 'historic', label: 'Windows 3.1', description: 'Program Manager chrome and 16-color controls' },
+    { id: 'historic-gameboy', mode: 'light', family: 'historic', label: 'Game Boy', description: 'Four-shade LCD panels and cartridge controls' },
+    { id: 'historic-geocities', mode: 'dark', family: 'historic', label: 'GeoCities', description: 'Tiled space, web-safe color, and table-era widgets' },
   ];
   const lightThemes = themes.filter(theme => theme.mode === 'light');
   const darkThemes = themes.filter(theme => theme.mode === 'dark');
+  const modernLightThemes = lightThemes.filter(theme => theme.family !== 'historic');
+  const modernDarkThemes = darkThemes.filter(theme => theme.family !== 'historic');
+  const historicThemes = themes.filter(theme => theme.family === 'historic');
   const themeIds = themes.map(theme => theme.id);
   const lightThemeIds = lightThemes.map(theme => theme.id);
   const darkThemeIds = darkThemes.map(theme => theme.id);
@@ -136,13 +144,13 @@
     const p = read();
     const hero = document.createElement('div'); hero.className = 'view-hero'; hero.innerHTML = '<h2>Settings & diagnostics</h2><p>Shape how the workspace looks, sounds, and keeps you informed.</p>';
     const appearance = document.createElement('section'); appearance.className = 'pref-group'; appearance.innerHTML = '<h3>Appearance</h3>';
-    const themeRow = document.createElement('div'); themeRow.className = 'pref-row pref-row-themes'; themeRow.innerHTML = '<div class="pr-txt"><div class="l">Theme presets</div><div class="d">Choose the light and dark themes used by the toggle. Each preset sets its own accent.</div></div>';
+    const themeRow = document.createElement('div'); themeRow.className = 'pref-row pref-row-themes'; themeRow.innerHTML = '<div class="pr-txt"><div class="l">Theme presets</div><div class="d">Choose a modern palette or a historic interface that restyles the controls, windows, navigation, and messages too.</div></div>';
     const themeChoices = document.createElement('div'); themeChoices.className = 'theme-choice';
-    [['lightTheme', 'Light default', lightThemes], ['darkTheme', 'Dark default', darkThemes]].forEach(([key, label, options]) => {
+    [['lightTheme', 'Light default', modernLightThemes], ['darkTheme', 'Dark default', modernDarkThemes], ['theme', 'Historic interfaces', historicThemes]].forEach(([key, label, options]) => {
       const group = document.createElement('div'); group.className = 'theme-choice-group';
       group.innerHTML = `<div class="theme-group-label">${label}</div>`;
       const choices = document.createElement('div'); choices.className = 'theme-choice';
-      options.forEach(option => { const b = document.createElement('button'); b.type = 'button'; b.className = 'theme-opt' + (p[key] === option.id ? ' on' : ''); b.setAttribute('aria-pressed', p[key] === option.id ? 'true' : 'false'); b.innerHTML = `<span class="swatch" data-theme="${option.id}"><span class="a"></span><span class="b"></span></span><span class="tl">${option.label}</span>`; b.addEventListener('click', () => { selectTheme(option.id); renderPage(panel); }); choices.append(b); });
+      options.forEach(option => { const selected = p[key] === option.id; const b = document.createElement('button'); b.type = 'button'; b.className = 'theme-opt' + (selected ? ' on' : ''); b.setAttribute('aria-pressed', selected ? 'true' : 'false'); if (option.description) b.title = option.description; b.innerHTML = `<span class="swatch" data-theme="${option.id}"><span class="a"></span><span class="b"></span></span><span class="tl">${option.label}</span>${option.description ? `<span class="td">${option.description}</span>` : ''}`; b.addEventListener('click', () => { selectTheme(option.id); renderPage(panel); }); choices.append(b); });
       group.append(choices); themeChoices.append(group);
     });
     themeRow.append(themeChoices); appearance.append(themeRow);
@@ -204,5 +212,5 @@
   function init() { apply(); }
   function mount() { init(); }
   function unmount() {}
-  Trio.preferences = { init, mount, unmount, apply, save, selectTheme, toggle, reset, read, diagnostics, renderPage, themes, lightThemes, darkThemes };
+  Trio.preferences = { init, mount, unmount, apply, save, selectTheme, toggle, reset, read, diagnostics, renderPage, themes, lightThemes, darkThemes, historicThemes };
 })();

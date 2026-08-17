@@ -1,0 +1,726 @@
+/* ============================================================
+   Historic interface presets
+
+   These are component skins, not palettes. Each preset changes the visual
+   grammar of windows, buttons, fields, menus, messages, state, and navigation
+   to match the platform it references. Kept in a late cascade layer so the
+   normal workspace remains the semantic/layout source of truth.
+   ============================================================ */
+
+:root[data-theme^="historic-"] {
+  color-scheme: light;
+  font-synthesis: none;
+}
+
+:root[data-theme^="historic-"] body {
+  -webkit-font-smoothing: none;
+  text-rendering: optimizeSpeed;
+}
+
+:root[data-theme^="historic-"] *,
+:root[data-theme^="historic-"] *::before,
+:root[data-theme^="historic-"] *::after {
+  transition-duration: 0s !important;
+  backdrop-filter: none !important;
+}
+
+:root[data-theme^="historic-"] .roster-grid .agent-card:hover,
+:root[data-theme^="historic-"] .workspace-view .home-channel:hover,
+:root[data-theme^="historic-"] .agent-card:hover,
+:root[data-theme^="historic-"] .btn.primary:active {
+  transform: none;
+}
+
+:root[data-theme^="historic-"] .operator-avatar,
+:root[data-theme^="historic-"] .directory-avatar,
+:root[data-theme^="historic-"] .av,
+:root[data-theme^="historic-"] .avatar-fallback,
+:root[data-theme^="historic-"] .status-chip,
+:root[data-theme^="historic-"] .channel-status-chip,
+:root[data-theme^="historic-"] .tag,
+:root[data-theme^="historic-"] .tstate,
+:root[data-theme^="historic-"] .badge,
+:root[data-theme^="historic-"] .target-chip,
+:root[data-theme^="historic-"] .attachment-pill,
+:root[data-theme^="historic-"] .day-separator,
+:root[data-theme^="historic-"] .unread-divider {
+  border-radius: 0;
+}
+
+:root[data-theme^="historic-"] .theme-opt .td {
+  display: block;
+  max-width: 17ch;
+  margin-top: 3px;
+  color: var(--ink-3);
+  font-size: 10.5px;
+  line-height: 1.25;
+}
+
+/* The swatches preview component language as well as color. */
+.swatch[data-theme^="historic-win"] {
+  position: relative;
+  padding: 7px 3px 3px;
+  border: 2px solid;
+  border-color: #fff #000 #000 #fff;
+  border-radius: 0;
+  background: #c0c0c0;
+  gap: 2px;
+}
+.swatch[data-theme^="historic-win"]::before {
+  content: "";
+  position: absolute;
+  inset: 2px 2px auto;
+  height: 4px;
+  background: #000080;
+}
+.swatch[data-theme^="historic-win"] .a {
+  border: 1px solid;
+  border-color: #808080 #fff #fff #808080;
+  background: #fff;
+}
+.swatch[data-theme^="historic-win"] .b {
+  border: 1px solid;
+  border-color: #fff #000 #000 #fff;
+  background: #c0c0c0;
+}
+.swatch[data-theme="historic-gameboy"] {
+  border: 3px solid #303623;
+  border-radius: 0;
+  background: #8b956d;
+  box-shadow: 3px 3px 0 #20251a;
+}
+.swatch[data-theme="historic-gameboy"] .a { background: #c4cfa1; }
+.swatch[data-theme="historic-gameboy"] .b { background: #303623; }
+.swatch[data-theme="historic-geocities"] {
+  border: 3px ridge #00ffff;
+  border-radius: 0;
+  background-color: #000033;
+  background-image: radial-gradient(#fff 1px, transparent 1px), radial-gradient(#ff0 1px, transparent 1px);
+  background-position: 0 0, 5px 7px;
+  background-size: 11px 11px, 13px 13px;
+}
+.swatch[data-theme="historic-geocities"] .a { background: #000066; }
+.swatch[data-theme="historic-geocities"] .b { background: linear-gradient(#f0f,#0ff,#ff0); }
+
+/* ============================================================
+   Windows 98 — Win32 bevel hierarchy and active title bars
+   ============================================================ */
+:root[data-theme="historic-win98"] {
+  --win-face: #c0c0c0;
+  --win-hi: #ffffff;
+  --win-light: #dfdfdf;
+  --win-shadow: #808080;
+  --win-dark: #000000;
+  --win-title: linear-gradient(90deg, #000080, #1084d0);
+  --ok: #008000; --ok-tint: #c0c0c0;
+  --warn: #808000; --warn-tint: #c0c0c0;
+  --danger: #800000; --danger-tint: #c0c0c0;
+  --info: #000080; --info-tint: #c0c0c0;
+}
+
+:root[data-theme="historic-win98"] body {
+  background: #008080;
+  font-size: 13px;
+}
+
+:root[data-theme="historic-win98"] .app {
+  inset: 4px;
+  width: calc(100% - 8px);
+  height: calc(100% - 8px);
+  border: 2px solid;
+  border-color: var(--win-hi) var(--win-dark) var(--win-dark) var(--win-hi);
+  box-shadow: inset 1px 1px var(--win-light), inset -1px -1px var(--win-shadow), 2px 2px #000;
+  background: var(--win-face);
+}
+
+:root[data-theme="historic-win98"] .sidebar,
+:root[data-theme="historic-win98"] .side-foot,
+:root[data-theme="historic-win98"] .composer-shell,
+:root[data-theme="historic-win98"] .channel-drawer,
+:root[data-theme="historic-win98"] .detail {
+  background: var(--win-face);
+}
+
+:root[data-theme="historic-win98"] .brand,
+:root[data-theme="historic-win98"] .topbar,
+:root[data-theme="historic-win98"] .channel-drawer-head,
+:root[data-theme="historic-win98"] .detail-hero {
+  min-height: 30px;
+  padding: 4px 5px;
+  border: 2px solid var(--win-face);
+  background: var(--win-title);
+  color: #fff;
+  box-shadow: inset 1px 1px var(--win-hi), inset -1px -1px var(--win-shadow);
+}
+
+:root[data-theme="historic-win98"] .brand-name,
+:root[data-theme="historic-win98"] .topbar h1,
+:root[data-theme="historic-win98"] .topbar h2,
+:root[data-theme="historic-win98"] .channel-drawer-head h2,
+:root[data-theme="historic-win98"] .detail-hero h2 {
+  color: #fff;
+  font-family: var(--font-body);
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0;
+}
+
+:root[data-theme="historic-win98"] .brand-sub,
+:root[data-theme="historic-win98"] .topbar .topic,
+:root[data-theme="historic-win98"] .detail-hero .role { color: #fff; }
+
+:root[data-theme="historic-win98"] .brand-mark {
+  width: 20px; height: 20px;
+  border: 1px solid #fff;
+  background: #008080;
+}
+
+:root[data-theme="historic-win98"] .icon-btn,
+:root[data-theme="historic-win98"] .add-btn,
+:root[data-theme="historic-win98"] .btn,
+:root[data-theme="historic-win98"] .send-btn,
+:root[data-theme="historic-win98"] .reset-prefs,
+:root[data-theme="historic-win98"] .message-actions-menu button,
+:root[data-theme="historic-win98"] .attention-actions button,
+:root[data-theme="historic-win98"] .agent-actions button,
+:root[data-theme="historic-win98"] .task-filters button,
+:root[data-theme="historic-win98"] .agent-filters button {
+  min-height: 24px;
+  padding: 3px 9px;
+  border: 2px solid;
+  border-color: var(--win-hi) var(--win-dark) var(--win-dark) var(--win-hi);
+  border-radius: 0;
+  background: var(--win-face);
+  color: #000;
+  box-shadow: inset 1px 1px var(--win-light), inset -1px -1px var(--win-shadow);
+  font-weight: 400;
+}
+
+:root[data-theme="historic-win98"] .icon-btn,
+:root[data-theme="historic-win98"] .add-btn { padding: 2px; }
+
+:root[data-theme="historic-win98"] .icon-btn:active,
+:root[data-theme="historic-win98"] .add-btn:active,
+:root[data-theme="historic-win98"] .btn:active,
+:root[data-theme="historic-win98"] .send-btn:active {
+  border-color: var(--win-dark) var(--win-hi) var(--win-hi) var(--win-dark);
+  box-shadow: inset 1px 1px var(--win-shadow);
+  padding-top: 4px;
+  padding-left: 10px;
+}
+
+:root[data-theme="historic-win98"] .nav-item,
+:root[data-theme="historic-win98"] .dm-item,
+:root[data-theme="historic-win98"] .rail-item {
+  min-height: 22px;
+  padding: 3px 5px;
+  border-radius: 0;
+  color: #000;
+  font-size: 13px;
+}
+:root[data-theme="historic-win98"] .nav-item.active,
+:root[data-theme="historic-win98"] .dm-item.active,
+:root[data-theme="historic-win98"] .rail-item.active {
+  background: #000080;
+  color: #fff;
+  box-shadow: none;
+}
+:root[data-theme="historic-win98"] .nav-item.active::before { display: none; }
+:root[data-theme="historic-win98"] .nav-head h3,
+:root[data-theme="historic-win98"] .rail-section h2 {
+  color: #000;
+  font-size: 12px;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+:root[data-theme="historic-win98"] .messages,
+:root[data-theme="historic-win98"] .workspace-view {
+  margin: 3px;
+  border: 2px solid;
+  border-color: var(--win-shadow) var(--win-hi) var(--win-hi) var(--win-shadow);
+  background: #fff;
+  box-shadow: inset 1px 1px #000;
+}
+
+:root[data-theme="historic-win98"] .message.msg,
+:root[data-theme="historic-win98"] .message.msg.me {
+  padding: 5px 7px;
+  border: 1px solid #808080;
+  border-radius: 0;
+  background: #fff;
+  color: #000;
+  box-shadow: none;
+}
+:root[data-theme="historic-win98"] .message.msg.me { border-left: 5px solid #000080; }
+:root[data-theme="historic-win98"] .message.msg .bubble,
+:root[data-theme="historic-win98"] .message.msg.me .bubble {
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
+  box-shadow: none;
+}
+
+:root[data-theme="historic-win98"] .composer-input,
+:root[data-theme="historic-win98"] input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
+:root[data-theme="historic-win98"] textarea,
+:root[data-theme="historic-win98"] select,
+:root[data-theme="historic-win98"] .input,
+:root[data-theme="historic-win98"] .textarea,
+:root[data-theme="historic-win98"] .select,
+:root[data-theme="historic-win98"] .pref-select {
+  border: 2px solid;
+  border-color: var(--win-shadow) var(--win-hi) var(--win-hi) var(--win-shadow);
+  border-radius: 0;
+  background-color: #fff;
+  color: #000;
+  box-shadow: inset 1px 1px #000;
+}
+
+:root[data-theme="historic-win98"] .pref-group,
+:root[data-theme="historic-win98"] .agent-card,
+:root[data-theme="historic-win98"] .roster-grid .agent-card,
+:root[data-theme="historic-win98"] .home-card,
+:root[data-theme="historic-win98"] .workspace-view .home-channel,
+:root[data-theme="historic-win98"] .task-row,
+:root[data-theme="historic-win98"] .attention-item,
+:root[data-theme="historic-win98"] .att-card,
+:root[data-theme="historic-win98"] .ask-card,
+:root[data-theme="historic-win98"] .modal,
+:root[data-theme="historic-win98"] .search-panel,
+:root[data-theme="historic-win98"] dialog,
+:root[data-theme="historic-win98"] .channel-menu,
+:root[data-theme="historic-win98"] .account-items {
+  border: 2px solid;
+  border-color: var(--win-hi) var(--win-dark) var(--win-dark) var(--win-hi);
+  border-radius: 0;
+  background: var(--win-face);
+  box-shadow: inset 1px 1px var(--win-light), inset -1px -1px var(--win-shadow), 2px 2px #000;
+}
+
+:root[data-theme="historic-win98"] .pref-group h3,
+:root[data-theme="historic-win98"] .modal-head {
+  margin: 2px;
+  padding: 4px 6px;
+  border: 0;
+  background: var(--win-title);
+  color: #fff;
+  font-family: var(--font-body);
+  font-size: 13px;
+}
+
+:root[data-theme="historic-win98"] .switch { width: 38px; height: 20px; }
+:root[data-theme="historic-win98"] .switch .track {
+  border: 2px solid;
+  border-color: var(--win-shadow) var(--win-hi) var(--win-hi) var(--win-shadow);
+  border-radius: 0;
+  background: #fff;
+  box-shadow: inset 1px 1px #000;
+}
+:root[data-theme="historic-win98"] .switch .knob {
+  top: 3px; left: 3px; width: 12px; height: 12px;
+  border: 1px solid #000; border-radius: 0; background: #000080; box-shadow: none;
+}
+:root[data-theme="historic-win98"] .switch input:checked ~ .knob { transform: translateX(18px); }
+:root[data-theme="historic-win98"] .switch.switch-sm input:checked ~ .knob { transform: translateX(12px); }
+
+:root[data-theme="historic-win98"] ::-webkit-scrollbar { width: 17px; height: 17px; background: #c0c0c0; }
+:root[data-theme="historic-win98"] ::-webkit-scrollbar-thumb {
+  border: 2px solid; border-color: #fff #000 #000 #fff; background: #c0c0c0;
+}
+:root[data-theme="historic-win98"] ::-webkit-scrollbar-track { background: repeating-conic-gradient(#fff 0 25%, #c0c0c0 0 50%) 0 0/2px 2px; }
+:root[data-theme="historic-win98"] ::-webkit-scrollbar-button { width: 17px; height: 17px; background: #c0c0c0; border: 2px solid; border-color: #fff #000 #000 #fff; }
+
+/* ============================================================
+   Windows 3.1 — flatter 16-color Program Manager vocabulary
+   ============================================================ */
+:root[data-theme="historic-win31"] {
+  --w31-face:#c0c0c0; --w31-blue:#000080; --w31-hi:#fff; --w31-shadow:#808080; --w31-dark:#000;
+  --ok:#008000; --ok-tint:#c0c0c0; --warn:#808000; --warn-tint:#ffff00;
+  --danger:#800000; --danger-tint:#c0c0c0; --info:#000080; --info-tint:#fff;
+}
+:root[data-theme="historic-win31"] body { background:#008080; font-size:13px; }
+:root[data-theme="historic-win31"] .app {
+  inset:8px; width:calc(100% - 16px); height:calc(100% - 16px);
+  border:3px double #000; outline:2px solid #fff; background:var(--w31-face); box-shadow:6px 6px 0 #000;
+}
+:root[data-theme="historic-win31"] .sidebar,
+:root[data-theme="historic-win31"] .side-foot,
+:root[data-theme="historic-win31"] .composer-shell,
+:root[data-theme="historic-win31"] .channel-drawer { background:var(--w31-face); }
+:root[data-theme="historic-win31"] .brand,
+:root[data-theme="historic-win31"] .topbar,
+:root[data-theme="historic-win31"] .channel-drawer-head,
+:root[data-theme="historic-win31"] .detail-hero {
+  min-height:28px; padding:3px 5px; border:1px solid #000; background:var(--w31-blue); color:#fff;
+}
+:root[data-theme="historic-win31"] .brand-name,
+:root[data-theme="historic-win31"] .topbar h1,
+:root[data-theme="historic-win31"] .channel-drawer-head h2,
+:root[data-theme="historic-win31"] .detail-hero h2 {
+  color:#fff; font:700 13px var(--font-body); letter-spacing:0;
+}
+:root[data-theme="historic-win31"] .brand-sub,
+:root[data-theme="historic-win31"] .topbar .topic { color:#fff; }
+:root[data-theme="historic-win31"] .brand-mark { width:18px; height:18px; border:1px solid #fff; background:#000; }
+
+:root[data-theme="historic-win31"] .icon-btn,
+:root[data-theme="historic-win31"] .add-btn,
+:root[data-theme="historic-win31"] .btn,
+:root[data-theme="historic-win31"] .send-btn,
+:root[data-theme="historic-win31"] .reset-prefs,
+:root[data-theme="historic-win31"] .message-actions-menu button,
+:root[data-theme="historic-win31"] .attention-actions button,
+:root[data-theme="historic-win31"] .agent-actions button,
+:root[data-theme="historic-win31"] .task-filters button,
+:root[data-theme="historic-win31"] .agent-filters button {
+  min-height:24px; padding:3px 10px; border:2px solid; border-color:#fff #000 #000 #fff;
+  border-radius:0; background:var(--w31-face); color:#000; box-shadow:none; font-weight:400;
+}
+:root[data-theme="historic-win31"] .icon-btn:active,
+:root[data-theme="historic-win31"] .btn:active,
+:root[data-theme="historic-win31"] .send-btn:active { border-color:#000 #fff #fff #000; }
+
+:root[data-theme="historic-win31"] .nav-section,
+:root[data-theme="historic-win31"] .rail-section {
+  margin:8px 4px; padding:5px; border:1px solid #000; background:#fff;
+}
+:root[data-theme="historic-win31"] .nav-head h3,
+:root[data-theme="historic-win31"] .rail-section h2 { color:#000; font-size:12px; letter-spacing:0; text-transform:none; }
+:root[data-theme="historic-win31"] .nav-item,
+:root[data-theme="historic-win31"] .dm-item,
+:root[data-theme="historic-win31"] .rail-item { padding:3px 4px; border-radius:0; color:#000; font-size:13px; }
+:root[data-theme="historic-win31"] .nav-item.active,
+:root[data-theme="historic-win31"] .dm-item.active,
+:root[data-theme="historic-win31"] .rail-item.active { background:#000080; color:#fff; box-shadow:none; }
+:root[data-theme="historic-win31"] .nav-item.active::before { display:none; }
+
+:root[data-theme="historic-win31"] .messages,
+:root[data-theme="historic-win31"] .workspace-view {
+  margin:4px; border:2px solid; border-color:#808080 #fff #fff #808080; background:#fff; box-shadow:inset 1px 1px #000;
+}
+:root[data-theme="historic-win31"] .message.msg,
+:root[data-theme="historic-win31"] .message.msg.me {
+  padding:4px 6px; border:1px solid #000; border-radius:0; background:#fff; color:#000; box-shadow:2px 2px 0 #808080;
+}
+:root[data-theme="historic-win31"] .message.msg.me { background:#000080; color:#fff; }
+:root[data-theme="historic-win31"] .message.msg .bubble,
+:root[data-theme="historic-win31"] .message.msg.me .bubble { padding:0; border:0; border-radius:0; background:transparent; color:inherit; box-shadow:none; }
+
+:root[data-theme="historic-win31"] .pref-group,
+:root[data-theme="historic-win31"] .agent-card,
+:root[data-theme="historic-win31"] .roster-grid .agent-card,
+:root[data-theme="historic-win31"] .home-card,
+:root[data-theme="historic-win31"] .workspace-view .home-channel,
+:root[data-theme="historic-win31"] .task-row,
+:root[data-theme="historic-win31"] .attention-item,
+:root[data-theme="historic-win31"] .att-card,
+:root[data-theme="historic-win31"] .ask-card,
+:root[data-theme="historic-win31"] .modal,
+:root[data-theme="historic-win31"] .search-panel,
+:root[data-theme="historic-win31"] dialog,
+:root[data-theme="historic-win31"] .channel-menu,
+:root[data-theme="historic-win31"] .account-items {
+  border:3px double #000; border-radius:0; background:var(--w31-face); box-shadow:3px 3px 0 #000;
+}
+:root[data-theme="historic-win31"] .pref-group h3,
+:root[data-theme="historic-win31"] .modal-head {
+  margin:2px; padding:3px 5px; border:1px solid #000; background:#000080; color:#fff; font:700 13px var(--font-body);
+}
+:root[data-theme="historic-win31"] .composer-input,
+:root[data-theme="historic-win31"] input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
+:root[data-theme="historic-win31"] textarea,
+:root[data-theme="historic-win31"] select,
+:root[data-theme="historic-win31"] .input,
+:root[data-theme="historic-win31"] .textarea,
+:root[data-theme="historic-win31"] .select,
+:root[data-theme="historic-win31"] .pref-select {
+  border:2px solid; border-color:#808080 #fff #fff #808080; border-radius:0; background-color:#fff; color:#000; box-shadow:inset 1px 1px #000;
+}
+:root[data-theme="historic-win31"] .switch { width:34px; height:18px; }
+:root[data-theme="historic-win31"] .switch .track { border:2px solid #000; border-radius:0; background:#fff; box-shadow:none; }
+:root[data-theme="historic-win31"] .switch .knob { top:3px; left:3px; width:10px; height:10px; border-radius:0; background:#000080; box-shadow:none; }
+:root[data-theme="historic-win31"] .switch input:checked ~ .knob { transform:translateX(17px); }
+:root[data-theme="historic-win31"] .switch.switch-sm input:checked ~ .knob { transform:translateX(12px); }
+:root[data-theme="historic-win31"] ::-webkit-scrollbar { width:16px; background:#c0c0c0; }
+:root[data-theme="historic-win31"] ::-webkit-scrollbar-thumb { border:2px solid; border-color:#fff #000 #000 #fff; background:#c0c0c0; }
+
+/* ============================================================
+   Game Boy — four-shade LCD, pixel controls, cartridge geometry
+   ============================================================ */
+:root[data-theme="historic-gameboy"] {
+  --ok:#303623; --ok-tint:#a8b17d; --warn:#4b5136; --warn-tint:#a8b17d;
+  --danger:#20251a; --danger-tint:#8b956d; --info:#303623; --info-tint:#a8b17d;
+}
+:root[data-theme="historic-gameboy"] body {
+  background:#c4cfa1;
+  background-image:linear-gradient(rgba(32,37,26,.07) 1px,transparent 1px),linear-gradient(90deg,rgba(32,37,26,.05) 1px,transparent 1px);
+  background-size:4px 4px;
+  font-size:13px;
+  letter-spacing:.02em;
+}
+:root[data-theme="historic-gameboy"] .app {
+  inset:8px; width:calc(100% - 16px); height:calc(100% - 16px);
+  border:8px solid #303623; outline:4px solid #8b956d; background:#8b956d; box-shadow:10px 10px 0 #20251a;
+}
+:root[data-theme="historic-gameboy"] .sidebar { border-right:4px solid #303623; background:#4b5136; color:#c4cfa1; }
+:root[data-theme="historic-gameboy"] .side-foot { border-top:4px double #8b956d; background:#4b5136; }
+:root[data-theme="historic-gameboy"] .brand,
+:root[data-theme="historic-gameboy"] .topbar,
+:root[data-theme="historic-gameboy"] .channel-drawer-head {
+  min-height:44px; padding:8px 12px; border:0; border-bottom:4px solid #303623; background:#8b956d; color:#20251a;
+}
+:root[data-theme="historic-gameboy"] .brand { background:#4b5136; color:#c4cfa1; border-color:#8b956d; }
+:root[data-theme="historic-gameboy"] .brand-name,
+:root[data-theme="historic-gameboy"] .topbar h1,
+:root[data-theme="historic-gameboy"] .topbar h2,
+:root[data-theme="historic-gameboy"] .channel-drawer-head h2,
+:root[data-theme="historic-gameboy"] .workspace-view h2,
+:root[data-theme="historic-gameboy"] .view-hero h1 {
+  font:700 15px var(--font-body); letter-spacing:.08em; text-transform:uppercase;
+}
+:root[data-theme="historic-gameboy"] .brand-mark { border:3px solid #c4cfa1; border-radius:0; background:#303623; }
+
+:root[data-theme="historic-gameboy"] .nav-head h3,
+:root[data-theme="historic-gameboy"] .rail-section h2 { color:#c4cfa1; font-size:12px; letter-spacing:.08em; }
+:root[data-theme="historic-gameboy"] .nav-item,
+:root[data-theme="historic-gameboy"] .dm-item,
+:root[data-theme="historic-gameboy"] .rail-item { padding:6px 7px 6px 22px; border-radius:0; color:#c4cfa1; font-weight:700; }
+:root[data-theme="historic-gameboy"] .nav-item.active,
+:root[data-theme="historic-gameboy"] .dm-item.active,
+:root[data-theme="historic-gameboy"] .rail-item.active { background:#8b956d; color:#20251a; box-shadow:3px 3px 0 #20251a; }
+:root[data-theme="historic-gameboy"] .nav-item.active::before,
+:root[data-theme="historic-gameboy"] .dm-item.active::before,
+:root[data-theme="historic-gameboy"] .rail-item.active::before {
+  content:""; display:block; left:7px; width:0; height:0; border-radius:0; background:none;
+  border-top:5px solid transparent; border-bottom:5px solid transparent; border-left:8px solid #20251a; transform:translateY(-50%);
+}
+
+:root[data-theme="historic-gameboy"] .icon-btn,
+:root[data-theme="historic-gameboy"] .add-btn,
+:root[data-theme="historic-gameboy"] .btn,
+:root[data-theme="historic-gameboy"] .reset-prefs,
+:root[data-theme="historic-gameboy"] .message-actions-menu button,
+:root[data-theme="historic-gameboy"] .attention-actions button,
+:root[data-theme="historic-gameboy"] .agent-actions button,
+:root[data-theme="historic-gameboy"] .task-filters button,
+:root[data-theme="historic-gameboy"] .agent-filters button {
+  min-height:30px; padding:5px 10px; border:3px solid #303623; border-radius:0; background:#8b956d; color:#20251a;
+  box-shadow:3px 3px 0 #303623; font-weight:700; text-transform:uppercase;
+}
+:root[data-theme="historic-gameboy"] .icon-btn:active,
+:root[data-theme="historic-gameboy"] .btn:active { translate:3px 3px; box-shadow:none; }
+:root[data-theme="historic-gameboy"] .send-btn {
+  width:54px; height:54px; padding:0; justify-content:center; border:4px solid #20251a; border-radius:50%;
+  background:#303623; color:#c4cfa1; box-shadow:4px 4px 0 #20251a; text-transform:uppercase;
+}
+:root[data-theme="historic-gameboy"] .send-btn svg { display:none; }
+:root[data-theme="historic-gameboy"] .send-btn:active { translate:4px 4px; box-shadow:none; }
+
+:root[data-theme="historic-gameboy"] .messages,
+:root[data-theme="historic-gameboy"] .workspace-view {
+  margin:6px; border:6px solid #303623; outline:2px solid #4b5136; background:#c4cfa1;
+  background-image:linear-gradient(rgba(32,37,26,.055) 1px,transparent 1px); background-size:100% 3px;
+  box-shadow:inset 5px 5px 0 #4b5136;
+}
+:root[data-theme="historic-gameboy"] .message.msg,
+:root[data-theme="historic-gameboy"] .message.msg.me {
+  padding:7px; border:3px solid #303623; border-radius:0; background:#c4cfa1; color:#20251a; box-shadow:4px 4px 0 #4b5136;
+}
+:root[data-theme="historic-gameboy"] .message.msg.me { background:#303623; color:#c4cfa1; }
+:root[data-theme="historic-gameboy"] .message.msg .bubble,
+:root[data-theme="historic-gameboy"] .message.msg.me .bubble { padding:0; border:0; border-radius:0; background:transparent; color:inherit; box-shadow:none; }
+:root[data-theme="historic-gameboy"] .message-head,
+:root[data-theme="historic-gameboy"] .message.msg .message-head strong { color:inherit; text-transform:uppercase; }
+
+:root[data-theme="historic-gameboy"] .pref-group,
+:root[data-theme="historic-gameboy"] .agent-card,
+:root[data-theme="historic-gameboy"] .roster-grid .agent-card,
+:root[data-theme="historic-gameboy"] .home-card,
+:root[data-theme="historic-gameboy"] .workspace-view .home-channel,
+:root[data-theme="historic-gameboy"] .task-row,
+:root[data-theme="historic-gameboy"] .attention-item,
+:root[data-theme="historic-gameboy"] .att-card,
+:root[data-theme="historic-gameboy"] .ask-card,
+:root[data-theme="historic-gameboy"] .modal,
+:root[data-theme="historic-gameboy"] .search-panel,
+:root[data-theme="historic-gameboy"] dialog,
+:root[data-theme="historic-gameboy"] .channel-menu,
+:root[data-theme="historic-gameboy"] .account-items {
+  border:4px solid #303623; border-radius:0; background:#9ca66f; box-shadow:5px 5px 0 #303623;
+}
+:root[data-theme="historic-gameboy"] .pref-group h3,
+:root[data-theme="historic-gameboy"] .modal-head { padding:8px 12px; border-bottom:4px solid #303623; background:#4b5136; color:#c4cfa1; font:700 13px var(--font-body); text-transform:uppercase; }
+:root[data-theme="historic-gameboy"] .composer-input,
+:root[data-theme="historic-gameboy"] input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
+:root[data-theme="historic-gameboy"] textarea,
+:root[data-theme="historic-gameboy"] select,
+:root[data-theme="historic-gameboy"] .input,
+:root[data-theme="historic-gameboy"] .textarea,
+:root[data-theme="historic-gameboy"] .select,
+:root[data-theme="historic-gameboy"] .pref-select {
+  border:4px solid #303623; border-radius:0; background-color:#c4cfa1; color:#20251a; box-shadow:inset 3px 3px 0 #4b5136;
+}
+:root[data-theme="historic-gameboy"] .switch { width:42px; height:22px; }
+:root[data-theme="historic-gameboy"] .switch .track { border:3px solid #303623; border-radius:0; background:#8b956d; box-shadow:none; }
+:root[data-theme="historic-gameboy"] .switch .knob { top:5px; left:5px; width:12px; height:12px; border-radius:0; background:#303623; box-shadow:none; }
+:root[data-theme="historic-gameboy"] .switch input:checked ~ .knob { transform:translateX(19px); }
+:root[data-theme="historic-gameboy"] .switch.switch-sm input:checked ~ .knob { transform:translateX(12px); }
+:root[data-theme="historic-gameboy"] .status-chip .st-dot,
+:root[data-theme="historic-gameboy"] .channel-status-chip .dot,
+:root[data-theme="historic-gameboy"] .tstate .d { border-radius:0; box-shadow:2px 2px 0 #20251a; }
+:root[data-theme="historic-gameboy"] ::-webkit-scrollbar { width:16px; background:#8b956d; }
+:root[data-theme="historic-gameboy"] ::-webkit-scrollbar-thumb { border:3px solid #303623; background:#c4cfa1; }
+
+/* ============================================================
+   GeoCities — table-era widgets on a tiled personal-homepage canvas
+   ============================================================ */
+:root[data-theme="historic-geocities"] {
+  color-scheme:dark;
+  --ok:#00ff00; --ok-tint:#003300; --warn:#ffff00; --warn-tint:#333300;
+  --danger:#ff0000; --danger-tint:#330000; --info:#00ffff; --info-tint:#000066;
+}
+@keyframes geo-blink { 50% { opacity:0; } }
+@keyframes geo-rainbow { 0% { color:#ff0; } 33% { color:#0ff; } 66% { color:#f0f; } 100% { color:#ff0; } }
+
+:root[data-theme="historic-geocities"] body {
+  background-color:#000033;
+  background-image:
+    radial-gradient(circle at 8px 8px,#fff 0 1px,transparent 1.5px),
+    radial-gradient(circle at 22px 17px,#0ff 0 1px,transparent 1.5px),
+    radial-gradient(circle at 35px 31px,#ff0 0 1px,transparent 1.5px);
+  background-size:43px 39px;
+  font-size:15px;
+}
+:root[data-theme="historic-geocities"] .app { background:transparent; }
+:root[data-theme="historic-geocities"] .sidebar {
+  border:6px ridge #c0c0c0; background:#000; color:#fff; box-shadow:6px 0 0 #f0f;
+}
+:root[data-theme="historic-geocities"] .brand {
+  min-height:72px; padding:10px; border-bottom:5px ridge #0ff;
+  background:linear-gradient(135deg,#000080,#800080,#000080); text-align:center;
+}
+:root[data-theme="historic-geocities"] .brand-name { color:#ff0; font-size:27px; text-shadow:2px 2px #f00; }
+:root[data-theme="historic-geocities"] .brand-sub { color:#0ff; }
+:root[data-theme="historic-geocities"] .brand-sub::after { content:" • best viewed at 800×600"; color:#ff0; }
+:root[data-theme="historic-geocities"] .brand-mark { border:4px ridge #ff0; border-radius:0; background:#f0f; }
+:root[data-theme="historic-geocities"] .topbar,
+:root[data-theme="historic-geocities"] .channel-drawer-head {
+  min-height:60px; border:5px ridge #0ff; background:#000080; color:#fff;
+}
+:root[data-theme="historic-geocities"] .topbar h1,
+:root[data-theme="historic-geocities"] .topbar h2,
+:root[data-theme="historic-geocities"] .channel-drawer-head h2,
+:root[data-theme="historic-geocities"] .workspace-view h2,
+:root[data-theme="historic-geocities"] .view-hero h1 {
+  color:#ff0; font-family:"Comic Sans MS","Comic Sans",cursive; text-shadow:2px 2px #f00; letter-spacing:.04em;
+}
+:root[data-theme="historic-geocities"] .topbar .topic { color:#0ff; }
+:root[data-theme="historic-geocities"] .conn .d { animation:geo-blink .8s steps(1,end) infinite; }
+
+:root[data-theme="historic-geocities"] .nav-head h3,
+:root[data-theme="historic-geocities"] .rail-section h2 { color:#ff0; font-family:"Comic Sans MS",cursive; text-decoration:underline; }
+:root[data-theme="historic-geocities"] .nav-item,
+:root[data-theme="historic-geocities"] .dm-item,
+:root[data-theme="historic-geocities"] .rail-item { border-radius:0; color:#0ff; text-decoration:underline; font-weight:700; }
+:root[data-theme="historic-geocities"] .nav-item::before,
+:root[data-theme="historic-geocities"] .dm-item::before,
+:root[data-theme="historic-geocities"] .rail-item::before {
+  content:""; position:static; width:11px; height:11px; flex:none; background:#ff0; transform:none;
+  clip-path:polygon(50% 0,61% 35%,98% 35%,68% 57%,79% 94%,50% 72%,21% 94%,32% 57%,2% 35%,39% 35%);
+}
+:root[data-theme="historic-geocities"] .nav-item.active,
+:root[data-theme="historic-geocities"] .dm-item.active,
+:root[data-theme="historic-geocities"] .rail-item.active { border:3px ridge #ff0; background:#0000aa; color:#fff; box-shadow:none; }
+
+:root[data-theme="historic-geocities"] .icon-btn,
+:root[data-theme="historic-geocities"] .add-btn,
+:root[data-theme="historic-geocities"] .btn,
+:root[data-theme="historic-geocities"] .send-btn,
+:root[data-theme="historic-geocities"] .reset-prefs,
+:root[data-theme="historic-geocities"] .message-actions-menu button,
+:root[data-theme="historic-geocities"] .attention-actions button,
+:root[data-theme="historic-geocities"] .agent-actions button,
+:root[data-theme="historic-geocities"] .task-filters button,
+:root[data-theme="historic-geocities"] .agent-filters button {
+  min-height:28px; padding:4px 10px; border:4px outset #ddd; border-radius:0; background:#c0c0c0; color:#000;
+  box-shadow:none; font-family:Arial,Helvetica,sans-serif; font-weight:700;
+}
+:root[data-theme="historic-geocities"] .icon-btn:active,
+:root[data-theme="historic-geocities"] .btn:active,
+:root[data-theme="historic-geocities"] .send-btn:active { border-style:inset; }
+:root[data-theme="historic-geocities"] .send-btn { background:#ff0; color:#000080; }
+
+:root[data-theme="historic-geocities"] .messages,
+:root[data-theme="historic-geocities"] .workspace-view {
+  margin:8px; border:8px ridge #0ff; background-color:#000033;
+  background-image:radial-gradient(#fff 1px,transparent 1px); background-size:17px 17px;
+  box-shadow:8px 8px 0 #f0f;
+}
+:root[data-theme="historic-geocities"] .message.msg,
+:root[data-theme="historic-geocities"] .message.msg.me {
+  padding:9px; border:5px ridge #0ff; border-radius:0; background:#000066; color:#fff; box-shadow:5px 5px 0 #000;
+}
+:root[data-theme="historic-geocities"] .message.msg.me { border-color:#ff0; background:#660066; }
+:root[data-theme="historic-geocities"] .message.msg .bubble,
+:root[data-theme="historic-geocities"] .message.msg.me .bubble { padding:0; border:0; border-radius:0; background:transparent; color:inherit; box-shadow:none; }
+:root[data-theme="historic-geocities"] .message-head,
+:root[data-theme="historic-geocities"] .message.msg .message-head strong { color:#0ff; }
+:root[data-theme="historic-geocities"] .message-body a { color:#0ff; text-decoration:underline; }
+:root[data-theme="historic-geocities"] .message.msg.me .message-body a { color:#ff0; }
+
+:root[data-theme="historic-geocities"] .pref-group,
+:root[data-theme="historic-geocities"] .agent-card,
+:root[data-theme="historic-geocities"] .roster-grid .agent-card,
+:root[data-theme="historic-geocities"] .home-card,
+:root[data-theme="historic-geocities"] .workspace-view .home-channel,
+:root[data-theme="historic-geocities"] .task-row,
+:root[data-theme="historic-geocities"] .attention-item,
+:root[data-theme="historic-geocities"] .att-card,
+:root[data-theme="historic-geocities"] .ask-card,
+:root[data-theme="historic-geocities"] .modal,
+:root[data-theme="historic-geocities"] .search-panel,
+:root[data-theme="historic-geocities"] dialog,
+:root[data-theme="historic-geocities"] .channel-menu,
+:root[data-theme="historic-geocities"] .account-items {
+  border:6px ridge #0ff; border-radius:0; background:#000066; color:#fff; box-shadow:7px 7px 0 #f0f;
+}
+:root[data-theme="historic-geocities"] .pref-group h3,
+:root[data-theme="historic-geocities"] .modal-head {
+  padding:8px 12px; border-bottom:5px ridge #ff0; background:#800080; color:#ff0;
+  font-family:"Comic Sans MS",cursive; text-shadow:2px 2px #000;
+}
+:root[data-theme="historic-geocities"] .theme-group-label,
+:root[data-theme="historic-geocities"] .pref-row .pr-txt .d,
+:root[data-theme="historic-geocities"] .pref-group-note { color:#0ff; }
+:root[data-theme="historic-geocities"] .theme-opt { border:4px ridge #ff0; border-radius:0; background:#000; color:#fff; }
+:root[data-theme="historic-geocities"] .theme-opt.on { border-color:#f0f; box-shadow:4px 4px 0 #0ff; }
+
+:root[data-theme="historic-geocities"] .composer-input,
+:root[data-theme="historic-geocities"] input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
+:root[data-theme="historic-geocities"] textarea,
+:root[data-theme="historic-geocities"] select,
+:root[data-theme="historic-geocities"] .input,
+:root[data-theme="historic-geocities"] .textarea,
+:root[data-theme="historic-geocities"] .select,
+:root[data-theme="historic-geocities"] .pref-select {
+  border:4px inset #ddd; border-radius:0; background-color:#fff; color:#000; box-shadow:none; font-family:"Courier New",monospace;
+}
+:root[data-theme="historic-geocities"] .switch { width:46px; height:24px; }
+:root[data-theme="historic-geocities"] .switch .track { border:4px inset #ddd; border-radius:0; background:#000; box-shadow:none; }
+:root[data-theme="historic-geocities"] .switch .knob { top:5px; left:5px; width:14px; height:14px; border-radius:0; background:#ff0; box-shadow:none; }
+:root[data-theme="historic-geocities"] .switch input:checked ~ .knob { transform:translateX(21px); background:#0f0; }
+:root[data-theme="historic-geocities"] .switch.switch-sm input:checked ~ .knob { transform:translateX(12px); }
+:root[data-theme="historic-geocities"] .status-chip,
+:root[data-theme="historic-geocities"] .channel-status-chip,
+:root[data-theme="historic-geocities"] .tag,
+:root[data-theme="historic-geocities"] .tstate { border:2px dashed #ff0; background:#000; color:#0ff; }
+:root[data-theme="historic-geocities"] .toast { border:5px ridge #ff0; border-radius:0; background:#000080; color:#fff; }
+:root[data-theme="historic-geocities"] ::-webkit-scrollbar { width:18px; background:#000; }
+:root[data-theme="historic-geocities"] ::-webkit-scrollbar-thumb { border:4px ridge #0ff; background:#f0f; }
+
+@media (prefers-reduced-motion: reduce) {
+  :root[data-theme="historic-geocities"] .conn .d { animation:none; }
+}

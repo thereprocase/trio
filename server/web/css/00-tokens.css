@@ -138,6 +138,68 @@
   --accent:#2c8fd6; --accent-strong:#1f74b8; --accent-tint:#dcebf7;
 }
 
+/* ---- HISTORIC interfaces ----
+   These palettes are deliberately small and period-correct. The component
+   vocabulary lives in 35-historic.css, where each preset gets native-feeling
+   window chrome and controls rather than merely inheriting modern cards. */
+[data-theme="historic-win98"] {
+  --font-display:"MS Sans Serif",Tahoma,Geneva,sans-serif;
+  --font-body:"MS Sans Serif",Tahoma,Geneva,sans-serif;
+  --bg:#008080; --bg-sink:#808080; --surface:#c0c0c0; --surface-2:#ffffff; --surface-hover:#d4d0c8;
+  --sidebar:#c0c0c0; --sidebar-hover:#000080; --line:#808080; --line-soft:#a0a0a0;
+  --ink:#000000; --ink-2:#202020; --ink-3:#505050; --ink-inv:#ffffff;
+  --bubble-agent:#ffffff; --bubble-me:#000080; --bubble-me-ink:#ffffff;
+  --code-bg:#ffffff; --code-ink:#000080;
+  --accent:#000080; --accent-strong:#000080; --accent-tint:#d4d0c8;
+  --warm:#800000; --warm-soft:#e0e0e0; --focus:#000000;
+  --st-online:#008000; --st-thinking:#808000; --st-idle:#808080; --st-offline:#808080;
+  --r-xs:0; --r-sm:0; --r-md:0; --r-lg:0; --r-xl:0; --r-full:0;
+  --shadow-sm:none; --shadow-md:2px 2px 0 #000; --shadow-lg:4px 4px 0 rgba(0,0,0,.72); --shadow-pop:3px 3px 0 #000;
+}
+[data-theme="historic-win31"] {
+  --font-display:"MS Sans Serif",Geneva,sans-serif;
+  --font-body:"MS Sans Serif",Geneva,sans-serif;
+  --bg:#008080; --bg-sink:#808080; --surface:#c0c0c0; --surface-2:#ffffff; --surface-hover:#000080;
+  --sidebar:#c0c0c0; --sidebar-hover:#000080; --line:#000000; --line-soft:#808080;
+  --ink:#000000; --ink-2:#000000; --ink-3:#404040; --ink-inv:#ffffff;
+  --bubble-agent:#ffffff; --bubble-me:#000080; --bubble-me-ink:#ffffff;
+  --code-bg:#ffffff; --code-ink:#000080;
+  --accent:#000080; --accent-strong:#000080; --accent-tint:#ffffff;
+  --warm:#800000; --warm-soft:#ffff00; --focus:#000000;
+  --st-online:#008000; --st-thinking:#808000; --st-idle:#808080; --st-offline:#000000;
+  --r-xs:0; --r-sm:0; --r-md:0; --r-lg:0; --r-xl:0; --r-full:0;
+  --shadow-sm:none; --shadow-md:2px 2px 0 #000; --shadow-lg:5px 5px 0 #000; --shadow-pop:3px 3px 0 #000;
+}
+[data-theme="historic-gameboy"] {
+  --font-display:"Courier New",ui-monospace,monospace;
+  --font-body:"Courier New",ui-monospace,monospace;
+  --bg:#8b956d; --bg-sink:#4b5136; --surface:#9ca66f; --surface-2:#c4cfa1; --surface-hover:#6f7751;
+  --sidebar:#4b5136; --sidebar-hover:#8b956d; --line:#303623; --line-soft:#59613e;
+  --ink:#20251a; --ink-2:#303623; --ink-3:#4b5136; --ink-inv:#c4cfa1;
+  --bubble-agent:#c4cfa1; --bubble-me:#303623; --bubble-me-ink:#c4cfa1;
+  --code-bg:#8b956d; --code-ink:#20251a;
+  --accent:#303623; --accent-strong:#20251a; --accent-tint:#a8b17d;
+  --warm:#4b5136; --warm-soft:#a8b17d; --focus:#20251a;
+  --st-online:#303623; --st-thinking:#4b5136; --st-idle:#6f7751; --st-offline:#8b956d;
+  --r-xs:0; --r-sm:0; --r-md:0; --r-lg:0; --r-xl:0; --r-full:0;
+  --shadow-sm:3px 3px 0 #303623; --shadow-md:5px 5px 0 #303623; --shadow-lg:8px 8px 0 #20251a; --shadow-pop:6px 6px 0 #20251a;
+}
+[data-theme="historic-geocities"] {
+  --font-display:"Comic Sans MS","Comic Sans",cursive;
+  --font-body:"Times New Roman",Times,serif;
+  --bg:#000033; --bg-sink:#000000; --surface:#000066; --surface-2:#000000; --surface-hover:#330066;
+  --sidebar:#000000; --sidebar-hover:#0000aa; --line:#00ffff; --line-soft:#ff00ff;
+  --ink:#ffffff; --ink-2:#ffff00; --ink-3:#00ffff; --ink-inv:#000000;
+  --bubble-agent:#000066; --bubble-me:#660066; --bubble-me-ink:#ffffff;
+  --code-bg:#000000; --code-ink:#00ff00;
+  --accent:#ff00ff; --accent-strong:#00ffff; --accent-tint:#330066;
+  --warm:#ffff00; --warm-soft:#660000; --focus:#ffff00;
+  --st-online:#00ff00; --st-thinking:#ffff00; --st-idle:#00ffff; --st-offline:#808080;
+  --r-xs:0; --r-sm:0; --r-md:0; --r-lg:0; --r-xl:0; --r-full:0;
+  --shadow-sm:3px 3px 0 #00ffff; --shadow-md:5px 5px 0 #ff00ff; --shadow-lg:8px 8px 0 #000; --shadow-pop:5px 5px 0 #ffff00;
+  --avatar-svg-filter:invert(1);
+}
+
 /* ---- DARK presets ----
    Shared mechanical tokens (shadows, inverse ink, the secondary "warm" chip
    color) live once here; each named preset below only overrides its own
