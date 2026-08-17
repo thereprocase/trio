@@ -202,16 +202,16 @@
 [data-theme="inspired-messenger"] {
   --font-display:Helvetica,Arial,sans-serif;
   --font-body:Helvetica,Arial,sans-serif;
-  --bg:#c9c9c9; --bg-sink:#aaaaaa; --surface:#f1f1f1; --surface-2:#ffffff; --surface-hover:#e5e5e5;
-  --sidebar:#e5e5e5; --sidebar-hover:#c8dcf0; --line:#999999; --line-soft:#cccccc;
-  --ink:#101010; --ink-2:#3c3c3c; --ink-3:#707070; --ink-inv:#ffffff;
-  --bubble-agent:#e5e5ea; --bubble-me:#35c84a; --bubble-me-ink:#071408;
-  --code-bg:#e1e1e1; --code-ink:#084c87;
-  --accent:#1477c9; --accent-strong:#075d9f; --accent-tint:#d6e8f8;
-  --warm:#e19b22; --warm-soft:#f7ebd2; --focus:#1477c9;
-  --st-online:#28a63d; --st-thinking:#d68c12; --st-idle:#888888; --st-offline:#aaaaaa;
+  --bg:#1e1e1f; --bg-sink:#262628; --surface:#2d2d2f; --surface-2:#353537; --surface-hover:#3b3b3e;
+  --sidebar:#29292b; --sidebar-hover:#3a3a3d; --line:#48484a; --line-soft:#39393c;
+  --ink:#f5f5f7; --ink-2:#c6c6c8; --ink-3:#8d8d92; --ink-inv:#fff;
+  --bubble-agent:#3a3a3c; --bubble-me:#0a84ff; --bubble-me-ink:#fff;
+  --code-bg:#29292b; --code-ink:#a9d4ff;
+  --accent:#0a84ff; --accent-strong:#409cff; --accent-tint:#173d67;
+  --warm:#ff9f0a; --warm-soft:#4a3514; --focus:#0a84ff;
+  --st-online:#30d158; --st-thinking:#ff9f0a; --st-idle:#8e8e93; --st-offline:#636366;
   --r-xs:4px; --r-sm:8px; --r-md:12px; --r-lg:16px; --r-xl:20px; --r-full:999px;
-  --shadow-sm:0 1px 2px rgba(0,0,0,.35); --shadow-md:0 5px 14px rgba(0,0,0,.35); --shadow-lg:0 15px 36px rgba(0,0,0,.4); --shadow-pop:0 8px 24px rgba(0,0,0,.45);
+  --shadow-sm:0 1px 2px rgba(0,0,0,.35); --shadow-md:0 5px 14px rgba(0,0,0,.35); --shadow-lg:0 15px 36px rgba(0,0,0,.45); --shadow-pop:0 8px 24px rgba(0,0,0,.5);
 }
 [data-theme="inspired-slack"] {
   --font-display:"Lato","Helvetica Neue",Arial,sans-serif;

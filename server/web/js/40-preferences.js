@@ -26,7 +26,7 @@
     { id: 'historic-gameboy', mode: 'light', family: 'inspired', label: 'Link Cable' },
     { id: 'historic-geocities', mode: 'dark', family: 'inspired', label: 'Webmaster' },
     { id: 'inspired-ipod', mode: 'light', family: 'inspired', label: 'Now Playing' },
-    { id: 'inspired-messenger', mode: 'light', family: 'inspired', label: 'Walled Garden' },
+    { id: 'inspired-messenger', mode: 'dark', family: 'inspired', label: 'Walled Garden' },
     { id: 'inspired-slack', mode: 'light', family: 'inspired', label: 'Threaded' },
   ];
   const lightThemes = themes.filter(theme => theme.mode === 'light');

@@ -170,6 +170,8 @@ check('Inspired cards have name-only labels and a toggle mode',
     'Start Menu,Link Cable,Webmaster,Now Playing,Walled Garden,Threaded'
   && inspired.every(theme => theme.family === 'inspired'
   && !theme.description && ['light', 'dark'].includes(theme.mode)));
+check('Walled Garden uses the dark Messages presentation',
+  inspired.find(theme => theme.id === 'inspired-messenger')?.mode === 'dark');
 check('theme picker balances every group as its available width changes',
   base.Trio.preferences.themeGridColumns(6, 720) === 6
   && base.Trio.preferences.themeGridColumns(7, 720) === 4
