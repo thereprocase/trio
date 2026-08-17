@@ -586,10 +586,80 @@ def get_db() -> sqlite3.Connection:
             created_at  TEXT NOT NULL
         )
     """)
-    conn.execute("""
-        CREATE INDEX IF NOT EXISTS idx_tool_events_fingerprint
-        ON tool_events (fingerprint, id)
-    """)
+    # tool_events predates this shape on any install that ran an earlier hooks
+    # build, where the ring was keyed on `session_id`. CREATE TABLE IF NOT
+    # EXISTS does not fire for a table that already exists, so `fingerprint`
+    # never appeared — and the index below then raised INSIDE get_db(), which
+    # is the function every MCP call and the whole dashboard open the database
+    # through. The effect was not a missing feature: the server could not open
+    # the database at all, so /trio could not connect and the roster stayed
+    # empty.
+    #
+    # This MUST be a rebuild, not an ALTER ... ADD COLUMN. The legacy column is
+    # `session_id TEXT NOT NULL` with no default, and it cannot be dropped in
+    # place on the SQLite versions we support. Merely adding `fingerprint`
+    # leaves that column behind, and the hook's insert — which names only the
+    # canonical columns — then dies on a NOT NULL constraint. That failure is an
+    # IntegrityError, so it escapes the hook's OperationalError handler and
+    # aborts the whole transaction, taking the sessions UPDATE with it. Net
+    # effect on every upgraded install: the ring stays empty AND last_tool_name
+    # is never stamped, so the roster reports a working agent as idle forever.
+    # Fresh installs got the canonical table from the CREATE above and were
+    # unaffected, which is why this only ever reproduced after an upgrade.
+    _TE_CANON = ("id", "fingerprint", "tool_name", "target", "created_at")
+    _te_cols = {row[1] for row in conn.execute("PRAGMA table_info(tool_events)")}
+    if _te_cols and _te_cols != set(_TE_CANON):
+        # Carry the fingerprint across from whichever column held it. Both may
+        # be present on an install that ran the earlier additive migration.
+        if "fingerprint" in _te_cols and "session_id" in _te_cols:
+            _fp_expr = "COALESCE(NULLIF(fingerprint, ''), session_id)"
+        elif "fingerprint" in _te_cols:
+            _fp_expr = "fingerprint"
+        elif "session_id" in _te_cols:
+            _fp_expr = "session_id"
+        else:
+            _fp_expr = "''"
+        try:
+            conn.execute("DROP TABLE IF EXISTS tool_events_rebuild")
+            conn.execute("""
+                CREATE TABLE tool_events_rebuild (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    fingerprint TEXT NOT NULL,
+                    tool_name   TEXT NOT NULL DEFAULT '',
+                    target      TEXT NOT NULL DEFAULT '',
+                    created_at  TEXT NOT NULL
+                )
+            """)
+            _te_carry = [c for c in ("id", "tool_name", "target", "created_at")
+                         if c in _te_cols]
+            conn.execute(
+                "INSERT INTO tool_events_rebuild "
+                f"(fingerprint, {', '.join(_te_carry)}) "
+                f"SELECT {_fp_expr}, {', '.join(_te_carry)} FROM tool_events"
+            )
+            # Dropping the table drops its indexes too; the CREATE INDEX below
+            # runs unconditionally and puts them back.
+            conn.execute("DROP TABLE tool_events")
+            conn.execute("ALTER TABLE tool_events_rebuild RENAME TO tool_events")
+        except sqlite3.Error:
+            # A rebuild we cannot complete must not take get_db() down with it —
+            # that is the exact failure this migration exists to undo. Leave the
+            # legacy table alone; the ring degrades, the server still opens.
+            try:
+                conn.execute("DROP TABLE IF EXISTS tool_events_rebuild")
+            except sqlite3.Error:
+                pass
+    try:
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_tool_events_fingerprint
+            ON tool_events (fingerprint, id)
+        """)
+    except sqlite3.Error:
+        # Only reachable if the rebuild above failed and left a legacy table
+        # with no `fingerprint` column. An index is an optimisation; get_db()
+        # is the door every MCP call and the dashboard come through, and it has
+        # already been shut once by exactly this statement.
+        pass
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_sessions_member
         ON sessions (channel, member_id)

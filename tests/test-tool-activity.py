@@ -383,6 +383,97 @@ def t_migrate_fallback():
           len(events) == 1 and events[0]["target"] == "ls")
 
 
+def _legacy_db(prefix):
+    """A DB whose tool_events is the PRE-fingerprint shape: keyed on
+    `session_id TEXT NOT NULL`, exactly as installs that ran an earlier hooks
+    build have it on disk."""
+    tmp = tempfile.mkdtemp(prefix=prefix)
+    db = str(Path(tmp) / "legacy.db")
+    c = sqlite3.connect(db)
+    c.execute("PRAGMA journal_mode=WAL")
+    c.executescript(
+        "CREATE TABLE sessions (session_token TEXT PRIMARY KEY, member_id TEXT,"
+        " channel TEXT, fingerprint TEXT, connected_at TEXT, last_seen TEXT,"
+        " revoked_at TEXT, last_tool_name TEXT, last_tool_target TEXT,"
+        " last_tool_at TEXT, blocked_since TEXT);"
+        "CREATE TABLE tool_events (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        " session_id TEXT NOT NULL, tool_name TEXT NOT NULL DEFAULT '',"
+        " target TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL);")
+    c.execute("INSERT INTO sessions (session_token, fingerprint, channel,"
+              " connected_at, last_seen) VALUES ('t','legacy-sid','c','2026-01-01','')")
+    c.execute("INSERT INTO tool_events (session_id, tool_name, target, created_at)"
+              " VALUES ('legacy-sid','Read','old.md','2026-01-01')")
+    c.commit()
+    c.close()
+    return db
+
+
+def t_legacy_ring_rebuilt_by_server():
+    """The legacy table cannot simply gain a `fingerprint` column: `session_id`
+    is NOT NULL with no default, so every insert naming only the canonical
+    columns dies on a constraint. get_db() must REBUILD the table, carrying the
+    old fingerprints across."""
+    db = _legacy_db("nth_tool_legacy_")
+    keep_path, keep_dir = srv.DB_PATH, srv.DB_DIR
+    srv.DB_PATH, srv.DB_DIR = Path(db), Path(db).parent
+    try:
+        conn = srv.get_db()
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(tool_events)")]
+        rows = conn.execute("SELECT fingerprint, target FROM tool_events").fetchall()
+        conn.close()
+    finally:
+        srv.DB_PATH, srv.DB_DIR = keep_path, keep_dir
+
+    check("legacy ring: the vestigial session_id column is gone",
+          "session_id" not in cols and "fingerprint" in cols)
+    check("legacy ring: existing rows survived the rebuild",
+          len(rows) == 1 and rows[0]["target"] == "old.md")
+    check("legacy ring: session_id was carried across as the fingerprint",
+          rows and rows[0]["fingerprint"] == "legacy-sid")
+
+    # The whole point of the rebuild: the hook's insert now works.
+    rc = fire({"session_id": "legacy-sid", "hook_event_name": "PreToolUse",
+               "tool_name": "Bash", "tool_input": {"command": "ls"}}, db=db)
+    c = sqlite3.connect(db)
+    c.row_factory = sqlite3.Row
+    try:
+        row = c.execute("SELECT * FROM sessions WHERE fingerprint='legacy-sid'").fetchone()
+        n = c.execute("SELECT count(*) FROM tool_events").fetchone()[0]
+    finally:
+        c.close()
+    check("legacy ring: after the rebuild the hook stamps and records",
+          rc == 0 and row["last_tool_name"] == "Bash" and n == 2)
+
+
+def t_stamp_survives_a_failing_ring_insert():
+    """The regression this pair of fixes exists for. Against a legacy table the
+    ring insert raises IntegrityError — which is NOT the OperationalError the
+    hook handles, so it escaped and aborted the shared transaction, discarding
+    the sessions UPDATE with it. Every upgraded install therefore reported a
+    working agent as idle, forever. The ring is subordinate: losing an event is
+    acceptable, losing the status is not."""
+    db = _legacy_db("nth_tool_ring_fail_")
+    rc = fire({"session_id": "legacy-sid", "hook_event_name": "PreToolUse",
+               "tool_name": "Grep", "tool_input": {"pattern": "x"}}, db=db)
+    c = sqlite3.connect(db)
+    c.row_factory = sqlite3.Row
+    try:
+        row = c.execute("SELECT * FROM sessions WHERE fingerprint='legacy-sid'").fetchone()
+        cols = [r[1] for r in c.execute("PRAGMA table_info(tool_events)")]
+    finally:
+        c.close()
+
+    # Precondition — if the hook ever migrates the table itself this test stops
+    # exercising the failure it was written for, and must be rewritten.
+    check("ring failure: the table under test really is still the legacy one",
+          "session_id" in cols)
+    check("ring failure: exits 0", rc == 0)
+    check("ring failure: the status stamp still landed",
+          row["last_tool_name"] == "Grep" and bool(row["last_tool_at"]))
+    check("ring failure: liveness still landed",
+          bool(row["last_seen"]))
+
+
 def t_migrate_not_triggered_by_contention():
     """A busy timeout raises the SAME OperationalError as a schema mismatch.
     The hook must not confuse them: running DDL and retrying under write
@@ -556,6 +647,8 @@ t_blocked_flag()
 t_scoping()
 t_scoping_edge_cases()
 t_migrate_fallback()
+t_legacy_ring_rebuilt_by_server()
+t_stamp_survives_a_failing_ring_insert()
 t_migrate_not_triggered_by_contention()
 t_roster_consumes_it()
 t_fails_fast_under_contention()

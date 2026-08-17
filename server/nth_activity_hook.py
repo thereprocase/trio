@@ -364,18 +364,33 @@ def _apply(conn, event, session_id, tool_name, target, now) -> None:
     # Only record events for a session trio actually tracks (rowcount>0), so
     # the capped table can't fill with orphan sub-agent/unknown sessions.
     if event == "PreToolUse" and cur.rowcount and tool_name:
-        conn.execute(
-            "INSERT INTO tool_events (fingerprint, tool_name, target, created_at) "
-            "VALUES (?, ?, ?, ?)",
-            (fp, tool_name[:_NAME_MAX], target, now),
-        )
-        # Bounded prune: keep only the newest N rows for THIS fingerprint.
-        conn.execute(
-            "DELETE FROM tool_events WHERE fingerprint = ? AND id NOT IN "
-            "(SELECT id FROM tool_events WHERE fingerprint = ? "
-            " ORDER BY id DESC LIMIT ?)",
-            (fp, fp, TOOL_EVENTS_PER_SESSION),
-        )
+        # The ring is subordinate to the stamp. They share one transaction to
+        # take the write lock once, which means an insert that raises would
+        # otherwise roll the UPDATE back with it — and that is not theoretical:
+        # a legacy tool_events left a `session_id NOT NULL` column behind, so
+        # every insert died on a constraint and every install that had ever
+        # upgraded reported working agents as permanently idle. The savepoint
+        # keeps the failure local. The stamp is what the roster reads; the ring
+        # is only the expandable detail under it, so losing an event is a far
+        # smaller harm than losing the status.
+        conn.execute("SAVEPOINT ring")
+        try:
+            conn.execute(
+                "INSERT INTO tool_events (fingerprint, tool_name, target, created_at) "
+                "VALUES (?, ?, ?, ?)",
+                (fp, tool_name[:_NAME_MAX], target, now),
+            )
+            # Bounded prune: keep only the newest N rows for THIS fingerprint.
+            conn.execute(
+                "DELETE FROM tool_events WHERE fingerprint = ? AND id NOT IN "
+                "(SELECT id FROM tool_events WHERE fingerprint = ? "
+                " ORDER BY id DESC LIMIT ?)",
+                (fp, fp, TOOL_EVENTS_PER_SESSION),
+            )
+        except sqlite3.DatabaseError:
+            conn.execute("ROLLBACK TO ring")
+        finally:
+            conn.execute("RELEASE ring")
     conn.execute("COMMIT")
 
 
