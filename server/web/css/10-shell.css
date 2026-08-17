@@ -189,10 +189,6 @@ h1,h2,h3,h4{ margin:0; font-weight:600; }
   border:2.5px solid var(--sidebar);
 }
 .dm-item .av .st-ring{ border-color:var(--sidebar); }
-.st-online .st-ring, .st-dot.online{ background:var(--st-online); }
-.st-thinking .st-ring, .st-dot.thinking{ background:var(--st-thinking); }
-.st-idle .st-ring, .st-dot.idle{ background:var(--st-idle); }
-.st-offline .st-ring, .st-dot.offline{ background:var(--st-offline); }
 
 .dm-pair{ position:relative; width:30px; height:28px; flex:none; }
 .dm-pair .av{ position:absolute; box-shadow: inset 0 0 0 1px rgba(255,255,255,.14), 0 0 0 2px var(--sidebar); }
@@ -836,20 +832,51 @@ h1,h2,h3,h4{ margin:0; font-weight:600; }
 
 /* ============================================================
    status system — presence chips + rings (label + icon, not color alone)
+
+   Four tones, not eleven. Color is the HEALTH axis — green fine, amber
+   needs you, red broken, gray absent — and motion is the "wants something"
+   axis on top of it. Twelve states still exist in the markup and the
+   drawer label still reads "Compacting"; only the visual treatment merges.
+   Do NOT collapse these states in channelStatus() to match.
    ============================================================ */
-.st-working .st-ring, .st-dot.working{ background:var(--warn); }
-.st-compacting .st-ring, .st-dot.compacting{ background:var(--st-thinking); }
-.st-active .st-ring, .st-dot.active{ background:var(--ok); }
-.st-sleeping .st-ring, .st-dot.sleeping{ background:var(--sleep); }
-.st-stopped .st-ring, .st-dot.stopped{ background:var(--st-offline); }
-.st-archived .st-ring, .st-dot.archived{ background:var(--ink-3); }
-.st-errored .st-ring, .st-dot.errored{ background:var(--danger); }
-.st-blocked .st-ring, .st-dot.blocked{ background:var(--warm); }
-.st-stale .st-ring, .st-dot.stale{ background:var(--st-offline); box-shadow:0 0 0 2px var(--sidebar); outline:1.5px dashed var(--ink-3); outline-offset:-1px; }
-.st-spawning .st-ring, .st-dot.spawning{ background:var(--accent); }
-.st-working .st-ring{ animation:breathe 2.4s var(--ease) infinite; }
+.st-active .st-ring, .st-idle .st-ring,
+.st-working .st-ring, .st-compacting .st-ring, .st-spawning .st-ring{ --c:var(--ok); }
+.st-blocked .st-ring{ --c:var(--warn); }
+.st-errored .st-ring{ --c:var(--danger); }
+.st-offline .st-ring, .st-stopped .st-ring, .st-sleeping .st-ring,
+.st-stale .st-ring, .st-archived .st-ring{ --c:var(--st-offline); }
+
+.st-ring{ background:var(--c); }
+
+/* Hollow reads as "present but not reachable" within the gray bucket. It is
+   an inset shadow, so it must never be combined with a pulse — they share
+   the box-shadow property and the last one wins. */
+.st-sleeping .st-ring, .st-stale .st-ring{
+  background:var(--sidebar); box-shadow:inset 0 0 0 2.2px var(--c);
+}
+/* Retired / aged out: the whole avatar dims, ring included. Parent opacity
+   creates a group, so a child opacity:1 CANNOT undo it — the ring cannot be
+   held at full strength that way. */
+.av.st-stale, .av.st-archived{ opacity:.45; }
+
+.st-working .st-ring, .st-compacting .st-ring, .st-spawning .st-ring{
+  animation:ripple var(--pulse-busy) var(--ease) infinite;
+}
+.st-blocked .st-ring{
+  animation:rippleUrgent var(--pulse-blocked) var(--ease) infinite;
+}
 @keyframes breathe{ 0%,100%{ box-shadow:0 0 0 0 color-mix(in oklab,var(--warn) 55%,transparent);} 50%{ box-shadow:0 0 0 4px color-mix(in oklab,var(--warn) 0%,transparent);} }
-@media (prefers-reduced-motion: reduce){ .st-working .st-ring{ animation:none; } }
+/* Without a stand-in halo, busy is indistinguishable from idle for anyone
+   who has reduced motion on — both are then a plain green dot. The halo is
+   not decorative, and blocked keeps its extra weight. */
+@media (prefers-reduced-motion: reduce){
+  .st-working .st-ring, .st-compacting .st-ring, .st-spawning .st-ring{
+    animation:none; box-shadow:0 0 0 2px color-mix(in oklab,var(--c) 45%,transparent);
+  }
+  .st-blocked .st-ring{
+    animation:none; box-shadow:0 0 0 3px color-mix(in oklab,var(--c) 60%,transparent);
+  }
+}
 
 /* Outward-only ripple, in two rhythms. The from/to pair is load-bearing: the
    halo dies fully transparent at max spread, so the loop restart is invisible.
