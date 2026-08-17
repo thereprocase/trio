@@ -60,11 +60,51 @@
   // resolved, and bail before inserting private history into the wrong view.
   let navGen = 0;
 
+  // ── stale threads ─────────────────────────────────────────────────────────
+  // "Hide old threads": a channel or DM with no activity for N days drops into
+  // a "show older" group rather than sitting at full weight in the sidebar
+  // forever. This is a VIEW filter — nothing is archived, nothing is deleted,
+  // and the group is one click away.
+  //
+  // Two things are never hidden, because hiding them would lose something the
+  // operator has not dealt with:
+  //   * anything UNREAD — an old thread you have not read is the single most
+  //     likely thing to actually need you
+  //   * whatever is open RIGHT NOW — a thread vanishing out of the sidebar
+  //     while you are reading it reads as a bug
+  function staleThreadDays() {
+    const prefs = Trio.preferences?.read?.() || Trio.state.preferences || {};
+    const n = Number(prefs.staleThreadDays);
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  }
+  function isStaleThread(item, openId) {
+    const days = staleThreadDays();
+    if (days <= 0) return false;
+    if (Number(item.unread) > 0) return false;
+    if (openId && (item.code === openId || item.key === openId)) return false;
+    const t = new Date(item.last_at || 0).getTime();
+    // No timestamp at all is NOT evidence of age — a channel created seconds
+    // ago and never posted in has none. Treat unknown as fresh, so the filter
+    // can only ever hide something it has positive evidence about.
+    if (!t || isNaN(t)) return false;
+    return t < Date.now() - days * 86400000;
+  }
+  function partitionStale(items, openId) {
+    const fresh = [], stale = [];
+    for (const item of items) (isStaleThread(item, openId) ? stale : fresh).push(item);
+    return { fresh, stale };
+  }
   function groupNavigation(channels = [], dms = {}) {
+    const openId = state.dmKey || state.channel || '';
+    const active = channels.filter(c => !c.archived);
+    const chan = partitionStale(active, openId);
+    const yours = partitionStale(dms.your_dms || [], openId);
     return {
-      active: channels.filter(c => !c.archived),
+      active: chan.fresh,
+      staleChannels: chan.stale,
       archived: channels.filter(c => c.archived),
-      yours: dms.your_dms || [],
+      yours: yours.fresh,
+      staleDms: yours.stale,
       agentAudit: dms.agent_dms || [],
     };
   }
@@ -363,6 +403,23 @@
     }
     items.forEach(item => wrap.append(item)); return wrap;
   }
+  function staleToggle(group, count) {
+    const btn = document.createElement('button');
+    btn.type = 'button'; btn.className = 'nav-stale-toggle';
+    const open = !!state.staleOpen?.[group];
+    btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    // Say the NUMBER, not just "older". A bare "show older" gives no reason to
+    // click and no sense of what the preference is doing on your behalf.
+    btn.textContent = open
+      ? 'Hide ' + count + ' older'
+      : 'Show ' + count + ' older' + (group === 'dms' ? ' conversation' : ' channel') + (count === 1 ? '' : 's');
+    btn.addEventListener('click', () => {
+      state.staleOpen = state.staleOpen || {};
+      state.staleOpen[group] = !state.staleOpen[group];
+      renderRail();
+    });
+    return btn;
+  }
   function itemWithAdd(item, onAdd, addLabel) {
     const row = document.createElement('div'); row.className = 'nav-item-row';
     const button = document.createElement('button'); button.type = 'button'; button.className = 'add-btn'; button.setAttribute('aria-label', addLabel); button.title = addLabel; button.innerHTML = navIcon('plus'); button.addEventListener('click', onAdd);
@@ -392,12 +449,25 @@
     // Number badge = unread @mentions (the loud signal); a plain dot = any
     // other unread messages (normal replies). So a channel with unread
     // non-mention traffic still shows *where* it is, without a nagging count.
-    const channelItems = nav.active.map(c => navItem(c.code, 'hash', () => openChannel(c.code), c.unread_mentions || '', state.view === 'conversation' && !state.dmKey && state.channel === c.code, (c.unread || 0) > 0));
+    const channelNav = c => navItem(c.code, 'hash', () => openChannel(c.code), c.unread_mentions || '', state.view === 'conversation' && !state.dmKey && state.channel === c.code, (c.unread || 0) > 0);
+    const channelItems = nav.active.map(channelNav);
     if (!channelItems.length && state.workspaceLoading) { const loading = document.createElement('div'); loading.className = 'nav-loading'; loading.textContent = 'Loading channels…'; channelItems.push(loading); }
+    // The stale group is expanded per-section and NOT persisted: it is a
+    // "let me look" gesture, not a setting. Persisting it would quietly undo
+    // the preference the operator set, one session at a time.
+    if (nav.staleChannels.length) {
+      channelItems.push(staleToggle('channels', nav.staleChannels.length));
+      if (state.staleOpen?.channels) nav.staleChannels.forEach(c => channelItems.push(channelNav(c)));
+    }
+    const dmItems = nav.yours.map(d => dmItem(d));
+    if (nav.staleDms.length) {
+      dmItems.push(staleToggle('dms', nav.staleDms.length));
+      if (state.staleOpen?.dms) nav.staleDms.forEach(d => dmItems.push(dmItem(d)));
+    }
     rail.append(section('Workspace', workspaceItems));
     rail.append(section('Channels', channelItems, true, createChannel, 'Create channel',
                         'No channels yet — use + to make one.'));
-    rail.append(section('Direct Messages', nav.yours.map(d => dmItem(d)), true, openDmDialog, 'Start direct message',
+    rail.append(section('Direct Messages', dmItems, true, openDmDialog, 'Start direct message',
                         'No direct messages yet.'));
     rail.append(section('Agent-to-Agent', nav.agentAudit.map(d => dmItem(d, true)), false, createChannel, 'Create channel',
                         'No agent-to-agent threads yet.'));
@@ -932,16 +1002,37 @@
     const showDms = filter === 'all' || filter === 'dms';
     let items = [];
     if (showMentions) { for (const m of listOf(state.mentions)) items.push({ ...m, kind: 'mention' }); }
-    if (showDms) { for (const d of (state.dms?.your_dms || [])) if (!d.archived) items.push({ ...d, kind: 'dm' }); }
+    // Same stale rule as the sidebar, so the two surfaces agree about what is
+    // "old". Unread and the open thread stay, per isStaleThread.
+    let staleDmCount = 0;
+    if (showDms) {
+      const openId = state.dmKey || '';
+      for (const d of (state.dms?.your_dms || [])) {
+        if (d.archived) continue;
+        if (!state.staleOpen?.messages && isStaleThread(d, openId)) { staleDmCount++; continue; }
+        items.push({ ...d, kind: 'dm' });
+      }
+    }
     items.sort((a, b) => new Date(b.created_at || b.last_at || 0) - new Date(a.created_at || a.last_at || 0));
 
-    if (!items.length) {
+    if (!items.length && !staleDmCount) {
       const p = document.createElement('p'); p.className = 'home-empty'; p.textContent = 'No messages.';
       list.append(p);
     } else {
       for (const item of items) {
         list.append(item.kind === 'mention' ? mentionCard(item) : dmCard(item));
       }
+    }
+    // Never let the filter make the page look empty with no explanation: if
+    // everything here is old, the reason has to be on screen and reversible.
+    if (staleDmCount) {
+      const more = document.createElement('button');
+      more.type = 'button'; more.className = 'nav-stale-toggle';
+      more.textContent = 'Show ' + staleDmCount + ' older conversation' + (staleDmCount === 1 ? '' : 's');
+      more.addEventListener('click', () => {
+        state.staleOpen = state.staleOpen || {}; state.staleOpen.messages = true; renderMessages(panel);
+      });
+      list.append(more);
     }
     if (filter === 'mentions' && listOf(state.mentions).some(m => !m.read)) {
       const footer = document.createElement('div'); footer.className = 'att-actions';
@@ -1842,5 +1933,5 @@
   function pollAgents() { return (Trio.agents?.refresh?.() || Promise.resolve()).then(() => { renderFacePile(); refreshDrawerMembers(); }); }
   function mount() { refresh(); renderFacePile(); if (!refreshInterval) refreshInterval = setInterval(refresh, 15000); if (!agentsInterval) agentsInterval = setInterval(pollAgents, 5000); unroute = Trio.router?.on?.(onRoute); wsl = onWorkspaceUpdate; Trio.events?.addEventListener?.('workspace:updated', wsl); Trio.events?.addEventListener?.('roster', renderFacePile); Trio.events?.addEventListener?.('roster', refreshDrawerMembers); Trio.events?.addEventListener?.('message', onMessageForDrawer); Trio.events?.addEventListener?.('message', onMessageLiveRefresh); const searchBtn = $('search-btn'); if (searchBtn) { searchBtn.addEventListener('click', openSearch); } const detailsBtn = $('details-btn'); if (detailsBtn) { detailsClick = showDetails; detailsBtn.addEventListener('click', detailsClick); } const drawerClose = $('channel-drawer-close'); if (drawerClose) drawerClose.addEventListener('click', closeDetails); const drawerResize = $('channel-drawer-resize'); if (drawerResize) drawerResize.addEventListener('pointerdown', startDrawerResize); const menuButton = $('channel-more-btn'); if (menuButton) { menuButtonClick = openChannelMenu; menuButton.addEventListener('click', menuButtonClick); } const accountTrigger = $('account-trigger'); if (accountTrigger) { accountTriggerClick = openAccountMenu; accountTrigger.addEventListener('click', accountTriggerClick); } menuClick = event => { if (!event.target.closest('#channel-menu, #channel-more-btn')) closeChannelMenu(); if (!event.target.closest('#account')) closeAccountMenu(); }; menuKeydown = event => { if (event.key === 'Escape') { closeChannelMenu(); closeDetails(); closeAccountMenu(); } }; document.addEventListener('click', menuClick); document.addEventListener('keydown', menuKeydown); searchKeydown = onSearchKey; document.addEventListener('keydown', searchKeydown); }
   function unmount() { closeChannelMenu(); closeDetails(); if (drawerResizeEnd) drawerResizeEnd(); if (refreshInterval) { clearInterval(refreshInterval); refreshInterval = null; } if (agentsInterval) { clearInterval(agentsInterval); agentsInterval = null; } if (unroute) { unroute(); unroute = null; } if (wsl) { Trio.events?.removeEventListener?.('workspace:updated', wsl); wsl = null; } Trio.events?.removeEventListener?.('roster', renderFacePile); Trio.events?.removeEventListener?.('roster', refreshDrawerMembers); Trio.events?.removeEventListener?.('message', onMessageForDrawer); Trio.events?.removeEventListener?.('message', onMessageLiveRefresh); clearTimeout(liveRefreshDebounce); clearTimeout(drawerActivityDebounce); const searchBtn = $('search-btn'); if (searchBtn && openSearch) searchBtn.removeEventListener('click', openSearch); const detailsBtn = $('details-btn'); if (detailsBtn && detailsClick) detailsBtn.removeEventListener('click', detailsClick); const drawerClose = $('channel-drawer-close'); if (drawerClose) drawerClose.removeEventListener('click', closeDetails); const drawerResize = $('channel-drawer-resize'); if (drawerResize) drawerResize.removeEventListener('pointerdown', startDrawerResize); const menuButton = $('channel-more-btn'); if (menuButton && menuButtonClick) menuButton.removeEventListener('click', menuButtonClick); const accountTrigger = $('account-trigger'); if (accountTrigger && accountTriggerClick) accountTrigger.removeEventListener('click', accountTriggerClick); closeAccountMenu(); if (menuClick) document.removeEventListener('click', menuClick); if (menuKeydown) document.removeEventListener('keydown', menuKeydown); if (searchKeydown) document.removeEventListener('keydown', searchKeydown); }
-  Trio.workspace = {init: mount, mount, unmount, render: renderRail, renderFacePile, refresh, archive, archiveCurrent, openChannel, openDm, openDmByKey, openDmDialog, dmTargets, groupNavigation, attentionCount, selectors, showView, search: openSearch, doSearch, modal, toast, showDetails, channelStatus, toolSuffix, usageTone, resetLabel, contextBadge, formatTokenEstimate, refreshDrawerActivity, refreshDrawerMembers, messageCountLabel, createChannel, openTaskModal, detailMember, renderSubagentList, openAccountMenu, closeAccountMenu, dismissQuestion, undismissQuestion, isQuestionDismissed, trendChip, dailyChangeLine, projectionLine};
+  Trio.workspace = {init: mount, mount, unmount, render: renderRail, renderFacePile, refresh, archive, archiveCurrent, openChannel, openDm, openDmByKey, openDmDialog, dmTargets, groupNavigation, isStaleThread, staleThreadDays, attentionCount, selectors, showView, search: openSearch, doSearch, modal, toast, showDetails, channelStatus, toolSuffix, usageTone, resetLabel, contextBadge, formatTokenEstimate, refreshDrawerActivity, refreshDrawerMembers, messageCountLabel, createChannel, openTaskModal, detailMember, renderSubagentList, openAccountMenu, closeAccountMenu, dismissQuestion, undismissQuestion, isQuestionDismissed, trendChip, dailyChangeLine, projectionLine};
 })();

@@ -670,31 +670,6 @@
   }
 
   function ordered() { return [...state.messages.values()].sort((a, b) => Number(a.id) - Number(b.id)); }
-  function messageHistoryDays() {
-    const prefs = Trio.preferences?.read?.() || Trio.state.preferences || {};
-    const n = Number(prefs.messageHistoryDays);
-    return Number.isFinite(n) && n > 0 ? n : 0;
-  }
-  function olderExpanded() { state.olderExpanded = state.olderExpanded || {}; return !!state.olderExpanded[convId()]; }
-  function isHiddenOld(msg) {
-    const days = messageHistoryDays();
-    if (days <= 0) return false;
-    if (olderExpanded()) return false;
-    const t = new Date(msg.created_at).getTime();
-    if (isNaN(t)) return false;
-    return t < Date.now() - days * 86400000;
-  }
-  function olderToggle(oldCount, expanded) {
-    const btn = document.createElement('button'); btn.type = 'button'; btn.className = 'older-toggle';
-    if (expanded) {
-      btn.textContent = 'Hide older messages';
-      btn.addEventListener('click', () => { state.olderExpanded[convId()] = false; render(); });
-    } else {
-      btn.textContent = 'Show ' + oldCount + ' older message' + (oldCount === 1 ? '' : 's');
-      btn.addEventListener('click', () => { state.olderExpanded[convId()] = true; render(); });
-    }
-    return btn;
-  }
   function render() {
     const list = dom(); if (!list) return;
     const stick = nearBottom(list); list.replaceChildren(); state.messageDomById.clear();
@@ -718,24 +693,7 @@
       else if (saved != null) { list.scrollTop = saved; }
       return;
     }
-    // Age-based collapse: hide messages older than the configured threshold
-    // (default 3 days) unless the user has expanded this conversation.
-    const days = messageHistoryDays();
-    const cutoff = days > 0 ? Date.now() - days * 86400000 : 0;
-    const expanded = olderExpanded();
-    let splitIndex = 0;
-    if (cutoff > 0) {
-      splitIndex = messages.length;
-      for (let i = 0; i < messages.length; i++) {
-        const t = new Date(messages[i].created_at).getTime();
-        if (isNaN(t) || t >= cutoff) { splitIndex = i; break; }
-      }
-    }
-    const oldCount = splitIndex;
-    const hideOld = cutoff > 0 && oldCount > 0 && !expanded;
-    const rendered = hideOld ? messages.slice(splitIndex) : messages;
-    if (hideOld) list.append(olderToggle(oldCount, false));
-    else if (cutoff > 0 && oldCount > 0 && expanded) list.append(olderToggle(oldCount, true));
+    const rendered = messages;
     // Unread divider index, mapped into the rendered slice.
     // Drawn against the FROZEN entry watermark, not the advancing read one —
     // otherwise reading the conversation erases the divider you opened it to
@@ -744,10 +702,10 @@
     const base = dividerBase();
     let unread = base ? messages.findIndex(msg => Number(msg.id) > base) : -1;
     let unreadRel = -1;
-    if (unread >= 0) {
-      if (hideOld) unreadRel = unread <= splitIndex ? 0 : unread - splitIndex;
-      else unreadRel = unread;
-    }
+    // No age-based collapse any more, so the divider index needs no remapping:
+    // the rendered list IS the full list. (It used to be a slice, and mapping
+    // between the two was where the divider went missing.)
+    if (unread >= 0) unreadRel = unread;
     let lastDate = '';
     rendered.forEach((msg, index) => {
       const d = date(msg.created_at);
@@ -813,10 +771,7 @@
     const list = dom();
     if (!existing) {
       if (list) {
-        if (isHiddenOld(state.messages.get(msg.id))) {
-          // Keep it in state but don't paint a card while older messages
-          // are collapsed for this conversation.
-        } else {
+        {
           const card = cardFor(state.messages.get(msg.id));
           // Defense in depth against an EventHub prime/live race delivering a
           // newer id ahead of older history: insert in id order instead of

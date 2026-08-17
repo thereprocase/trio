@@ -39,11 +39,11 @@
   // independent chime *sound preset* — see Trio.notifications.SOUNDS.
   const NOTIFICATION_TIERS = ['dm', 'mention', 'ref', 'plain'];
   const SOUND_IDS = ['ping', 'alert', 'tick'];
-  const defaults = { theme: 'light-1', lightTheme: 'light-1', darkTheme: 'dark-3', font: 'default', compact: false, messageNumbers: false, notifications: true, chime: false, chimeVolume: 0.5, dictation: true, sttMode: 'local', messageHistoryDays: 3,
+  const defaults = { theme: 'light-1', lightTheme: 'light-1', darkTheme: 'dark-3', font: 'default', compact: false, messageNumbers: false, notifications: true, chime: false, chimeVolume: 0.5, dictation: true, sttMode: 'local', staleThreadDays: 7,
     chimeTierDm: true, chimeTierMention: true, chimeTierRef: true, chimeTierPlain: false,
     notifyTierDm: true, notifyTierMention: true, notifyTierRef: false, notifyTierPlain: false,
     chimeSoundDm: 'alert', chimeSoundMention: 'ping', chimeSoundRef: 'tick', chimeSoundPlain: 'tick' };
-  const schema = { theme: themeIds, lightTheme: lightThemeIds, darkTheme: darkThemeIds, font: ['default','serif','mono'], compact: 'boolean', messageNumbers: 'boolean', notifications: 'boolean', chime: 'boolean', chimeVolume: 'number', dictation: 'boolean', sttMode: ['local','web'], messageHistoryDays: 'number',
+  const schema = { theme: themeIds, lightTheme: lightThemeIds, darkTheme: darkThemeIds, font: ['default','serif','mono'], compact: 'boolean', messageNumbers: 'boolean', notifications: 'boolean', chime: 'boolean', chimeVolume: 'number', dictation: 'boolean', sttMode: ['local','web'], staleThreadDays: 'number',
     chimeTierDm: 'boolean', chimeTierMention: 'boolean', chimeTierRef: 'boolean', chimeTierPlain: 'boolean',
     notifyTierDm: 'boolean', notifyTierMention: 'boolean', notifyTierRef: 'boolean', notifyTierPlain: 'boolean',
     chimeSoundDm: SOUND_IDS, chimeSoundMention: SOUND_IDS, chimeSoundRef: SOUND_IDS, chimeSoundPlain: SOUND_IDS };
@@ -150,11 +150,11 @@
     const behaviors = [['compact','Compact messages','Tighter spacing for dense, high-volume channels.'],['messageNumbers','Message numbers','Show message IDs beside timestamps.'],['notifications','Desktop notifications','Master switch — which message types actually pop one is set below.'],['chime','Notification chime','Master switch — which message types actually play one, and which sound, is set below.'],['dictation','Dictation','Keep the microphone control available in the composer.']];
     behaviors.forEach(([key,label,description]) => { const row = document.createElement('div'); row.className = 'pref-row'; const text = document.createElement('div'); text.className = 'pr-txt'; text.innerHTML = `<div class="l">${esc(label)}</div><div class="d">${esc(description)}</div>`; const toggle = document.createElement('label'); toggle.className = 'switch'; toggle.innerHTML = `<input type="checkbox" ${p[key] ? 'checked' : ''} aria-label="${esc(label)}"><span class="track"></span><span class="knob"></span>`; toggle.querySelector('input').addEventListener('change', event => save({[key]:event.target.checked})); row.append(text, toggle); behavior.append(row); });
     const historyRow = document.createElement('div'); historyRow.className = 'pref-row';
-    const historyText = document.createElement('div'); historyText.className = 'pr-txt'; historyText.innerHTML = '<div class="l">Hide old messages</div><div class="d">Collapse messages older than this age so they don\'t clog the conversation. Expand them inline when needed.</div>';
-    const historySelect = document.createElement('select'); historySelect.className = 'pref-select'; historySelect.setAttribute('aria-label', 'Hide old messages after');
-    const historyOptions = [[1,'1 day'],[3,'3 days'],[7,'7 days'],[14,'14 days'],[30,'30 days'],[0,'Never']];
-    historyOptions.forEach(([value,label]) => { const opt = document.createElement('option'); opt.value = String(value); opt.textContent = label; if (Number(p.messageHistoryDays) === value) opt.selected = true; historySelect.append(opt); });
-    historySelect.addEventListener('change', () => save({ messageHistoryDays: Number(historySelect.value) }));
+    const historyText = document.createElement('div'); historyText.className = 'pr-txt'; historyText.innerHTML = '<div class="l">Hide old threads</div><div class="d">Move channels and DMs with no activity for this long into a &ldquo;show older&rdquo; group in the sidebar. Nothing is archived or deleted, and anything unread stays put.</div>';
+    const historySelect = document.createElement('select'); historySelect.className = 'pref-select'; historySelect.setAttribute('aria-label', 'Hide old threads after');
+    const historyOptions = [[3,'3 days'],[7,'7 days'],[14,'14 days'],[30,'30 days'],[0,'Never']];
+    historyOptions.forEach(([value,label]) => { const opt = document.createElement('option'); opt.value = String(value); opt.textContent = label; if (Number(p.staleThreadDays) === value) opt.selected = true; historySelect.append(opt); });
+    historySelect.addEventListener('change', () => save({ staleThreadDays: Number(historySelect.value) }));
     historyRow.append(historyText, historySelect); behavior.append(historyRow);
     const sttRow = document.createElement('div'); sttRow.className = 'pref-row';
     const sttText = document.createElement('div'); sttText.className = 'pr-txt'; sttText.innerHTML = '<div class="l">Speech-to-text engine</div><div class="d">Local runs Whisper on this machine and keeps audio off the network. Browser uses your browser\'s built-in speech recognition (routed through its vendor\'s cloud service) — faster to start, no local model needed.</div>';
