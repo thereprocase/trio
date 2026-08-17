@@ -830,6 +830,17 @@ class AgentSupervisor:
                 lk = self._agent_locks[agent_id] = threading.RLock()
             return lk
 
+    def plock(self, agent_id: str) -> threading.RLock:
+        """Public accessor for the per-agent lifecycle lock. spawn/hibernate/
+        wake/stop all serialize on this internally; external callers that read
+        is_running() and then act on the result (e.g. nth_web.py's wake_agent,
+        which rotates reclaim_secret only when the agent looks dead) must hold
+        it across the whole check-then-act, or a spawn() in flight on another
+        thread can finish — and hand the process a secret — after the read but
+        before the rotation, leaving the live process holding a secret the DB
+        no longer has (B1: a router wake racing a fresh /api/agents create)."""
+        return self._plock(agent_id)
+
     def _turn_key_locked(self, agent_id: str, session_id: Any) -> str:
         """The current turn's join id, minting one if a turn just started.
 
@@ -1436,6 +1447,31 @@ class AgentSupervisor:
 
     def is_running(self, agent_id: str) -> bool:
         with self._lock:
+            proc = self._procs.get(agent_id)
+        return bool(proc and proc.alive())
+
+    def reserve_starting(self, agent_id: str) -> None:
+        """Mark agent_id as having a spawn in flight before spawn() itself is
+        called. Closes the window between a caller committing a fresh `agents`
+        row (which ensure_agent_inboxes' INSERT OR IGNORE can make routable
+        for ANY non-archived agent, not just the one being created) and this
+        caller actually invoking spawn(): without it, wake_agent() can see
+        is_running() == False for an agent seconds away from being spawned and
+        "helpfully" rotate its reclaim_secret out from under the preamble the
+        real spawn() is about to hand the process (LOTC Sauron/Gandalf, B1
+        recurrence). Always pair with release_starting in a finally, even on
+        error, so a failed create doesn't wedge the id."""
+        with self._lock:
+            self._starting.add(agent_id)
+
+    def release_starting(self, agent_id: str) -> None:
+        with self._lock:
+            self._starting.discard(agent_id)
+
+    def is_running_or_starting(self, agent_id: str) -> bool:
+        with self._lock:
+            if agent_id in self._starting:
+                return True
             proc = self._procs.get(agent_id)
         return bool(proc and proc.alive())
 

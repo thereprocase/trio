@@ -2316,21 +2316,26 @@ def wake_agent(agent_id: str, supervisor, db_path: Path):
             (agent_id,)).fetchall()]
     finally:
         db.close()
-    # Waking an agent that is ALREADY running is a no-op inside the supervisor
-    # (spawn short-circuits on a live handle). Rotating the secret first would
-    # therefore invalidate the one the live agent is holding and hand it no
-    # replacement — it could never reclaim again. Only rotate when we are
-    # actually going to inject a fresh preamble.
-    if supervisor.is_running(agent_id):
-        return None
-    base = (row["base_prompt"] or "").strip()
-    reclaim_secret = _rotate_reclaim_secret(db_path, agent_id)
-    preamble = (base + "\n\n" if base else "") + \
-        build_agent_preamble(row["name"], channels, member_id=agent_id,
-                             reclaim_secret=reclaim_secret)
-    return supervisor.wake(agent_id, system_prompt=preamble,
-                           mcp_config=build_mcp_config_for_hub(),
-                           extra_dirs=[str(channel_attach_dir(c)) for c in channels])
+    # Waking an agent that is ALREADY running (or has a spawn in flight on
+    # another thread) is a no-op. Checking is_running() and rotating the
+    # secret must happen as ONE atomic step under the agent's own lifecycle
+    # lock — spawn()/wake()/hibernate()/stop() all serialize on the same
+    # lock, so holding it here closes the window where this check reads
+    # "not running yet" a moment before a concurrent spawn() finishes and
+    # hands the process a secret this call is about to invalidate (LOTC
+    # Sauron/Gandalf: B1 recurrence via a check-then-act race, independent
+    # of how the agent became routable).
+    with supervisor.plock(agent_id):
+        if supervisor.is_running_or_starting(agent_id):
+            return None
+        base = (row["base_prompt"] or "").strip()
+        reclaim_secret = _rotate_reclaim_secret(db_path, agent_id)
+        preamble = (base + "\n\n" if base else "") + \
+            build_agent_preamble(row["name"], channels, member_id=agent_id,
+                                 reclaim_secret=reclaim_secret)
+        return supervisor.wake(agent_id, system_prompt=preamble,
+                               mcp_config=build_mcp_config_for_hub(),
+                               extra_dirs=[str(channel_attach_dir(c)) for c in channels])
 
 
 def clear_agent(agent_id: str, supervisor, db_path: Path):
@@ -2367,11 +2372,24 @@ def resume_managed_agents(db_path: Path, supervisor) -> List[str]:
             "AND state IN (?,?,?)",
             (nsup.ST_SPAWNING, nsup.ST_RUNNING, nsup.ST_IDLE)
         ).fetchall()]
+        # An ST_SPAWNING row with no placements never got past the window
+        # between the agents-row commit and its placement insert in
+        # _handle_agent_create — a hub crash landed exactly there. Its
+        # intended channel list only ever existed in the original HTTP
+        # request and is gone, so waking it would hand a live process an
+        # empty channel list and (per build_agent_preamble) no reclaim
+        # instruction at all: unreachable forever, not recovered. Treat it
+        # as failed instead of resumable.
+        placed = {r["id"] for r in db.execute(
+            "SELECT DISTINCT agent_id FROM agent_channels").fetchall()}
     finally:
         db.close()
     resumed = []
     for agent_id in ids:
         try:
+            if agent_id not in placed:
+                supervisor._set_state(agent_id, nsup.ST_ERRORED, clear_pid=True)
+                continue
             if wake_agent(agent_id, supervisor, db_path) is not None:
                 resumed.append(agent_id)
         except Exception:
@@ -3257,9 +3275,13 @@ class NthWebHandler(BaseHTTPRequestHandler):
 
     def _handle_agent_create(self) -> None:
         """Create + spawn an agent: `{model, prompt?, name?, channels?}`.
-        Inserts the durable agents row, one members row per placement (member_id
-        = agent_id -> agent-keyed identity) + agent_channels rows, then launches
-        the process. Operator-only."""
+        Inserts the durable agents row, launches the process, and only THEN
+        inserts the members/agent_channels placement rows (member_id =
+        agent_id -> agent-keyed identity) — an agent with no placements is
+        not routable, so it can't be woken/rotated before its process exists.
+        wake_agent()'s own plock() guard (see below) covers the residual case
+        where a concurrent create's ensure_agent_inboxes() places this agent
+        anyway (LOTC Sauron/Gandalf, B1). Operator-only."""
         if self._require_operator() is None or not self._require_agent_control():
             return
         body = self._read_json_body()
@@ -3375,12 +3397,22 @@ class NthWebHandler(BaseHTTPRequestHandler):
         # root, which used to let any agent read every other channel's
         # uploaded images regardless of membership (LOTC/Aragorn).
         attach_dirs = [str(channel_attach_dir(c, base=ATTACH_DIR)) for c in all_channels]
+        sup = get_supervisor()
+        # Belt-and-braces alongside the placement ordering above: a
+        # concurrent create()'s ensure_agent_inboxes() call can still place
+        # THIS agent (INSERT OR IGNORE touches every non-archived agents
+        # row) before spawn() below has even started. That's safe because
+        # spawn() itself takes this agent's plock() for its whole duration
+        # (registering the proc before start()), and wake_agent now takes
+        # the same lock before checking is_running()/rotating the secret —
+        # so a router wake landing in this window blocks until spawn()
+        # finishes rather than racing it.
         try:
-            proc = get_supervisor().spawn(agent_id, provider=provider, model=model,
-                                          system_prompt=preamble, mcp_config=mcp_config,
-                                          effort=effort, cwd=cwd,
-                                          permission_profile=permission_profile,
-                                          extra_dirs=attach_dirs)
+            proc = sup.spawn(agent_id, provider=provider, model=model,
+                             system_prompt=preamble, mcp_config=mcp_config,
+                             effort=effort, cwd=cwd,
+                             permission_profile=permission_profile,
+                             extra_dirs=attach_dirs)
         except Exception as e:
             # Spawn threw — don't leave the row stuck at 'spawning'. No
             # placements were ever inserted, so there is nothing to unwind.
@@ -3392,6 +3424,12 @@ class NthWebHandler(BaseHTTPRequestHandler):
             except sqlite3.Error:
                 pass
             self._error(500, f"spawn failed: {e}")
+            return
+        if not proc.alive():
+            # spawn() can return normally with a dead proc (it already set
+            # ST_ERRORED itself in that case). Placing a dead agent would
+            # make an unreachable ghost look like a real roster member.
+            self._error(500, "spawn failed: process did not start")
             return
         try:
             d = sqlite3.connect(str(self.db_path), timeout=5)
@@ -3413,6 +3451,22 @@ class NthWebHandler(BaseHTTPRequestHandler):
             finally:
                 d.close()
         except sqlite3.Error as e:
+            # Placement failed after a successful, live spawn — don't leak a
+            # running process nothing can ever reach (no agent_channels rows
+            # means AgentRouter can never target it, and it never appears in
+            # any roster). Stop it and mark the row failed, same shape as the
+            # spawn-failure branch above.
+            try:
+                sup.stop(agent_id)
+            except Exception:
+                pass
+            try:
+                d2 = sqlite3.connect(str(self.db_path), timeout=5)
+                d2.execute("UPDATE agents SET state=? WHERE id=?",
+                          (nsup.ST_ERRORED, agent_id))
+                d2.commit(); d2.close()
+            except sqlite3.Error:
+                pass
             self._error(500, f"db error placing agent: {e}")
             return
         # Nudge the agent to connect + participate on startup (a stream-json
