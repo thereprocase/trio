@@ -333,11 +333,8 @@ h1,h2,h3,h4{ margin:0; font-weight:600; }
 .channel-member-copy{ flex:1; min-width:0; }
 .channel-member-name{ font-weight:600; font-size:15px; }
 .channel-member-status{ margin-top:1px; color:var(--ink-3); font-size:13px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.channel-status-chip{ display:inline-flex; align-items:center; gap:6px; flex:none; border-radius:999px; padding:6px 11px; font-size:12px; font-weight:700; }
-.channel-status-chip .dot{ width:8px; height:8px; border-radius:50%; background:currentColor; }
-.channel-status-chip.working{ background:var(--warn-tint); color:color-mix(in oklab,var(--warn) 75%,var(--ink)); }
-.channel-status-chip.working .dot{ animation:breathe 2.4s var(--ease) infinite; }
-@media (prefers-reduced-motion: reduce){ .channel-status-chip.working .dot{ animation:none; } }
+.channel-status-chip{ display:inline-flex; align-items:center; gap:6px; flex:none; border-radius:999px; padding:6px 11px; font-size:12px; font-weight:700; --c:currentColor; }
+.channel-status-chip .dot{ width:8px; height:8px; border-radius:50%; background:var(--c); }
 .channel-member-tool{ margin-top:1px; color:var(--ink-3); font-size:11.5px; font-style:italic; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .channel-member-subagents{ margin-top:4px; display:grid; gap:2px; }
 .channel-member-subagents:empty{ display:none; margin:0; }
@@ -413,17 +410,28 @@ h1,h2,h3,h4{ margin:0; font-weight:600; }
   .ua-grid{ grid-template-columns:1fr; }
   .codex-days{ grid-template-columns:repeat(4,minmax(0,1fr)); }
 }
-.channel-status-chip.blocked,.channel-status-chip.errored{ background:var(--danger-tint); color:color-mix(in oklab,var(--danger) 72%,var(--ink)); }
-.channel-status-chip.sleeping{ background:var(--sleep-tint); color:color-mix(in oklab,var(--sleep) 76%,var(--ink)); }
-.channel-status-chip.active,.channel-status-chip.idle{ background:var(--ok-tint); color:color-mix(in oklab,var(--ok) 74%,var(--ink)); }
-.channel-status-chip.compacting{ background:color-mix(in oklab,var(--st-thinking) 18%,var(--surface)); color:color-mix(in oklab,var(--st-thinking) 74%,var(--ink)); }
+/* Same four buckets as the ring, so a member's dot and their chip can never
+   disagree. The chip carries the label, which is what lets the tones merge
+   without losing the distinction — the drawer is where you disambiguate. */
+.channel-status-chip.active,.channel-status-chip.idle,
+.channel-status-chip.working,.channel-status-chip.compacting,
+.channel-status-chip.spawning{ background:var(--ok-tint); color:color-mix(in oklab,var(--ok) 74%,var(--ink)); }
+.channel-status-chip.blocked{ background:var(--warn-tint); color:color-mix(in oklab,var(--warn) 75%,var(--ink)); }
+.channel-status-chip.errored{ background:var(--danger-tint); color:color-mix(in oklab,var(--danger) 72%,var(--ink)); }
+.channel-status-chip.offline,.channel-status-chip.stopped,.channel-status-chip.sleeping,
+.channel-status-chip.stale,.channel-status-chip.archived{ background:var(--bg-sink); color:var(--ink-3); }
 /* Archived reads as retired, not as a live member who happens to be down —
    flatter than Offline, and the row itself dims. */
-.channel-status-chip.archived{ background:var(--bg-sink); color:var(--ink-3); border:1px dashed var(--line); }
+.channel-status-chip.archived{ border:1px dashed var(--line); }
 .channel-member.is-archived{ opacity:.62; }
-.channel-status-chip.compacting .dot{ animation:breathe 2.4s var(--ease) infinite; }
-@media (prefers-reduced-motion: reduce){ .channel-status-chip.compacting .dot{ animation:none; } }
-.channel-status-chip.offline{ background:var(--bg-sink); color:var(--ink-3); }
+.channel-status-chip.working .dot,.channel-status-chip.compacting .dot,
+.channel-status-chip.spawning .dot{ animation:ripple var(--pulse-busy) var(--ease) infinite; }
+.channel-status-chip.blocked .dot{ animation:rippleUrgent var(--pulse-blocked) var(--ease) infinite; }
+@media (prefers-reduced-motion: reduce){
+  .channel-status-chip.working .dot,.channel-status-chip.compacting .dot,
+  .channel-status-chip.spawning .dot{ animation:none; box-shadow:0 0 0 2px color-mix(in oklab,var(--c) 45%,transparent); }
+  .channel-status-chip.blocked .dot{ animation:none; box-shadow:0 0 0 3px color-mix(in oklab,var(--c) 60%,transparent); }
+}
 .channel-task{ display:flex; align-items:flex-start; gap:10px; padding:7px 0; color:var(--ink-2); font-size:13.5px; line-height:1.4; }
 .channel-task .tstate{ flex:none; margin-top:1px; }
 .channel-task-text{ min-width:0; }
@@ -865,7 +873,6 @@ h1,h2,h3,h4{ margin:0; font-weight:600; }
 .st-blocked .st-ring{
   animation:rippleUrgent var(--pulse-blocked) var(--ease) infinite;
 }
-@keyframes breathe{ 0%,100%{ box-shadow:0 0 0 0 color-mix(in oklab,var(--warn) 55%,transparent);} 50%{ box-shadow:0 0 0 4px color-mix(in oklab,var(--warn) 0%,transparent);} }
 /* Without a stand-in halo, busy is indistinguishable from idle for anyone
    who has reduced motion on — both are then a plain green dot. The halo is
    not decorative, and blocked keeps its extra weight. */
@@ -880,8 +887,9 @@ h1,h2,h3,h4{ margin:0; font-weight:600; }
 
 /* Outward-only ripple, in two rhythms. The from/to pair is load-bearing: the
    halo dies fully transparent at max spread, so the loop restart is invisible.
-   `breathe` above animates 0 -> 4px -> 0, which draws a ring CONTRACTING
-   inward for half of every cycle — read as "finishing" rather than "working".
+   The `breathe` keyframe this replaced animated 0 -> 4px -> 0, which drew a
+   ring CONTRACTING inward for half of every cycle — read as "finishing"
+   rather than "working".
    Tone comes from --c on the animated element, so one keyframe serves every
    bucket; an element that never sets --c gets a transparent halo, silently. */
 @keyframes ripple{
