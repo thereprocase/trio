@@ -1016,19 +1016,31 @@
 :root[data-theme="inspired-slack"] .rail-section h2 { color:#c7b7c7; font-size:13px; letter-spacing:0; text-transform:none; }
 :root[data-theme="inspired-slack"] .nav-item,
 :root[data-theme="inspired-slack"] .dm-item,
-:root[data-theme="inspired-slack"] .rail-item { min-height:28px; margin:0; padding:4px 10px 4px 28px; border:0; border-radius:0; color:#d1c3d1; font-weight:400; }
+:root[data-theme="inspired-slack"] .rail-item {
+  min-height:32px;
+  width:calc(100% - 8px);
+  margin:2px 4px;
+  padding:5px 10px;
+  border:0;
+  border-radius:8px;
+  color:#e8dce9;
+  font-weight:400;
+}
+:root[data-theme="inspired-slack"] .nav-item .nav-hash { color:#d8c7d9; }
 :root[data-theme="inspired-slack"] .nav-item::before,
 :root[data-theme="inspired-slack"] .dm-item::before,
 :root[data-theme="inspired-slack"] .rail-item::before { content:"#"; display:block; left:10px; top:50%; width:auto; height:auto; border:0; border-radius:0; background:none; color:#b9a7b9; transform:translateY(-50%); }
 :root[data-theme="inspired-slack"] .nav-item::before,
 :root[data-theme="inspired-slack"] .rail-item::before { display:none; }
+:root[data-theme="inspired-slack"] .dm-item { padding-left:28px; }
 :root[data-theme="inspired-slack"] .dm-item::before { content:"●"; color:#2bac76; font-size:9px; }
 :root[data-theme="inspired-slack"] .nav-item.active,
 :root[data-theme="inspired-slack"] .dm-item.active,
-:root[data-theme="inspired-slack"] .rail-item.active { background:#f4e5f5; color:#4a154b; box-shadow:none; }
+:root[data-theme="inspired-slack"] .rail-item.active { background:#69386b; color:#fff; box-shadow:none; font-weight:500; }
 :root[data-theme="inspired-slack"] .nav-item.active::before,
 :root[data-theme="inspired-slack"] .dm-item.active::before,
-:root[data-theme="inspired-slack"] .rail-item.active::before { color:#4a154b; }
+:root[data-theme="inspired-slack"] .rail-item.active::before { color:#fff; }
+:root[data-theme="inspired-slack"] .nav-item.active .nav-hash { color:#f7edf8; }
 :root[data-theme="inspired-slack"] .messages,
 :root[data-theme="inspired-slack"] .workspace-view { background:#fff; }
 :root[data-theme="inspired-slack"] .messages { padding:18px 0 10px; }
