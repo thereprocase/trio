@@ -2544,18 +2544,19 @@ def ensure_agent_inboxes(conn: sqlite3.Connection) -> None:
 # The hub owns ONE AgentSupervisor. Agent management endpoints are operator-only.
 # Auto-assigned agent identities. Each name has a checked-in SVG avatar; a
 # spawned agent gets a stable face so operators can tell them apart at a glance
-# without naming every one by hand.
+# without naming every one by hand. The icons are from SVG Repo under CC BY 4.0;
+# the Settings drawer carries the user-facing attribution.
 _CHARACTERS = [
-    ("Doug", "Doug"), ("Clover", "Clover"), ("Calyx", "Calyx"),
-    ("Thorne", "Thorne"), ("Cedar", "Cedar"), ("Lark", "Lark"),
-    ("Raven", "Raven"), ("Marten", "Marten"), ("Stag", "Stag"),
-    ("Zephyr", "Zephyr"), ("Gale", "Gale"), ("Tempest", "Tempest"),
-    ("Frost", "Frost"), ("Mist", "Mist"), ("Cascade", "Cascade"),
-    ("Delta", "Delta"), ("Tidal", "Tidal"), ("Smith", "Smith"),
-    ("Fletcher", "Fletcher"), ("Mason", "Mason"), ("Cooper", "Cooper"),
-    ("Sawyer", "Sawyer"), ("Scribe", "Scribe"), ("Griffin", "Griffin"),
-    ("Sphynx", "Sphynx"), ("Ember", "Ember"), ("Scout", "Scout"),
-    ("Beacon", "Beacon"), ("Horizon", "Horizon"),
+    ("Luna", "Luna"), ("Iris", "Iris"), ("Gale", "Gale"),
+    ("Frost", "Frost"), ("Umbra", "Umbra"), ("Atlas", "Atlas"),
+    ("Chance", "Chance"), ("Gemma", "Gemma"), ("Rex", "Rex"),
+    ("Locke", "Locke"), ("Corbin", "Corbin"), ("Vesper", "Vesper"),
+    ("Salem", "Salem"), ("Merlin", "Merlin"), ("Circe", "Circe"),
+    ("Piper", "Piper"), ("Reed", "Reed"), ("Coda", "Coda"),
+    ("Cass", "Cass"), ("Quill", "Quill"), ("Scout", "Scout"),
+    ("Paige", "Paige"), ("Darwin", "Darwin"), ("Ada", "Ada"),
+    ("Watts", "Watts"), ("Ferris", "Ferris"), ("Mason", "Mason"),
+    ("Grove", "Grove"), ("Archer", "Archer"), ("Ranger", "Ranger"),
 ]
 _CHARACTER_NAMES = [name for name, _avatar in _CHARACTERS]
 

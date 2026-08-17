@@ -3173,6 +3173,16 @@
   sttPage.appendChild(sttTestOut);
   settingsPanel.appendChild(sttPage);
 
+  // Keep third-party icon attribution visible at the bottom of Settings.
+  const iconAttribution = document.createElement('div');
+  iconAttribution.className = 'settings-attribution';
+  iconAttribution.innerHTML =
+    'Character icons from <a href="https://www.svgrepo.com/" target="_blank" '
+    + 'rel="noreferrer">SVG Repo</a>, licensed under '
+    + '<a href="https://creativecommons.org/licenses/by/4.0/" target="_blank" '
+    + 'rel="noreferrer">CC BY 4.0</a>.';
+  settingsPanel.appendChild(iconAttribution);
+
   const testWave = makeWaveform(sttTestWave);
 
   function openSttPage() { settingsPanel.classList.add('stt-page-open'); refreshSttStatus(); }

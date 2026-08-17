@@ -121,6 +121,18 @@ try:
     check("avatars: every character in the roster has an asset on disk",
           all((SERVER / "web" / "avatars" / a / "avatar.svg").exists()
               for _n, a in web._CHARACTERS))
+    check("avatars: the Character pool matches the product list", web._CHARACTERS == [
+        ("Luna", "Luna"), ("Iris", "Iris"), ("Gale", "Gale"),
+        ("Frost", "Frost"), ("Umbra", "Umbra"), ("Atlas", "Atlas"),
+        ("Chance", "Chance"), ("Gemma", "Gemma"), ("Rex", "Rex"),
+        ("Locke", "Locke"), ("Corbin", "Corbin"), ("Vesper", "Vesper"),
+        ("Salem", "Salem"), ("Merlin", "Merlin"), ("Circe", "Circe"),
+        ("Piper", "Piper"), ("Reed", "Reed"), ("Coda", "Coda"),
+        ("Cass", "Cass"), ("Quill", "Quill"), ("Scout", "Scout"),
+        ("Paige", "Paige"), ("Darwin", "Darwin"), ("Ada", "Ada"),
+        ("Watts", "Watts"), ("Ferris", "Ferris"), ("Mason", "Mason"),
+        ("Grove", "Grove"), ("Archer", "Archer"), ("Ranger", "Ranger"),
+    ])
 
     # ── storage ─────────────────────────────────────────────────────────────
     st_s, sb = http(port, "/api/storage")
