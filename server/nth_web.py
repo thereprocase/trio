@@ -96,6 +96,13 @@ AGENT_ACTIONS = (
     "stop", "interrupt", "hibernate", "wake", "clear", "compact",
     "placement", "wake-mode", "effort", "model", "cwd", "permissions",
     "archive", "unarchive",
+    # reclaim is the operator's answer to an orphan: a process this hub does
+    # not own, whose own hub is gone, which every other action correctly
+    # refuses to touch. Kills it by pid and frees the identity. Deliberately a
+    # separate verb from stop — stop refuses on a foreign process, and that
+    # refusal is the invariant, so overriding it has to be something the
+    # operator asks for by name.
+    "reclaim",
 )
 # Actions that read parameters from the request body. compact's body is
 # optional; the rest require one.
@@ -2259,6 +2266,26 @@ _SUPERVISOR_LOCK = threading.Lock()
 _ROUTER = None
 _IDLE_REAPER = None
 _LEASE = None
+
+
+def _quiesce_agents() -> None:
+    """Give up the control plane. Handed to the lease as its on_lost callback.
+
+    Passed to the lease as a callback rather than reached for from inside it:
+    the lease decides WHEN a hub stops driving agents, and this decides HOW.
+    Keeping that seam means the lease knows nothing about the HTTP handler or
+    the router globals, which is what would let it move to its own module.
+    """
+    global _ROUTER, _IDLE_REAPER
+    NthWebHandler._agent_control_enabled = False
+    for thread in (_ROUTER, _IDLE_REAPER):
+        try:
+            if thread is not None:
+                thread.stop()
+        except Exception:
+            pass
+    _ROUTER = None
+    _IDLE_REAPER = None
 _RUNTIME_HEALTH: Dict[str, Tuple[float, Dict[str, Any]]] = {}
 
 
@@ -3617,6 +3644,14 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 raise AgentActionError(409, "agent is archived — unarchive first")
         if action == "stop":
             ok = sup.stop(agent_id)
+        elif action == "reclaim":
+            result = sup.reclaim(agent_id)
+            if result.get("still_alive"):
+                raise AgentActionError(
+                    500, f"pid {result['killed_pid']} survived SIGKILL")
+            # False for "there was nothing to kill" so the dashboard doesn't
+            # claim to have recovered an agent it never touched.
+            ok = bool(result.get("killed_pid") or result.get("was_local"))
         elif action == "interrupt":
             ok = sup.interrupt(agent_id)
         elif action == "hibernate":
@@ -10268,8 +10303,14 @@ class AgentControlLease:
     """
 
     def __init__(self, db_path: Path, ttl: float = AGENT_CONTROL_LEASE_TTL,
-                 renew_interval: float = AGENT_CONTROL_RENEW_INTERVAL):
+                 renew_interval: float = AGENT_CONTROL_RENEW_INTERVAL,
+                 on_lost: Optional[Any] = None):
         self.db_path = db_path
+        # Called when the lease is lost, to shut this hub's control plane
+        # down. Injected rather than reached for: the lease has no business
+        # knowing about HTTP handlers or router globals, and taking it as a
+        # callback is what let this class move out of nth_web at all.
+        self.on_lost = on_lost
         self.ttl = ttl
         self.renew_interval = renew_interval
         # host and pid are recorded separately from the opaque holder id so a
@@ -10423,21 +10464,13 @@ class AgentControlLease:
                     "[nth_web] WARNING: lost the agent-control lease "
                     f"({self.holder}); another hub took it over — this hub is "
                     "dropping to read-only\n")
-                self._quiesce()
+                if self.on_lost is not None:
+                    try:
+                        self.on_lost()
+                    except Exception as e:               # noqa: BLE001
+                        sys.stderr.write(
+                            f"[nth_web] quiesce callback failed: {e}\n")
                 return
-
-    def _quiesce(self) -> None:
-        """Give up the control plane after losing the lease."""
-        global _ROUTER, _IDLE_REAPER
-        NthWebHandler._agent_control_enabled = False
-        for thread in (_ROUTER, _IDLE_REAPER):
-            try:
-                if thread is not None:
-                    thread.stop()
-            except Exception:
-                pass
-        _ROUTER = None
-        _IDLE_REAPER = None
 
     def start_renewal(self) -> None:
         self._thread = threading.Thread(
@@ -10575,7 +10608,7 @@ def main() -> int:
 
     global _ROUTER, _IDLE_REAPER, _LEASE
     if args.channel is None and not args.no_agent_control:
-        _LEASE = AgentControlLease(db_path)
+        _LEASE = AgentControlLease(db_path, on_lost=_quiesce_agents)
         blocking = _LEASE.acquire()
         if blocking is not None:
             _LEASE = None

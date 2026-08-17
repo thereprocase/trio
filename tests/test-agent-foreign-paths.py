@@ -191,6 +191,46 @@ try:
     check("no destructive path parked the live agent in a dead state",
           row[0] == "running")
 
+    # ── reclaim: the operator's way out of an orphan ──────────────────────
+    # Everything above refuses to touch a foreign process, which is right and
+    # which leaves an agent whose hub died alive, unfed and unreachable. This
+    # is the one action that may end it, and the reason the guard is safe to
+    # have. Without it the only remedy is ps(1) in a terminal.
+    orphan = live_agent_process("ag_orphan")
+    db = sqlite3.connect(str(db_path))
+    db.execute("INSERT INTO agents (id, pid, state) VALUES (?,?,'running')",
+               ("ag_orphan", orphan.pid))
+    db.commit()
+    db.close()
+
+    check("an orphan is refused by the ordinary destructive paths first",
+          sup.foreign_owner_pid("ag_orphan") == orphan.pid)
+
+    result = sup.reclaim("ag_orphan")
+    check("reclaim reports the pid it actually killed",
+          result["killed_pid"] == orphan.pid and result["still_alive"] is False)
+    # NOT pid_alive: the killed process is this test's own child, so it sits
+    # as an unreaped zombie and the raw os.kill probe still succeeds. That is
+    # exactly the trap — a zombie agent that counts as "alive" owns its
+    # identity forever and blocks every respawn.
+    check("reclaim really ends the process",
+          nsup._really_running(orphan.pid) is False)
+    check("a zombie is not a live owner",
+          nsup.pid_owns_agent(orphan.pid, "ag_orphan") is False)
+
+    row = sqlite3.connect(str(db_path)).execute(
+        "SELECT state, pid FROM agents WHERE id=?", ("ag_orphan",)).fetchone()
+    check("reclaim frees the identity for a fresh spawn",
+          row[0] == "stopped" and row[1] is None)
+    check("the freed agent no longer reports a foreign owner",
+          sup.foreign_owner_pid("ag_orphan") is None)
+
+    # Reclaiming something that isn't there must not claim it did anything —
+    # the dashboard would otherwise report a recovery that never happened.
+    nothing = sup.reclaim("ag_orphan")
+    check("reclaim on an already-free agent kills nothing",
+          nothing["killed_pid"] is None and nothing["was_local"] is False)
+
     # ── and once the owner really is gone, the agent is reclaimable ───────
     # The guard must not become a trap: an agent whose process died has to be
     # spawnable again, or the fix strands every agent it protects.

@@ -25,6 +25,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import socket
 import threading
 import time
 from pathlib import Path
@@ -100,7 +101,7 @@ db.execute("CREATE TABLE IF NOT EXISTS agent_control_lease ("
            "acquired_at TEXT NOT NULL, expires_at REAL NOT NULL)")
 db.execute("INSERT OR REPLACE INTO agent_control_lease VALUES "
            "(1,?,?,?,?,?)",
-           ("ghost", nw.socket.gethostname(), dead.pid, "now",
+           ("ghost", socket.gethostname(), dead.pid, "now",
             time.time() + 9999))
 db.commit()
 db.close()
@@ -117,7 +118,7 @@ try:
     db = sqlite3.connect(str(DB))
     db.execute("INSERT OR REPLACE INTO agent_control_lease VALUES "
                "(1,?,?,?,?,?)",
-               ("busy-hub", nw.socket.gethostname(), alive.pid, "now",
+               ("busy-hub", socket.gethostname(), alive.pid, "now",
                 time.time() + 9999))
     db.commit()
     db.close()

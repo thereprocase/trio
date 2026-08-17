@@ -285,6 +285,16 @@ def get_db() -> sqlite3.Connection:
             FOREIGN KEY (channel) REFERENCES channels(code)
         )
     """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS agent_control_lease (
+            id          INTEGER PRIMARY KEY CHECK (id = 1),
+            holder      TEXT NOT NULL,
+            host        TEXT NOT NULL DEFAULT '',
+            pid         INTEGER,
+            acquired_at TEXT NOT NULL,
+            expires_at  REAL NOT NULL
+        )
+    """)
     # Index for efficient unread-message queries in nth_poll
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_messages_channel_id

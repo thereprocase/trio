@@ -32,6 +32,7 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import sqlite3
 import subprocess
 import sys
@@ -614,14 +615,50 @@ def pid_alive(pid: int) -> bool:
 _pid_alive = pid_alive
 
 
-def _pid_cmdline(pid: int) -> str:
-    """This pid's command line, or "" when it can't be read."""
+def _pid_ps(pid: int) -> tuple:
+    """(process state, command line) for this pid, or ("", "") if unreadable.
+
+    Both in one ps because the state is only needed alongside the command
+    line, and forking twice to learn two fields about the same process is
+    waste on a path the router walks.
+    """
     try:
-        out = subprocess.run(["ps", "-o", "command=", "-p", str(pid)],
+        out = subprocess.run(["ps", "-o", "state=,command=", "-p", str(pid)],
                              capture_output=True, text=True, timeout=5)
     except (OSError, subprocess.SubprocessError):
-        return ""
-    return out.stdout.strip() if out.returncode == 0 else ""
+        return ("", "")
+    if out.returncode != 0:
+        return ("", "")
+    line = out.stdout.strip()
+    if not line:
+        return ("", "")
+    state, _, command = line.partition(" ")
+    return (state.strip(), command.strip())
+
+
+def _pid_cmdline(pid: int) -> str:
+    """This pid's command line, or "" when it can't be read."""
+    return _pid_ps(pid)[1]
+
+
+def _is_zombie(state: str) -> bool:
+    """A reaped-but-not-waited process is NOT running.
+
+    os.kill(pid, 0) succeeds on a zombie — the pid stays in the process table
+    until its parent waits — so liveness alone calls a dead agent alive. That
+    is not academic: an agent that exits while its hub is busy sits as a
+    zombie, and treating it as the live owner of its identity would refuse
+    every respawn for as long as nobody reaps it. It also made reclaim report
+    failure immediately after successfully killing something.
+    """
+    return state.upper().startswith("Z")
+
+
+def _really_running(pid: int) -> bool:
+    """Alive AND not a zombie. See _is_zombie for why the distinction matters."""
+    if not pid_alive(pid):
+        return False
+    return not _is_zombie(_pid_ps(pid)[0])
 
 
 def pid_owns_agent(pid: Optional[int], agent_id: str) -> bool:
@@ -644,7 +681,9 @@ def pid_owns_agent(pid: Optional[int], agent_id: str) -> bool:
     pid = int(pid)
     if not pid_alive(pid):
         return False
-    cmd = _pid_cmdline(pid)
+    state, cmd = _pid_ps(pid)
+    if _is_zombie(state):
+        return False
     if not cmd:
         return True
     # Anchored on the preamble's own wording, not a bare substring search.
@@ -1498,6 +1537,73 @@ class AgentSupervisor:
                 extra_dirs=spawn_kw.get("extra_dirs"),
                 resume_session_id="",
             )
+
+    def reclaim(self, agent_id: str, grace: float = 3.0) -> Dict[str, Any]:
+        """End the process recorded for this agent and free the identity.
+
+        The escape hatch for an ORPHAN, and the reason the ownership guard is
+        safe to have at all. A hub takes SIGTERM, its agents survive as
+        reparented processes (measured: they outlive SIGTERM and need
+        SIGKILL), and every guard here then correctly refuses to duplicate
+        them — which leaves them alive, unfed, and reachable by nobody.
+        Detection without reconciliation is a worse operator experience than
+        the duplicates it replaced, because at least a duplicate was visible
+        and killable from the dashboard.
+
+        Adoption is not on the table: an agent talks over stdin/stdout pipes
+        held by the process that spawned it, and those died with the parent.
+        No surviving process can speak to an orphan, so the only honest
+        recovery is to end it and let the agent be spawned fresh — which the
+        caller can then do, because the row no longer names a live pid.
+
+        Deliberately NOT automatic. A live process under a healthy peer hub
+        looks identical from here to an orphan under a dead one, so choosing
+        to kill it is the operator's call to make, not a side effect of
+        routing. Returns what it actually did rather than a bool, because
+        "there was nothing to kill" and "killed pid 123" are different
+        answers and the dashboard should be able to say which.
+        """
+        with self._plock(agent_id):
+            with self._lock:
+                proc = self._procs.pop(agent_id, None)
+                self._models.pop(agent_id, None)
+            if proc is not None:
+                # Ours after all — this is just a stop with a louder name.
+                proc.stop(grace=grace)
+            db = self._db()
+            try:
+                row = db.execute(
+                    "SELECT pid FROM agents WHERE id = ?", (agent_id,)).fetchone()
+            except sqlite3.Error:
+                row = None
+            finally:
+                db.close()
+            pid = int(row["pid"]) if row is not None and row["pid"] else 0
+            killed = None
+            if pid and pid_owns_agent(pid, agent_id):
+                killed = pid
+                try:
+                    os.kill(pid, signal.SIGTERM)
+                except OSError:
+                    pass
+                deadline = time.monotonic() + grace
+                while time.monotonic() < deadline and _really_running(pid):
+                    time.sleep(0.1)
+                if _really_running(pid):
+                    # Agents ignore SIGTERM often enough that treating it as
+                    # sufficient would leave the identity still taken and the
+                    # operator none the wiser.
+                    try:
+                        os.kill(pid, signal.SIGKILL)
+                    except OSError:
+                        pass
+                    time.sleep(0.2)
+            self._forget_pending(agent_id)
+            self._forget_owner(agent_id)
+            self._set_state(agent_id, ST_STOPPED, clear_pid=True)
+            still = bool(killed and _really_running(killed))
+            return {"agent_id": agent_id, "killed_pid": killed,
+                    "was_local": proc is not None, "still_alive": still}
 
     def compact(self, agent_id: str, message: str = "") -> bool:
         """Compact a live Claude session, optionally guiding its summary."""
