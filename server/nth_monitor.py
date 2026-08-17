@@ -473,36 +473,42 @@ def monitor(channel, member_id, filter_mode="all", _db_path=None):
                 external_hwm = max(legacy_hwm, sess_hwm)
                 local_hwm = external_hwm if local_hwm is None else max(local_hwm, external_hwm)
 
-                # Pull mentions + refs + bangs alongside the message. If the
-                # schema is pre-v7.1 (no refs) or pre-v7.2 (no bangs), the
-                # OperationalError drops us to progressively older SELECTs.
-                # refs/bangs are both treated as empty when missing — agents
-                # on old DBs just get the pre-bang behavior.
-                try:
-                    unread = db.execute(
-                        "SELECT id, mentions, refs, bangs, recipients, member_id, "
-                        "member_name, content FROM messages "
-                        "WHERE channel = ? AND id > ? AND member_id != ? "
-                        "ORDER BY id",
-                        (channel, local_hwm, member_id),
-                    ).fetchall()
-                except sqlite3.OperationalError:
+                # Pull the optional columns alongside the message, degrading
+                # one at a time if the schema predates them. This used to nest
+                # three try/excepts over refs and bangs only — `recipients`
+                # was added to every tier INCLUDING the innermost, which has no
+                # handler, so a database predating it did not degrade: the
+                # OperationalError escaped and the monitor read no messages at
+                # all, waking for nothing, silently. (Found by integrating the
+                # DM-visibility filter with up/monitor's tests, whose fixture
+                # schema has no recipients column — neither branch failed
+                # alone.) Ordered richest-first; each entry drops one more.
+                OPTIONAL_TIERS = (
+                    ("refs", "bangs", "recipients"),
+                    ("refs", "bangs"),            # pre-DM
+                    ("refs", "recipients"),       # pre-v7.2 bangs
+                    ("refs",),
+                    ("recipients",),              # pre-v7.1 refs
+                    (),                           # oldest schema we support
+                )
+                unread = None
+                for _optional in OPTIONAL_TIERS:
+                    cols = ["id", "mentions", *_optional,
+                            "member_id", "member_name", "content"]
                     try:
                         unread = db.execute(
-                            "SELECT id, mentions, refs, recipients, member_id, "
-                            "member_name, content FROM messages "
+                            "SELECT " + ", ".join(cols) + " FROM messages "
                             "WHERE channel = ? AND id > ? AND member_id != ? "
                             "ORDER BY id",
                             (channel, local_hwm, member_id),
                         ).fetchall()
+                        break
                     except sqlite3.OperationalError:
-                        unread = db.execute(
-                            "SELECT id, mentions, recipients, member_id, "
-                            "member_name, content FROM messages "
-                            "WHERE channel = ? AND id > ? AND member_id != ? "
-                            "ORDER BY id",
-                            (channel, local_hwm, member_id),
-                        ).fetchall()
+                        continue
+                if unread is None:
+                    # Every tier failed: the table is not one we recognise at
+                    # all. Skip this tick rather than crash the monitor.
+                    unread = []
 
                 if unread:
                     # Advance the LOCAL watermark over the WHOLE raw batch
