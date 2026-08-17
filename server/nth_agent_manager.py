@@ -221,6 +221,50 @@ class UnifiedAgentSupervisor:
         manager = self.manager_for(agent_id)
         return bool(manager and manager.is_running(agent_id))
 
+    # ── identity/ownership guards ───────────────────────────────────────────
+    #
+    # This facade is hand-maintained, so a method added to AgentSupervisor is
+    # not reachable through it until someone writes the forwarder — and the
+    # failure is an AttributeError at the call site, not a signature mismatch
+    # anything checks. Four of the five below were added by the B1 fix and
+    # never forwarded, which is why test-agent-bulk, test-web-agents and
+    # test-web-codex-agents fail with "no attribute 'reserve_starting'".
+    #
+    # These are the guards that keep one agent id naming one process. Losing
+    # them to an AttributeError does not merely error: AgentRouter's worker
+    # catches Exception per message, so a missing foreign_owner_pid would drop
+    # every routed message while looking like a quiet hub.
+
+    def _guard(self, agent_id: str, name: str):
+        """The manager that implements `name` for this agent.
+
+        Falls back to the Claude supervisor rather than to nothing: these
+        guards read the shared `agents` table, so its implementation is
+        correct for any provider, and a silently absent guard is the failure
+        mode this whole block exists to prevent. A provider that wants its own
+        answer supplies the method and is preferred.
+        """
+        manager = self.manager_for(agent_id)
+        if manager is not None and hasattr(manager, name):
+            return manager
+        return self.claude
+
+    def plock(self, agent_id: str):
+        return self._guard(agent_id, "plock").plock(agent_id)
+
+    def reserve_starting(self, agent_id: str) -> None:
+        self._guard(agent_id, "reserve_starting").reserve_starting(agent_id)
+
+    def release_starting(self, agent_id: str) -> None:
+        self._guard(agent_id, "release_starting").release_starting(agent_id)
+
+    def is_running_or_starting(self, agent_id: str) -> bool:
+        return bool(self._guard(agent_id, "is_running_or_starting")
+                    .is_running_or_starting(agent_id))
+
+    def foreign_owner_pid(self, agent_id: str) -> Optional[int]:
+        return self._guard(agent_id, "foreign_owner_pid").foreign_owner_pid(agent_id)
+
     def live_ids(self) -> List[str]:
         ids = set(self.claude.live_ids())
         if self.codex is not None:
