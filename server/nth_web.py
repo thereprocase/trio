@@ -3336,8 +3336,17 @@ class NthWebHandler(BaseHTTPRequestHandler):
             name = pick_agent_name(db, desired)
             assigned_avatar = pick_agent_avatar(db, name)
             now = now_iso()
-            # One transaction: agents row + all placements commit or roll back
-            # together, so a mid-loop failure can't leave a half-placed orphan.
+            # Placements (members + agent_channels) are deliberately NOT
+            # inserted here, only the durable agents row. AgentRouter.tick()
+            # discovers targets purely via agent_channels, so an agent placed
+            # before its process exists is a live target for wake_agent() —
+            # which unconditionally rotates reclaim_secret (nth_restack bug:
+            # a message landing in this window rotated the secret out from
+            # under the spawn already in flight below, so the real process
+            # booted with a stale secret baked into its preamble and rejected
+            # its own first reclaim). Placement now happens only after spawn()
+            # has actually succeeded, so the agent isn't routable — and thus
+            # can't be woken — until a process is there to answer.
             with db:
                 ensure_agent_inboxes(db)
                 db.execute(
@@ -3347,16 +3356,6 @@ class NthWebHandler(BaseHTTPRequestHandler):
                     (agent_id, name, model, prompt, nsup.ST_SPAWNING, effort,
                      provider, cwd, permission_profile, wake_mode, reclaim_secret,
                      assigned_avatar, now))
-                for c in channels + [AGENT_INBOX_CHANNEL]:
-                    db.execute(
-                        "INSERT OR IGNORE INTO members (id, channel, name, summary, "
-                        "skills, last_seen, last_read, joined_at, active, kind, model) "
-                        "VALUES (?,?,?,?,?,?,0,?,1,'agent',?)",
-                        (agent_id, c, name, prompt[:200], "", now, now, model))
-                    db.execute(
-                        "INSERT OR IGNORE INTO agent_channels "
-                        "(agent_id, channel, member_id, joined_at) VALUES (?,?,?,?)",
-                        (agent_id, c, agent_id, now))
         except sqlite3.Error as e:
             self._error(500, f"db error: {e}")
             return
@@ -3383,7 +3382,8 @@ class NthWebHandler(BaseHTTPRequestHandler):
                                           permission_profile=permission_profile,
                                           extra_dirs=attach_dirs)
         except Exception as e:
-            # Spawn threw — don't leave the row stuck at 'spawning'.
+            # Spawn threw — don't leave the row stuck at 'spawning'. No
+            # placements were ever inserted, so there is nothing to unwind.
             try:
                 d = sqlite3.connect(str(self.db_path), timeout=5)
                 d.execute("UPDATE agents SET state=? WHERE id=?",
@@ -3392,6 +3392,28 @@ class NthWebHandler(BaseHTTPRequestHandler):
             except sqlite3.Error:
                 pass
             self._error(500, f"spawn failed: {e}")
+            return
+        try:
+            d = sqlite3.connect(str(self.db_path), timeout=5)
+            try:
+                d.execute("PRAGMA busy_timeout=3000")
+                # Same all-or-nothing guarantee as before, just deferred until
+                # the process the placements point at actually exists.
+                with d:
+                    for c in all_channels:
+                        d.execute(
+                            "INSERT OR IGNORE INTO members (id, channel, name, summary, "
+                            "skills, last_seen, last_read, joined_at, active, kind, model) "
+                            "VALUES (?,?,?,?,?,?,0,?,1,'agent',?)",
+                            (agent_id, c, name, prompt[:200], "", now, now, model))
+                        d.execute(
+                            "INSERT OR IGNORE INTO agent_channels "
+                            "(agent_id, channel, member_id, joined_at) VALUES (?,?,?,?)",
+                            (agent_id, c, agent_id, now))
+            finally:
+                d.close()
+        except sqlite3.Error as e:
+            self._error(500, f"db error placing agent: {e}")
             return
         # Nudge the agent to connect + participate on startup (a stream-json
         # agent is request/response, so it needs a first message to act on).
