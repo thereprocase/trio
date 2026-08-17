@@ -2352,12 +2352,19 @@ def clear_agent(agent_id: str, supervisor, db_path: Path):
             (agent_id,)).fetchall()]
     finally:
         db.close()
-    base = (row["base_prompt"] or "").strip()
-    reclaim_secret = _rotate_reclaim_secret(db_path, agent_id)
-    preamble = (base + "\n\n" if base else "") + \
-        build_agent_preamble(row["name"], channels, member_id=agent_id,
-                             reclaim_secret=reclaim_secret)
-    return supervisor.clear(agent_id, system_prompt=preamble,
+    # Same check-then-rotate-then-relaunch race as wake_agent (LOTC
+    # Sauron finding 4): a concurrent wake_agent()/spawn() for this agent_id
+    # must not interleave with the rotation below, or the process that ends
+    # up alive can hold a secret the DB no longer has. clear()'s own
+    # internal _plock(agent_id) acquisition is reentrant, so holding it here
+    # first is safe.
+    with supervisor.plock(agent_id):
+        base = (row["base_prompt"] or "").strip()
+        reclaim_secret = _rotate_reclaim_secret(db_path, agent_id)
+        preamble = (base + "\n\n" if base else "") + \
+            build_agent_preamble(row["name"], channels, member_id=agent_id,
+                                 reclaim_secret=reclaim_secret)
+        return supervisor.clear(agent_id, system_prompt=preamble,
                             mcp_config=build_mcp_config_for_hub(),
                             extra_dirs=[str(channel_attach_dir(c)) for c in channels])
 
@@ -3351,127 +3358,137 @@ class NthWebHandler(BaseHTTPRequestHandler):
         db = None
         agent_id = _gen_agent_id()
         reclaim_secret = secrets.token_hex(16)
+        sup = get_supervisor()
+        # Reserve BEFORE the agents row is even committed below — a
+        # concurrent create's own ensure_agent_inboxes() call (INSERT OR
+        # IGNORE over every non-archived agents row) can make THIS agent
+        # routable the instant its row exists, seconds before spawn() is
+        # reached. is_running_or_starting() (checked by wake_agent under its
+        # plock) treats a reservation exactly like a live process, so a
+        # router wake landing anywhere in this window is a safe no-op
+        # instead of a secret rotation racing the real spawn() below (LOTC
+        # Sauron/Gandalf, B1 recurrence — plock() alone does NOT close this,
+        # because nothing populates it until spawn() itself is reached).
+        # release_starting() in the finally covers every exit path,
+        # including the sqlite3.Error return three lines down.
+        sup.reserve_starting(agent_id)
         try:
-            db = sqlite3.connect(str(self.db_path), timeout=5)
-            db.row_factory = sqlite3.Row
-            db.execute("PRAGMA busy_timeout=3000")
-            name = pick_agent_name(db, desired)
-            assigned_avatar = pick_agent_avatar(db, name)
-            now = now_iso()
-            # Placements (members + agent_channels) are deliberately NOT
-            # inserted here, only the durable agents row. AgentRouter.tick()
-            # discovers targets purely via agent_channels, so an agent placed
-            # before its process exists is a live target for wake_agent() —
-            # which unconditionally rotates reclaim_secret (nth_restack bug:
-            # a message landing in this window rotated the secret out from
-            # under the spawn already in flight below, so the real process
-            # booted with a stale secret baked into its preamble and rejected
-            # its own first reclaim). Placement now happens only after spawn()
-            # has actually succeeded, so the agent isn't routable — and thus
-            # can't be woken — until a process is there to answer.
-            with db:
-                ensure_agent_inboxes(db)
-                db.execute(
-                    "INSERT INTO agents (id, name, model, base_prompt, state, "
-                    "managed, effort, runtime_provider, cwd, permission_profile, "
-                    "wake_mode, reclaim_secret, avatar_name, created_at) VALUES (?,?,?,?,?,1,?,?,?,?,?,?,?,?)",
-                    (agent_id, name, model, prompt, nsup.ST_SPAWNING, effort,
-                     provider, cwd, permission_profile, wake_mode, reclaim_secret,
-                     assigned_avatar, now))
-        except sqlite3.Error as e:
-            self._error(500, f"db error: {e}")
-            return
-        finally:
-            if db is not None:
+            try:
+                db = sqlite3.connect(str(self.db_path), timeout=5)
+                db.row_factory = sqlite3.Row
+                db.execute("PRAGMA busy_timeout=3000")
+                name = pick_agent_name(db, desired)
+                assigned_avatar = pick_agent_avatar(db, name)
+                now = now_iso()
+                # Placements (members + agent_channels) are deliberately NOT
+                # inserted here, only the durable agents row. AgentRouter.tick()
+                # discovers targets purely via agent_channels, so an agent placed
+                # before its process exists is a live target for wake_agent() —
+                # which unconditionally rotates reclaim_secret (nth_restack bug:
+                # a message landing in this window rotated the secret out from
+                # under the spawn already in flight below, so the real process
+                # booted with a stale secret baked into its preamble and rejected
+                # its own first reclaim). Placement now happens only after spawn()
+                # has actually succeeded, so the agent isn't routable — and thus
+                # can't be woken — until a process is there to answer.
+                with db:
+                    ensure_agent_inboxes(db)
+                    db.execute(
+                        "INSERT INTO agents (id, name, model, base_prompt, state, "
+                        "managed, effort, runtime_provider, cwd, permission_profile, "
+                        "wake_mode, reclaim_secret, avatar_name, created_at) VALUES (?,?,?,?,?,1,?,?,?,?,?,?,?,?)",
+                        (agent_id, name, model, prompt, nsup.ST_SPAWNING, effort,
+                         provider, cwd, permission_profile, wake_mode, reclaim_secret,
+                         assigned_avatar, now))
+            except sqlite3.Error as e:
+                self._error(500, f"db error: {e}")
+                return
+            finally:
+                if db is not None:
+                    try:
+                        db.close()
+                    except sqlite3.Error:
+                        pass
+            all_channels = channels + [AGENT_INBOX_CHANNEL]
+            preamble = (prompt + "\n\n" if prompt else "") + \
+                build_agent_preamble(name, all_channels, member_id=agent_id,
+                                     reclaim_secret=reclaim_secret)
+            mcp_config = nsup.build_mcp_config(NTH_SERVER_PATH)
+            # Grant Read access ONLY to this agent's own channels' attachment
+            # dirs — build_spawn_argv no longer adds the whole shared ATTACH_DIR
+            # root, which used to let any agent read every other channel's
+            # uploaded images regardless of membership (LOTC/Aragorn).
+            attach_dirs = [str(channel_attach_dir(c, base=ATTACH_DIR)) for c in all_channels]
+            try:
+                proc = sup.spawn(agent_id, provider=provider, model=model,
+                                 system_prompt=preamble, mcp_config=mcp_config,
+                                 effort=effort, cwd=cwd,
+                                 permission_profile=permission_profile,
+                                 extra_dirs=attach_dirs)
+            except Exception as e:
+                # Spawn threw — don't leave the row stuck at 'spawning'. No
+                # placements were ever inserted, so there is nothing to unwind.
                 try:
-                    db.close()
+                    d = sqlite3.connect(str(self.db_path), timeout=5)
+                    d.execute("UPDATE agents SET state=? WHERE id=?",
+                              (nsup.ST_ERRORED, agent_id))
+                    d.commit(); d.close()
                 except sqlite3.Error:
                     pass
-        all_channels = channels + [AGENT_INBOX_CHANNEL]
-        preamble = (prompt + "\n\n" if prompt else "") + \
-            build_agent_preamble(name, all_channels, member_id=agent_id,
-                                 reclaim_secret=reclaim_secret)
-        mcp_config = nsup.build_mcp_config(NTH_SERVER_PATH)
-        # Grant Read access ONLY to this agent's own channels' attachment
-        # dirs — build_spawn_argv no longer adds the whole shared ATTACH_DIR
-        # root, which used to let any agent read every other channel's
-        # uploaded images regardless of membership (LOTC/Aragorn).
-        attach_dirs = [str(channel_attach_dir(c, base=ATTACH_DIR)) for c in all_channels]
-        sup = get_supervisor()
-        # Belt-and-braces alongside the placement ordering above: a
-        # concurrent create()'s ensure_agent_inboxes() call can still place
-        # THIS agent (INSERT OR IGNORE touches every non-archived agents
-        # row) before spawn() below has even started. That's safe because
-        # spawn() itself takes this agent's plock() for its whole duration
-        # (registering the proc before start()), and wake_agent now takes
-        # the same lock before checking is_running()/rotating the secret —
-        # so a router wake landing in this window blocks until spawn()
-        # finishes rather than racing it.
-        try:
-            proc = sup.spawn(agent_id, provider=provider, model=model,
-                             system_prompt=preamble, mcp_config=mcp_config,
-                             effort=effort, cwd=cwd,
-                             permission_profile=permission_profile,
-                             extra_dirs=attach_dirs)
-        except Exception as e:
-            # Spawn threw — don't leave the row stuck at 'spawning'. No
-            # placements were ever inserted, so there is nothing to unwind.
+                self._error(500, f"spawn failed: {e}")
+                return
+            if not proc.alive():
+                # spawn() can return normally with a dead proc (it already set
+                # ST_ERRORED itself in that case). Placing a dead agent would
+                # make an unreachable ghost look like a real roster member.
+                self._error(500, "spawn failed: process did not start")
+                return
             try:
                 d = sqlite3.connect(str(self.db_path), timeout=5)
-                d.execute("UPDATE agents SET state=? WHERE id=?",
-                          (nsup.ST_ERRORED, agent_id))
-                d.commit(); d.close()
-            except sqlite3.Error:
-                pass
-            self._error(500, f"spawn failed: {e}")
-            return
-        if not proc.alive():
-            # spawn() can return normally with a dead proc (it already set
-            # ST_ERRORED itself in that case). Placing a dead agent would
-            # make an unreachable ghost look like a real roster member.
-            self._error(500, "spawn failed: process did not start")
-            return
-        try:
-            d = sqlite3.connect(str(self.db_path), timeout=5)
-            try:
-                d.execute("PRAGMA busy_timeout=3000")
-                # Same all-or-nothing guarantee as before, just deferred until
-                # the process the placements point at actually exists.
-                with d:
-                    for c in all_channels:
-                        d.execute(
-                            "INSERT OR IGNORE INTO members (id, channel, name, summary, "
-                            "skills, last_seen, last_read, joined_at, active, kind, model) "
-                            "VALUES (?,?,?,?,?,?,0,?,1,'agent',?)",
-                            (agent_id, c, name, prompt[:200], "", now, now, model))
-                        d.execute(
-                            "INSERT OR IGNORE INTO agent_channels "
-                            "(agent_id, channel, member_id, joined_at) VALUES (?,?,?,?)",
-                            (agent_id, c, agent_id, now))
-            finally:
-                d.close()
-        except sqlite3.Error as e:
-            # Placement failed after a successful, live spawn — don't leak a
-            # running process nothing can ever reach (no agent_channels rows
-            # means AgentRouter can never target it, and it never appears in
-            # any roster). Stop it and mark the row failed, same shape as the
-            # spawn-failure branch above.
-            try:
-                sup.stop(agent_id)
-            except Exception:
-                pass
-            try:
-                d2 = sqlite3.connect(str(self.db_path), timeout=5)
-                d2.execute("UPDATE agents SET state=? WHERE id=?",
-                          (nsup.ST_ERRORED, agent_id))
-                d2.commit(); d2.close()
-            except sqlite3.Error:
-                pass
-            self._error(500, f"db error placing agent: {e}")
-            return
+                try:
+                    d.execute("PRAGMA busy_timeout=3000")
+                    # Same all-or-nothing guarantee as before, just deferred until
+                    # the process the placements point at actually exists.
+                    with d:
+                        for c in all_channels:
+                            d.execute(
+                                "INSERT OR IGNORE INTO members (id, channel, name, summary, "
+                                "skills, last_seen, last_read, joined_at, active, kind, model) "
+                                "VALUES (?,?,?,?,?,?,0,?,1,'agent',?)",
+                                (agent_id, c, name, prompt[:200], "", now, now, model))
+                            d.execute(
+                                "INSERT OR IGNORE INTO agent_channels "
+                                "(agent_id, channel, member_id, joined_at) VALUES (?,?,?,?)",
+                                (agent_id, c, agent_id, now))
+                finally:
+                    d.close()
+            except sqlite3.Error as e:
+                # Placement failed after a successful, live spawn — don't leak a
+                # running process nothing can ever reach (no agent_channels rows
+                # means AgentRouter can never target it, and it never appears in
+                # any roster). Stop it and mark the row failed, same shape as the
+                # spawn-failure branch above.
+                try:
+                    sup.stop(agent_id)
+                except Exception:
+                    pass
+                try:
+                    d2 = sqlite3.connect(str(self.db_path), timeout=5)
+                    d2.execute("UPDATE agents SET state=? WHERE id=?",
+                              (nsup.ST_ERRORED, agent_id))
+                    d2.commit(); d2.close()
+                except sqlite3.Error:
+                    pass
+                self._error(500, f"db error placing agent: {e}")
+                return
+        finally:
+            # Covers every exit path above, including the early `return`s:
+            # a failed create must not leave this id permanently marked
+            # "starting" for wake_agent()'s is_running_or_starting() check.
+            sup.release_starting(agent_id)
         # Nudge the agent to connect + participate on startup (a stream-json
         # agent is request/response, so it needs a first message to act on).
-        get_supervisor().feed(
+        sup.feed(
             agent_id, channels[0] if channels else AGENT_INBOX_CHANNEL,
             "You are online — connect to your channels and say hello. Your private "
             "inbox is for direct messages and is not a public workspace channel.")

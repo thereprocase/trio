@@ -795,6 +795,12 @@ class AgentSupervisor:
         # Agents whose spawn is in flight. reconcile() must not reap these:
         # their handle is registered before the process exists.
         self._starting: set = set()
+        # External callers' "spawn about to happen" reservations — see
+        # reserve_starting(). Deliberately separate from _starting, which is
+        # spawn()'s own internal bookkeeping and unconditionally discarded in
+        # its finally; refcounted (id -> count) so nested/overlapping
+        # reservations for the same id don't clobber each other.
+        self._reserved: Dict[str, int] = {}
         self._pending: Dict[str, Deque[Dict[str, Any]]] = {}
         self._compacting: set[str] = set()
         self._models: Dict[str, str] = {}
@@ -1451,26 +1457,37 @@ class AgentSupervisor:
         return bool(proc and proc.alive())
 
     def reserve_starting(self, agent_id: str) -> None:
-        """Mark agent_id as having a spawn in flight before spawn() itself is
-        called. Closes the window between a caller committing a fresh `agents`
-        row (which ensure_agent_inboxes' INSERT OR IGNORE can make routable
-        for ANY non-archived agent, not just the one being created) and this
-        caller actually invoking spawn(): without it, wake_agent() can see
-        is_running() == False for an agent seconds away from being spawned and
-        "helpfully" rotate its reclaim_secret out from under the preamble the
-        real spawn() is about to hand the process (LOTC Sauron/Gandalf, B1
-        recurrence). Always pair with release_starting in a finally, even on
-        error, so a failed create doesn't wedge the id."""
+        """Mark agent_id as having a create in flight, BEFORE its `agents` row
+        is even committed. Closes the window between that commit (which
+        ensure_agent_inboxes' INSERT OR IGNORE can use to make ANY
+        non-archived agent routable, not just the one being created) and
+        spawn() actually starting: without it, wake_agent() can see
+        is_running() == False for an agent seconds away from being spawned
+        and rotate its reclaim_secret out from under the preamble the real
+        spawn() is about to hand the process (LOTC Sauron/Gandalf, B1
+        recurrence). Deliberately a SEPARATE set from `_starting` — spawn()
+        adds to and unconditionally discards from `_starting` itself as
+        internal bookkeeping (see spawn()), so sharing one set means spawn's
+        own cleanup would silently clear a caller's still-active reservation
+        the moment spawn() returns, reopening the exact window this exists
+        to close. Refcounted so overlapping reserve calls for the same id
+        (e.g. a retry) can't have one's release evict the other's guard.
+        Always pair with release_starting in a finally, even on error, so a
+        failed create doesn't wedge the id."""
         with self._lock:
-            self._starting.add(agent_id)
+            self._reserved[agent_id] = self._reserved.get(agent_id, 0) + 1
 
     def release_starting(self, agent_id: str) -> None:
         with self._lock:
-            self._starting.discard(agent_id)
+            n = self._reserved.get(agent_id, 0) - 1
+            if n <= 0:
+                self._reserved.pop(agent_id, None)
+            else:
+                self._reserved[agent_id] = n
 
     def is_running_or_starting(self, agent_id: str) -> bool:
         with self._lock:
-            if agent_id in self._starting:
+            if agent_id in self._starting or agent_id in self._reserved:
                 return True
             proc = self._procs.get(agent_id)
         return bool(proc and proc.alive())
