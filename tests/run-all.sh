@@ -21,6 +21,20 @@ cd "$(dirname "${BASH_SOURCE[0]}")" || exit 1
 PY="${PY:-python3}"
 TIMEOUT="${TIMEOUT:-60}"
 
+# macOS ships no `timeout`. Without this the runner reported EVERY test as
+# FAIL with "timeout: command not found" — a green suite and a totally broken
+# one look identical, which is worse than having no runner at all. Prefer
+# coreutils' gtimeout, fall back to running the test untimed.
+if command -v timeout >/dev/null 2>&1; then
+    TIMEOUT_CMD="timeout $TIMEOUT"
+elif command -v gtimeout >/dev/null 2>&1; then
+    TIMEOUT_CMD="gtimeout $TIMEOUT"
+else
+    printf '  \033[33mnote\033[0m  no timeout(1) — tests run untimed '
+    printf '(brew install coreutils)\n'
+    TIMEOUT_CMD=""
+fi
+
 SOAK="test-agent-restart-loop.py test-heartbeat-theory.py
       test-timeout-battery.py test-timeout-ceiling.py
       test-timeout-unfakeable.py test-restart-arch.py"
@@ -38,7 +52,7 @@ for f in test-*.py; do
         printf '  \033[90mSOAK\033[0m  %s (long-running; run by hand)\n' "$f"
         skip=$((skip+1)); continue
     fi
-    out="$(timeout "$TIMEOUT" "$PY" "$f" 2>&1)"; rc=$?
+    out="$($TIMEOUT_CMD "$PY" "$f" 2>&1)"; rc=$?
     if [ $rc -eq 0 ]; then
         printf '  \033[32mPASS\033[0m  %s\n' "$f"; pass=$((pass+1))
     elif printf '%s' "$out" | grep -q "No module named 'mcp'"; then

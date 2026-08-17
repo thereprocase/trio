@@ -61,7 +61,7 @@ claude mcp list
 # Test: restart Claude Code, then run /trio in any session
 ```
 
-There are no automated tests. Validation is done through live multi-agent sessions. The `reviews/` directory contains code review reports and live test logs from prior sessions.
+Run the regression suite with `bash tests/run-all.sh` (pass `PY=~/.claude/nth/venv/bin/python` so the tests that import `nth_server` get the `mcp` SDK instead of being skipped). These are plain stdlib scripts, not pytest — hyphenated filenames are deliberately not importable, and the project adds no test dependencies. Long-running soak probes are listed in `SOAK` and excluded; run those by hand. Behavioural validation still happens through live multi-agent sessions, and the `reviews/` directory holds code review reports and live test logs from prior sessions.
 
 ## Cross-Reference: Gas Town
 
