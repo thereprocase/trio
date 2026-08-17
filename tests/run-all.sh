@@ -21,18 +21,19 @@ cd "$(dirname "${BASH_SOURCE[0]}")" || exit 1
 PY="${PY:-python3}"
 TIMEOUT="${TIMEOUT:-60}"
 
-# macOS ships no `timeout`. Without this the runner reported EVERY test as
-# FAIL with "timeout: command not found" — a green suite and a totally broken
-# one look identical, which is worse than having no runner at all. Prefer
-# coreutils' gtimeout, fall back to running the test untimed.
+# timeout(1) is GNU coreutils and is NOT on a stock macOS, where this suite is
+# developed. Without this shim every test "failed" with `timeout: command not
+# found` — a fully red suite that says nothing at all about the code, which is
+# worse than no suite, because it trains you to ignore it. Homebrew's coreutils
+# installs the same binary as `gtimeout`. With neither, run the test directly
+# and lose only the per-test time limit.
 if command -v timeout >/dev/null 2>&1; then
-    TIMEOUT_CMD="timeout $TIMEOUT"
+    run_test() { timeout "$TIMEOUT" "$@"; }
 elif command -v gtimeout >/dev/null 2>&1; then
-    TIMEOUT_CMD="gtimeout $TIMEOUT"
+    run_test() { gtimeout "$TIMEOUT" "$@"; }
 else
-    printf '  \033[33mnote\033[0m  no timeout(1) — tests run untimed '
-    printf '(brew install coreutils)\n'
-    TIMEOUT_CMD=""
+    run_test() { "$@"; }
+    printf '  \033[90mnote\033[0m  no timeout(1) on PATH — running without a per-test limit\n'
 fi
 
 SOAK="test-agent-restart-loop.py test-heartbeat-theory.py
@@ -52,7 +53,7 @@ for f in test-*.py; do
         printf '  \033[90mSOAK\033[0m  %s (long-running; run by hand)\n' "$f"
         skip=$((skip+1)); continue
     fi
-    out="$($TIMEOUT_CMD "$PY" "$f" 2>&1)"; rc=$?
+    out="$(run_test "$PY" "$f" 2>&1)"; rc=$?
     if [ $rc -eq 0 ]; then
         printf '  \033[32mPASS\033[0m  %s\n' "$f"; pass=$((pass+1))
     elif printf '%s' "$out" | grep -q "No module named 'mcp'"; then
