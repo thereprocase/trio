@@ -197,8 +197,9 @@
     const diagnosticsGroup = document.createElement('section'); diagnosticsGroup.className = 'pref-group'; diagnosticsGroup.innerHTML = '<h3>Diagnostics</h3>';
     const diagnostic = diagnostics(); Object.entries(diagnostic).forEach(([key,value]) => { const row = document.createElement('div'); row.className = 'diag-card'; row.innerHTML = `<span class="di ${key === 'online' || key === 'stt' ? 'ok' : 'off'}">●</span><div class="dtxt"><div class="dl">${esc(key.replace(/([A-Z])/g,' $1'))}<span class="stat-chip-sm ${key === 'online' ? 'ok' : 'off'}">${esc(String(value))}</span></div></div>`; diagnosticsGroup.append(row); });
     const resetButton = document.createElement('button'); resetButton.type = 'button'; resetButton.className = 'reset-prefs'; resetButton.textContent = 'Reset to defaults'; resetButton.addEventListener('click', () => { reset(); renderPage(panel); }); diagnosticsGroup.append(resetButton);
-    const attribution = document.createElement('p'); attribution.className = 'settings-attribution'; attribution.innerHTML = 'Character icons from <a href="https://www.svgrepo.com/" target="_blank" rel="noreferrer">SVG Repo</a>, licensed under <a href="https://creativecommons.org/licenses/by/4.0/" target="_blank" rel="noreferrer">CC BY 4.0</a>.'; diagnosticsGroup.append(attribution);
-    panel.append(hero, appearance, behavior, notifyGroup, diagnosticsGroup);
+    const attribution = document.createElement('div'); attribution.className = 'pref-attribution';
+    attribution.innerHTML = 'Character and brand icons from <a href="https://www.svgrepo.com/" target="_blank" rel="noreferrer">SVG Repo</a>, licensed under <a href="https://creativecommons.org/licenses/by/4.0/" target="_blank" rel="noreferrer">CC BY 4.0</a>.';
+    panel.append(hero, appearance, behavior, notifyGroup, diagnosticsGroup, attribution);
   }
   function init() { apply(); }
   function mount() { init(); }

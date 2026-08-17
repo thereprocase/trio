@@ -66,6 +66,12 @@ check("the Character icon attribution reaches the Settings drawer",
 # with a ReferenceError in the console and nothing server-side to notice.
 check("the ask helpers were injected, not left as a comment",
       "function isAskChoices(" in served and "function composeAnswer(" in served)
+check("the Atrium brand uses the message-square-chat icon",
+      'M18 9V7.2C18 6.0799' in served
+      and 'M 0.049804 0.049804' not in served)
+check("the Preferences page carries icon attribution",
+      "Character and brand icons from" in served
+      and "creativecommons.org/licenses/by/4.0/" in served)
 
 # ── the declaration must match the directory ───────────────────────────
 # GROUND TRUTH IS THE DIRECTORY, NOT THE TUPLE. Deriving the expectation from
