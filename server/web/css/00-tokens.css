@@ -23,6 +23,11 @@
   --ease: cubic-bezier(.22,.61,.36,1);
   --ease-soft: cubic-bezier(.34,1.2,.64,1);
   --dur: .28s;
+  /* Status-dot ripple rates. Rhythm carries urgency, so these are a ratio
+     before they are durations: blocked travels in half the time busy does,
+     and that 2x is the only cue left once hue collapses under deuteranopia. */
+  --pulse-busy: 1.2s;
+  --pulse-blocked: .7s;
 
   /* ---- LIGHT THEME: light-1 (warm off-white paper, default) ---- */
   --bg: #ece7e1;                 /* room */

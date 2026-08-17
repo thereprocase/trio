@@ -851,6 +851,21 @@ h1,h2,h3,h4{ margin:0; font-weight:600; }
 @keyframes breathe{ 0%,100%{ box-shadow:0 0 0 0 color-mix(in oklab,var(--warn) 55%,transparent);} 50%{ box-shadow:0 0 0 4px color-mix(in oklab,var(--warn) 0%,transparent);} }
 @media (prefers-reduced-motion: reduce){ .st-working .st-ring{ animation:none; } }
 
+/* Outward-only ripple, in two rhythms. The from/to pair is load-bearing: the
+   halo dies fully transparent at max spread, so the loop restart is invisible.
+   `breathe` above animates 0 -> 4px -> 0, which draws a ring CONTRACTING
+   inward for half of every cycle — read as "finishing" rather than "working".
+   Tone comes from --c on the animated element, so one keyframe serves every
+   bucket; an element that never sets --c gets a transparent halo, silently. */
+@keyframes ripple{
+  from{ box-shadow:0 0 0 0   color-mix(in oklab,var(--c) 55%,transparent); }
+  to  { box-shadow:0 0 0 4px color-mix(in oklab,var(--c) 0%,transparent); }
+}
+@keyframes rippleUrgent{
+  from{ box-shadow:0 0 0 0   color-mix(in oklab,var(--c) 75%,transparent); }
+  to  { box-shadow:0 0 0 5px color-mix(in oklab,var(--c) 0%,transparent); }
+}
+
 .pstate{
   display:inline-flex; align-items:center; gap:6px; font-size:11.5px; font-weight:700;
   padding:3px 10px 3px 8px; border-radius:999px; white-space:nowrap;
