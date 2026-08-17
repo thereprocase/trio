@@ -162,9 +162,9 @@ check('every preset is either light or dark, and both modes are offered',
   && lights.every(t => t.mode === 'light') && darks.every(t => t.mode === 'dark'));
 check('no preset id appears in both modes',
   lights.every(l => !darks.some(d => d.id === l.id)));
-check('historic interface set includes the four promised platforms',
+check('historic interface set includes the three distinct platforms',
   historic.map(theme => theme.id).join(',') ===
-    'historic-win98,historic-win31,historic-gameboy,historic-geocities');
+    'historic-win98,historic-gameboy,historic-geocities');
 check('historic interfaces carry picker descriptions and a toggle mode',
   historic.every(theme => theme.family === 'historic'
     && theme.description && ['light', 'dark'].includes(theme.mode)));

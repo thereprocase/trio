@@ -23,8 +23,7 @@
     { id: 'dark-5', mode: 'dark', label: 'Noir' },
     { id: 'dark-6', mode: 'dark', label: 'Torch' },
     { id: 'historic-win98', mode: 'light', family: 'historic', label: 'Windows 98', description: 'Win32 bevels, title bars, and inset fields' },
-    { id: 'historic-win31', mode: 'light', family: 'historic', label: 'Windows 3.1', description: 'Program Manager chrome and 16-color controls' },
-    { id: 'historic-gameboy', mode: 'light', family: 'historic', label: 'Game Boy', description: 'Four-shade LCD panels and cartridge controls' },
+    { id: 'historic-gameboy', mode: 'light', family: 'historic', label: 'Game Boy', description: 'Four-shade LCD with a working D-pad and A/B controls' },
     { id: 'historic-geocities', mode: 'dark', family: 'historic', label: 'GeoCities', description: 'Tiled space, web-safe color, and table-era widgets' },
   ];
   const lightThemes = themes.filter(theme => theme.mode === 'light');

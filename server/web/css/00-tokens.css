@@ -156,20 +156,6 @@
   --r-xs:0; --r-sm:0; --r-md:0; --r-lg:0; --r-xl:0; --r-full:0;
   --shadow-sm:none; --shadow-md:2px 2px 0 #000; --shadow-lg:4px 4px 0 rgba(0,0,0,.72); --shadow-pop:3px 3px 0 #000;
 }
-[data-theme="historic-win31"] {
-  --font-display:"MS Sans Serif",Geneva,sans-serif;
-  --font-body:"MS Sans Serif",Geneva,sans-serif;
-  --bg:#008080; --bg-sink:#808080; --surface:#c0c0c0; --surface-2:#ffffff; --surface-hover:#000080;
-  --sidebar:#c0c0c0; --sidebar-hover:#000080; --line:#000000; --line-soft:#808080;
-  --ink:#000000; --ink-2:#000000; --ink-3:#404040; --ink-inv:#ffffff;
-  --bubble-agent:#ffffff; --bubble-me:#000080; --bubble-me-ink:#ffffff;
-  --code-bg:#ffffff; --code-ink:#000080;
-  --accent:#000080; --accent-strong:#000080; --accent-tint:#ffffff;
-  --warm:#800000; --warm-soft:#ffff00; --focus:#000000;
-  --st-online:#008000; --st-thinking:#808000; --st-idle:#808080; --st-offline:#000000;
-  --r-xs:0; --r-sm:0; --r-md:0; --r-lg:0; --r-xl:0; --r-full:0;
-  --shadow-sm:none; --shadow-md:2px 2px 0 #000; --shadow-lg:5px 5px 0 #000; --shadow-pop:3px 3px 0 #000;
-}
 [data-theme="historic-gameboy"] {
   --font-display:"Courier New",ui-monospace,monospace;
   --font-body:"Courier New",ui-monospace,monospace;

@@ -8321,7 +8321,8 @@ WEB_JS_FILES = (
     "js/08-sidebar.js", "js/09-ui.js", "js/10-markdown.js",
     "js/11-conversation.js", "js/12-composer.js", "js/13-file-links.js",
     "js/14-lightbox.js", "js/20-workspace.js", "js/30-agents.js",
-    "js/40-preferences.js", "js/45-notifications.js", "js/46-data.js",
+    "js/40-preferences.js", "js/41-gameboy-controls.js",
+    "js/45-notifications.js", "js/46-data.js",
     "js/90-boot.js", "js/99-test-hook.js",
 )
 

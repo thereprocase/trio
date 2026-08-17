@@ -334,120 +334,6 @@
 :root[data-theme="historic-win98"] ::-webkit-scrollbar-button { width: 17px; height: 17px; background: #c0c0c0; border: 2px solid; border-color: #fff #000 #000 #fff; }
 
 /* ============================================================
-   Windows 3.1 — flatter 16-color Program Manager vocabulary
-   ============================================================ */
-:root[data-theme="historic-win31"] {
-  --w31-face:#c0c0c0; --w31-blue:#000080; --w31-hi:#fff; --w31-shadow:#808080; --w31-dark:#000;
-  --ok:#008000; --ok-tint:#c0c0c0; --warn:#808000; --warn-tint:#ffff00;
-  --danger:#800000; --danger-tint:#c0c0c0; --info:#000080; --info-tint:#fff;
-}
-:root[data-theme="historic-win31"] body { background:#008080; font-size:13px; }
-:root[data-theme="historic-win31"] .app {
-  inset:8px; width:calc(100% - 16px); height:calc(100% - 16px);
-  border:3px double #000; outline:2px solid #fff; background:var(--w31-face); box-shadow:6px 6px 0 #000;
-}
-:root[data-theme="historic-win31"] .sidebar,
-:root[data-theme="historic-win31"] .side-foot,
-:root[data-theme="historic-win31"] .composer-shell,
-:root[data-theme="historic-win31"] .channel-drawer { background:var(--w31-face); }
-:root[data-theme="historic-win31"] .brand,
-:root[data-theme="historic-win31"] .topbar,
-:root[data-theme="historic-win31"] .channel-drawer-head,
-:root[data-theme="historic-win31"] .detail-hero {
-  min-height:28px; padding:3px 5px; border:1px solid #000; background:var(--w31-blue); color:#fff;
-}
-:root[data-theme="historic-win31"] .brand-name,
-:root[data-theme="historic-win31"] .topbar h1,
-:root[data-theme="historic-win31"] .channel-drawer-head h2,
-:root[data-theme="historic-win31"] .detail-hero h2 {
-  color:#fff; font:700 13px var(--font-body); letter-spacing:0;
-}
-:root[data-theme="historic-win31"] .brand-sub,
-:root[data-theme="historic-win31"] .topbar .topic { color:#fff; }
-:root[data-theme="historic-win31"] .brand-mark { width:18px; height:18px; border:1px solid #fff; background:#000; }
-
-:root[data-theme="historic-win31"] .icon-btn,
-:root[data-theme="historic-win31"] .add-btn,
-:root[data-theme="historic-win31"] .btn,
-:root[data-theme="historic-win31"] .send-btn,
-:root[data-theme="historic-win31"] .reset-prefs,
-:root[data-theme="historic-win31"] .message-actions-menu button,
-:root[data-theme="historic-win31"] .attention-actions button,
-:root[data-theme="historic-win31"] .agent-actions button,
-:root[data-theme="historic-win31"] .task-filters button,
-:root[data-theme="historic-win31"] .agent-filters button {
-  min-height:24px; padding:3px 10px; border:2px solid; border-color:#fff #000 #000 #fff;
-  border-radius:0; background:var(--w31-face); color:#000; box-shadow:none; font-weight:400;
-}
-:root[data-theme="historic-win31"] .icon-btn:active,
-:root[data-theme="historic-win31"] .btn:active,
-:root[data-theme="historic-win31"] .send-btn:active { border-color:#000 #fff #fff #000; }
-
-:root[data-theme="historic-win31"] .nav-section,
-:root[data-theme="historic-win31"] .rail-section {
-  margin:8px 4px; padding:5px; border:1px solid #000; background:#fff;
-}
-:root[data-theme="historic-win31"] .nav-head h3,
-:root[data-theme="historic-win31"] .rail-section h2 { color:#000; font-size:12px; letter-spacing:0; text-transform:none; }
-:root[data-theme="historic-win31"] .nav-item,
-:root[data-theme="historic-win31"] .dm-item,
-:root[data-theme="historic-win31"] .rail-item { padding:3px 4px; border-radius:0; color:#000; font-size:13px; }
-:root[data-theme="historic-win31"] .nav-item.active,
-:root[data-theme="historic-win31"] .dm-item.active,
-:root[data-theme="historic-win31"] .rail-item.active { background:#000080; color:#fff; box-shadow:none; }
-:root[data-theme="historic-win31"] .nav-item.active::before { display:none; }
-
-:root[data-theme="historic-win31"] .messages,
-:root[data-theme="historic-win31"] .workspace-view {
-  margin:4px; border:2px solid; border-color:#808080 #fff #fff #808080; background:#fff; box-shadow:inset 1px 1px #000;
-}
-:root[data-theme="historic-win31"] .message.msg,
-:root[data-theme="historic-win31"] .message.msg.me {
-  padding:4px 6px; border:1px solid #000; border-radius:0; background:#fff; color:#000; box-shadow:2px 2px 0 #808080;
-}
-:root[data-theme="historic-win31"] .message.msg.me { background:#000080; color:#fff; }
-:root[data-theme="historic-win31"] .message.msg .bubble,
-:root[data-theme="historic-win31"] .message.msg.me .bubble { padding:0; border:0; border-radius:0; background:transparent; color:inherit; box-shadow:none; }
-
-:root[data-theme="historic-win31"] .pref-group,
-:root[data-theme="historic-win31"] .agent-card,
-:root[data-theme="historic-win31"] .roster-grid .agent-card,
-:root[data-theme="historic-win31"] .home-card,
-:root[data-theme="historic-win31"] .workspace-view .home-channel,
-:root[data-theme="historic-win31"] .task-row,
-:root[data-theme="historic-win31"] .attention-item,
-:root[data-theme="historic-win31"] .att-card,
-:root[data-theme="historic-win31"] .ask-card,
-:root[data-theme="historic-win31"] .modal,
-:root[data-theme="historic-win31"] .search-panel,
-:root[data-theme="historic-win31"] dialog,
-:root[data-theme="historic-win31"] .channel-menu,
-:root[data-theme="historic-win31"] .account-items {
-  border:3px double #000; border-radius:0; background:var(--w31-face); box-shadow:3px 3px 0 #000;
-}
-:root[data-theme="historic-win31"] .pref-group h3,
-:root[data-theme="historic-win31"] .modal-head {
-  margin:2px; padding:3px 5px; border:1px solid #000; background:#000080; color:#fff; font:700 13px var(--font-body);
-}
-:root[data-theme="historic-win31"] .composer-input,
-:root[data-theme="historic-win31"] input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
-:root[data-theme="historic-win31"] textarea,
-:root[data-theme="historic-win31"] select,
-:root[data-theme="historic-win31"] .input,
-:root[data-theme="historic-win31"] .textarea,
-:root[data-theme="historic-win31"] .select,
-:root[data-theme="historic-win31"] .pref-select {
-  border:2px solid; border-color:#808080 #fff #fff #808080; border-radius:0; background-color:#fff; color:#000; box-shadow:inset 1px 1px #000;
-}
-:root[data-theme="historic-win31"] .switch { width:34px; height:18px; }
-:root[data-theme="historic-win31"] .switch .track { border:2px solid #000; border-radius:0; background:#fff; box-shadow:none; }
-:root[data-theme="historic-win31"] .switch .knob { top:3px; left:3px; width:10px; height:10px; border-radius:0; background:#000080; box-shadow:none; }
-:root[data-theme="historic-win31"] .switch input:checked ~ .knob { transform:translateX(17px); }
-:root[data-theme="historic-win31"] .switch.switch-sm input:checked ~ .knob { transform:translateX(12px); }
-:root[data-theme="historic-win31"] ::-webkit-scrollbar { width:16px; background:#c0c0c0; }
-:root[data-theme="historic-win31"] ::-webkit-scrollbar-thumb { border:2px solid; border-color:#fff #000 #000 #fff; background:#c0c0c0; }
-
-/* ============================================================
    Game Boy — four-shade LCD, pixel controls, cartridge geometry
    ============================================================ */
 :root[data-theme="historic-gameboy"] {
@@ -573,6 +459,169 @@
 :root[data-theme="historic-gameboy"] .tstate .d { border-radius:0; box-shadow:2px 2px 0 #20251a; }
 :root[data-theme="historic-gameboy"] ::-webkit-scrollbar { width:16px; background:#8b956d; }
 :root[data-theme="historic-gameboy"] ::-webkit-scrollbar-thumb { border:3px solid #303623; background:#c4cfa1; }
+
+/* A real controller surface for the Game Boy skin. The controls are injected
+   by 41-gameboy-controls.js and hidden for every other theme. */
+.gameboy-controls { display:none; }
+:root[data-theme="historic-gameboy"] .gameboy-controls:not([hidden]) {
+  position:fixed;
+  z-index:calc(var(--z-dialog) - 1);
+  right:30px;
+  bottom:26px;
+  width:342px;
+  height:138px;
+  box-sizing:border-box;
+  display:grid;
+  grid-template-columns:126px 1fr 126px;
+  grid-template-rows:1fr auto;
+  align-items:center;
+  gap:8px;
+  padding:11px 13px 9px;
+  border:5px solid #303623;
+  border-radius:22px 22px 38px 22px;
+  background:#a8b17d;
+  box-shadow:inset 4px 4px 0 #c4cfa1,inset -4px -4px 0 #6f7751,7px 7px 0 #20251a;
+  color:#20251a;
+  font:700 9px/1 var(--font-body);
+  letter-spacing:.04em;
+}
+
+:root[data-theme="historic-gameboy"] .gb-dpad {
+  position:relative;
+  width:108px;
+  height:108px;
+  align-self:center;
+}
+:root[data-theme="historic-gameboy"] .gb-pad,
+:root[data-theme="historic-gameboy"] .gb-pad-center {
+  position:absolute;
+  width:38px;
+  height:38px;
+  border:0;
+  border-radius:2px;
+  background:#303623;
+  color:#8b956d;
+  box-shadow:inset 3px 3px 0 #4b5136,inset -3px -3px 0 #20251a;
+}
+:root[data-theme="historic-gameboy"] .gb-pad {
+  display:grid;
+  place-items:center;
+  padding:0;
+  cursor:pointer;
+  font:700 13px/1 var(--font-body);
+}
+:root[data-theme="historic-gameboy"] .gb-pad:active,
+:root[data-theme="historic-gameboy"] .gb-pad.is-pressed {
+  translate:2px 2px;
+  box-shadow:inset 3px 3px 0 #20251a;
+}
+:root[data-theme="historic-gameboy"] .gb-up { left:35px; top:0; }
+:root[data-theme="historic-gameboy"] .gb-right { left:70px; top:35px; }
+:root[data-theme="historic-gameboy"] .gb-down { left:35px; top:70px; }
+:root[data-theme="historic-gameboy"] .gb-left { left:0; top:35px; }
+:root[data-theme="historic-gameboy"] .gb-pad-center { left:35px; top:35px; }
+:root[data-theme="historic-gameboy"] .gb-pad-center::after {
+  content:""; position:absolute; inset:9px; border:2px solid #20251a; border-radius:50%;
+}
+
+:root[data-theme="historic-gameboy"] .gb-actions {
+  position:relative;
+  width:116px;
+  height:74px;
+  transform:rotate(-13deg);
+}
+:root[data-theme="historic-gameboy"] .gb-round {
+  position:absolute;
+  width:52px;
+  height:52px;
+  padding:0;
+  border:4px solid #4b2436;
+  border-radius:50%;
+  background:#7b3752;
+  color:#f0d7df;
+  box-shadow:inset 4px 4px 0 #a55676,inset -4px -4px 0 #4b2436,4px 4px 0 #303623;
+  cursor:pointer;
+  font:700 19px/1 var(--font-body);
+}
+:root[data-theme="historic-gameboy"] .gb-round:active {
+  translate:3px 3px;
+  box-shadow:inset 4px 4px 0 #4b2436;
+}
+:root[data-theme="historic-gameboy"] .gb-b { left:0; top:19px; }
+:root[data-theme="historic-gameboy"] .gb-a { right:0; top:0; }
+
+:root[data-theme="historic-gameboy"] .gb-system {
+  display:flex;
+  align-self:end;
+  justify-content:center;
+  gap:9px;
+  padding-bottom:11px;
+  transform:rotate(-5deg);
+}
+:root[data-theme="historic-gameboy"] .gb-system button {
+  display:grid;
+  justify-items:center;
+  gap:5px;
+  padding:0;
+  border:0;
+  background:transparent;
+  color:#303623;
+  cursor:pointer;
+  font:700 8px/1 var(--font-body);
+  letter-spacing:.04em;
+}
+:root[data-theme="historic-gameboy"] .gb-system button span {
+  width:34px;
+  height:10px;
+  border:2px solid #303623;
+  border-radius:999px;
+  background:#4b5136;
+  box-shadow:inset 2px 2px 0 #20251a,2px 2px 0 #c4cfa1;
+}
+:root[data-theme="historic-gameboy"] .gb-system button:active span { translate:2px 2px; box-shadow:inset 2px 2px 0 #20251a; }
+
+:root[data-theme="historic-gameboy"] .gb-legend {
+  grid-column:1 / -1;
+  align-self:end;
+  text-align:center;
+  color:#4b5136;
+  font-size:8px;
+  letter-spacing:.08em;
+}
+
+:root[data-theme="historic-gameboy"] :is(button,a,input,select,textarea,[contenteditable="true"],[tabindex]):focus-visible {
+  outline:4px double #20251a;
+  outline-offset:3px;
+}
+:root[data-theme="historic-gameboy"] .gameboy-controls button:focus-visible {
+  outline-color:#7b3752;
+  outline-offset:4px;
+}
+
+@media (min-width:861px) {
+  :root[data-theme="historic-gameboy"] .composer-shell { padding-right:382px; }
+  :root[data-theme="historic-gameboy"] .workspace-view,
+  :root[data-theme="historic-gameboy"] .messages { padding-bottom:178px; }
+}
+
+@media (max-width:860px) {
+  :root[data-theme="historic-gameboy"] .gameboy-controls:not([hidden]) {
+    left:50%;
+    right:auto;
+    bottom:12px;
+    width:300px;
+    height:120px;
+    transform:translateX(-50%);
+    grid-template-columns:105px 1fr 104px;
+    padding:7px 9px;
+  }
+  :root[data-theme="historic-gameboy"] .gb-dpad { scale:.82; transform-origin:left center; }
+  :root[data-theme="historic-gameboy"] .gb-actions { scale:.84; transform:rotate(-13deg); transform-origin:right center; }
+  :root[data-theme="historic-gameboy"] .gb-legend { display:none; }
+  :root[data-theme="historic-gameboy"] .workspace-view,
+  :root[data-theme="historic-gameboy"] .messages { padding-bottom:148px; }
+  :root[data-theme="historic-gameboy"] .composer-shell { padding-bottom:142px; }
+}
 
 /* ============================================================
    GeoCities — table-era widgets on a tiled personal-homepage canvas
