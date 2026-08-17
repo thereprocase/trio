@@ -20,16 +20,16 @@ except ImportError:                                        # pragma: no cover
     CodexRuntimeManager = None
 
 
+# Re-exported, not redefined. This file used to carry its own copy of the
+# catalogue, and because the dispatcher is what /api/agent-models actually
+# calls, ITS copy was the one the picker showed — so editing the supervisor's
+# list changed nothing visible and the two drifted silently. One definition,
+# in nth_supervisor, which is where the Claude runtime lives.
+#
 # Names are bare model tiers (no "Claude " prefix) — the provider column
-# already says Claude, so prefixing every option was redundant. `id` is the
-# CLI alias passed straight to `claude --model`.
-CLAUDE_MODELS = [
-    {"id": "opus", "name": "Opus", "efforts": ["low", "medium", "high", "max"]},
-    {"id": "sonnet", "name": "Sonnet", "efforts": ["low", "medium", "high", "max"],
-     "default": True},
-    {"id": "haiku", "name": "Haiku", "efforts": ["low", "medium", "high"]},
-    {"id": "fable", "name": "Fable", "efforts": ["low", "medium", "high", "max"]},
-]
+# already says Claude. `id` is the CLI alias passed straight to `claude
+# --model`.
+CLAUDE_MODELS = nsup.CLAUDE_MODELS
 
 
 def now_iso() -> str:
