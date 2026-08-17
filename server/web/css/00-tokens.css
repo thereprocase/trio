@@ -214,8 +214,8 @@
   --shadow-sm:0 1px 2px rgba(0,0,0,.35); --shadow-md:0 5px 14px rgba(0,0,0,.35); --shadow-lg:0 15px 36px rgba(0,0,0,.4); --shadow-pop:0 8px 24px rgba(0,0,0,.45);
 }
 [data-theme="inspired-slack"] {
-  --font-display:"Helvetica Neue",Helvetica,Arial,sans-serif;
-  --font-body:"Helvetica Neue",Helvetica,Arial,sans-serif;
+  --font-display:"Lato","Helvetica Neue",Arial,sans-serif;
+  --font-body:"Lato","Helvetica Neue",Arial,sans-serif;
   --bg:#ffffff; --bg-sink:#e8e8e8; --surface:#ffffff; --surface-2:#ffffff; --surface-hover:#f8f8f8;
   --sidebar:#3f0e40; --sidebar-hover:#350d36; --line:#dddddd; --line-soft:#eeeeee;
   --ink:#1d1c1d; --ink-2:#616061; --ink-3:#868686; --ink-inv:#ffffff;

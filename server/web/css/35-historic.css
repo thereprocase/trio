@@ -993,11 +993,11 @@
    Standup — channel sidebar, flat message timeline, compact chrome
    ============================================================ */
 :root[data-theme="inspired-slack"] { color-scheme:light; --ok:#2bac76; --ok-tint:#e1f4ec; --warn:#b76700; --warn-tint:#fff0d9; --danger:#e01e5a; --danger-tint:#fbe3eb; --info:#1264a3; --info-tint:#e1f1fb; }
-:root[data-theme="inspired-slack"] body { background:#fff; font-size:14px; }
+:root[data-theme="inspired-slack"] body { background:#fff; font-family:"Lato","Helvetica Neue",Arial,sans-serif; font-size:15px; }
 :root[data-theme="inspired-slack"] .app { inset:0; width:100%; height:100%; border:0; border-radius:0; background:#fff; box-shadow:none; }
-:root[data-theme="inspired-slack"] .sidebar { border-right:1px solid #522653; background:#3f0e40; color:#fff; }
-:root[data-theme="inspired-slack"] .side-foot { border-top:1px solid #522653; background:#3f0e40; }
-:root[data-theme="inspired-slack"] .brand { min-height:50px; border:0; border-bottom:1px solid #522653; background:#3f0e40; color:#fff; }
+:root[data-theme="inspired-slack"] .sidebar { border-right:1px solid #522653; background:#4a154b; color:#fff; }
+:root[data-theme="inspired-slack"] .side-foot { border-top:1px solid rgba(255,255,255,.12); background:#4a154b; }
+:root[data-theme="inspired-slack"] .brand { min-height:50px; border:0; border-bottom:1px solid rgba(255,255,255,.12); background:#4a154b; color:#fff; }
 :root[data-theme="inspired-slack"] .brand:hover { background:#350d36; }
 :root[data-theme="inspired-slack"] .brand-name { color:#fff; font:800 17px var(--font-body); letter-spacing:-.02em; }
 :root[data-theme="inspired-slack"] .brand-sub { color:#c7b7c7; }
@@ -1021,20 +1021,33 @@
 :root[data-theme="inspired-slack"] .dm-item::before { content:"●"; color:#2bac76; font-size:9px; }
 :root[data-theme="inspired-slack"] .nav-item.active,
 :root[data-theme="inspired-slack"] .dm-item.active,
-:root[data-theme="inspired-slack"] .rail-item.active { background:#1164a3; color:#fff; box-shadow:none; }
+:root[data-theme="inspired-slack"] .rail-item.active { background:#f4e5f5; color:#4a154b; box-shadow:none; }
 :root[data-theme="inspired-slack"] .nav-item.active::before,
 :root[data-theme="inspired-slack"] .dm-item.active::before,
-:root[data-theme="inspired-slack"] .rail-item.active::before { color:#fff; }
+:root[data-theme="inspired-slack"] .rail-item.active::before { color:#4a154b; }
 :root[data-theme="inspired-slack"] .messages,
 :root[data-theme="inspired-slack"] .workspace-view { background:#fff; }
+:root[data-theme="inspired-slack"] .messages { padding:18px 0 10px; }
 :root[data-theme="inspired-slack"] .message.msg,
-:root[data-theme="inspired-slack"] .message.msg.me { padding:8px 18px; border:0; border-radius:0; background:#fff; color:#1d1c1d; box-shadow:none; }
+:root[data-theme="inspired-slack"] .message.msg.me {
+  align-self:stretch; flex-direction:row; width:100%; max-width:none; gap:10px; padding:5px 28px;
+  border:0; border-radius:0; background:#fff; color:#1d1c1d; box-shadow:none;
+}
 :root[data-theme="inspired-slack"] .message.msg:hover,
 :root[data-theme="inspired-slack"] .message.msg.me:hover { background:#f8f8f8; }
+:root[data-theme="inspired-slack"] .message.msg .message-avatar,
+:root[data-theme="inspired-slack"] .message.msg.me .message-avatar { width:38px; height:38px; margin-top:1px; border-radius:8px; box-shadow:none; }
+:root[data-theme="inspired-slack"] .message.msg .message-content,
+:root[data-theme="inspired-slack"] .message.msg.me .message-content { width:calc(100% - 48px); max-width:none; align-items:flex-start; }
+:root[data-theme="inspired-slack"] .message.msg .message-head,
+:root[data-theme="inspired-slack"] .message.msg.me .message-head { margin:0 0 1px; gap:7px; }
+:root[data-theme="inspired-slack"] .message.msg .message-head strong { font-size:15px; }
 :root[data-theme="inspired-slack"] .message.msg .bubble,
-:root[data-theme="inspired-slack"] .message.msg.me .bubble { padding:0; border:0; border-radius:0; background:transparent; color:inherit; box-shadow:none; }
+:root[data-theme="inspired-slack"] .message.msg.me .bubble { width:auto; max-width:100%; padding:0; border:0; border-radius:0; background:transparent; color:inherit; box-shadow:none; font-size:15px; line-height:1.4667; }
 :root[data-theme="inspired-slack"] .message-head strong { color:#1d1c1d; font-weight:800; }
 :root[data-theme="inspired-slack"] .message-body a { color:#1264a3; }
+:root[data-theme="inspired-slack"] .message.msg.me .message-body a { color:#1264a3; }
+:root[data-theme="inspired-slack"] .message.msg.me .inline-mention { background:#e8f5fa; color:#1264a3; }
 :root[data-theme="inspired-slack"] .icon-btn,
 :root[data-theme="inspired-slack"] .add-btn,
 :root[data-theme="inspired-slack"] .btn,
@@ -1043,6 +1056,12 @@
 :root[data-theme="inspired-slack"] .message-actions-menu button { min-height:30px; border:1px solid #868686; border-radius:4px; background:#fff; color:#1d1c1d; box-shadow:0 1px 1px rgba(0,0,0,.08); font-weight:700; }
 :root[data-theme="inspired-slack"] .btn.primary,
 :root[data-theme="inspired-slack"] .send-btn { border-color:#007a5a; background:#007a5a; color:#fff; }
+:root[data-theme="inspired-slack"] .sidebar .add-btn,
+:root[data-theme="inspired-slack"] .sidebar .icon-btn {
+  border-color:transparent; background:transparent; color:#d8c8d8; box-shadow:none;
+}
+:root[data-theme="inspired-slack"] .sidebar .add-btn:hover,
+:root[data-theme="inspired-slack"] .sidebar .icon-btn:hover { background:rgba(255,255,255,.12); color:#fff; box-shadow:none; }
 :root[data-theme="inspired-slack"] .btn:hover,
 :root[data-theme="inspired-slack"] .icon-btn:hover { box-shadow:0 1px 3px rgba(0,0,0,.22); }
 :root[data-theme="inspired-slack"] .pref-group,
@@ -1056,7 +1075,9 @@
 :root[data-theme="inspired-slack"] dialog { border:1px solid #ddd; border-radius:6px; background:#fff; box-shadow:0 4px 18px rgba(0,0,0,.16); }
 :root[data-theme="inspired-slack"] .pref-group h3,
 :root[data-theme="inspired-slack"] .modal-head { padding:9px 12px; border-bottom:1px solid #ddd; background:#fff; color:#1d1c1d; font-weight:800; }
-:root[data-theme="inspired-slack"] .composer-shell { border-top:0; background:#fff; }
+:root[data-theme="inspired-slack"] .composer-shell { border-top:0; background:#fff; padding-left:28px; padding-right:28px; }
+:root[data-theme="inspired-slack"] .composer-shell .composer-inner { max-width:none; margin:0; border-color:#aaa; border-radius:8px; box-shadow:none; }
+:root[data-theme="inspired-slack"] .composer-shell .send-btn:disabled { border-color:transparent; background:transparent; color:#999; box-shadow:none; }
 :root[data-theme="inspired-slack"] .composer-input,
 :root[data-theme="inspired-slack"] input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
 :root[data-theme="inspired-slack"] textarea,
@@ -1064,3 +1085,9 @@
 :root[data-theme="inspired-slack"] .pref-select { border:1px solid #868686; border-radius:4px; background:#fff; color:#1d1c1d; box-shadow:inset 0 1px 1px rgba(0,0,0,.08); }
 :root[data-theme="inspired-slack"] .status-chip,
 :root[data-theme="inspired-slack"] .channel-status-chip { border-radius:4px; background:#fff; color:#1d1c1d; }
+
+@media (max-width:640px) {
+  :root[data-theme="inspired-slack"] .message.msg,
+  :root[data-theme="inspired-slack"] .message.msg.me { padding-left:14px; padding-right:14px; }
+  :root[data-theme="inspired-slack"] .composer-shell { padding-left:12px; padding-right:12px; }
+}

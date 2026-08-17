@@ -109,7 +109,10 @@ check("Inspired skins include platform-native control vocabularies",
       and ".gb-round" in historic_css
       and ".ipod-wheel" in historic_css
       and "repeating-linear-gradient(0deg,#d9d9d9" in historic_css
-      and "background:#3f0e40" in historic_css)
+      and "background:#4a154b" in historic_css
+      and "flex-direction:row; width:100%; max-width:none" in historic_css
+      and "font-family:\"Lato\"" in historic_css
+      and ".messages { padding:18px 0 10px; }" in historic_css)
 check("retired Windows 3.1 preset is absent from tokens and component skins",
       "historic-win31" not in tokens_css and "historic-win31" not in historic_css)
 
