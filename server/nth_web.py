@@ -10218,9 +10218,13 @@ def main() -> int:
                     help="hibernate a managed agent after this many idle minutes "
                          "(0 disables; a hibernated agent keeps its session and "
                          "resumes with memory intact)")
-    ap.add_argument("--no-agent-resume", action="store_true",
-                    help="do not revive managed agents that were running when "
-                         "this server last stopped")
+    ap.add_argument("--no-agent-control", "--no-agent-resume",
+                    dest="no_agent_control", action="store_true",
+                    help="serve the dashboard read-only: no reviving agents "
+                         "that were running when this server last stopped, and "
+                         "no routing or hibernating them either. Use this for a "
+                         "second dashboard against a database another hub is "
+                         "already driving.")
     ap.add_argument("--request-log", action="store_true",
                     help="log one entry per API request for diagnosing token "
                          "consumption (equivalent to NTH_REQUEST_LOG=1)")
@@ -10316,8 +10320,17 @@ def main() -> int:
     if args.request_log:
         os.environ[nrl.ENV_FLAG] = "1"
 
+    # --no-agent-control used to be --no-agent-resume, and it only gated the
+    # startup resume below: the router and the idle reaper started regardless,
+    # and BOTH spawn agents. A hub launched with the flag that reads "do not
+    # bring agents up" spawned three of them within the hour, because the first
+    # message routed to each looked like a cold start. The flag now means what
+    # its old name already implied to everyone who reached for it.
+    if args.no_agent_control:
+        NthWebHandler._agent_control_enabled = False
+
     global _ROUTER, _IDLE_REAPER
-    if args.channel is None:
+    if args.channel is None and not args.no_agent_control:
         supervisor = get_supervisor()
         # One cheap poll loop feeds every managed agent the channel traffic its
         # wake policy asks for — replacing N per-agent monitors.
@@ -10327,11 +10340,10 @@ def main() -> int:
             db_path, supervisor,
             idle_seconds=max(0.0, args.agent_idle_minutes * 60.0))
         _IDLE_REAPER.start()
-        if not args.no_agent_resume:
-            # Off the startup path: reviving an agent can block for seconds and
-            # must not delay binding the port.
-            threading.Thread(target=resume_managed_agents,
-                             args=(db_path, supervisor), daemon=True).start()
+        # Off the startup path: reviving an agent can block for seconds and
+        # must not delay binding the port.
+        threading.Thread(target=resume_managed_agents,
+                         args=(db_path, supervisor), daemon=True).start()
 
     # Let multiple channel dashboards start without manual port coordination.
     requested_port = args.port
