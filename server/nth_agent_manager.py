@@ -265,6 +265,12 @@ class UnifiedAgentSupervisor:
     def foreign_owner_pid(self, agent_id: str) -> Optional[int]:
         return self._guard(agent_id, "foreign_owner_pid").foreign_owner_pid(agent_id)
 
+    def reclaim(self, agent_id: str, grace: float = 3.0) -> Dict[str, Any]:
+        # The operator's only route out of an orphan. Unforwarded it would be
+        # an AttributeError inside the action handler, i.e. a 500 on the one
+        # button that exists to recover an agent nothing else can touch.
+        return self._guard(agent_id, "reclaim").reclaim(agent_id, grace=grace)
+
     def live_ids(self) -> List[str]:
         ids = set(self.claude.live_ids())
         if self.codex is not None:
