@@ -176,7 +176,12 @@ process.on('exit', cleanup);
 (async () => {
   PORT = await freePort();
   BASE = `http://127.0.0.1:${PORT}`;
-  child = spawn('python3', ['-c', bootstrapFor(PORT)], { cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'] });
+  // Honour the interpreter selected by run-all.sh. The system python can lack
+  // the mcp SDK even when the configured project venv has it, making this
+  // integration test fail before the web server starts.
+  child = spawn(process.env.PY || 'python3', ['-c', bootstrapFor(PORT)], {
+    cwd: ROOT, stdio: ['ignore', 'pipe', 'pipe'],
+  });
   let serverLog = '';
   child.stdout.on('data', d => { serverLog += d; });
   child.stderr.on('data', d => { serverLog += d; });
