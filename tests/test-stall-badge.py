@@ -33,6 +33,10 @@ sys.path.insert(0, str(SERVER))
 _tmp = Path(tempfile.mkdtemp(prefix="nth_stall_badge_"))
 DB = _tmp / "nth.db"
 os.environ["NTH_DB_PATH"] = str(DB)
+# nth_connect records the host session id as the durable fingerprint that the
+# StopFailure hook later reports. Keep the fixture hermetic instead of relying
+# on the test runner itself happening to be inside a Claude Code session.
+os.environ["CLAUDE_CODE_SESSION_ID"] = "stall-test-fingerprint"
 
 import nth_server as srv    # noqa: E402
 import nth_web as web       # noqa: E402
