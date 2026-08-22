@@ -115,7 +115,12 @@
     // No channel selected on load; stay on the workspace home view instead of
     // forcing the first channel open.
     root.setChannelTitle(root.state.channel ? `#${root.state.channel}` : 'nth');
-    document.getElementById('h-meta').textContent = root.state.channel ? 'Live agent workspace' : 'No channel selected';
+    // /api/meta identifies the route/operator; it does not carry the channel
+    // roster or agent avatar/state metadata. Calling the room "Live" here
+    // paints a final claim beside fallback initials while those slower slices
+    // are still in flight. Workspace refresh promotes this to Live only after
+    // both metadata slices have settled.
+    document.getElementById('h-meta').textContent = root.state.channel ? 'Loading workspace…' : 'No channel selected';
     mountFeatures?.();
     // The router applies the initial route from inside mountFeatures(), and a
     // channel route loads the conversation — which opens the event stream. So

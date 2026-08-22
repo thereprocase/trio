@@ -31,6 +31,15 @@ from nth_constants import AGENT_INBOX_CHANNEL
 STDERR_TAIL_LINES = 200
 DEFAULT_TIMEOUT = 10.0
 
+# One capability list drives both App Server enablement and readiness. Managed
+# agents must not be invited to use tools their provider launch path hid.
+TRIO_TOOL_NAMES = (
+    "connect", "send", "dm", "poll", "ack", "pounds", "ask",
+    "claim", "complete", "cancel", "release", "lock", "unlock",
+    "set_status", "rename", "status", "roster", "history", "end",
+    "list", "cull", "cleanup", "retract", "avatar_choices", "set_avatar",
+)
+
 
 def _toml_string(value: str) -> str:
     """JSON strings are valid TOML basic strings for the paths used here."""
@@ -51,12 +60,7 @@ def build_app_server_argv(nth_server_path: str = "",
     argv = ["codex", "app-server"]
     if nth_server_path:
         py = python_cmd or sys.executable
-        tool_names = ["trio_" + name for name in (
-            "connect", "send", "dm", "poll", "ack", "pounds", "ask",
-            "claim", "complete", "cancel", "release", "lock", "unlock",
-            "set_status", "rename", "status", "roster", "history", "end",
-            "list", "cull", "cleanup", "retract",
-        )]
+        tool_names = ["trio_" + name for name in TRIO_TOOL_NAMES]
         argv += [
             "-c", f"mcp_servers.nth-trio.command={_toml_string(py)}",
             "-c", "mcp_servers.nth-trio.args=" + json.dumps([nth_server_path]),
@@ -474,11 +478,7 @@ class CodexRuntimeManager:
                 "limit": 50, "detail": "toolsAndAuthOnly"})
             trio = next((row for row in mcp.get("data", [])
                          if row.get("name") == "nth-trio"), None)
-            required = {"trio_" + name for name in (
-                "connect", "send", "dm", "poll", "ack", "pounds", "ask",
-                "claim", "complete", "cancel", "release", "lock", "unlock",
-                "set_status", "rename", "status", "roster", "history", "end",
-                "list", "cull", "cleanup", "retract")}
+            required = {"trio_" + name for name in TRIO_TOOL_NAMES}
             tools = set((trio or {}).get("tools", {}).keys())
             missing = sorted(required - tools)
             if trio is None or missing:

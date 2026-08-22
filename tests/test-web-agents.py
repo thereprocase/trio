@@ -224,9 +224,21 @@ try:
           foreign_active == (1,) and foreign_revoked == (None,))
 
     # ── unarchive (restore presence; agent stays stopped until woken) ──
+    # While this identity is archived its portrait is reusable. If another
+    # active identity takes it, unarchive must atomically choose a different
+    # free portrait rather than reintroducing duplicate faces.
+    archived_avatar = ar["avatar_name"]
+    db = sqlite3.connect(str(srv.DB_PATH))
+    db.execute(
+        "INSERT INTO agents (id,name,model,state,managed,avatar_name,created_at) "
+        "VALUES ('avatar-reuser','AvatarReuser','external','stopped',0,?,?)",
+        (archived_avatar, srv.now_iso()))
+    db.commit(); db.close()
     st, _ = http(port, f"/api/agents/{aid}/unarchive", "POST")
     ur = row(aid)
     check("unarchive: 200 + archived_at cleared", st == 200 and ur and ur["archived_at"] is None)
+    check("unarchive: resolves a portrait reused while archived",
+          ur and ur["avatar_name"] and ur["avatar_name"] != archived_avatar)
     db = sqlite3.connect(str(srv.DB_PATH))
     active = db.execute("SELECT active FROM members WHERE id=? AND channel='chan-x'", (aid,)).fetchone()
     inbox_member = db.execute(
@@ -236,6 +248,8 @@ try:
         "SELECT 1 FROM agent_channels WHERE agent_id=? AND channel=?",
         (aid, srv.AGENT_INBOX_CHANNEL),
     ).fetchone()
+    db.execute("DELETE FROM agents WHERE id='avatar-reuser'")
+    db.commit()
     db.close()
     check("unarchive: member presence restored", active and active[0] == 1)
     check("unarchive: global inbox presence restored",

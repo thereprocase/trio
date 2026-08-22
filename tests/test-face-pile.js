@@ -186,10 +186,42 @@ state.dmKey = '';
 state.operator = null;
 state.agents = [];
 state.members = new Map(elevenMembers.map(m => [m.id, m]));
+state.loaded = {};
 Trio.workspace.renderFacePile();
 const pile = cx.document.getElementById('face-pile');
+check('cold metadata keeps fallback initials out of the supposedly-final pile',
+      pile.classList.contains('hidden') && pile.querySelectorAll('.av').length === 0);
+Trio.workspace.renderChannelMetadataState();
+check('cold channel metadata says Loading workspace, not Live',
+      cx.document.getElementById('h-meta').textContent === 'Loading workspace…');
+
+state.loaded = { meta: true, agents: true };
+Trio.workspace.renderChannelMetadataState();
+check('settled channel and agent metadata promotes the subtitle to Live',
+      cx.document.getElementById('h-meta').textContent === 'Live agent workspace');
+Trio.workspace.renderFacePile();
 check('the header paints one face per live member',
       pile.querySelectorAll('.av').length === 3);
+state.members.get('alice').avatar_url = '/avatars/Atlas/avatar.svg';
+Trio.workspace.renderFacePile();
+check('settled roster buddy metadata replaces initials with its image',
+      pile.querySelector('img')?.getAttribute('src') === '/avatars/Atlas/avatar.svg');
+state.sliceErrors = { agents: new Error('offline') };
+Trio.workspace.renderChannelMetadataState();
+Trio.workspace.renderFacePile();
+check('failed agent metadata does not promote the workspace to Live',
+      cx.document.getElementById('h-meta').textContent === 'Workspace metadata unavailable');
+check('failed agent metadata cannot resurrect provisional initials',
+      pile.classList.contains('hidden') && pile.querySelectorAll('.av').length === 0);
+state.sliceErrors = { meta: new Error('offline') };
+Trio.workspace.renderChannelMetadataState();
+Trio.workspace.renderFacePile();
+check('failed channel metadata independently prevents a Live claim',
+      cx.document.getElementById('h-meta').textContent === 'Workspace metadata unavailable'
+      && pile.classList.contains('hidden'));
+state.sliceErrors = {};
+Trio.workspace.renderChannelMetadataState();
+Trio.workspace.renderFacePile();
 check('the header shows no overflow badge when nobody is hidden',
       !pile.querySelector('.more'));
 

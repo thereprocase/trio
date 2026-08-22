@@ -30,7 +30,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).parent))
 from nth_constants import (SLEEPING_KEYWORDS, NTH_VERSION, project_context,
                            AGENT_INBOX_CHANNEL, can_see, is_all_seeing,
-                           narrow_wake, parse_recipients)
+                           narrow_wake, parse_recipients, BUDDY_AVATARS)
 
 from mcp.server.fastmcp import FastMCP, Image
 
@@ -1542,6 +1542,17 @@ def nth_connect(
             "reclaim_secret": response_reclaim_secret,
             "transport": "sse" if is_sse else "stdio",
             "monitor_hint": monitor_hint,
+            # Capability-honest invitation: the checked-in buddy set is ready
+            # for self-service; custom generation is deliberately a separate
+            # PNG-only pipeline and must not be implied by this response.
+            "buddy_icon": {
+                "current": ((db.execute(
+                    "SELECT avatar_name FROM agents WHERE id = ?", (member_id,)
+                ).fetchone() or {"avatar_name": ""})["avatar_name"] or ""),
+                "choices_tool": f"{TOOL_PREFIX}_avatar_choices",
+                "set_tool": f"{TOOL_PREFIX}_set_avatar",
+                "custom_generation": False,
+            },
             "members": [
                 {"id": m["id"], "name": m["name"], "summary": m["summary"],
                  "skills": m["skills"], "active": _is_member_active(m["last_seen"]),
@@ -4112,6 +4123,129 @@ def nth_rename(channel: str, member_id: str, new_name: str, session_token: str =
         except Exception:
             pass
         return json.dumps({"ok": True, "old_name": old_name, "name": new_name})
+    finally:
+        db.close()
+
+
+def _avatar_self_session(db, channel: str, member_id: str, session_token: str):
+    """Validate the self-only identity capability used by buddy metadata."""
+    if not session_token:
+        return None, "session_token is required to manage your buddy icon."
+    sess = _get_session(db, channel, session_token)
+    if not sess:
+        return None, "Invalid or revoked session_token."
+    if sess["member_id"] != member_id:
+        return None, "session_token does not match member_id."
+    if sess["role"] != "primary":
+        return None, f"session_token role '{sess['role']}' cannot change buddy metadata."
+    if not _get_member(db, channel, member_id):
+        return None, "You are not a member of this channel."
+    agent = db.execute(
+        "SELECT id, avatar_name FROM agents WHERE id = ? AND archived_at IS NULL",
+        (member_id,),
+    ).fetchone()
+    if agent is None:
+        return None, "No active durable agent identity exists for this session."
+    return agent, None
+
+
+@mcp.tool(name=f"{TOOL_PREFIX}_avatar_choices")
+def nth_avatar_choices(channel: str, member_id: str, session_token: str = "") -> str:
+    """List safe checked-in buddy icons and your current selection.
+
+    Requires the primary session token for this exact channel/member. Values
+    come from the same server allowlist used by the avatar HTTP route.
+
+    Args:
+        channel: Channel whose session proves your identity
+        member_id: Your own member id
+        session_token: Primary token returned by connect
+    """
+    err = validate_channel_code(channel)
+    if err:
+        return json.dumps({"error": err})
+    db = get_db()
+    try:
+        agent, auth_error = _avatar_self_session(
+            db, channel, member_id, session_token)
+        if auth_error:
+            return json.dumps({"error": auth_error})
+        used = {row[0]: row[1] for row in db.execute(
+            "SELECT avatar_name, id FROM agents WHERE archived_at IS NULL "
+            "AND avatar_name != '' AND id != ?", (member_id,)).fetchall()}
+        return json.dumps({
+            "ok": True,
+            "current": agent["avatar_name"] or "",
+            "choices": [
+                {"name": name, "available": name not in used}
+                for name in BUDDY_AVATARS
+            ],
+            "reset": "Pass avatar_name='auto' to choose an unused buddy.",
+            "custom_generation": False,
+        })
+    finally:
+        db.close()
+
+
+@mcp.tool(name=f"{TOOL_PREFIX}_set_avatar")
+def nth_set_avatar(channel: str, member_id: str, avatar_name: str,
+                   session_token: str = "") -> str:
+    """Set your own buddy icon from the checked-in safe allowlist.
+
+    The target is derived from the authenticated session: this tool cannot
+    change another agent. Buddy icons stay unique among active identities.
+    Pass ``auto`` (or an empty value) to select an unused buddy automatically.
+
+    Args:
+        channel: Channel whose session proves your identity
+        member_id: Your own member id
+        avatar_name: One server-advertised name, or ``auto``
+        session_token: Primary token returned by connect
+    """
+    err = validate_channel_code(channel)
+    if err:
+        return json.dumps({"error": err})
+    db = get_db()
+    try:
+        # The uniqueness decision and update are one writer transaction. Two
+        # agents choosing the same free buddy concurrently must not both pass a
+        # SELECT-then-UPDATE race.
+        db.execute("BEGIN IMMEDIATE")
+        agent, auth_error = _avatar_self_session(
+            db, channel, member_id, session_token)
+        if auth_error:
+            db.execute("ROLLBACK")
+            return json.dumps({"error": auth_error})
+        desired = (avatar_name or "auto").strip()
+        used = {row[0] for row in db.execute(
+            "SELECT avatar_name FROM agents WHERE archived_at IS NULL "
+            "AND avatar_name != '' AND id != ?", (member_id,)).fetchall()}
+        if desired.lower() == "auto":
+            available = [name for name in BUDDY_AVATARS if name not in used]
+            if not available:
+                db.execute("ROLLBACK")
+                return json.dumps({"error": "No unused buddy icons remain."})
+            desired = secrets.choice(available)
+        if desired not in BUDDY_AVATARS:
+            db.execute("ROLLBACK")
+            return json.dumps({
+                "error": "Unknown buddy icon. Call avatar_choices for server values."
+            })
+        if desired in used:
+            db.execute("ROLLBACK")
+            return json.dumps({"error": f"Buddy icon '{desired}' is already in use."})
+        unchanged = (agent["avatar_name"] or "") == desired
+        if not unchanged:
+            db.execute(
+                "UPDATE agents SET avatar_name = ? WHERE id = ?",
+                (desired, member_id),
+            )
+        db.commit()
+        return json.dumps({
+            "ok": True, "avatar_name": desired,
+            "avatar_url": f"/avatars/{desired}/avatar.svg",
+            "unchanged": unchanged,
+        })
     finally:
         db.close()
 

@@ -95,7 +95,9 @@ def main() -> int:
     check("build_spawn_argv: every Trio tool is pre-approved headlessly",
           "--allowedTools" in argv
           and "mcp__nth-trio__trio_dm" in argv[argv.index("--allowedTools") + 1]
-          and "mcp__nth-trio__trio_ask" in argv[argv.index("--allowedTools") + 1])
+          and "mcp__nth-trio__trio_ask" in argv[argv.index("--allowedTools") + 1]
+          and "mcp__nth-trio__trio_avatar_choices" in argv[argv.index("--allowedTools") + 1]
+          and "mcp__nth-trio__trio_set_avatar" in argv[argv.index("--allowedTools") + 1])
     check("build_spawn_argv: model + resume + mcp + prompt passed",
           argv[argv.index("--model") + 1] == "sonnet"
           and argv[argv.index("--resume") + 1] == "sX"

@@ -63,7 +63,7 @@ import nth_usage as nusage
 import nth_conversation as nconv
 from nth_constants import (ANIMAL_EMOJIS, animal_for, animal_for_channel,
                            NTH_VERSION, project_context, AGENT_INBOX_CHANNEL, can_see, is_all_seeing,
-                           parse_recipients, narrow_wake)
+                           parse_recipients, narrow_wake, BUDDY_AVATARS)
 
 
 # ───────── Config ─────────
@@ -1920,6 +1920,13 @@ class EventHub:
         # can be launched standalone against a DB whose server has not restarted
         # — folding both into one try/except would drop filter_mode and the
         # context % for every member just because the turn column is missing.
+        try:
+            _agent_cols = {row[1] for row in db.execute(
+                "PRAGMA table_info(agents)").fetchall()}
+        except sqlite3.Error:
+            _agent_cols = set()
+        has_agent_avatar = "avatar_name" in _agent_cols
+
         def _roster_sql(turn: bool, v72: bool, kind: bool) -> str:
             cols = [
                 "m.id AS id", "m.name AS name", "m.status_text AS status_text",
@@ -1932,6 +1939,9 @@ class EventHub:
             # context %, which is what folding it into v72 would do.
             if kind:
                 cols.append("m.kind AS kind")
+            cols.append(
+                "MAX(COALESCE(a.avatar_name, '')) AS avatar_name"
+                if has_agent_avatar else "'' AS avatar_name")
             if v72:
                 cols += ["m.filter_mode AS filter_mode", "m.context_json AS context_json"]
             cols += [
@@ -1954,7 +1964,10 @@ class EventHub:
                     "MAX(COALESCE(s.last_tool_at,'') || char(31) || "
                     "    COALESCE(s.last_tool_name,'') || char(31) || "
                     "    COALESCE(s.last_tool_target,'')) AS session_tool_packed")
+            agent_join = ("LEFT JOIN agents a ON a.id = m.id "
+                          if has_agent_avatar else "")
             return ("SELECT " + ", ".join(cols) + " FROM members m "
+                    + agent_join +
                     "LEFT JOIN sessions s "
                     "  ON s.channel = m.channel AND s.member_id = m.id "
                     "  AND s.revoked_at IS NULL "
@@ -2027,6 +2040,8 @@ class EventHub:
                 if len(parts) == 3:
                     tool_at, tool_name, tool_target = parts
             aname, aemoji = avatars.get(r["id"], animal_for(r["id"]))
+            buddy_name = ((r["avatar_name"]
+                           if "avatar_name" in keys else "") or "")
             out.append({
                 "id": r["id"],
                 "name": r["name"] or r["id"],
@@ -2069,6 +2084,11 @@ class EventHub:
                 "stalled": stalled.get(r["id"]),
                 "animal_name": aname,
                 "animal_emoji": aemoji,
+                # Only a server-allowlisted checked-in buddy becomes a URL.
+                # Empty/legacy values keep the client's honest initials
+                # fallback rather than avatar_url()'s managed-agent default.
+                "avatar_url": (avatar_url(buddy_name)
+                               if buddy_name in BUDDY_AVATARS else ""),
             })
         return out
 
@@ -2742,18 +2762,7 @@ def ensure_agent_inboxes(conn: sqlite3.Connection) -> None:
 # spawned agent gets a stable face so operators can tell them apart at a glance
 # without naming every one by hand. The icons are from SVG Repo under CC BY 4.0;
 # the Settings drawer carries the user-facing attribution.
-_CHARACTERS = [
-    ("Luna", "Luna"), ("Iris", "Iris"), ("Gale", "Gale"),
-    ("Frost", "Frost"), ("Umbra", "Umbra"), ("Atlas", "Atlas"),
-    ("Chance", "Chance"), ("Gemma", "Gemma"), ("Rex", "Rex"),
-    ("Locke", "Locke"), ("Corbin", "Corbin"), ("Vesper", "Vesper"),
-    ("Salem", "Salem"), ("Merlin", "Merlin"), ("Circe", "Circe"),
-    ("Piper", "Piper"), ("Reed", "Reed"), ("Coda", "Coda"),
-    ("Cass", "Cass"), ("Quill", "Quill"), ("Scout", "Scout"),
-    ("Paige", "Paige"), ("Darwin", "Darwin"), ("Ada", "Ada"),
-    ("Watts", "Watts"), ("Ferris", "Ferris"), ("Mason", "Mason"),
-    ("Grove", "Grove"), ("Archer", "Archer"), ("Ranger", "Ranger"),
-]
+_CHARACTERS = [(name, name) for name in BUDDY_AVATARS]
 _CHARACTER_NAMES = [name for name, _avatar in _CHARACTERS]
 
 
@@ -2780,15 +2789,28 @@ def pick_agent_name(db, desired: str = "") -> str:
     return f"{_CHARACTER_NAMES[0]}-{i}"
 
 
-def pick_agent_avatar(db, name: str) -> str:
-    """Return the character folder used for an agent's avatar."""
-    if name in _CHARACTER_NAMES:
-        return name
+def pick_agent_avatar(db, name: str, exclude_agent_id: str = "") -> str:
+    """Return an unused checked-in portrait while holding a writer txn.
+
+    Callers begin ``IMMEDIATE`` before allocation, so web create/unarchive and
+    MCP self-selection serialize their read+write uniqueness decisions across
+    the two server processes.
+    """
+    params = []
+    exclude = ""
+    if exclude_agent_id:
+        exclude = " AND id != ?"
+        params.append(exclude_agent_id)
     used = {r[0] for r in db.execute(
         "SELECT avatar_name FROM agents "
-        "WHERE avatar_name != '' AND archived_at IS NULL").fetchall()}
+        "WHERE avatar_name != '' AND archived_at IS NULL" + exclude,
+        params).fetchall()}
+    if name in _CHARACTER_NAMES and name not in used:
+        return name
     available = [avatar for _name, avatar in _CHARACTERS if avatar not in used]
-    return secrets.choice(available or [avatar for _name, avatar in _CHARACTERS])
+    # More than 30 active identities is valid. An empty portrait is honest and
+    # preserves uniqueness; the UI uses initials until one becomes available.
+    return secrets.choice(available) if available else ""
 
 
 def avatar_url(avatar_name: str) -> str:
@@ -4517,7 +4539,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
                     "wake_mode": r["wake_mode"] or "at",
                     "status_text": (r["status_text"]
                                     if "status_text" in r.keys() else "") or "",
-                    "avatar_url": avatar_url(r["avatar_name"] or r["name"]),
+                    "avatar_url": avatar_url(r["avatar_name"]),
                     "session_id": r["session_id"], "pid": r["pid"],
                     "channels": chans,
                     "dm_ready": dm_ready,
@@ -4822,6 +4844,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 db = sqlite3.connect(str(self.db_path), timeout=5)
                 db.row_factory = sqlite3.Row
                 db.execute("PRAGMA busy_timeout=3000")
+                db.execute("BEGIN IMMEDIATE")
                 name = pick_agent_name(db, desired)
                 assigned_avatar = pick_agent_avatar(db, name)
                 now = now_iso()
@@ -5459,14 +5482,23 @@ class NthWebHandler(BaseHTTPRequestHandler):
                     (agent_id,)).fetchone()
                 if exists is None:
                     raise AgentActionError(404, "agent not found")
+                db.execute("BEGIN IMMEDIATE")
                 with db:
                     agent = db.execute(
-                        "SELECT name, model, base_prompt FROM agents WHERE id=?",
+                        "SELECT name, model, base_prompt, avatar_name FROM agents WHERE id=?",
                         (agent_id,)).fetchone()
+                    assigned_avatar = (agent["avatar_name"] or "") if agent else ""
+                    used_elsewhere = db.execute(
+                        "SELECT 1 FROM agents WHERE archived_at IS NULL "
+                        "AND avatar_name != '' AND avatar_name=? AND id!=? LIMIT 1",
+                        (assigned_avatar, agent_id)).fetchone()
+                    if not assigned_avatar or used_elsewhere:
+                        assigned_avatar = pick_agent_avatar(
+                            db, agent["name"] if agent else "", agent_id)
                     cur = db.execute(
                         "UPDATE agents SET archived_at=NULL, archived_by=NULL, "
-                        "state=?, pid=NULL WHERE id=?",
-                        (nsup.ST_STOPPED, agent_id))
+                        "state=?, pid=NULL, avatar_name=? WHERE id=?",
+                        (nsup.ST_STOPPED, assigned_avatar, agent_id))
                     if cur.rowcount == 0:
                         raise AgentActionError(404, "agent not found")
                     # Restore public presence only in channels where the agent

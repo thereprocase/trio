@@ -8,6 +8,16 @@ import json
 
 NTH_VERSION = "8.1.1-beta.1"
 
+# Checked-in buddy portraits shared by the MCP self-service metadata path and
+# the web server's allowlisted avatar route. Keep one source of truth: a tool
+# must never offer a value the HTTP renderer will silently reject.
+BUDDY_AVATARS = (
+    "Luna", "Iris", "Gale", "Frost", "Umbra", "Atlas", "Chance", "Gemma",
+    "Rex", "Locke", "Corbin", "Vesper", "Salem", "Merlin", "Circe",
+    "Piper", "Reed", "Coda", "Cass", "Quill", "Scout", "Paige", "Darwin",
+    "Ada", "Watts", "Ferris", "Mason", "Grove", "Archer", "Ranger",
+)
+
 SLEEPING_KEYWORDS = ("idle", "standing by", "tier 3", "agent-monitor")
 
 # Hidden transport for managed agents. A supervised agent is launched with this

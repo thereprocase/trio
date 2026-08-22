@@ -56,6 +56,8 @@ check('an archived agent gets no face in the face-pile', () => {
   state.dmKey = ''; state.dmMemberIds = [];
   state.operator = { id: 'op_1', name: 'operator' };
   state.agents = [];
+  state.loaded = { meta: true, agents: true };
+  state.sliceErrors = {};
   // The live agent carries an explicit status because the pile now filters on
   // liveness, not just on `archived` (see test-face-pile.js). The roster always
   // supplies one — member_status() emits blocked/working/active/idle/stale/dead

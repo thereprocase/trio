@@ -18,6 +18,7 @@ os.environ["TRIO_CODEX_CMD"] = f"{sys.executable} {HERE / 'fake_codex_app_server
 
 import nth_server as srv
 import nth_web as web
+import nth_codex_runtime as ncodex
 
 
 failures = 0
@@ -61,6 +62,21 @@ port = server.server_address[1]
 threading.Thread(target=server.serve_forever, daemon=True).start()
 router = None
 try:
+    saved_override = os.environ.pop("TRIO_CODEX_CMD", None)
+    try:
+        codex_argv = ncodex.build_app_server_argv(
+            str(HERE.parent / "server" / "nth_server.py"), sys.executable)
+    finally:
+        if saved_override is not None:
+            os.environ["TRIO_CODEX_CMD"] = saved_override
+    enabled_arg = next(
+        arg for arg in codex_argv
+        if arg.startswith("mcp_servers.nth-trio.enabled_tools="))
+    enabled_tools = set(json.loads(enabled_arg.split("=", 1)[1]))
+    check("managed Codex enables and requires buddy self-service tools",
+          {"trio_avatar_choices", "trio_set_avatar"} <= enabled_tools
+          and {"avatar_choices", "set_avatar"} <= set(ncodex.TRIO_TOOL_NAMES))
+
     status, payload = request(port, "/api/agent-models?provider=codex")
     check("Codex models are discovered from App Server",
           status == 200 and payload["models"][0]["id"] == "fake-codex")

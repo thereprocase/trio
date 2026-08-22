@@ -403,7 +403,7 @@ TRIO_TOOL_NAMES = (
     "connect", "send", "dm", "poll", "ack", "pounds", "ask",
     "claim", "complete", "cancel", "release", "lock", "unlock",
     "set_status", "rename", "status", "roster", "history", "end",
-    "list", "cull", "cleanup", "retract",
+    "list", "cull", "cleanup", "retract", "avatar_choices", "set_avatar",
 )
 MANAGED_ALLOWED_TOOLS = ",".join(
     f"mcp__nth-trio__trio_{name}" for name in TRIO_TOOL_NAMES)

@@ -536,6 +536,8 @@ check('face-pile merges agent {live,busy,state} so its status matches the drawer
   H.Trio.state.dmKey = null;
   H.Trio.state.channel = 'atrium-test';
   H.Trio.state.operator = { id: 'op', name: 'op' };
+  H.Trio.state.loaded = { meta: true, agents: true };
+  H.Trio.state.sliceErrors = {};
   // roster row alone would read 'offline' (no live/state); the agent record says compacting.
   H.Trio.state.members = new Map([['ag_c', { id: 'ag_c', name: 'Comp' }]]);
   H.Trio.state.agents = [{ id: 'ag_c', name: 'Comp', state: 'compacting', live: true, busy: true }];
