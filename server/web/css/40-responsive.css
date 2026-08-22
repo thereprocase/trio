@@ -1,1 +1,25 @@
 @media (max-width:880px) { .app { grid-template-columns:1fr; }.sidebar { position:fixed; z-index:2; inset:0 auto 0 0; width:300px; transform:translateX(-105%); transition:transform .25s ease; }.app.nav-open .sidebar { transform:none; }.nav-toggle { display:block; }.scrim-nav { position:fixed; inset:0; z-index:1; background:#0006; }.app.nav-open + .scrim-nav { display:block; } }
+
+/* These live here rather than in the 880px block of 10-shell.css because
+   30-workspace.css re-declares .workspace-view and .pref-row unconditionally and
+   loads later. Media queries contribute no specificity, so at equal specificity
+   source order decides and the earlier mobile rule simply loses. 10-shell.css
+   already carries one dead rule for exactly this reason
+   (.workspace-view{padding:22px 18px 40px}, measured as 34px at every width).
+   This file loads last, so a rule placed here actually applies. */
+
+/* A preference row is label + control on one line. The control is flex:none, and
+   a <select> sizes to its widest option — so when the row runs out of room the
+   label is what gives. Measured at 412px: the "Speech-to-text engine" label box
+   collapsed to 15px wide and 752px tall, one character per line. Let the row wrap
+   and give the label its own full-width line instead of squeezing it to nothing. */
+@media (max-width:640px){
+  .pref-row{ flex-wrap:wrap; }
+  .pref-row .pr-txt{ flex:1 1 100%; }
+}
+
+/* 34px of horizontal padding each side is a desktop number; on a 360px phone it
+   spends 19% of the screen on margin. */
+@media (max-width:880px){
+  .workspace-view{ padding:22px 16px 40px; }
+}
