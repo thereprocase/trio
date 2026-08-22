@@ -1899,7 +1899,7 @@
   function closeDetails() {
     const drawer = $('channel-drawer');
     if (!drawer) return;
-    drawer.classList.remove('open'); $('app')?.classList.remove('channel-details-open'); drawer.setAttribute('aria-hidden', 'true'); $('details-btn')?.classList.remove('menu-active');
+    drawer.classList.remove('open'); $('app')?.classList.remove('channel-details-open'); drawer.setAttribute('aria-hidden', 'true'); $('details-btn')?.classList.remove('menu-active'); $('face-pile')?.setAttribute('aria-expanded', 'false');
   }
   function startDrawerResize(event) {
     if (event.button !== 0) return;
@@ -2014,7 +2014,7 @@
     const connection = $('h-conn')?.querySelector('.conn-label')?.textContent || (archived ? 'Archived' : 'Live');
     $('channel-drawer-title').textContent = title;
     body.innerHTML = `<section class="channel-drawer-section"><h3>Topic</h3><div class="channel-drawer-topic">${esc(channel?.topic || (dm ? 'Private conversation' : 'No topic'))}</div></section><section class="channel-drawer-section channel-members-section"><h3><span id="channel-drawer-members-heading">Members · ${memberCount}</span>${canEditMembers ? `<button type="button" class="icon-btn edit-members-toggle" id="edit-members-toggle" aria-label="Edit members" aria-pressed="false" title="Edit members">${navIcon('edit')}</button>` : ''}</h3><div id="channel-drawer-members">${members.length ? members.map(detailMember).join('') : '<div class="channel-drawer-empty">Waiting for the current roster…</div>'}</div>${canEditMembers ? `<button type="button" class="btn ghost add-member-btn" id="add-member-btn" hidden>${navIcon('plus')}<span>Add member</span></button>` : ''}</section><section class="channel-drawer-section"><h3>Tasks · ${tasks.length}</h3>${tasks.length ? tasks.slice(0, 4).map(detailTask).join('') : '<div class="channel-drawer-empty">No open tasks.</div>'}${tasks.length > 4 ? '<div class="channel-drawer-empty">+' + (tasks.length - 4) + ' more tasks</div>' : ''}<button type="button" class="btn ghost" id="open-channel-tasks">Open tasks view</button></section><section class="channel-drawer-section"><h3>Activity</h3><div class="kv"><span class="k">Messages loaded</span><span class="v" id="channel-drawer-msgcount" title="Capped at the most recent 500 — not literally every message in this conversation's history">${messageCountLabel()}</span></div><div class="kv"><span class="k">${dm ? 'Conversation size' : 'Channel size'}</span><span class="v" id="channel-drawer-size" title="Rough estimate of this ${dm ? 'conversation' : 'channel'}'s message-history size — a different measurement than an individual agent's own context-fullness badge above">…</span></div><div class="kv"><span class="k">Connection</span><span class="v live">${esc(connection)}</span></div></section><section class="channel-drawer-section"><h3>${dm ? 'Conversation' : 'Channel'}</h3><div class="channel-drawer-actions"><button type="button" class="btn" id="edit-channel-objective">${dm ? 'Conversation settings' : 'Edit objective'}</button>${state.channel ? `<button type="button" class="btn danger" id="archive-channel-drawer">${dm ? (archived ? 'Restore conversation' : 'Archive conversation') : (archived ? 'Restore channel' : 'Archive channel')}</button>` : ''}</div></section>`;
-    $('app')?.classList.add('channel-details-open'); drawer.classList.add('open'); drawer.setAttribute('aria-hidden', 'false'); $('details-btn')?.classList.add('menu-active');
+    $('app')?.classList.add('channel-details-open'); drawer.classList.add('open'); drawer.setAttribute('aria-hidden', 'false'); $('details-btn')?.classList.add('menu-active'); $('face-pile')?.setAttribute('aria-expanded', 'true');
     if (!refresh) $('channel-drawer-close')?.focus();
     $('open-channel-tasks')?.addEventListener('click', () => { closeDetails(); navigateView('tasks'); });
     $('edit-members-toggle')?.addEventListener('click', toggleEditMembers);
@@ -2148,15 +2148,33 @@
   // 15s workspace refresh, operator-gated, no agent tokens. Working/idle + tool
   // use come faster still, over the roster SSE (see renderFacePile/refreshDrawerMembers).
   function pollAgents() { return (Trio.agents?.refresh?.() || Promise.resolve()).then(() => { renderFacePile(); refreshDrawerMembers(); }); }
+  function openFacePile(event) {
+    if (event.type === 'keydown' && event.key !== 'Enter' && event.key !== ' ') return;
+    event.preventDefault();
+    showDetails();
+  }
   // Feed ownership is per mount and is surrendered on unmount; otherwise a
   // later boot could skip core's fallback using evidence from an old lifetime.
   function mountFaceMedia() {
+    const pile = $('face-pile');
+    if (pile) {
+      pile.setAttribute('role', 'button');
+      pile.setAttribute('tabindex', '0');
+      pile.setAttribute('aria-controls', 'channel-drawer');
+      pile.setAttribute('aria-expanded', 'false');
+      pile.setAttribute('aria-label', 'Open channel members');
+      pile.addEventListener('click', openFacePile);
+      pile.addEventListener('keydown', openFacePile);
+    }
     try { faceMedia = window.matchMedia?.(FACE_MEDIA) || null; } catch { faceMedia = null; }
     if (!faceMedia) return;
     faceMediaChange = () => renderFacePile();
     faceMedia.addEventListener?.('change', faceMediaChange);
   }
   function unmountFaceMedia() {
+    const pile = $('face-pile');
+    pile?.removeEventListener('click', openFacePile);
+    pile?.removeEventListener('keydown', openFacePile);
     if (faceMedia && faceMediaChange) faceMedia.removeEventListener?.('change', faceMediaChange);
     faceMedia = null; faceMediaChange = null;
   }

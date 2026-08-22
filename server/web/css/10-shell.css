@@ -453,7 +453,9 @@ h1,h2,h3,h4{ margin:0; font-weight:600; }
   .channel-drawer-head{ padding-left:24px; padding-right:20px; }
 }
 
-.face-pile{ display:flex; align-items:center; padding-right:6px; }
+.face-pile{ display:flex; align-items:center; padding:5px 6px 5px 5px; min-width:44px; min-height:44px; border-radius:var(--r-md); cursor:pointer; }
+.face-pile:hover{ background:var(--hover); }
+.face-pile:focus-visible{ outline:2px solid var(--accent); outline-offset:2px; }
 .face-pile .av{ width:34px; height:34px; font-size:14px; margin-left:-8px; box-shadow: inset 0 0 0 1px rgba(255,255,255,.14), 0 0 0 2.5px var(--bg); }
 .face-pile .av:first-child{ margin-left:0; }
 .face-pile .more{
