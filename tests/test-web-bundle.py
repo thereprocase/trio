@@ -47,6 +47,9 @@ served = web.INDEX_HTML
 check("the composed bundle is a complete document",
       served.lstrip().startswith("<!doctype html>")
       and served.rstrip().endswith("</html>"))
+check("the soft keyboard resizes the layout viewport",
+      re.search(r'<meta\s+name="viewport"\s+content="[^"]*'
+                r'interactive-widget=resizes-content[^"]*">', served) is not None)
 
 # ── every marker was substituted ───────────────────────────────────────
 # A surviving marker means a substitution silently missed its file — the
