@@ -231,6 +231,25 @@ with tempfile.TemporaryDirectory() as tmp:
     check("a dirty database warns exactly once per process, not per open",
           err.getvalue().count("buddy-icon uniqueness index not created") == 1)
 
+    # ── and it recovers by itself once the duplicates are gone ───────────────
+    # The commit body claims the index "appears by itself once an operator
+    # resolves the duplicates". Nothing above proves that: counting warnings
+    # while the database stays dirty passes just as happily against a version
+    # that gives up after the first attempt. Claiming behaviour in a commit
+    # message that no test covers is how a promise quietly becomes false.
+    fix = sqlite3.connect(dirty_path)
+    fix.execute("DELETE FROM agents WHERE id='d2'")
+    fix.commit()
+    fix.close()
+    recovered = fresh_db(dirty_path)
+    try:
+        check("the index creates itself on the next open once duplicates are gone",
+              recovered.execute(
+                  "SELECT name FROM sqlite_master WHERE type='index' "
+                  "AND name='idx_agents_avatar_active'").fetchone() is not None)
+    finally:
+        recovered.close()
+
     # ── the two web backstops ────────────────────────────────────────────────
     # These CANNOT be driven to the constraint honestly: pick_agent_avatar
     # returns '' when every portrait is taken (nth_web.py:2813), and '' is a
@@ -298,6 +317,12 @@ with tempfile.TemporaryDirectory() as tmp:
         threading.Thread(target=server.serve_forever, daemon=True).start()
         time.sleep(0.3)
 
+        # A stable id so the supervisor can be interrogated about the exact
+        # identity the failed create would have reserved. With a random id
+        # there is nothing to ask about, and "no agent is running" is a much
+        # weaker claim than "this one was not left reserved".
+        real_gen = web._gen_agent_id
+        web._gen_agent_id = lambda *a, **k: "ag_conflict_probe"
         web.pick_agent_avatar = lambda *a, **k: "Luna"   # already held by 'live'
 
         before = nth_server.get_db()
@@ -312,14 +337,41 @@ with tempfile.TemporaryDirectory() as tmp:
         n_after = after.execute("SELECT COUNT(*) FROM agents").fetchone()[0]
         after.close()
         check("...and leaves no durable half-created agent row", n_after == n_before)
+        # The row is only half the state. Create marks the id "starting" for
+        # wake_agent's benefit before the insert lands, so a refused create that
+        # forgets to release it leaves a phantom the supervisor believes is
+        # coming up — invisible in the agents table, and exactly the kind of
+        # leak a row count cannot see.
+        check("...and does not leave the id reserved with the supervisor",
+              not web.get_supervisor().is_running_or_starting("ag_conflict_probe"))
 
         status, body = post(port, "/api/agents/arch/unarchive", {})
         check("unarchive answers 409 rather than dropping the socket",
               status == 409)
+        probe = nth_server.get_db()
+        try:
+            still_archived = probe.execute(
+                "SELECT archived_at FROM agents WHERE id='arch'").fetchone()[0]
+        finally:
+            probe.close()
         check("...and the archived row is left archived, not half-restored",
-              (lambda d: d.execute(
-                  "SELECT archived_at FROM agents WHERE id='arch'"
-              ).fetchone()[0] is not None)(nth_server.get_db()))
+              still_archived is not None)
+
+        # ── the non-avatar branch, which was a required repair ───────────────
+        # An id collision out of our own generator is a server fault, not a
+        # client conflict: it must keep reporting 500. The first version of this
+        # handler returned 409 for every IntegrityError, which would have
+        # pointed a reader at the buddy-icon subsystem for a fault that has
+        # nothing to do with it.
+        web.pick_agent_avatar = lambda *a, **k: "Atlas"   # free — not the cause
+        web._gen_agent_id = lambda *a, **k: "live"        # collides on PK
+        status, body = post(port, "/api/agents",
+                            {"name": "Collide", "channels": [channel]})
+        check("a NON-avatar integrity fault still reports 500, not 409",
+              status == 500)
+        check("...and is not mislabelled a buddy-icon conflict",
+              "buddy icon" not in str(body).lower())
+        web._gen_agent_id = real_gen
     finally:
         web.pick_agent_avatar = real_pick
         if server is not None:
