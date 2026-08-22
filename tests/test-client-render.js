@@ -989,6 +989,43 @@ check('connection freshness: slow connect gets a fresh heartbeat deadline on ope
     H.Trio.stopWorkspaceEvents();
   }
 });
+check('connection freshness: native reconnect resets old receipt proof for both feeds', () => {
+  const ES = cx.window.EventSource; ES.instances.length = 0;
+  const realNow = cx.window.Date.now;
+  let now = 1_000;
+  cx.window.Date.now = () => now;
+  try {
+    H.Trio.startWorkspaceEvents(); H.Trio.startEvents('chanA');
+    const ws = ES.instances[0], ch = ES.instances[1];
+    ws.fireOpen(); ws.fireHeartbeat(); ch.fireOpen(); ch.fireHeartbeat();
+    now = 70_000; ws.fireOpen(); ch.fireOpen();
+    assert.strictEqual(H.Trio.checkEventFreshness(70_001), false,
+      'native reopen should get a new proof deadline');
+    assert.strictEqual(ES.instances.length, 2, 'native reopen must not cause explicit replacements');
+  } finally {
+    cx.window.Date.now = realNow;
+    H.Trio.stopEvents(); H.Trio.stopWorkspaceEvents();
+  }
+});
+check('connection freshness: a healthy workspace feed cannot mask a stale channel feed', () => {
+  const ES = cx.window.EventSource; ES.instances.length = 0;
+  const realNow = cx.window.Date.now;
+  let now = 1_000;
+  cx.window.Date.now = () => now;
+  try {
+    H.Trio.startWorkspaceEvents(); H.Trio.startEvents('cold-channel');
+    const ws = ES.instances[0], ch = ES.instances[1];
+    ws.fireOpen(); ws.fireHeartbeat(); ch.fireOpen(); ch.fireHeartbeat();
+    now = 50_000; ws.fireHeartbeat();
+    assert.strictEqual(H.Trio.checkEventFreshness(50_001), true);
+    assert.ok(ch.closed, 'stale channel should be replaced');
+    assert.ok(!ws.closed, 'fresh workspace should be retained');
+    assert.strictEqual(ES.instances.length, 3, 'only the stale channel feed should restart');
+  } finally {
+    cx.window.Date.now = realNow;
+    H.Trio.stopEvents(); H.Trio.stopWorkspaceEvents();
+  }
+});
 check('connection freshness: returning visible restarts workspace and channel streams once', () => {
   const ES = cx.window.EventSource; ES.instances.length = 0;
   H.Trio.startWorkspaceEvents(); H.Trio.startEvents('chanA');
@@ -1016,6 +1053,20 @@ check('connection freshness: callbacks from a replaced stream cannot overwrite l
   assert.ok(String(conn.className).includes('live') && !String(conn.className).includes('reconnect'),
     'late error from closed generation must be ignored');
   H.Trio.stopWorkspaceEvents();
+});
+check('connection freshness: online while hidden does not consume foreground recovery', () => {
+  const ES = cx.window.EventSource; ES.instances.length = 0;
+  H.Trio.startWorkspaceEvents(); H.Trio.startEvents('chanA');
+  const before = ES.instances.slice();
+  cx.document.hidden = true; cx.document.visibilityState = 'hidden';
+  cx.document.dispatchEvent(new Event('visibilitychange'));
+  cx.window.dispatchEvent(new Event('online'));
+  assert.strictEqual(ES.instances.length, before.length, 'hidden online event must not restart or start cooldown');
+  cx.document.hidden = false; cx.document.visibilityState = 'visible';
+  cx.document.dispatchEvent(new Event('visibilitychange'));
+  assert.strictEqual(ES.instances.length, before.length + 2, 'foreground transition must still restart both feeds');
+  before.forEach(source => assert.ok(source.closed));
+  H.Trio.stopEvents(); H.Trio.stopWorkspaceEvents();
 });
 
 // The workspace refresh loop (15s interval + on-message) must re-poll

@@ -65,15 +65,24 @@
   // the shared inbox) even though live events are flowing. workspaceLive tracks
   // it so the per-channel paths below don't clobber the pill back to offline.
   let workspaceLive = false;
+  let channelLive = false;
+  function showLiveWhenAllRequiredFeedsAreFresh() {
+    const workspaceReady = !workspaceStream || workspaceLive;
+    const channelReady = !stream || channelLive;
+    if (workspaceReady && channelReady && (workspaceStream || stream)) setConnection('live');
+  }
   function markChannelFresh() {
     channelLastReceivedAt = Date.now();
-    if (!workspaceStream) { setConnection('live'); notify('live'); }
+    const wasLive = channelLive;
+    channelLive = true;
+    showLiveWhenAllRequiredFeedsAreFresh();
+    if (!wasLive) notify('live');
   }
   function markWorkspaceFresh() {
     workspaceLastReceivedAt = Date.now();
     const wasLive = workspaceLive;
     workspaceLive = true;
-    setConnection('live');
+    showLiveWhenAllRequiredFeedsAreFresh();
     if (!wasLive) notify('workspace:live');
   }
   function ensureWatchdog() {
@@ -94,8 +103,9 @@
       return;
     }
     stream?.close();
+    channelLive = false;
     channelLastReceivedAt = 0;
-    if (!workspaceLive && !workspaceStream) setConnection('connecting…', true);
+    setConnection('connecting…', true);
     notify('connecting');
     channelStartedAt = Date.now();
     const source = new EventSource(Trio.api.url('/api/events'));
@@ -103,7 +113,9 @@
     source.onopen = () => {
       if (stream !== source) return;
       channelStartedAt = Date.now();
-      if (!workspaceStream) setConnection('waiting for updates…', true);
+      channelLastReceivedAt = 0;
+      channelLive = false;
+      setConnection('waiting for updates…', true);
       notify('connected');
     };
     source.onmessage = event => {
@@ -113,7 +125,8 @@
     source.addEventListener('heartbeat', () => { if (stream === source) markChannelFresh(); });
     source.onerror = () => {
       if (stream !== source) return;
-      if (!workspaceLive) setConnection('reconnecting…', true);
+      channelLive = false;
+      setConnection('reconnecting…', true);
       notify('reconnecting');
     };
     ensureWatchdog();
@@ -131,6 +144,8 @@
     source.onopen = () => {
       if (workspaceStream !== source) return;
       workspaceStartedAt = Date.now();
+      workspaceLastReceivedAt = 0;
+      workspaceLive = false;
       setConnection('waiting for updates…', true); notify('workspace:connected');
     };
     source.onmessage = event => {
@@ -152,22 +167,26 @@
   }
   function checkEventFreshness(now = Date.now()) {
     if (document.visibilityState === 'hidden' || document.hidden) return false;
-    const checkingWorkspace = !!workspaceStream;
-    if (!checkingWorkspace && !stream) return false;
-    const proofAt = checkingWorkspace
-      ? (workspaceLastReceivedAt || workspaceStartedAt)
-      : (channelLastReceivedAt || channelStartedAt);
-    if (now - proofAt <= STALE_AFTER_MS) return false;
-    workspaceLive = false;
+    const workspaceStale = !!workspaceStream
+      && now - Math.max(workspaceLastReceivedAt, workspaceStartedAt) > STALE_AFTER_MS;
+    const channelStale = !!stream
+      && now - Math.max(channelLastReceivedAt, channelStartedAt) > STALE_AFTER_MS;
+    if (!workspaceStale && !channelStale) return false;
     setConnection('reconnecting…', true);
-    notify(checkingWorkspace ? 'workspace:stale' : 'stale', {
-      lastReceivedAt: (checkingWorkspace ? workspaceLastReceivedAt : channelLastReceivedAt) || null,
-    });
-    if (checkingWorkspace) restartVisibleStreams();
-    else if (currentChannel) startEvents(currentChannel);
+    if (workspaceStale) {
+      workspaceLive = false;
+      notify('workspace:stale', { lastReceivedAt: workspaceLastReceivedAt || null });
+      startWorkspaceEvents();
+    }
+    if (channelStale && currentChannel) {
+      channelLive = false;
+      notify('stale', { lastReceivedAt: channelLastReceivedAt || null });
+      startEvents(currentChannel);
+    }
     return true;
   }
   function recoverFromLifecycle() {
+    if (document.visibilityState === 'hidden' || document.hidden) return;
     const now = Date.now();
     if (now - lastLifecycleRestartAt < 1_000) return;
     lastLifecycleRestartAt = now;
@@ -176,12 +195,18 @@
   function installLifecycleRecovery() {
     if (lifecycleInstalled) return;
     lifecycleInstalled = true;
-    document.addEventListener('visibilitychange', () => {
-      if (document.visibilityState === 'hidden' || document.hidden) { sawHidden = true; return; }
+    document.addEventListener?.('visibilitychange', () => {
+      if (document.visibilityState === 'hidden' || document.hidden) {
+        sawHidden = true;
+        // A new background/foreground cycle deserves its own recovery even
+        // when it begins inside the prior cycle's signal-coalescing window.
+        lastLifecycleRestartAt = 0;
+        return;
+      }
       if (sawHidden) { sawHidden = false; recoverFromLifecycle(); }
     });
-    window.addEventListener('pageshow', event => { if (event.persisted) recoverFromLifecycle(); });
-    window.addEventListener('online', recoverFromLifecycle);
+    window.addEventListener?.('pageshow', event => { if (event.persisted) recoverFromLifecycle(); });
+    window.addEventListener?.('online', recoverFromLifecycle);
   }
   function stopWorkspaceEvents() {
     workspaceStream?.close(); workspaceStream = null; workspaceLive = false;
@@ -189,7 +214,8 @@
     notify('workspace:offline'); setConnection('offline', true); maybeStopWatchdog();
   }
   function stopEvents() {
-    stream?.close(); stream = null; currentChannel = null; channelStartedAt = 0; channelLastReceivedAt = 0;
+    stream?.close(); stream = null; currentChannel = null; channelLive = false;
+    channelStartedAt = 0; channelLastReceivedAt = 0;
     if (!workspaceLive) setConnection('offline', true);
     notify('offline', { reason: 'stopped' }); maybeStopWatchdog();
   }
