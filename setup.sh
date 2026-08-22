@@ -448,6 +448,7 @@ LAUNCHER
 fi
 cp "$SCRIPT_DIR/server/nth_turn_hook.py" "$SERVER_DIR/nth_turn_hook.py"
 cp "$SCRIPT_DIR/server/nth_activity_hook.py" "$SERVER_DIR/nth_activity_hook.py"
+cp "$SCRIPT_DIR/server/nth_stall_hook.py" "$SERVER_DIR/nth_stall_hook.py"
 
 # Clean up deprecated files from earlier Haiku-subagent design
 rm -f "$SERVER_DIR/nth_sentinel.py" \
@@ -628,6 +629,7 @@ native_path() {  # native_path <posix-path>
 }
 TURN_NATIVE=$(native_path "$SERVER_DIR/nth_turn_hook.py")
 ACTIVITY_NATIVE=$(native_path "$SERVER_DIR/nth_activity_hook.py")
+STALL_NATIVE=$(native_path "$SERVER_DIR/nth_stall_hook.py")
 
 "$PYTHON_CMD" -c "
 import json, os, tempfile
@@ -637,8 +639,10 @@ settings_path = r'''$SETTINGS_JSON'''
 py = r'''$PYTHON_CMD'''
 turn  = r'''$TURN_NATIVE'''
 activity = r'''$ACTIVITY_NATIVE'''
+stall = r'''$STALL_NATIVE'''
 turn_cmd  = f'{py} \"{turn}\"'
 activity_cmd = f'{py} \"{activity}\"'
+stall_cmd = f'{py} \"{stall}\"'
 
 # Match every StopFailure error type (not just the transient ones): the watchdog
 settings = {}
@@ -685,6 +689,11 @@ changed |= register('UserPromptSubmit', 'nth_activity_hook.py', activity_cmd)
 # AskUserQuestion/ExitPlanMode. Without it a session stays flagged blocked until
 # the turn ends, which is most of the window the flag is supposed to cover.
 changed |= register('PostToolUse',      'nth_activity_hook.py', activity_cmd)
+# Records a turn that died to an API error, so a frozen session shows STALLED
+# on the roster instead of looking healthy. Matcher-less on every StopFailure
+# error type: a matcher would drop an unrecognised error before anyone saw it,
+# and the badge's whole job is to make the unnoticed visible.
+changed |= register('StopFailure', 'nth_stall_hook.py', stall_cmd)
 
 if not changed:
     print('trio hooks: already registered')

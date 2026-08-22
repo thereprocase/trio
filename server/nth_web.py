@@ -1944,6 +1944,7 @@ class EventHub:
         # may reshuffle affected members, which the client handles by
         # keying on the emoji/name fields we ship instead of hashing.
         avatars = animal_for_channel([r["id"] for r in rows])
+        stalled = self._stalled_members(db)
         ctx_usage = _read_context_usage()
         out = []
         for r in rows:
@@ -2023,10 +2024,47 @@ class EventHub:
                 "last_tool_target": tool_target,
                 "last_tool_at": tool_at,
                 "blocked_since": s_blocked or "",
+                # A turn killed by an API error does not retry itself: the
+                # session freezes mid-work and goes quiet, and in a busy room
+                # nobody notices until someone reads the transcript. This makes
+                # that visible. It is a BADGE, not an actuator — a human sees
+                # it and decides. Nothing here spends tokens.
+                "stalled": stalled.get(r["id"]),
                 "animal_name": aname,
                 "animal_emoji": aemoji,
             })
         return out
+
+    def _stalled_members(self, db: sqlite3.Connection) -> Dict[str, Any]:
+        """member_id -> {error, since} for sessions frozen on a dead turn.
+
+        A stall counts when the event is OPEN (resolved_at IS NULL) and the
+        session has not moved since: sessions.last_seen is the session's own
+        tool activity, the only signal that separates alive from frozen.
+        members.last_seen is deliberately NOT used — the Monitor keeps that
+        ticking while the session it watches is dead, which is exactly why a
+        frozen agent currently reads as healthy on the roster.
+        """
+        try:
+            rows = db.execute(
+                "SELECT s.member_id AS member_id, e.error AS error, "
+                "       e.created_at AS created_at "
+                "FROM stall_events e "
+                "JOIN sessions s ON s.fingerprint = e.session_id "
+                "WHERE e.resolved_at IS NULL AND s.channel = ? "
+                "  AND s.revoked_at IS NULL "
+                "  AND (s.last_seen IS NULL OR s.last_seen <= e.created_at) "
+                "ORDER BY e.id",
+                (self.channel,),
+            ).fetchall()
+        except sqlite3.Error:
+            # Pre-stall-hook schema (no stall_events table, or no
+            # sessions.fingerprint): no badges, not an error. The roster must
+            # never fail because an optional feature's table is absent.
+            return {}
+        return {r["member_id"]: {"error": r["error"] or "",
+                                 "since": r["created_at"]}
+                for r in rows}
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():

@@ -809,6 +809,33 @@ def get_db() -> sqlite3.Connection:
             PRIMARY KEY (hostname, transport)
         )
     """)
+
+    # Stall watchdog. nth_stall_hook.py (a StopFailure hook) INSERTs one row per
+    # turn that died to an API error; StallWatchdog in nth_web.py consumes them,
+    # nudges the frozen session back to life, and resolves the row. The hook
+    # mirrors this DDL so a stall is never dropped just because the server has
+    # not initialised the schema yet.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS stall_events (
+            id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id         TEXT NOT NULL,
+            error              TEXT NOT NULL DEFAULT '',
+            cwd                TEXT NOT NULL DEFAULT '',
+            created_at         TEXT NOT NULL,
+            resolved_at        TEXT,
+            resolution         TEXT NOT NULL DEFAULT '',
+            nudge_count        INTEGER NOT NULL DEFAULT 0,
+            last_nudge_at      TEXT,
+            last_nudge_msg_id  INTEGER
+        )
+    """)
+    # The watchdog scans for OPEN events every POLL_INTERVAL (5s). Without this
+    # that is a full table scan every five seconds, growing with every stall
+    # ever recorded.
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_stall_events_open "
+        "ON stall_events (resolved_at, id)"
+    )
     conn.commit()
     return conn
 
