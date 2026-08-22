@@ -143,6 +143,11 @@
     },
   };
   function attentionCount(meta = state.meta || {}) { return selectors.pendingApprovals({ approvals: meta.approvals }); }
+  const channelSubtitle = readOnly => readOnly ? 'Archived channel — read only' : 'Live agent workspace';
+  // Set by loadConversation once it has opened the event stream; read by
+  // 06-core during boot to decide whether it still needs to open one. See the
+  // comment at the assignment for why this is a fact rather than an intention.
+  let streamOpenedByRoute = false;
   function openChannel(code, extra = '') {
     // Picking a destination dismisses the mobile drawer. Below 880px it is an
     // overlay lying on top of the conversation you just chose, so leaving it up
@@ -151,8 +156,15 @@
     // and also every route-driven call that no human clicked.
     Trio.nav?.close?.();
     const readOnly = extra === 'archived';
+    // The router is the SINGLE authority for loading a channel. navigate()
+    // applies the route synchronously (03-router.js apply() invokes every
+    // handler before returning), so onRoute() has already loaded by the time
+    // this line is reached — loading again here cleared the message map and
+    // re-seeded the unread watermark a second time, and tore down the
+    // EventSource the first load had just opened, on every single channel
+    // click. The direct call survives only as the no-router fallback.
     if (Trio.router?.navigate) Trio.router.navigate('channel', { code, archived: readOnly });
-    loadConversation(code, '#' + code, readOnly ? 'Archived channel — read only' : 'Live agent workspace', readOnly, false);
+    else loadConversation(code, '#' + code, channelSubtitle(readOnly), readOnly, false);
   }
   // The operator's server-side read watermark for the conversation being
   // opened. Lives on their own roster row; absent until the roster lands.
@@ -211,7 +223,15 @@
     // channel + dmKey are final. openChannel fires the router before this point,
     // so the router hook alone would load stale state (Bug C).
     Trio.composer?.refresh?.();
-    Trio.startEvents?.(state.channel);
+    // Claim ownership only when the call actually happened — the flag is read
+    // by 06-core to decide whether it still needs to open the stream, so it has
+    // to record a fact rather than an intention. 90-boot deliberately isolates
+    // per-feature mount failures, so the router can apply a channel route while
+    // THIS module failed to mount; answering boot from the route name alone
+    // would leave that case with no owner at all, which is a worse failure than
+    // the double-open being removed. Guarding on startEvents rather than using
+    // `?.` keeps the claim true when the events module is absent too.
+    if (Trio.startEvents) { Trio.startEvents(state.channel); streamOpenedByRoute = true; }
     // If the details drawer is open, re-render it for the conversation we just
     // switched to. Otherwise it keeps the previous conversation's topic /
     // members / size row — e.g. a stale "Conversation size" (or, before this,
@@ -1431,14 +1451,16 @@
   function onRoute(route) {
     if (!route) return;
     if (route.name === 'channel') {
-      const subtitle = route.params.archived ? 'Archived channel — read only' : 'Live agent workspace';
-      if (state.channel !== route.params.code) loadConversation(route.params.code, '#' + route.params.code, subtitle, !!route.params.archived, false);
-      // Same-code partial switch (e.g. browser Back from a DM whose transport
-      // IS this channel) bypasses loadConversation, so it must itself drop the
-      // DM's target identity + aux composer state and reload the composer —
-      // otherwise the DM's @-chips/images and dmTargetId leak into the channel
-      // (Sauron/Frodo). Mirrors the !isDm reset in loadConversation.
-      else { state.view = 'conversation'; state.readOnly = !!route.params.archived; state.dmKey = ''; state.dmThread = null; state.dmTargetId = ''; state.dmMemberIds = []; showConversationPage(); updateTopbar('#' + route.params.code, subtitle); renderFacePile(); renderRail(); Trio.composer?.refresh?.(); }
+      // One full load, including when the code has not changed. There used to
+      // be a partial same-code branch here that hand-rolled the DM teardown
+      // (the "Back from a DM whose transport IS this channel" case). It cleared
+      // the DM's identity but left its MESSAGE MAP in place and never restarted
+      // channel events, so that transition landed on a channel showing the DM's
+      // history over a stream still scoped to the DM. loadConversation already
+      // does all of it correctly; duplicating a subset of its work was the bug,
+      // not the duplication of the call.
+      loadConversation(route.params.code, '#' + route.params.code,
+                       channelSubtitle(!!route.params.archived), !!route.params.archived, false);
     }
     else if ((route.name === 'dm' || route.name === 'audit') && state.dmKey !== route.params.key) openDmByKey(route.params.key, route.name === 'audit');
     else if (route.name === 'home') showView('home');
@@ -2018,7 +2040,13 @@
   // 15s workspace refresh, operator-gated, no agent tokens. Working/idle + tool
   // use come faster still, over the roster SSE (see renderFacePile/refreshDrawerMembers).
   function pollAgents() { return (Trio.agents?.refresh?.() || Promise.resolve()).then(() => { renderFacePile(); refreshDrawerMembers(); }); }
-  function mount() { refresh(); renderFacePile(); if (!refreshInterval) refreshInterval = setInterval(refresh, 15000); if (!agentsInterval) agentsInterval = setInterval(pollAgents, 5000); unroute = Trio.router?.on?.(onRoute); wsl = onWorkspaceUpdate; Trio.events?.addEventListener?.('workspace:updated', wsl); preferencesChanged = onPreferencesChanged; Trio.events?.addEventListener?.('preferences:changed', preferencesChanged); Trio.events?.addEventListener?.('roster', renderFacePile); Trio.events?.addEventListener?.('roster', refreshDrawerMembers); Trio.events?.addEventListener?.('message', onMessageForDrawer); Trio.events?.addEventListener?.('message', onMessageLiveRefresh); const searchBtn = $('search-btn'); if (searchBtn) { searchBtn.addEventListener('click', openSearch); } const detailsBtn = $('details-btn'); if (detailsBtn) { detailsClick = showDetails; detailsBtn.addEventListener('click', detailsClick); } const drawerClose = $('channel-drawer-close'); if (drawerClose) drawerClose.addEventListener('click', closeDetails); const drawerResize = $('channel-drawer-resize'); if (drawerResize) drawerResize.addEventListener('pointerdown', startDrawerResize); const menuButton = $('channel-more-btn'); if (menuButton) { menuButtonClick = openChannelMenu; menuButton.addEventListener('click', menuButtonClick); } const accountTrigger = $('account-trigger'); if (accountTrigger) { accountTriggerClick = openAccountMenu; accountTrigger.addEventListener('click', accountTriggerClick); } menuClick = event => { if (!event.target.closest('#channel-menu, #channel-more-btn')) closeChannelMenu(); if (!event.target.closest('#account')) closeAccountMenu(); }; menuKeydown = event => { if (event.key === 'Escape') { closeChannelMenu(); closeDetails(); closeAccountMenu(); } }; document.addEventListener('click', menuClick); document.addEventListener('keydown', menuKeydown); searchKeydown = onSearchKey; document.addEventListener('keydown', searchKeydown); }
-  function unmount() { closeChannelMenu(); closeDetails(); if (drawerResizeEnd) drawerResizeEnd(); if (refreshInterval) { clearInterval(refreshInterval); refreshInterval = null; } if (agentsInterval) { clearInterval(agentsInterval); agentsInterval = null; } if (unroute) { unroute(); unroute = null; } if (wsl) { Trio.events?.removeEventListener?.('workspace:updated', wsl); wsl = null; } if (preferencesChanged) { Trio.events?.removeEventListener?.('preferences:changed', preferencesChanged); preferencesChanged = null; } Trio.events?.removeEventListener?.('roster', renderFacePile); Trio.events?.removeEventListener?.('roster', refreshDrawerMembers); Trio.events?.removeEventListener?.('message', onMessageForDrawer); Trio.events?.removeEventListener?.('message', onMessageLiveRefresh); clearTimeout(liveRefreshDebounce); clearTimeout(drawerActivityDebounce); const searchBtn = $('search-btn'); if (searchBtn && openSearch) searchBtn.removeEventListener('click', openSearch); const detailsBtn = $('details-btn'); if (detailsBtn && detailsClick) detailsBtn.removeEventListener('click', detailsClick); const drawerClose = $('channel-drawer-close'); if (drawerClose) drawerClose.removeEventListener('click', closeDetails); const drawerResize = $('channel-drawer-resize'); if (drawerResize) drawerResize.removeEventListener('pointerdown', startDrawerResize); const menuButton = $('channel-more-btn'); if (menuButton && menuButtonClick) menuButton.removeEventListener('click', menuButtonClick); const accountTrigger = $('account-trigger'); if (accountTrigger && accountTriggerClick) accountTrigger.removeEventListener('click', accountTriggerClick); closeAccountMenu(); if (menuClick) document.removeEventListener('click', menuClick); if (menuKeydown) document.removeEventListener('keydown', menuKeydown); if (searchKeydown) document.removeEventListener('keydown', searchKeydown); }
-  Trio.workspace = {init: mount, mount, unmount, render: renderRail, renderFacePile, facePileModel, refresh, archive, archiveCurrent, openChannel, openDm, openDmByKey, openDmDialog, dmTargets, groupNavigation, isStaleThread, staleThreadDays, attentionCount, selectors, showView, search: openSearch, doSearch, modal, toast, showDetails, channelStatus, toolSuffix, usageTone, resetLabel, contextBadge, formatTokenEstimate, refreshDrawerActivity, refreshDrawerMembers, messageCountLabel, createChannel, openTaskModal, detailMember, renderSubagentList, subagentsFromResponse, openAccountMenu, closeAccountMenu, dismissQuestion, undismissQuestion, isQuestionDismissed, trendChip, dailyChangeLine, projectionLine};
+  // The stream claim is per-mount: it says "this workspace opened the stream
+  // during the boot now in progress", so it has to start false on every mount
+  // and be surrendered on unmount. Without that it would answer for a previous
+  // page lifetime, and 06-core would skip its fallback on evidence that had
+  // expired.
+  function mount() { streamOpenedByRoute = false; refresh(); renderFacePile(); if (!refreshInterval) refreshInterval = setInterval(refresh, 15000); if (!agentsInterval) agentsInterval = setInterval(pollAgents, 5000); unroute = Trio.router?.on?.(onRoute); wsl = onWorkspaceUpdate; Trio.events?.addEventListener?.('workspace:updated', wsl); preferencesChanged = onPreferencesChanged; Trio.events?.addEventListener?.('preferences:changed', preferencesChanged); Trio.events?.addEventListener?.('roster', renderFacePile); Trio.events?.addEventListener?.('roster', refreshDrawerMembers); Trio.events?.addEventListener?.('message', onMessageForDrawer); Trio.events?.addEventListener?.('message', onMessageLiveRefresh); const searchBtn = $('search-btn'); if (searchBtn) { searchBtn.addEventListener('click', openSearch); } const detailsBtn = $('details-btn'); if (detailsBtn) { detailsClick = showDetails; detailsBtn.addEventListener('click', detailsClick); } const drawerClose = $('channel-drawer-close'); if (drawerClose) drawerClose.addEventListener('click', closeDetails); const drawerResize = $('channel-drawer-resize'); if (drawerResize) drawerResize.addEventListener('pointerdown', startDrawerResize); const menuButton = $('channel-more-btn'); if (menuButton) { menuButtonClick = openChannelMenu; menuButton.addEventListener('click', menuButtonClick); } const accountTrigger = $('account-trigger'); if (accountTrigger) { accountTriggerClick = openAccountMenu; accountTrigger.addEventListener('click', accountTriggerClick); } menuClick = event => { if (!event.target.closest('#channel-menu, #channel-more-btn')) closeChannelMenu(); if (!event.target.closest('#account')) closeAccountMenu(); }; menuKeydown = event => { if (event.key === 'Escape') { closeChannelMenu(); closeDetails(); closeAccountMenu(); } }; document.addEventListener('click', menuClick); document.addEventListener('keydown', menuKeydown); searchKeydown = onSearchKey; document.addEventListener('keydown', searchKeydown); }
+  function unmount() { streamOpenedByRoute = false; closeChannelMenu(); closeDetails(); if (drawerResizeEnd) drawerResizeEnd(); if (refreshInterval) { clearInterval(refreshInterval); refreshInterval = null; } if (agentsInterval) { clearInterval(agentsInterval); agentsInterval = null; } if (unroute) { unroute(); unroute = null; } if (wsl) { Trio.events?.removeEventListener?.('workspace:updated', wsl); wsl = null; } if (preferencesChanged) { Trio.events?.removeEventListener?.('preferences:changed', preferencesChanged); preferencesChanged = null; } Trio.events?.removeEventListener?.('roster', renderFacePile); Trio.events?.removeEventListener?.('roster', refreshDrawerMembers); Trio.events?.removeEventListener?.('message', onMessageForDrawer); Trio.events?.removeEventListener?.('message', onMessageLiveRefresh); clearTimeout(liveRefreshDebounce); clearTimeout(drawerActivityDebounce); const searchBtn = $('search-btn'); if (searchBtn && openSearch) searchBtn.removeEventListener('click', openSearch); const detailsBtn = $('details-btn'); if (detailsBtn && detailsClick) detailsBtn.removeEventListener('click', detailsClick); const drawerClose = $('channel-drawer-close'); if (drawerClose) drawerClose.removeEventListener('click', closeDetails); const drawerResize = $('channel-drawer-resize'); if (drawerResize) drawerResize.removeEventListener('pointerdown', startDrawerResize); const menuButton = $('channel-more-btn'); if (menuButton && menuButtonClick) menuButton.removeEventListener('click', menuButtonClick); const accountTrigger = $('account-trigger'); if (accountTrigger && accountTriggerClick) accountTrigger.removeEventListener('click', accountTriggerClick); closeAccountMenu(); if (menuClick) document.removeEventListener('click', menuClick); if (menuKeydown) document.removeEventListener('keydown', menuKeydown); if (searchKeydown) document.removeEventListener('keydown', searchKeydown); }
+  Trio.workspace = {init: mount, mount, unmount, render: renderRail, renderFacePile, facePileModel,
+    didOpenStream: () => streamOpenedByRoute, refresh, archive, archiveCurrent, openChannel, openDm, openDmByKey, openDmDialog, dmTargets, groupNavigation, isStaleThread, staleThreadDays, attentionCount, selectors, showView, search: openSearch, doSearch, modal, toast, showDetails, channelStatus, toolSuffix, usageTone, resetLabel, contextBadge, formatTokenEstimate, refreshDrawerActivity, refreshDrawerMembers, messageCountLabel, createChannel, openTaskModal, detailMember, renderSubagentList, subagentsFromResponse, openAccountMenu, closeAccountMenu, dismissQuestion, undismissQuestion, isQuestionDismissed, trendChip, dailyChangeLine, projectionLine};
 })();

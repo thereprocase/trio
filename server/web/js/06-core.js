@@ -93,7 +93,26 @@
     document.getElementById('h-channel').textContent = root.state.channel ? `#${root.state.channel}` : 'nth';
     document.getElementById('h-meta').textContent = root.state.channel ? 'Live agent workspace' : 'No channel selected';
     mountFeatures?.();
-    if (root.startEvents) root.startEvents(root.state.channel);
+    // The router applies the initial route from inside mountFeatures(), and a
+    // channel route loads the conversation — which opens the event stream. So
+    // by the time we get here that stream may already exist, and opening it
+    // again would close the one just created: the same tear-down/reopen that
+    // used to happen on every channel click, relocated to page boot. Ask the
+    // router what it did rather than assuming nothing happened.
+    //
+    // Ask what HAPPENED, not what was intended. Reading the route name would be
+    // the obvious test and it is wrong: 90-boot isolates per-feature mount
+    // failures on purpose, so the router can apply a channel route while the
+    // workspace module failed to mount — route name would then say "already
+    // handled" and nobody would ever open a stream. didOpenStream() is set at
+    // the actual call site, so a failed workspace mount falls back here
+    // correctly, which is the resilience guarantee 90-boot exists to provide.
+    //
+    // Only the channel route reaches this synchronously. dm/audit load through
+    // an async openDmByKey and have a second bootstrap in 90-boot, so they keep
+    // today's behaviour; that double-open is real and filed separately rather
+    // than fixed here on a guess.
+    if (root.startEvents && !root.workspace?.didOpenStream?.()) root.startEvents(root.state.channel);
     // Cross-channel notifications (chime/desktop popup for a channel you're
     // NOT currently viewing) need the workspace-wide SSE stream — but
     // /api/workspace/events is operator-only server-side (403 for anyone
