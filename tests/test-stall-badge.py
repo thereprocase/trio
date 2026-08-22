@@ -129,28 +129,59 @@ check("the badge carries the error so a human can judge it",
       bool(badge) and badge.get("error") == "overloaded_error")
 check("the badge carries when it happened", bool(badge) and bool(badge.get("since")))
 
+# ── Reconnect scoping: only the newest live identity is stalled ───────
+# One Claude fingerprint accumulates a new member/session row on reconnect.
+# The hook reports the fingerprint, not a member id, so joining every matching
+# row resurrects the stale identity as stalled too. Match the activity hooks:
+# newest non-revoked session per channel, with session_token breaking an exact
+# connected_at tie deterministically.
+RECONNECTED = "stall-reconnected"
+c = sqlite3.connect(str(DB))
+try:
+    old_token, connected_at = c.execute(
+        "SELECT session_token, connected_at FROM sessions WHERE member_id=?",
+        (MEMBER,)).fetchone()
+    new_token = old_token + "~new"
+    c.execute(
+        "INSERT INTO members (id,channel,name,last_seen,joined_at,kind) "
+        "VALUES (?, ?, 'Reconnected', ?, ?, 'agent')",
+        (RECONNECTED, CH, connected_at, connected_at))
+    c.execute(
+        "INSERT INTO sessions "
+        "(session_token,member_id,channel,role,fingerprint,connected_at,last_seen) "
+        "VALUES (?, ?, ?, 'primary', ?, ?, '2000-01-01T00:00:00+00:00')",
+        (new_token, RECONNECTED, CH, FP, connected_at))
+    c.commit()
+finally:
+    c.close()
+
+reconnect_roster = roster_for(CH)
+check("a shared fingerprint badges only the newest reconnect identity",
+      reconnect_roster[MEMBER]["stalled"] is None
+      and reconnect_roster[RECONNECTED]["stalled"] is not None)
+
 # ── 3. A session that resumes on its own stops being stalled ────────────────
 # Resume is detected from sessions.last_seen — the session's OWN tool activity.
 # members.last_seen is deliberately not consulted: the Monitor keeps it ticking
 # while the session is frozen, which is the whole reason this badge exists.
 c = sqlite3.connect(str(DB))
 try:
-    c.execute("UPDATE members SET last_seen=? WHERE id=?", (now_iso(), MEMBER))
+    c.execute("UPDATE members SET last_seen=? WHERE id=?", (now_iso(), RECONNECTED))
     c.commit()
 finally:
     c.close()
 check("a Monitor heartbeat alone does NOT clear the badge",
-      roster_for(CH)[MEMBER]["stalled"] is not None)
+      roster_for(CH)[RECONNECTED]["stalled"] is not None)
 
 c = sqlite3.connect(str(DB))
 try:
     c.execute("UPDATE sessions SET last_seen=? WHERE member_id=?",
-              (now_iso(), MEMBER))
+              (now_iso(), RECONNECTED))
     c.commit()
 finally:
     c.close()
 check("the session's own activity clears the badge",
-      roster_for(CH)[MEMBER]["stalled"] is None)
+      roster_for(CH)[RECONNECTED]["stalled"] is None)
 
 # ── 4. A resolved event never re-badges ─────────────────────────────────────
 c = sqlite3.connect(str(DB))
@@ -160,11 +191,12 @@ try:
     # Roll the session's activity back BEFORE the stall, so the only reason
     # the badge stays away is the resolution — not a fresh last_seen.
     c.execute("UPDATE sessions SET last_seen='2000-01-01T00:00:00+00:00' "
-              "WHERE member_id=?", (MEMBER,))
+              "WHERE member_id=?", (RECONNECTED,))
     c.commit()
 finally:
     c.close()
-check("a resolved stall does not come back", roster_for(CH)[MEMBER]["stalled"] is None)
+check("a resolved stall does not come back",
+      roster_for(CH)[RECONNECTED]["stalled"] is None)
 
 # ── 5. Retention: nothing else reclaims these rows ──────────────────────────
 # The consumer that used to prune them is not in this branch, and a spoke

@@ -2053,6 +2053,19 @@ class EventHub:
                 "JOIN sessions s ON s.fingerprint = e.session_id "
                 "WHERE e.resolved_at IS NULL AND s.channel = ? "
                 "  AND s.revoked_at IS NULL "
+                # A fingerprint is a Claude session, not a Trio member id. A
+                # reconnect mints a new member/session row without revoking the
+                # old one, so badge only the newest live identity in each
+                # channel. This is the same scope used by nth_activity_hook:
+                # ORDER BY + LIMIT 1 makes the choice single, and session_token
+                # deterministically breaks equal connected_at timestamps.
+                "  AND s.session_token = ("
+                "      SELECT s2.session_token FROM sessions s2 "
+                "       WHERE s2.fingerprint = s.fingerprint "
+                "         AND s2.channel = s.channel "
+                "         AND s2.revoked_at IS NULL "
+                "       ORDER BY s2.connected_at DESC, s2.session_token DESC "
+                "       LIMIT 1) "
                 "  AND (s.last_seen IS NULL OR s.last_seen <= e.created_at) "
                 "ORDER BY e.id",
                 (self.channel,),
