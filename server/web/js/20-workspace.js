@@ -198,7 +198,7 @@
     if (!isDm) { state.dmThread = null; state.dmTargetId = ''; state.dmMemberIds = []; }
     state.channel = channel;
     renderRail();
-    document.getElementById('h-channel').textContent = title;
+    Trio.setChannelTitle(title);
     document.getElementById('h-meta').textContent = subtitle;
     renderFacePile();
     const detailsBtn = $('details-btn');
@@ -333,7 +333,7 @@
     state.messages = new Map();
     state.messageDomById = new Map();
     state.answers = new Map();
-    document.getElementById('h-channel').textContent = 'DM ' + key;
+    Trio.setChannelTitle('DM ' + key);
     document.getElementById('h-meta').textContent = audit ? 'Agent-to-agent audit'
       : archived ? 'Archived private conversation' : 'Private conversation';
     const banner = document.getElementById('private-banner');
@@ -636,8 +636,8 @@
     if (opLabel) opLabel.textContent = opName; if (opRole) opRole.textContent = operator.name ? 'Workspace owner' : 'Live agent coordination';
   }
   function updateTopbar(title, subtitle) {
-    const h = $('h-channel'); const m = $('h-meta');
-    if (h) h.textContent = title || 'nth';
+    Trio.setChannelTitle(title);
+    const m = $('h-meta');
     if (m) m.textContent = subtitle || '';
   }
   function showConversationPage() {

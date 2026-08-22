@@ -76,6 +76,30 @@
     ids.add(label);
     return root.avatarTones([...ids]).get(label);
   };
+  // The channel title is truncated by CSS — on narrow viewports, and per the
+  // 881-1040px header measurement on some desktop widths too — so the full name
+  // has to stay recoverable. Text and tooltip are therefore set together, from
+  // one place.
+  //
+  // That single place is the point. This element was previously written from
+  // four separate call sites (boot, the channel load, the DM load, and the
+  // topbar update), and a tooltip added to only one of them is worse than no
+  // tooltip at all: it makes the truncation look handled on whichever path
+  // happens to be checked, while the others still show an unreadable stub with
+  // nothing to hover. Defined here, in the earliest module that needs it, so
+  // every later caller can reach it.
+  //
+  // The tooltip is set unconditionally rather than only when the text actually
+  // overflows. Detecting that needs a layout read, which is both a forced
+  // reflow on a hot path and untestable in the DOM harness, and a tooltip
+  // repeating a fully visible name costs nothing.
+  root.setChannelTitle = function setChannelTitle(text) {
+    const h = document.getElementById('h-channel');
+    if (!h) return;
+    const label = text || 'nth';
+    h.textContent = label;
+    h.title = label;
+  };
   root.boot = async function boot(mountFeatures) {
     // A failed/slow /api/meta must NOT abort boot — otherwise mountFeatures()
     // below never runs and the whole shell (theme, router, views) is skipped,
@@ -90,7 +114,7 @@
     if (root.store) { root.store.set('session.operator', root.state.operator); root.store.set('session.channel', root.state.channel); }
     // No channel selected on load; stay on the workspace home view instead of
     // forcing the first channel open.
-    document.getElementById('h-channel').textContent = root.state.channel ? `#${root.state.channel}` : 'nth';
+    root.setChannelTitle(root.state.channel ? `#${root.state.channel}` : 'nth');
     document.getElementById('h-meta').textContent = root.state.channel ? 'Live agent workspace' : 'No channel selected';
     mountFeatures?.();
     // The router applies the initial route from inside mountFeatures(), and a
