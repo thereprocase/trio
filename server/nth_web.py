@@ -1853,7 +1853,8 @@ class EventHub:
 
     # ── subscription ──
     def subscribe(self, viewer_id: Optional[str] = None,
-                  all_seeing: bool = True) -> queue.Queue:
+                  all_seeing: bool = True,
+                  include_history: bool = True) -> queue.Queue:
         """Register an SSE subscriber, scoped to what this viewer may see.
 
         An all-seeing operator (loopback / tailnet) receives every message. Any
@@ -1862,7 +1863,10 @@ class EventHub:
         HERE, on the server: hiding a DM client-side would still have sent its
         bytes to a browser that was never a party to it.
 
-        Defaults stay all-seeing so existing callers are unaffected."""
+        Defaults stay all-seeing and history-bearing so existing callers are
+        unaffected. The cross-channel workspace index disables history: it
+        needs roster/context plus the live tail, while replaying 200 messages
+        from every recent room makes an index load grow without bound."""
         # Prime and registration are one cutover under the fan-out lock.  If a
         # live row arrives while the snapshot is being built, _broadcast waits
         # here and delivers it after registration; it cannot precede the
@@ -1873,7 +1877,9 @@ class EventHub:
                 # Unit/offline callers historically use subscribe() without
                 # start().  Give them a complete current snapshot too.
                 through_id = self._db_message_highwater()
-            primed = self._prime_payloads(viewer_id, all_seeing, through_id)
+            primed = self._prime_payloads(
+                viewer_id, all_seeing, through_id,
+                include_history=include_history)
             # Capacity derives from the actual prime, rather than assuming a
             # fixed number of control envelopes.  The live tail remains
             # bounded: a client that cannot drain the extra buffer is removed
@@ -1914,7 +1920,8 @@ class EventHub:
             return len(self._subs)
 
     def _prime_payloads(self, viewer_id: Optional[str], all_seeing: bool,
-                        through_id: int) -> List[str]:
+                        through_id: int,
+                        include_history: bool = True) -> List[str]:
         # try/finally so queue.Full or a transient sqlite error doesn't leak
         # the connection. A leaked read connection holds a SHARED lock and,
         # worse, if Python's default isolation_level has auto-BEGUN any write,
@@ -1939,19 +1946,20 @@ class EventHub:
                 {"type": "roster", "channel": self.channel, "members": members}))
             payloads.append(json.dumps(
                 {"type": "context", "sessions": _read_context_snapshots()}))
-            rows = db.execute(
-                "SELECT id, member_id, member_name, content, mentions, refs, bangs, "
-                "recipients, reply_to, choices, selection, "
-                "retracted_at, retraction_reason, edited_at, created_at "
-                "FROM messages WHERE channel = ? AND id <= ? "
-                "ORDER BY id DESC LIMIT ?",
-                (self.channel, through_id, HISTORY_LIMIT),
-            ).fetchall()
-            for r in reversed(rows):
-                ev = _message_event(db, r, self.channel)
-                if not _event_visible_to(ev, viewer_id, all_seeing):
-                    continue
-                payloads.append(json.dumps(ev))
+            if include_history:
+                rows = db.execute(
+                    "SELECT id, member_id, member_name, content, mentions, refs, bangs, "
+                    "recipients, reply_to, choices, selection, "
+                    "retracted_at, retraction_reason, edited_at, created_at "
+                    "FROM messages WHERE channel = ? AND id <= ? "
+                    "ORDER BY id DESC LIMIT ?",
+                    (self.channel, through_id, HISTORY_LIMIT),
+                ).fetchall()
+                for r in reversed(rows):
+                    ev = _message_event(db, r, self.channel)
+                    if not _event_visible_to(ev, viewer_id, all_seeing):
+                        continue
+                    payloads.append(json.dumps(ev))
         except sqlite3.Error:
             pass
         finally:
@@ -5883,7 +5891,14 @@ class NthWebHandler(BaseHTTPRequestHandler):
         try:
             for ch in channels:
                 hub = self._hub_for_channel(ch)
-                q = hub.subscribe(viewer_id=viewer_id, all_seeing=True)
+                # The workspace stream keeps the index and cross-channel
+                # notifications live. Its unread counts and previews already
+                # come from /api/channels; replaying up to 200 historical rows
+                # for every recent room only triggers a debounced refetch and
+                # transfers megabytes the index never renders. Conversation
+                # streams retain their atomic recent-history prime.
+                q = hub.subscribe(viewer_id=viewer_id, all_seeing=True,
+                                  include_history=False)
                 subs.append((hub, q))
                 threading.Thread(target=pump, args=(q,), daemon=True).start()
             last_heartbeat = time.monotonic()

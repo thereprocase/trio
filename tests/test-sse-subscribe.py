@@ -47,6 +47,29 @@ try:
           message_ids == ids[-web.HISTORY_LIMIT:])
     hub.unsubscribe(q)
 
+    index_q = hub.subscribe(include_history=False)
+    index_prime = []
+    while not index_q.empty():
+        index_prime.append(json.loads(index_q.get_nowait()))
+    check("history-free subscription retains roster and context control envelopes",
+          [e.get("type") for e in index_prime] == ["roster", "context"])
+    check("history-free subscription replays no old messages",
+          not any(e.get("type") == "message" for e in index_prime))
+    index_live_id = ids[-1] + 100
+    index_live = {
+        "type": "message", "id": index_live_id, "channel": channel,
+        "member_id": member, "member_name": "Sender", "content": "index-live",
+        "mentions": [], "refs": [], "bangs": [], "recipients": [],
+        "reply_to": None, "choices": None, "selection": None,
+        "retracted_at": None, "retraction_reason": None, "edited_at": None,
+        "created_at": "now", "attachments": [],
+    }
+    hub._broadcast(index_live)
+    check("history-free subscription still receives new live messages once",
+          json.loads(index_q.get_nowait()).get("id") == index_live_id
+          and index_q.empty())
+    hub.unsubscribe(index_q)
+
     entered = threading.Event()
     release = threading.Event()
     original_prime = hub._prime_payloads
