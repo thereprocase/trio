@@ -60,6 +60,7 @@ import nth_supervisor as nsup
 import nth_agent_manager as nam
 import nth_request_log as nrl
 import nth_usage as nusage
+import nth_conversation as nconv
 from nth_constants import (ANIMAL_EMOJIS, animal_for, animal_for_channel,
                            NTH_VERSION, project_context, AGENT_INBOX_CHANNEL, can_see, is_all_seeing,
                            parse_recipients, narrow_wake)
@@ -1188,6 +1189,27 @@ def _parse_sigils_against_roster(
     return mention_ids, ref_ids, bang_ids
 
 
+# What one message costs beyond its own text when actually delivered to a
+# model: the JSON envelope's field names and punctuation (id, from, content,
+# at, mentions, refs, ...). Counting only visible characters understates a
+# channel's real context footprint, which is the number being asked for.
+JSON_OVERHEAD_CHARS_PER_MESSAGE = 80
+
+# Ceiling on a reported unread count. The count is computed over the WHOLE
+# channel (see _handle_channels) and stops as soon as it exceeds this, so the
+# number is exact up to the cap and honestly flagged past it. A badge does not
+# need to distinguish 900 from 4,000; it does need to never say 0 when mail is
+# waiting.
+UNREAD_COUNT_CAP = 500
+
+
+def _is_lock_error(exc: sqlite3.OperationalError) -> bool:
+    """True when a SQLite OperationalError is a transient write-lock/busy
+    condition (worth retrying) rather than a schema or syntax fault."""
+    msg = str(exc).lower()
+    return "locked" in msg or "busy" in msg
+
+
 def ensure_operator_row(db: sqlite3.Connection, channel: str, ident: OperatorIdentity) -> Tuple[str, str]:
     """Insert-or-update this operator's members row. On every send we
     refresh the summary so trust source is fresh if a guest later upgrades
@@ -1585,6 +1607,42 @@ def ensure_ask_columns(db: sqlite3.Connection) -> None:
             db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {defn}")
         except sqlite3.OperationalError:
             pass  # column already exists
+
+
+def _unlink_attachment_files(paths: List[str]) -> Tuple[int, int]:
+    """Best-effort delete of on-disk attachment files for the storage pruner.
+
+    FILES-FIRST + IDEMPOTENT (deliberate ordering, mirrors the atomicity care in
+    the upload path): callers unlink the files BEFORE deleting the owning DB rows.
+    A file that's already gone is NOT an error — a prior partial run may have
+    removed it — so re-running the same prune converges instead of failing. The
+    inverse order (rows first) would strand files with no DB pointer to find them
+    on a retry, defeating a storage-management feature. Reads never trust the
+    `bytes` column for freed-space accounting: it stats each file so the returned
+    figure is the real disk space reclaimed.
+
+    Returns (freed_bytes, failed_paths). `failed_paths` holds only genuine
+    unlink failures (permissions, I/O) — never a missing file. The PATHS are
+    returned, not just a count: "file_errors: 3" tells an operator nothing they
+    can act on, and the caller keeps those attachment rows so a retry can still
+    find the files."""
+    freed = 0
+    failed: List[str] = []
+    for p in paths:
+        if not p:
+            continue
+        fp = Path(p)
+        try:
+            try:
+                freed += fp.stat().st_size
+            except OSError:
+                pass  # size unknown — still attempt the unlink below
+            fp.unlink()
+        except FileNotFoundError:
+            pass       # already gone — idempotent, not an error
+        except OSError:
+            failed.append(p)
+    return freed, failed
 
 
 def _event_visible_to(event: Dict[str, Any], viewer_id: Optional[str],
@@ -2387,6 +2445,50 @@ STT_SLOTS = threading.BoundedSemaphore(STT_MAX_CONCURRENT)
 CHANNEL_CODE_RE = re.compile(r"^[a-z0-9][a-z0-9\-]{0,31}$")
 
 
+# ── unified DM threading ──
+# A DM's identity is its PARTICIPANTS, not its channel. The same pair of people
+# may exchange messages that live in several backing channels (older rows are
+# scattered across topics; new ones go through the global agent inbox), and to
+# a reader that is one conversation. Keying on participants is what merges
+# them; keying on channel is what split them in the first place.
+#
+# The key itself lives in nth_conversation.py and is VIEWER-INDEPENDENT — see
+# that module for why. What is viewer-relative (who the counterparts are, what
+# the thread is called, whether it is yours or one you are auditing) is derived
+# from the key here, and never folded back into it.
+def dm_thread_key(message, operator_id: str) -> Tuple[str, List[str]]:
+    """(key, counterparts) for a DM row the operator is part of.
+
+    Returns ("", []) when the operator is not a participant, so callers can
+    keep using the empty key to mean "not one of mine". The key is the same
+    string every viewer sees for this conversation; only `counterparts` is
+    relative to the operator.
+    """
+    people = nconv.message_participants(
+        message["member_id"], parse_recipients(message["recipients"]))
+    if operator_id not in people:
+        return "", []
+    key = nconv.canonical_dm_key(people)
+    if not key:
+        return "", []
+    return key, nconv.counterparts(key, operator_id)
+
+
+def dm_audit_thread_key(message) -> str:
+    """Key for a DM row the operator is NOT part of — an agent-to-agent thread
+    surfaced read-only for audit.
+
+    Identical in form to dm_thread_key's: a conversation does not change its
+    name because of who is looking at it.
+    """
+    people = nconv.message_participants(
+        message["member_id"], parse_recipients(message["recipients"]))
+    return nconv.canonical_dm_key(people)
+
+
+participants_in_key = nconv.participants_in_key
+
+
 # ── agent control plane (supervisor-backed) ──
 # The hub owns ONE AgentSupervisor. Agent endpoints are operator-only.
 def public_agent_channels(conn: sqlite3.Connection, agent_id: str) -> List[str]:
@@ -2442,18 +2544,19 @@ def ensure_agent_inboxes(conn: sqlite3.Connection) -> None:
 # The hub owns ONE AgentSupervisor. Agent management endpoints are operator-only.
 # Auto-assigned agent identities. Each name has a checked-in SVG avatar; a
 # spawned agent gets a stable face so operators can tell them apart at a glance
-# without naming every one by hand.
+# without naming every one by hand. The icons are from SVG Repo under CC BY 4.0;
+# the Settings drawer carries the user-facing attribution.
 _CHARACTERS = [
-    ("Doug", "Doug"), ("Clover", "Clover"), ("Calyx", "Calyx"),
-    ("Thorne", "Thorne"), ("Cedar", "Cedar"), ("Lark", "Lark"),
-    ("Raven", "Raven"), ("Marten", "Marten"), ("Stag", "Stag"),
-    ("Zephyr", "Zephyr"), ("Gale", "Gale"), ("Tempest", "Tempest"),
-    ("Frost", "Frost"), ("Mist", "Mist"), ("Cascade", "Cascade"),
-    ("Delta", "Delta"), ("Tidal", "Tidal"), ("Smith", "Smith"),
-    ("Fletcher", "Fletcher"), ("Mason", "Mason"), ("Cooper", "Cooper"),
-    ("Sawyer", "Sawyer"), ("Scribe", "Scribe"), ("Griffin", "Griffin"),
-    ("Sphynx", "Sphynx"), ("Ember", "Ember"), ("Scout", "Scout"),
-    ("Beacon", "Beacon"), ("Horizon", "Horizon"),
+    ("Luna", "Luna"), ("Iris", "Iris"), ("Gale", "Gale"),
+    ("Frost", "Frost"), ("Umbra", "Umbra"), ("Atlas", "Atlas"),
+    ("Chance", "Chance"), ("Gemma", "Gemma"), ("Rex", "Rex"),
+    ("Locke", "Locke"), ("Corbin", "Corbin"), ("Vesper", "Vesper"),
+    ("Salem", "Salem"), ("Merlin", "Merlin"), ("Circe", "Circe"),
+    ("Piper", "Piper"), ("Reed", "Reed"), ("Coda", "Coda"),
+    ("Cass", "Cass"), ("Quill", "Quill"), ("Scout", "Scout"),
+    ("Paige", "Paige"), ("Darwin", "Darwin"), ("Ada", "Ada"),
+    ("Watts", "Watts"), ("Ferris", "Ferris"), ("Mason", "Mason"),
+    ("Grove", "Grove"), ("Archer", "Archer"), ("Ranger", "Ranger"),
 ]
 _CHARACTER_NAMES = [name for name, _avatar in _CHARACTERS]
 
@@ -3214,6 +3317,13 @@ class NthWebHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         path = parsed.path
+        if path.startswith("/avatars/"):
+            # Static and unauthenticated on purpose: these are 29 checked-in
+            # SVGs chosen from a fixed allowlist, identical for every viewer,
+            # and gating them would only mean the roster renders broken images
+            # before an identity cookie exists.
+            self._serve_avatar(path)
+            return
         if path == "/" or path == "/index.html":
             # Mint a cookie on first visit so /api/meta + /api/events carry it.
             token, _ident, is_new = self._resolve_identity()
@@ -3250,6 +3360,22 @@ class NthWebHandler(BaseHTTPRequestHandler):
             self._handle_agent_activity(path.split("/")[3], parsed)
         elif self.landing_mode and path == "/api/landing":
             self._json(_landing_snapshot(self.db_path))
+        elif path == "/api/channels":
+            self._handle_channels(parsed)
+        elif path == "/api/dms":
+            self._handle_dms(parsed)
+        elif path == "/api/questions":
+            self._handle_questions()
+        elif path == "/api/mentions":
+            self._handle_mentions()
+        elif path == "/api/tasks":
+            self._handle_tasks(parsed)
+        elif path == "/api/storage":
+            self._handle_storage(parsed)
+        elif path == "/api/channel-size":
+            self._handle_channel_size(parsed)
+        elif path == "/api/workspace/events":
+            self._serve_workspace_sse()
         elif path == "/api/meta":
             ch = self._channel_for_request(parsed)
             if ch is None:
@@ -3289,7 +3415,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
             # now cached too; both together close it.
             _token, ident, _is_new = self._resolve_identity()
             if ident.source == IDENTITY_SOURCE_PENDING:
-                self._error(403, "identity required — POST /api/identify first")
+                self._error(403, "pick a name to join this channel first")
                 return
             self._json(STT.health())
         elif path.startswith("/api/attachment/"):
@@ -3363,6 +3489,14 @@ class NthWebHandler(BaseHTTPRequestHandler):
             self._handle_upload()
         elif parsed.path == "/api/stt/transcribe":
             self._handle_transcribe()
+        elif parsed.path == "/api/messages/mark-read":
+            self._handle_message_read()
+        elif parsed.path == "/api/channels":
+            self._handle_channel_create()
+        elif parsed.path == "/api/archives":
+            self._handle_archive_update()
+        elif parsed.path == "/api/prune":
+            self._handle_prune()
         else:
             self._error(404, "not found")
 
@@ -3441,7 +3575,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
             self._error(400, "invalid JSON")
             return None
 
-    def _require_operator(self):
+    def _require_operator(self, verb: str = "manage agents"):
         """Gate the agent control plane to a trusted operator.
 
         The same tiers as the local-path endpoints: a local shell, or a
@@ -3454,8 +3588,8 @@ class NthWebHandler(BaseHTTPRequestHandler):
         assumption this can make."""
         _t, ident, _n = self._resolve_identity()
         if ident.source not in LOCAL_PATH_ALLOWED_SOURCES:
-            self._error(403,
-                        "only a trusted operator (local or tailnet) can manage agents")
+            self._error(403, "only a trusted operator (local or tailnet) "
+                             f"can {verb}")
             return None
         return ident
 
@@ -3861,7 +3995,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
             return
         _token, ident, _is_new = self._resolve_identity()
         if ident.source == IDENTITY_SOURCE_PENDING:
-            self._error(403, "identity required — POST /api/identify first")
+            self._error(403, "pick a name to join this channel first")
             return
         ch = self._channel_for_request(urlparse(self.path))
         if ch is None:
@@ -3920,6 +4054,94 @@ class NthWebHandler(BaseHTTPRequestHandler):
         self._json({"ok": True, "id": mid})
 
 
+    def _handle_message_read(self) -> None:
+        """Mark messages read, or unread, for the operator.
+
+        OPERATOR-ONLY, and that is a privacy boundary rather than a
+        convenience: `member_id` comes from the resolved identity and is never
+        read from the body, so one reader cannot write or clear another
+        reader's read state. A guest has no sidebar to keep unread counts for,
+        so it has no business writing rows here at all.
+
+        Idempotent in both directions — INSERT OR IGNORE and a DELETE that
+        matches nothing both succeed — because the client marks a visible
+        message read on every scroll pass and must not care whether it already
+        did. `updated` is therefore the number of ids ACCEPTED, not the number
+        of rows changed; the client uses it to confirm the batch landed, and
+        reporting rows-changed would make a correct repeat look like a failure.
+        """
+        ident = self._require_operator()
+        if ident is None:
+            return
+        operator_id = ident.member_id
+        body = self._read_json_body(max_bytes=65536)
+        if body is None:
+            return
+        ids = body.get("ids")
+        read = body.get("read", True)
+        # bool is a subclass of int, so `isinstance(i, int)` alone would accept
+        # [True, False] and then write message_id=1/0 rows against real ids.
+        if (not isinstance(ids, list)
+                or not all(isinstance(i, int) and not isinstance(i, bool)
+                           for i in ids)):
+            self._error(400, "ids must be a list of integers")
+            return
+        if not isinstance(read, bool):
+            self._error(400, "read must be a boolean")
+            return
+        # Bounded so one request cannot pin the write lock on a WAL database
+        # the EventHub polls twice a second. The client batches per visible
+        # screenful, which is far below this.
+        if len(ids) > 1000:
+            self._error(400, "too many ids (max 1000)")
+            return
+        if not ids:
+            self._json({"ok": True, "updated": 0})
+            return
+        db = None
+        try:
+            db = sqlite3.connect(str(self.db_path), timeout=5)
+            db.execute("PRAGMA busy_timeout=3000")
+            if read:
+                now = now_iso()
+                # INSERT ... SELECT so only ids that name a REAL message are
+                # stored. Accepting arbitrary integers made this table grow
+                # without any bound or reclaim path: every prune scopes its
+                # cleanup to ids drawn FROM messages, so a row for an id that
+                # never existed was collected by nothing, ever. 1000 fabricated
+                # ids per request, forever, is pure disk growth.
+                #
+                # Chunked to stay under SQLite's bound-variable limit.
+                for i in range(0, len(ids), 400):
+                    chunk = ids[i:i + 400]
+                    ph = ",".join("?" for _ in chunk)
+                    db.execute(
+                        "INSERT OR IGNORE INTO message_reads "
+                        "(message_id, member_id, read_at) "
+                        f"SELECT id, ?, ? FROM messages WHERE id IN ({ph})",
+                        [operator_id, now, *chunk])
+            else:
+                db.executemany(
+                    "DELETE FROM message_reads "
+                    "WHERE message_id = ? AND member_id = ?",
+                    [(mid, operator_id) for mid in ids])
+            db.commit()
+        except sqlite3.Error as e:
+            # Same reasoning as /api/cull: this handler is new on this branch,
+            # so echoing sqlite's text would INTRODUCE the leak rather than
+            # inherit it. Its messages name tables and columns.
+            sys.stderr.write(f"[nth_web] mark-read db error: {e}\n")
+            self._error(500, "mark-read failed")
+            return
+        finally:
+            if db is not None:
+                try:
+                    db.close()
+                except sqlite3.Error:
+                    pass
+        self._json({"ok": True, "updated": len(ids)})
+
+
     def _handle_delete(self) -> None:
         """Delete (retract) a message the operator authored — marks it retracted
         in place and posts a synthetic [retracted #N] line, matching trio_cull's
@@ -3936,7 +4158,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
             return
         _token, ident, _is_new = self._resolve_identity()
         if ident.source == IDENTITY_SOURCE_PENDING:
-            self._error(403, "identity required — POST /api/identify first")
+            self._error(403, "pick a name to join this channel first")
             return
         ch = self._channel_for_request(urlparse(self.path))
         if ch is None:
@@ -4943,6 +5165,1745 @@ class NthWebHandler(BaseHTTPRequestHandler):
             raise AgentActionError(400, f"unknown action: {action}")
         return bool(ok)
 
+    def _handle_channels(self, parsed) -> None:
+        """Channel list for the workspace sidebar: every channel with its
+        member count, last activity, a short preview, and the operator's
+        unread and unread-mention counts.
+
+        OPERATOR-ONLY. This enumerates every channel in the shared DB, and the
+        previews quote real message bodies — one of which could be from a room
+        the caller is not in. A guest is confined to the channel it was served
+        and does not get a switcher, so there is nothing here it may see.
+
+        Distinct from /api/landing, which is the FLEET view: node check-ins,
+        heartbeat liveness, message totals. That answers "what is running";
+        this answers "what needs me", which is per-operator and needs read
+        state. The overlap is transitional — landing goes away when the
+        workspace client replaces the landing page.
+        """
+        _token, ident, _is_new = self._resolve_identity()
+        if not is_all_seeing(ident.member_id):
+            self._error(403, "only the hub operator can see all channels — "
+                             "open the dashboard on the hub machine, or "
+                             "over Tailscale")
+            return
+        archived = (parse_qs(parsed.query).get("archived", ["0"])[0] == "1")
+        operator_id = ident.member_id
+        db = None
+        try:
+            db = sqlite3.connect(str(self.db_path), timeout=5)
+            db.row_factory = sqlite3.Row
+            db.execute("PRAGMA busy_timeout=3000")
+            rows = db.execute(
+                "SELECT c.code, c.status, c.pinned_message_id, c.archived_at, "
+                "  (SELECT COUNT(*) FROM members m "
+                "     WHERE m.channel = c.code AND m.active = 1) AS members, "
+                "  (SELECT MAX(created_at) FROM messages msg "
+                "     WHERE msg.channel = c.code) AS last_at, "
+                # UNREAD IS COUNTED OVER THE WHOLE CHANNEL, stopping once
+                # the cap is exceeded — NOT over "the newest 500 messages".
+                #
+                # The window used to define the CANDIDATE SET, which made the
+                # count wrong rather than merely approximate: with 600 unread,
+                # reading the newest 500 reported 0 while 100 were still
+                # unread, because the remaining 100 were outside the window
+                # entirely. Since the client marks visible messages read on
+                # every scroll pass, an operator reached that state just by
+                # scrolling. A badge that reads 0 when mail is waiting is worse
+                # than one that admits a limit.
+                #
+                # LIMIT cap+1 lets SQLite stop as soon as it has enough to know
+                # the answer is "more than cap", so the common backlog case is
+                # FASTER than the old windowed form (8ms vs 15ms measured over
+                # 50 channels x 4k messages) and only the all-read case pays
+                # for the full anti-join walk.
+                "  (SELECT COUNT(*) FROM ("
+                "     SELECT 1 FROM messages m "
+                "     WHERE m.channel = c.code AND m.member_id != ? "
+                # A DM is addressed, not broadcast: it must not raise the
+                # channel's unread badge for someone who cannot read it.
+                "       AND (m.recipients IS NULL OR m.recipients = '' "
+                "            OR m.recipients = '[]') "
+                "       AND NOT EXISTS (SELECT 1 FROM message_reads mr "
+                "                       WHERE mr.message_id = m.id "
+                "                         AND mr.member_id = ?) "
+                "     LIMIT " + str(UNREAD_COUNT_CAP + 1) + ")) AS unread, "
+                # Mention-scoped subset of the same set, for the number badge;
+                # plain unread drives the dot. instr() on the QUOTED id is an
+                # exact substring test — no LIKE wildcards, which matters
+                # because an operator id contains '_'. NULL mentions give NULL
+                # from instr and are not counted, as intended.
+                "  (SELECT COUNT(*) FROM ("
+                "     SELECT 1 FROM messages m "
+                "     WHERE m.channel = c.code AND m.member_id != ? "
+                "       AND (m.recipients IS NULL OR m.recipients = '' "
+                "            OR m.recipients = '[]') "
+                "       AND instr(m.mentions, ?) > 0 "
+                "       AND NOT EXISTS (SELECT 1 FROM message_reads mr "
+                "                       WHERE mr.message_id = m.id "
+                "                         AND mr.member_id = ?) "
+                "     LIMIT " + str(UNREAD_COUNT_CAP + 1) + ")) AS unread_mentions "
+                "FROM channels c WHERE c.code != ? "
+                + ("AND c.archived_at IS NOT NULL " if archived
+                   else "AND c.archived_at IS NULL ") +
+                "ORDER BY last_at DESC",
+                (operator_id, operator_id,
+                 operator_id, f'"{operator_id}"', operator_id,
+                 AGENT_INBOX_CHANNEL)).fetchall()
+            # ONE query for every channel's newest message, rather than one
+            # per channel inside the loop. That N+1 was the dominant cost of
+            # this endpoint — measured 164ms at 200 channels, growing linearly
+            # with the sidebar, on every dashboard refresh.
+            previews = {}
+            for prow in db.execute(
+                    "SELECT m.channel, m.member_name, m.content FROM messages m "
+                    "JOIN (SELECT channel, MAX(id) AS top FROM messages "
+                    "      GROUP BY channel) newest "
+                    "  ON newest.channel = m.channel AND newest.top = m.id"
+            ).fetchall():
+                previews[prow["channel"]] = prow
+
+            channels = []
+            for r in rows:
+                last_at = r["last_at"]
+                preview = ""
+                topic = ""
+                if r["pinned_message_id"] is not None:
+                    pinned = db.execute(
+                        "SELECT content FROM messages WHERE id = ?",
+                        (r["pinned_message_id"],)).fetchone()
+                    if pinned is not None:
+                        topic = (pinned["content"] or "").strip()
+                        if topic.startswith("[channel created]"):
+                            topic = topic[len("[channel created]"):].strip()
+                if last_at is not None:
+                    prow = previews.get(r["code"])
+                    if prow is not None:
+                        who = (prow["member_name"] or "").strip()
+                        body = (prow["content"] or "").replace("\n", " ").strip()
+                        preview = (f"{who}: {body}" if who else body)[:80]
+                channels.append({
+                    "code": r["code"],
+                    "status": r["status"],
+                    "topic": topic,
+                    "members": r["members"],
+                    "last_at": last_at,
+                    "preview": preview,
+                    "archived_at": r["archived_at"],
+                    # Report the cap, not cap+1, and say so — the client
+                    # renders "500+" rather than a precise-looking 501.
+                    "unread": min(r["unread"] or 0, UNREAD_COUNT_CAP),
+                    "unread_capped": (r["unread"] or 0) > UNREAD_COUNT_CAP,
+                    "unread_mentions": min(r["unread_mentions"] or 0,
+                                           UNREAD_COUNT_CAP),
+                    "unread_mentions_capped": (
+                        (r["unread_mentions"] or 0) > UNREAD_COUNT_CAP),
+                })
+        except sqlite3.Error as e:
+            sys.stderr.write(f"[nth_web] channels db error: {e}\n")
+            self._error(500, "channel list failed")
+            return
+        finally:
+            if db is not None:
+                try:
+                    db.close()
+                except sqlite3.Error:
+                    pass
+        self._json({"ok": True, "archived": archived,
+                    "count": len(channels), "channels": channels})
+
+    def _serve_workspace_sse(self) -> None:
+        """Cross-channel, operator-only SSE multiplexing every channel's hub.
+
+        The per-channel /api/events stream cannot keep the workspace live: a
+        unified DM thread contains rows from several backing channels, so a
+        client watching one channel would miss half its own conversation.
+        """
+        _token, ident, _is_new = self._resolve_identity()
+        viewer_id = ident.member_id
+        if not is_all_seeing(viewer_id):
+            # all_seeing=True is passed to subscribe() below, so this gate is
+            # what makes that safe: a non-operator must never be handed a
+            # stream that deliberately skips the per-viewer withholding.
+            self._error(403, "only the hub operator can watch every channel — "
+                             "open the dashboard on the hub machine, or over "
+                             "Tailscale")
+            return
+
+        if not self.landing_mode:
+            # Single-channel mode owns exactly one hub, and _hub_for_channel
+            # returns it whatever code it is asked for — looping over channels
+            # here would subscribe to the same hub many times and deliver
+            # every message that many times over.
+            channels = [self.channel]
+        else:
+            db = None
+            try:
+                db = sqlite3.connect(str(self.db_path), timeout=5)
+                db.row_factory = sqlite3.Row
+                # Bounded to recently-active, unarchived channels. Each hub is
+                # a background thread polling SQLite twice a second, so
+                # subscribing to every channel that ever existed would make one
+                # operator's first connection a permanent thread-count ratchet
+                # as channels accumulate. A channel nobody has touched in 30
+                # days warming its hub on first view instead is a fine trade.
+                channels = [r["code"] for r in db.execute(
+                    "SELECT code FROM channels WHERE archived_at IS NULL "
+                    "AND updated_at > datetime('now', '-30 days')").fetchall()]
+            except sqlite3.Error as e:
+                sys.stderr.write(f"[nth_web] workspace sse db error: {e}\n")
+                self._error(500, "workspace stream failed")
+                return
+            finally:
+                if db is not None:
+                    try:
+                        db.close()
+                    except sqlite3.Error:
+                        pass
+
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "keep-alive")
+        self.send_header("X-Accel-Buffering", "no")
+        self.end_headers()
+
+        merged: queue.Queue = queue.Queue(maxsize=500)
+        subs = []
+        stop = threading.Event()
+
+        def pump(q):
+            while not stop.is_set():
+                try:
+                    payload = q.get(timeout=0.5)
+                except queue.Empty:
+                    continue
+                try:
+                    merged.put(payload, timeout=1.0)
+                except queue.Full:
+                    # Say so rather than drop in silence: a full merge queue
+                    # means the client is slower than the room, and the
+                    # symptom downstream is a message that never arrives.
+                    if not stop.is_set():
+                        sys.stderr.write("[nth_web] workspace SSE: merged "
+                                         "queue full, dropping payload\n")
+
+        try:
+            for ch in channels:
+                hub = self._hub_for_channel(ch)
+                q = hub.subscribe(viewer_id=viewer_id, all_seeing=True)
+                subs.append((hub, q))
+                threading.Thread(target=pump, args=(q,), daemon=True).start()
+            last_heartbeat = time.monotonic()
+            while True:
+                try:
+                    payload = merged.get(timeout=1.0)
+                    self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
+                    self.wfile.flush()
+                except queue.Empty:
+                    now = time.monotonic()
+                    if now - last_heartbeat >= SSE_HEARTBEAT_SEC:
+                        self.wfile.write(b": keepalive\n\n")
+                        self.wfile.flush()
+                        last_heartbeat = now
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
+        finally:
+            # Always runs, including when subscribing partway through the loop
+            # raised: an unsubscribed queue keeps its hub from ever going idle,
+            # so the reaper would never retire it.
+            stop.set()
+            for hub, q in subs:
+                hub.unsubscribe(q)
+
+    def _serve_avatar(self, path: str) -> None:
+        """Serve one checked-in character SVG.
+
+        The name is matched against _CHARACTER_NAMES rather than sanitised,
+        so no request-supplied string ever reaches the filesystem: an allowlist
+        cannot be walked out of, whereas ".." stripping is a thing to get
+        wrong. The shape is fixed at /avatars/<name>/avatar.svg.
+        """
+        parts = path.strip("/").split("/")
+        if (len(parts) != 3 or parts[0] != "avatars"
+                or parts[2] != "avatar.svg"):
+            self._error(404, "not found")
+            return
+        # Checked against the AVATAR set, matching avatar_url() exactly. The
+        # two happen to be equal today (every _CHARACTERS pair is ("X", "X")),
+        # but avatar_url builds the path from the avatar, so validating the
+        # name here would silently disagree the moment a pair differs.
+        if parts[1] not in {avatar for _name, avatar in _CHARACTERS}:
+            self._error(404, "not found")
+            return
+        asset = WEB_SOURCE_DIR / "avatars" / parts[1] / "avatar.svg"
+        try:
+            payload = asset.read_bytes()
+        except OSError:
+            self._error(404, "not found")
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "image/svg+xml; charset=utf-8")
+        self.send_header("Content-Length", str(len(payload)))
+        # These are content-addressed by name and never change in place, so a
+        # long immutable cache is safe and keeps them off the wire entirely.
+        self.send_header("Cache-Control", "public, max-age=31536000, immutable")
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def _require_trusted_operator(self, verb: str):
+        """The storage/prune tier. IDENTICAL to _require_operator today.
+
+        It exists as a named seam, not as an extra check. These endpoints
+        expose DB-wide figures — including the volume of private DM traffic in
+        the shared inbox — and prune destroys data, so if the operator gate is
+        ever widened, this is the call site that must NOT widen with it.
+
+        An earlier version of this docstring claimed the wrapper added a
+        second, independent check on top of an id-PREFIX test. That was wrong
+        about its own codebase: _require_operator gates on `ident.source`
+        against LOCAL_PATH_ALLOWED_SOURCES and never examines a prefix, so the
+        extra `source in CULL_ALLOWED_SOURCES` test compared the same field to
+        a byte-identical tuple. That is a tautology, not defence in depth, and
+        a comment asserting a safety property the code does not have is worse
+        than no comment. The duplicate test is gone; the seam remains.
+
+        If the prefix/source invariant is ever worth enforcing, it belongs
+        where identities are MINTED, as one check protecting every consumer.
+        """
+        # Passes the verb through rather than writing a second 403 of its
+        # own: _require_operator has already answered the request, and writing
+        # twice puts two HTTP responses on one connection.
+        return self._require_operator(verb)
+
+    def _handle_storage(self, parsed) -> None:
+        """Workspace-wide storage overview: total DB size, attachment totals,
+        and a per-channel breakdown sorted heaviest-first."""
+        if self._require_trusted_operator("view storage") is None:
+            return
+        db = None
+        try:
+            db = sqlite3.connect(str(self.db_path), timeout=5)
+            db.row_factory = sqlite3.Row
+            db.execute("PRAGMA busy_timeout=3000")
+            page_count = db.execute("PRAGMA page_count").fetchone()[0]
+            page_size = db.execute("PRAGMA page_size").fetchone()[0]
+            freelist = db.execute("PRAGMA freelist_count").fetchone()[0]
+            # CAST(... AS BLOB) so LENGTH counts OCTETS, not characters. Without
+            # it the message estimate is in a different unit from the exact
+            # attachments.bytes figure it is added to, and multi-byte UTF-8
+            # content silently undercounts.
+            msg_rows = db.execute(
+                "SELECT channel, COUNT(*) AS n, "
+                "  COALESCE(SUM(LENGTH(CAST(content AS BLOB))), 0) + "
+                "  COALESCE(SUM(LENGTH(CAST(COALESCE(member_name, '') "
+                "                           AS BLOB))), 0) AS text_bytes "
+                "FROM messages GROUP BY channel").fetchall()
+            try:
+                att_rows = db.execute(
+                    "SELECT channel, COUNT(*) AS n, "
+                    "  COALESCE(SUM(bytes), 0) AS b "
+                    "FROM attachments GROUP BY channel").fetchall()
+            except sqlite3.Error:
+                # The attachments table is created on first upload, so a hub
+                # that has never received one legitimately has no such table.
+                att_rows = []
+            archived = {r["code"] for r in db.execute(
+                "SELECT code FROM channels "
+                "WHERE archived_at IS NOT NULL").fetchall()}
+        except sqlite3.Error as e:
+            sys.stderr.write(f"[nth_web] storage db error: {e}\n")
+            self._error(500, "storage query failed")
+            return
+        finally:
+            if db is not None:
+                try:
+                    db.close()
+                except sqlite3.Error:
+                    pass
+
+        def blank(code):
+            return {"channel": code, "message_count": 0,
+                    "est_message_bytes": 0, "attachment_count": 0,
+                    "attachment_bytes": 0}
+
+        by_channel: Dict[str, Dict[str, Any]] = {}
+        for r in msg_rows:
+            entry = by_channel.setdefault(r["channel"], blank(r["channel"]))
+            entry["message_count"] = r["n"]
+            entry["est_message_bytes"] = r["text_bytes"]
+        total_att_count = 0
+        total_att_bytes = 0
+        for r in att_rows:
+            entry = by_channel.setdefault(r["channel"], blank(r["channel"]))
+            entry["attachment_count"] = r["n"]
+            entry["attachment_bytes"] = r["b"]
+            total_att_count += r["n"]
+            total_att_bytes += r["b"]
+        rows = list(by_channel.values())
+        for entry in rows:
+            entry["archived"] = entry["channel"] in archived
+        rows.sort(key=lambda e: e["attachment_bytes"] + e["est_message_bytes"],
+                  reverse=True)
+        self._json({
+            "ok": True,
+            "db_bytes": page_count * page_size,
+            # What VACUUM could give back, reported separately: a DB that has
+            # had a big prune looks enormous by page count alone.
+            "db_reclaimable_bytes": freelist * page_size,
+            "attachments": {"count": total_att_count,
+                            "bytes": total_att_bytes},
+            "by_channel": rows,
+        })
+
+    def _handle_channel_size(self, parsed) -> None:
+        """Rough token estimate for one channel's history — how much of a
+        model's context window it would occupy.
+
+        Deliberately approximate: chars/4, plus a fixed per-message allowance
+        for the JSON envelope each message costs when actually delivered to a
+        model, which is more than the raw text a human would count.
+
+        An all-seeing operator counts ALL messages, because agents read the
+        full history and that is the figure being asked for. A non-all-seeing
+        caller counts BROADCASTS ONLY: the channel may be the shared agent
+        inbox (a real row holding every DM) or a legacy topic channel with
+        addressed rows in it, and an unfiltered SUM there leaks the aggregate
+        size of private traffic the caller is not party to.
+        """
+        qs = parse_qs(parsed.query)
+        dm_key = (qs.get("dm", [""])[0] or "").strip()
+        if dm_key:
+            # DM threads have no channel row of their own — size them by
+            # participant set instead.
+            self._handle_dm_size(dm_key)
+            return
+        ch = self._channel_for_request(parsed)
+        if ch is None:
+            self._error(400, "channel query param required")
+            return
+        if self.landing_mode and not self._channel_exists(ch):
+            self._error(404, f"no such channel: {ch}")
+            return
+        _token, ident, _is_new = self._resolve_identity()
+        if ident.source == IDENTITY_SOURCE_PENDING:
+            self._error(403, "pick a name to join this channel first")
+            return
+        if is_all_seeing(ident.member_id):
+            size_where = "channel = ?"
+        else:
+            size_where = ("channel = ? AND (recipients IS NULL "
+                          "OR recipients = '' OR recipients = '[]')")
+        db = None
+        try:
+            db = sqlite3.connect(str(self.db_path), timeout=5)
+            db.execute("PRAGMA busy_timeout=3000")
+            count, content_chars, name_chars = db.execute(
+                "SELECT COUNT(*), COALESCE(SUM(LENGTH(content)), 0), "
+                "  COALESCE(SUM(LENGTH(member_name)), 0) "
+                "FROM messages WHERE " + size_where, (ch,)).fetchone()
+        except sqlite3.Error as e:
+            sys.stderr.write(f"[nth_web] channel size db error: {e}\n")
+            self._error(500, "size query failed")
+            return
+        finally:
+            if db is not None:
+                try:
+                    db.close()
+                except sqlite3.Error:
+                    pass
+        total = (content_chars + name_chars
+                 + count * JSON_OVERHEAD_CHARS_PER_MESSAGE)
+        self._json({"ok": True, "channel": ch, "message_count": count,
+                    "estimated_tokens": round(total / 4)})
+
+    def _handle_dm_size(self, dm_key: str) -> None:
+        """Token estimate for one DM thread — the DM analogue of the above.
+
+        DM rows have no channel column to group by, so this narrows to rows
+        that actually name one of the thread's participants and groups those
+        by participant set.
+
+        The narrowing is not just cost. The previous version selected EVERY DM
+        row in the database and filtered in Python, which was a full table scan
+        growing with total message count (measured 423ms at 800k rows, with no
+        ceiling), and its docstring claimed a bound it did not have: per-row
+        memory was bounded, row COUNT was not. It also disagreed with
+        /api/dms, which windows at 2000 — so this endpoint would report a token
+        count for messages the thread view could never show.
+
+        instr() on each QUOTED participant id is an exact substring test
+        against the recipients JSON; Python still confirms the full thread key
+        per row, so the SQL only has to be a superset.
+        """
+        ident = self._require_operator()
+        if ident is None:
+            return
+        operator_id = ident.member_id
+        db = None
+        try:
+            db = sqlite3.connect(str(self.db_path), timeout=5)
+            db.row_factory = sqlite3.Row
+            db.execute("PRAGMA busy_timeout=3000")
+            # Superset filter: any row naming a participant, or sent by one.
+            # A thread's rows always satisfy at least one of these.
+            people = participants_in_key(dm_key) or [dm_key]
+            people = [pid for pid in people if pid][:16]
+            if not people:
+                rows = []
+            else:
+                clauses = " OR ".join(
+                    ["instr(recipients, ?) > 0"] * len(people)
+                    + ["member_id = ?"] * len(people))
+                rows = db.execute(
+                    "SELECT member_id, recipients, LENGTH(content) AS clen, "
+                    "  LENGTH(member_name) AS nlen FROM messages "
+                    "WHERE recipients IS NOT NULL "
+                    "  AND recipients NOT IN ('', '[]') "
+                    f"  AND ({clauses})",
+                    [f'"{pid}"' for pid in people] + people).fetchall()
+        except sqlite3.Error as e:
+            sys.stderr.write(f"[nth_web] dm size db error: {e}\n")
+            self._error(500, "size query failed")
+            return
+        finally:
+            if db is not None:
+                try:
+                    db.close()
+                except sqlite3.Error:
+                    pass
+        count = 0
+        total_chars = 0
+        for r in rows:
+            key, _others = dm_thread_key(r, operator_id)
+            if not key:
+                # The audit fallback lets an all-seeing operator size an
+                # agent-to-agent thread. That crosses the participant boundary,
+                # but only within the same audit scope ?with= already grants,
+                # and returns strictly less: a count, not the content.
+                key = dm_audit_thread_key(r)
+            if key != dm_key:
+                continue
+            count += 1
+            total_chars += ((r["clen"] or 0) + (r["nlen"] or 0)
+                            + JSON_OVERHEAD_CHARS_PER_MESSAGE)
+        self._json({"ok": True, "dm": dm_key, "message_count": count,
+                    "estimated_tokens": round(total_chars / 4)})
+
+    def _handle_prune(self) -> None:
+        """Destructive storage maintenance for the Data page. Trusted operator
+        only; same-origin already enforced in do_POST.
+
+        Body: {action, older_than_days?, channel?, dry_run?}.
+          - prune_attachments       — attachment files older than N days (all channels).
+          - prune_archived_messages — messages (+ their attachments) in ARCHIVED
+                                       channels older than N days.
+          - delete_channel          — one channel's messages + attachments +
+                                       membership + the channel row itself.
+          - reclaim                 — VACUUM only (manual "reclaim space").
+
+        SAFETY: dry_run defaults to TRUE (a body with no dry_run key changes
+        nothing and just previews counts/bytes). The agent inbox is never
+        deletable. Files are unlinked before rows are deleted (see
+        _unlink_attachment_files). Real runs VACUUM afterward so freed pages
+        actually return to disk, and report the real bytes reclaimed."""
+        # Auth first (Aragorn): gate before parsing/validating the body so an
+        # untrusted-but-same-origin caller can't even probe the validation path.
+        if self._require_trusted_operator("prune storage") is None:
+            return
+        body = self._read_json_body(max_bytes=2048)
+        if body is None:
+            return
+        if not isinstance(body, dict):
+            self._error(400, "invalid body")
+            return
+        action = body.get("action")
+        if action not in ("prune_attachments", "prune_archived_messages",
+                           "delete_channel", "reclaim"):
+            self._error(400, "unknown action")
+            return
+        dry_run = body.get("dry_run", True)
+        if not isinstance(dry_run, bool):
+            self._error(400, "dry_run must be a boolean")
+            return
+        older_than_days = body.get("older_than_days")
+        if action in ("prune_attachments", "prune_archived_messages"):
+            # bool is an int subclass — reject True/False sneaking in as a count.
+            if (not isinstance(older_than_days, int) or isinstance(older_than_days, bool)
+                    or older_than_days < 0):
+                self._error(400, "older_than_days must be a non-negative integer")
+                return
+        target_channel = None
+        if action == "delete_channel":
+            target_channel = body.get("channel")
+            if not isinstance(target_channel, str) or not target_channel.strip():
+                self._error(400, "channel required for delete_channel")
+                return
+            target_channel = target_channel.strip()
+            if target_channel == AGENT_INBOX_CHANNEL:
+                self._error(400, "the agent inbox cannot be deleted")
+                return
+
+        db = None
+        try:
+            # Autocommit (isolation_level=None) so we can BEGIN IMMEDIATE around
+            # the deletes and run VACUUM (which cannot execute inside a
+            # transaction) afterward on the same connection.
+            db = sqlite3.connect(str(self.db_path), timeout=10, isolation_level=None)
+            db.row_factory = sqlite3.Row
+            db.execute("PRAGMA busy_timeout=8000")
+            if action == "reclaim":
+                result = self._prune_reclaim(db, dry_run)
+            elif action == "prune_attachments":
+                result = self._prune_attachments(db, older_than_days, dry_run)
+            elif action == "prune_archived_messages":
+                result = self._prune_archived_messages(db, older_than_days, dry_run)
+            else:  # delete_channel
+                result = self._prune_delete_channel(db, target_channel, dry_run)
+        except AgentActionError as e:
+            self._error(e.status, e.message)
+            return
+        except sqlite3.Error as e:
+            # Generic to the client, detail to the log: sqlite text names
+            # tables, columns and the DB path. Same rule as /api/cull.
+            sys.stderr.write(f"[nth_web] prune db error: {e}\n")
+            self._error(500, "prune failed")
+            return
+        finally:
+            if db is not None:
+                try:
+                    db.close()
+                except sqlite3.Error:
+                    pass
+        self._json({"ok": True, "action": action, "dry_run": dry_run, **result})
+
+    @staticmethod
+    def _db_logical_bytes(db: sqlite3.Connection) -> int:
+        pc = db.execute("PRAGMA page_count").fetchone()[0]
+        ps = db.execute("PRAGMA page_size").fetchone()[0]
+        return pc * ps
+
+    # A DB above this size is not VACUUMed as a side effect of a prune; the
+    # operator has to ask for it explicitly via the `reclaim` action.
+    #
+    # VACUUM takes an EXCLUSIVE lock and rewrites the whole file. Measured: 1s
+    # at 160MB, 3.6s at 560MB — and during that window concurrent writers with
+    # the ordinary 3000ms busy_timeout do not merely wait, they FAIL: an agent
+    # calling trio_send gets "database is locked" as a 500. Reclaiming disk is
+    # never worth breaking live agent traffic without the operator choosing
+    # that trade, and this branch's own prune feature is what will eventually
+    # produce databases this size.
+    VACUUM_INLINE_MAX_BYTES = 128 * 1024 * 1024
+
+    @staticmethod
+    def _vacuum(db: sqlite3.Connection) -> bool:
+        """Run VACUUM to return freed pages to disk. True on success, False if
+        it could not run (the exclusive lock exceeded busy_timeout under live
+        traffic).
+
+        By the time this is called the destructive deletes have ALREADY
+        committed, so a VACUUM that cannot acquire the lock must be a soft,
+        retryable warning — never a 500 that hides the successful prune and
+        loses the freed-bytes figure."""
+        try:
+            db.execute("VACUUM")
+            return True
+        except sqlite3.Error:
+            return False
+
+    def _vacuum_if_small(self, db: sqlite3.Connection) -> Tuple[bool, str]:
+        """VACUUM only if the file is small enough to compact without stalling
+        other writers. Returns (vacuumed, reason_if_skipped)."""
+        if self._db_logical_bytes(db) > self.VACUUM_INLINE_MAX_BYTES:
+            return False, ("The deletions are saved. Disk space wasn't "
+                           "reclaimed because this database is large enough "
+                           "that compacting it would briefly block agents "
+                           "from writing — run Reclaim when that's convenient.")
+        return self._vacuum(db), ""
+
+    @staticmethod
+    def _delete_message_reads(db: sqlite3.Connection, msg_ids) -> None:
+        """Reap message_reads rows for deleted messages. message_reads is one
+        row per (message × reader) and is frequently the LARGEST table in a busy
+        channel; the messages→message_reads FK is declared but never enforced
+        (foreign_keys is off, no ON DELETE CASCADE), so deleting messages strands
+        these rows and undercuts the whole reclaim goal unless we sweep them
+        explicitly (Sauron). Chunked to respect SQLite's bound-variable limit."""
+        for i in range(0, len(msg_ids), 400):
+            chunk = msg_ids[i:i + 400]
+            ph = ",".join("?" for _ in chunk)
+            db.execute(f"DELETE FROM message_reads WHERE message_id IN ({ph})", chunk)
+
+    def _prune_reclaim(self, db, dry_run) -> Dict[str, Any]:
+        """VACUUM the DB to return freed pages to disk. Dry-run reports the
+        freelist bytes that WOULD be reclaimed; a real run VACUUMs and reports
+        the actual shrink (before − after), or marks vacuum_deferred if the
+        VACUUM couldn't acquire its lock."""
+        if dry_run:
+            freelist = db.execute("PRAGMA freelist_count").fetchone()[0]
+            page_size = db.execute("PRAGMA page_size").fetchone()[0]
+            return {"counts": {}, "file_errors": 0, "would_free_bytes": {
+                    "attachments": 0, "db": freelist * page_size}}
+        before = self._db_logical_bytes(db)
+        vacuumed = self._vacuum(db)
+        after = self._db_logical_bytes(db) if vacuumed else before
+        res = {"counts": {}, "file_errors": 0,
+               "freed_bytes": {"attachments": 0, "db": max(0, before - after)}}
+        if not vacuumed:
+            res["vacuum_deferred"] = True
+            # A bare `vacuum_deferred: true` next to `freed_bytes.db: 0` reads
+            # as failure, and the operator runs the whole prune again. The
+            # deletes DID commit; only the disk reclaim was postponed.
+            res["note"] = vacuum_note or (
+                "The deletions are saved. Disk space wasn't reclaimed yet "
+                "because the database was busy — run Reclaim later to finish.")
+        return res
+
+    def _prune_attachments(self, db, older_than_days, dry_run) -> Dict[str, Any]:
+        """Delete attachment files older than N days across every channel
+        (rows + on-disk files). Frees disk immediately; DB rows freed are
+        reclaimed by the trailing VACUUM."""
+        cutoff = (datetime.now(timezone.utc)
+                  - timedelta(days=older_than_days)).isoformat()
+        try:
+            rows = db.execute(
+                "SELECT id, path, bytes FROM attachments WHERE created_at < ?",
+                (cutoff,)).fetchall()
+        except sqlite3.Error:
+            rows = []  # no attachments table yet → nothing to prune
+        paths = [r["path"] for r in rows]
+        if dry_run:
+            # Stat real files for an honest preview; fall back to the bytes column.
+            would = 0
+            for r in rows:
+                sz = None
+                if r["path"]:
+                    try:
+                        sz = Path(r["path"]).stat().st_size
+                    except OSError:
+                        sz = None
+                would += sz if sz is not None else (r["bytes"] or 0)
+            return {"counts": {"attachments": len(rows)}, "file_errors": 0,
+                    "would_free_bytes": {"attachments": would, "db": 0}}
+        freed_files, failed_paths = _unlink_attachment_files(paths)
+        file_errors = len(failed_paths)
+        before = self._db_logical_bytes(db)
+        # Keep the rows whose file could NOT be removed. Deleting them would
+        # strand those files with nothing pointing at them, so a retry could
+        # never find them — which contradicts the files-first ordering this
+        # helper exists to provide.
+        stuck = set(failed_paths)
+        ids = [r["id"] for r in rows if r["path"] not in stuck]
+        # BEGIN IMMEDIATE for parity with the other prune paths: one atomic
+        # row-set delete rather than per-chunk autocommits (Sauron/Aragorn).
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            self._delete_by_ids(db, "attachments", ids)
+            db.execute("COMMIT")
+        except sqlite3.Error:
+            db.execute("ROLLBACK")
+            raise
+        vacuumed, vacuum_note = self._vacuum_if_small(db)
+        after = self._db_logical_bytes(db) if vacuumed else before
+        res = {"counts": {"attachments": len(ids)}, "file_errors": file_errors,
+               "freed_bytes": {"attachments": freed_files,
+                               "db": max(0, before - after)}}
+        if failed_paths:
+            # The paths, not just a count: an operator seeing "3" has no idea
+            # which three or what to do. These are files the server could not
+            # delete (usually permissions).
+            res["file_error_paths"] = failed_paths[:50]
+        if not vacuumed:
+            res["vacuum_deferred"] = True
+            # A bare `vacuum_deferred: true` next to `freed_bytes.db: 0` reads
+            # as failure, and the operator runs the whole prune again. The
+            # deletes DID commit; only the disk reclaim was postponed.
+            res["note"] = vacuum_note or (
+                "The deletions are saved. Disk space wasn't reclaimed yet "
+                "because the database was busy — run Reclaim later to finish.")
+        return res
+
+    def _prune_archived_messages(self, db, older_than_days, dry_run) -> Dict[str, Any]:
+        """Delete messages in ARCHIVED channels older than N days, plus the
+        attachments those messages own (rows + files). Active channels are never
+        touched — only channels the operator has already archived."""
+        cutoff = (datetime.now(timezone.utc)
+                  - timedelta(days=older_than_days)).isoformat()
+        archived = [r["code"] for r in db.execute(
+            "SELECT code FROM channels WHERE archived_at IS NOT NULL"
+        ).fetchall()]
+        if not archived:
+            empty = {"messages": 0, "attachments": 0}
+            key = "would_free_bytes" if dry_run else "freed_bytes"
+            return {"counts": empty, "file_errors": 0, key: {"attachments": 0, "db": 0}}
+        placeholders = ",".join("?" for _ in archived)
+        msg_ids = [r["id"] for r in db.execute(
+            f"SELECT id FROM messages WHERE channel IN ({placeholders}) "
+            "AND created_at < ?", (*archived, cutoff)).fetchall()]
+        att_rows = self._attachments_for_messages(db, msg_ids)
+        paths = [r["path"] for r in att_rows]
+        if dry_run:
+            would = self._stat_or_bytes(att_rows)
+            return {"counts": {"messages": len(msg_ids),
+                               "attachments": len(att_rows)},
+                    "file_errors": 0, "db_bytes_estimated": True,
+                    "would_free_bytes": {
+                        "attachments": would,
+                        "db": self._est_message_bytes(db, msg_ids)}}
+        freed_files, failed_paths = _unlink_attachment_files(paths)
+        file_errors = len(failed_paths)
+        before = self._db_logical_bytes(db)
+        stuck = set(failed_paths)
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            self._delete_by_ids(db, "attachments",
+                                [r["id"] for r in att_rows
+                                 if r["path"] not in stuck])
+            self._delete_message_reads(db, msg_ids)
+            self._delete_by_ids(db, "messages", msg_ids)
+            db.execute("COMMIT")
+        except sqlite3.Error:
+            db.execute("ROLLBACK")
+            raise
+        vacuumed, vacuum_note = self._vacuum_if_small(db)
+        after = self._db_logical_bytes(db) if vacuumed else before
+        res = {"counts": {"messages": len(msg_ids), "attachments": len(att_rows)},
+               "file_errors": file_errors,
+               "freed_bytes": {"attachments": freed_files,
+                               "db": max(0, before - after)}}
+        if failed_paths:
+            # The paths, not just a count: an operator seeing "3" has no idea
+            # which three or what to do. These are files the server could not
+            # delete (usually permissions).
+            res["file_error_paths"] = failed_paths[:50]
+        if not vacuumed:
+            res["vacuum_deferred"] = True
+            # A bare `vacuum_deferred: true` next to `freed_bytes.db: 0` reads
+            # as failure, and the operator runs the whole prune again. The
+            # deletes DID commit; only the disk reclaim was postponed.
+            res["note"] = vacuum_note or (
+                "The deletions are saved. Disk space wasn't reclaimed yet "
+                "because the database was busy — run Reclaim later to finish.")
+        return res
+
+    def _prune_delete_channel(self, db, channel, dry_run) -> Dict[str, Any]:
+        """Delete ONE channel wholesale: its messages + attachments (rows +
+        files) + membership + the channel row. Membership teardown routes
+        through _remove_from_channel per member so tasks are released, locks
+        dropped, agent_channels cleaned, and agent-global sessions revoked when
+        this was the member's final presence — no orphans. The agent inbox is
+        rejected earlier and can never reach here.
+
+        Raises AgentActionError(404) for an unknown channel. Without that, a
+        mistyped code on the single most destructive operation in the product
+        deleted nothing and still answered `ok: true` with all-zero counts —
+        a green checkmark while the channel sat untouched in the sidebar.
+        """
+        if db.execute("SELECT 1 FROM channels WHERE code = ?",
+                      (channel,)).fetchone() is None:
+            raise AgentActionError(404, f"no such channel: {channel}")
+        att_rows = self._channel_attachments(db, channel)
+        msg_count = db.execute(
+            "SELECT COUNT(*) FROM messages WHERE channel = ?", (channel,)).fetchone()[0]
+        member_ids = [r["id"] for r in db.execute(
+            "SELECT id FROM members WHERE channel = ?", (channel,)).fetchall()]
+        if dry_run:
+            would = self._stat_or_bytes(att_rows)
+            chan_ids = [r[0] for r in db.execute(
+                "SELECT id FROM messages WHERE channel = ?",
+                (channel,)).fetchall()]
+            return {"counts": {"messages": msg_count,
+                               "attachments": len(att_rows),
+                               "members": len(member_ids)},
+                    "file_errors": 0, "db_bytes_estimated": True,
+                    "would_free_bytes": {
+                        "attachments": would,
+                        "db": self._est_message_bytes(db, chan_ids)}}
+        # Unlike the two prune paths above, the channel row itself is going
+        # away here, so keeping an attachment row would leave it pointing at a
+        # channel that no longer exists. Delete regardless and report the paths
+        # so the operator can remove the files by hand.
+        freed_files, failed_paths = _unlink_attachment_files(
+            [r["path"] for r in att_rows])
+        file_errors = len(failed_paths)
+        before = self._db_logical_bytes(db)
+        now = now_iso()
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            for mid in member_ids:
+                _remove_from_channel(db, channel, mid, now)
+            # Residual channel-scoped rows not tied to a specific member.
+            self._delete_by_ids(db, "attachments", [r["id"] for r in att_rows])
+            # message_reads has no FK cascade — reap by the channel's message ids
+            # BEFORE the messages go (Sauron).
+            db.execute("DELETE FROM message_reads WHERE message_id IN "
+                       "(SELECT id FROM messages WHERE channel = ?)", (channel,))
+            db.execute("DELETE FROM messages WHERE channel = ?", (channel,))
+            db.execute("DELETE FROM tasks WHERE channel = ?", (channel,))
+            db.execute("DELETE FROM locks WHERE channel = ?", (channel,))
+            # Belt-and-suspenders: sweep any agent_channels placement for this
+            # channel that lacked a members row (so no orphan points at the now
+            # deleted channels.code) (Sauron).
+            db.execute("DELETE FROM agent_channels WHERE channel = ?", (channel,))
+            db.execute("DELETE FROM channels WHERE code = ?", (channel,))
+            db.execute("COMMIT")
+        except sqlite3.Error:
+            db.execute("ROLLBACK")
+            raise
+        vacuumed, vacuum_note = self._vacuum_if_small(db)
+        after = self._db_logical_bytes(db) if vacuumed else before
+        res = {"counts": {"messages": msg_count, "attachments": len(att_rows),
+                          "members": len(member_ids)}, "file_errors": file_errors,
+               "freed_bytes": {"attachments": freed_files,
+                               "db": max(0, before - after)}}
+        if failed_paths:
+            # The paths, not just a count: an operator seeing "3" has no idea
+            # which three or what to do. These are files the server could not
+            # delete (usually permissions).
+            res["file_error_paths"] = failed_paths[:50]
+        if not vacuumed:
+            res["vacuum_deferred"] = True
+            # A bare `vacuum_deferred: true` next to `freed_bytes.db: 0` reads
+            # as failure, and the operator runs the whole prune again. The
+            # deletes DID commit; only the disk reclaim was postponed.
+            res["note"] = vacuum_note or (
+                "The deletions are saved. Disk space wasn't reclaimed yet "
+                "because the database was busy — run Reclaim later to finish.")
+        return res
+
+    # ── prune helpers ────────────────────────────────────────────────────────
+    @staticmethod
+    def _attachments_for_messages(db, msg_ids):
+        """[{id, path, bytes}] for the given message ids (empty if none / no
+        attachments table). Chunked IN() so a huge id list can't blow the SQL
+        variable limit."""
+        if not msg_ids:
+            return []
+        out = []
+        try:
+            for i in range(0, len(msg_ids), 400):
+                chunk = msg_ids[i:i + 400]
+                ph = ",".join("?" for _ in chunk)
+                out.extend(db.execute(
+                    f"SELECT id, path, bytes FROM attachments "
+                    f"WHERE message_id IN ({ph})", chunk).fetchall())
+        except sqlite3.Error:
+            return []
+        return out
+
+    @staticmethod
+    def _channel_attachments(db, channel):
+        """[{id, path, bytes}] for every attachment in a channel (empty if no
+        attachments table)."""
+        try:
+            return db.execute(
+                "SELECT id, path, bytes FROM attachments WHERE channel = ?",
+                (channel,)).fetchall()
+        except sqlite3.Error:
+            return []
+
+    @staticmethod
+    def _est_message_bytes(db, msg_ids) -> int:
+        """Rough DB bytes the given messages occupy, for a dry-run preview.
+
+        Previews used to report `db: 0` for every destructive action, so
+        "delete this channel" previewed as *12,000 messages, 0 bytes freed*
+        and the real run then reported hundreds of MB. Zero is an assertion of
+        nothing, and it made the preview useless for the one decision it
+        exists to support. This is an estimate and the caller labels it as
+        one, but an estimate beats a confident lie.
+        """
+        if not msg_ids:
+            return 0
+        total = 0
+        for i in range(0, len(msg_ids), 400):
+            chunk = msg_ids[i:i + 400]
+            ph = ",".join("?" for _ in chunk)
+            total += db.execute(
+                "SELECT COALESCE(SUM(LENGTH(CAST(content AS BLOB))), 0) + "
+                "       COALESCE(SUM(LENGTH(CAST(COALESCE(member_name, '') "
+                "                                AS BLOB))), 0) "
+                f"FROM messages WHERE id IN ({ph})", chunk).fetchone()[0]
+        return total
+
+    @staticmethod
+    def _stat_or_bytes(att_rows) -> int:
+        """Sum of on-disk file sizes (falling back to the stored `bytes` column
+        when a file is missing) — the honest 'would free' figure for a preview."""
+        total = 0
+        for r in att_rows:
+            sz = None
+            if r["path"]:
+                try:
+                    sz = Path(r["path"]).stat().st_size
+                except OSError:
+                    sz = None
+            total += sz if sz is not None else (r["bytes"] or 0)
+        return total
+
+    @staticmethod
+    def _delete_by_ids(db, table, ids) -> None:
+        """DELETE FROM <table> WHERE id IN (ids), chunked to respect SQLite's
+        bound-variable limit. `table` is a trusted internal literal, never user
+        input; ids are always parameterized."""
+        for i in range(0, len(ids), 400):
+            chunk = ids[i:i + 400]
+            ph = ",".join("?" for _ in chunk)
+            db.execute(f"DELETE FROM {table} WHERE id IN ({ph})", chunk)
+
+    def _handle_questions(self) -> None:
+        """Pending multiple-choice questions addressed to the operator.
+
+        "Pending" is derived, not stored: a question is answered when the
+        operator has posted a reply_to it carrying a selection. Deriving it
+        means an answer sent from anywhere — dashboard, MCP, a second browser —
+        clears the question everywhere, with no answered-flag to keep in sync.
+        """
+        ident = self._require_operator()
+        if ident is None:
+            return
+        operator_id = ident.member_id
+        db = None
+        try:
+            db = sqlite3.connect(str(self.db_path), timeout=5)
+            db.row_factory = sqlite3.Row
+            db.execute("PRAGMA busy_timeout=3000")
+            # ANY reply from the operator counts as answering, not only one
+            # carrying a structured `selection`.
+            #
+            # The picker sends a selection, but the MCP contract is explicit
+            # that the asking agent reads the ordinary reply WORDS — so a prose
+            # answer, or one sent from MCP or a second client, is a real answer
+            # and unblocks the agent. Requiring `selection` left those
+            # questions in the operator's queue permanently, with no dismiss
+            # path and no way to review what they had already answered. If a
+            # reply was actually a clarifying question, the agent asks again
+            # and a new row appears; that is recoverable, a stuck queue is not.
+            answered = {(r["channel"], r["reply_to"]) for r in db.execute(
+                "SELECT channel, reply_to FROM messages "
+                "WHERE member_id = ? AND reply_to IS NOT NULL "
+                "  AND EXISTS (SELECT 1 FROM channels c "
+                "              WHERE c.code = messages.channel "
+                "                AND c.archived_at IS NULL)",
+                (operator_id,)).fetchall()}
+            rows = db.execute(
+                "SELECT id, channel, member_id, member_name, content, "
+                "       created_at, choices FROM messages "
+                "WHERE COALESCE(choices, '') != '' AND member_id != ? "
+                "  AND EXISTS (SELECT 1 FROM channels c "
+                "              WHERE c.code = messages.channel "
+                "                AND c.archived_at IS NULL) "
+                "ORDER BY id DESC LIMIT 2000",
+                (operator_id,)).fetchall()
+            questions = []
+            name_cache: Dict[str, str] = {}
+            for r in rows:
+                choices = parse_obj_json(r["choices"])
+                # The target check is what makes this the OPERATOR's queue: a
+                # question posed to someone else is not theirs to answer.
+                if (not isinstance(choices, dict)
+                        or choices.get("target") != operator_id):
+                    continue
+                if (r["channel"], r["id"]) in answered:
+                    continue
+                qs = choices.get("questions") or []
+                if not qs and "options" in choices:
+                    # Single-question form, kept readable alongside batches.
+                    qs = [{"question": choices.get("question", ""),
+                           "options": choices["options"],
+                           "mode": choices.get("mode")}]
+                if not qs:
+                    continue
+                questions.append({
+                    "id": r["id"],
+                    "channel": r["channel"],
+                    "member_id": r["member_id"],
+                    "member_name": resolve_display_name(
+                        db, r["member_id"], name_cache),
+                    "created_at": r["created_at"],
+                    "question": qs[0].get("question", "") or "Question",
+                    "questions": qs,
+                })
+        except sqlite3.Error as e:
+            sys.stderr.write(f"[nth_web] questions db error: {e}\n")
+            self._error(500, "question list failed")
+            return
+        finally:
+            if db is not None:
+                try:
+                    db.close()
+                except sqlite3.Error:
+                    pass
+        self._json({"ok": True, "count": len(questions),
+                    "questions": questions})
+
+    def _handle_mentions(self) -> None:
+        """@mentions of the operator, each with a read receipt."""
+        ident = self._require_operator()
+        if ident is None:
+            return
+        operator_id = ident.member_id
+        db = None
+        try:
+            db = sqlite3.connect(str(self.db_path), timeout=5)
+            db.row_factory = sqlite3.Row
+            db.execute("PRAGMA busy_timeout=3000")
+            rows = db.execute(
+                "SELECT m.id, m.channel, m.member_id, m.member_name, "
+                "       m.content, m.created_at, m.mentions, "
+                "       (mr.member_id IS NOT NULL) AS is_read "
+                "FROM messages m "
+                "LEFT JOIN message_reads mr "
+                "  ON mr.message_id = m.id AND mr.member_id = ? "
+                "WHERE m.mentions LIKE ? AND m.member_id != ? "
+                "  AND EXISTS (SELECT 1 FROM channels c "
+                "              WHERE c.code = m.channel "
+                "                AND c.archived_at IS NULL) "
+                "ORDER BY m.id DESC LIMIT 2000",
+                (operator_id, f"%{operator_id}%", operator_id)).fetchall()
+            mentions = []
+            name_cache: Dict[str, str] = {}
+            unread_count = 0
+            for r in rows:
+                # The LIKE above is a coarse prefilter only — it would also
+                # match an id that merely CONTAINS the operator's. The parsed
+                # array is the exact test, and it is the one that decides.
+                if operator_id not in parse_mentions_json(r["mentions"]):
+                    continue
+                is_read = bool(r["is_read"])
+                if not is_read:
+                    unread_count += 1
+                mentions.append({
+                    "id": r["id"],
+                    "channel": r["channel"],
+                    "member_id": r["member_id"],
+                    "member_name": resolve_display_name(
+                        db, r["member_id"], name_cache),
+                    "created_at": r["created_at"],
+                    "content": r["content"] or "",
+                    "read": is_read,
+                })
+        except sqlite3.Error as e:
+            sys.stderr.write(f"[nth_web] mentions db error: {e}\n")
+            self._error(500, "mention list failed")
+            return
+        finally:
+            if db is not None:
+                try:
+                    db.close()
+                except sqlite3.Error:
+                    pass
+        self._json({"ok": True, "count": len(mentions),
+                    "unread_count": unread_count, "mentions": mentions})
+
+    def _handle_tasks(self, parsed) -> None:
+        """Read-only task board for one channel.
+
+        Read-only on purpose: tasks are claimed and completed through MCP,
+        where the claim is atomic and the agent doing the work is the one
+        recording it. A human "complete" button would let the board disagree
+        with what actually happened.
+        """
+        # Landing mode serves many channels from one process, so the channel
+        # comes from the request rather than a process-wide attribute — the
+        # same shape as _handle_search. atrium reaches self.channel here
+        # because its _authorize_channel resolved it first; there is no such
+        # gate on this branch, so scope explicitly.
+        ch = self._channel_for_request(parsed)
+        if ch is None:
+            self._error(400, "channel query param required")
+            return
+        if self.landing_mode and not self._channel_exists(ch):
+            self._error(404, f"no such channel: {ch}")
+            return
+        _token, ident, _is_new = self._resolve_identity()
+        if ident.source == IDENTITY_SOURCE_PENDING:
+            self._error(403, "pick a name to join this channel first")
+            return
+        # In LANDING mode the channel comes from ?channel= and is validated
+        # only for SHAPE, so "channel-scoped" would really mean
+        # "any-channel-scoped": a guest who has identified could read the task
+        # board — descriptions, results, claimants — of every channel in the
+        # DB by iterating codes. Upstream's single-channel mode is unaffected
+        # (the channel is fixed by the process), but the workspace this branch
+        # exists to enable runs in landing mode, so the cross-channel read has
+        # to be operator-gated exactly like its ten siblings.
+        if self.landing_mode and not is_all_seeing(ident.member_id):
+            self._error(403, "only the hub operator can read another "
+                             "channel's tasks")
+            return
+        # Active work first, terminal states last.
+        order = ("CASE status WHEN 'open' THEN 0 WHEN 'claimed' THEN 1 "
+                 "WHEN 'blocked' THEN 2 WHEN 'done' THEN 3 "
+                 "WHEN 'cancelled' THEN 4 ELSE 5 END")
+        db = None
+        try:
+            db = sqlite3.connect(str(self.db_path), timeout=5)
+            db.row_factory = sqlite3.Row
+            db.execute("PRAGMA busy_timeout=3000")
+            rows = db.execute(
+                "SELECT id, posted_by, claimed_by, status, description, "
+                "       result, blocked_by, created_at, updated_at, "
+                "       lease_expires_at "
+                "FROM tasks WHERE channel = ? "
+                f"ORDER BY {order}, id", (ch,)).fetchall()
+            tasks = []
+            name_cache: Dict[str, str] = {}
+            now = now_iso()
+            for r in rows:
+                try:
+                    deps = json.loads(r["blocked_by"] or "[]")
+                except (ValueError, TypeError):
+                    # A malformed blocked_by must not take the whole board
+                    # down; an empty dependency list is the safe reading.
+                    deps = []
+                # Resolved names, not raw ids. This board is read-only by
+                # design — the only useful thing left is knowing WHO to go and
+                # ask, and "claimed by ag_7f3c91" does not tell you that.
+                # /api/mentions and /api/dms already resolve; this did not.
+                tasks.append({
+                    "id": r["id"],
+                    "posted_by": r["posted_by"],
+                    "posted_by_name": resolve_display_name(
+                        db, r["posted_by"], name_cache),
+                    "claimed_by": r["claimed_by"],
+                    "claimed_by_name": (resolve_display_name(
+                        db, r["claimed_by"], name_cache)
+                        if r["claimed_by"] else ""),
+                    # An expired lease means the claim was abandoned; without
+                    # this an abandoned task looks identical to live work.
+                    "stale": bool(r["lease_expires_at"]
+                                  and r["lease_expires_at"] < now
+                                  and r["status"] == "claimed"),
+                    "status": r["status"],
+                    "description": r["description"] or "",
+                    "result": r["result"] or "",
+                    "blocked_by": deps,
+                    "created_at": r["created_at"],
+                    "updated_at": r["updated_at"],
+                    "lease_expires_at": r["lease_expires_at"],
+                })
+        except sqlite3.Error as e:
+            sys.stderr.write(f"[nth_web] tasks db error: {e}\n")
+            self._error(500, "task list failed")
+            return
+        finally:
+            if db is not None:
+                try:
+                    db.close()
+                except sqlite3.Error:
+                    pass
+        self._json({"ok": True, "channel": ch,
+                    "count": len(tasks), "tasks": tasks})
+
+    def _handle_archive_update(self) -> None:
+        """Archive or restore one channel or one operator DM thread.
+
+        Archiving is navigational, never destructive: a channel archive
+        preserves membership, messages, tasks and runtime state, and restoring
+        is a single UPDATE back to NULL.
+
+        DM archives store a message-id WATERMARK rather than a flag, so a newly
+        received message returns the thread to the active inbox on its own. A
+        boolean would have to be cleared explicitly on every send, and missing
+        that in one path is how a live conversation goes quietly missing.
+        """
+        ident = self._require_operator()
+        if ident is None:
+            return
+        body = self._read_json_body(max_bytes=8192)
+        if body is None:
+            return
+        kind = str(body.get("kind") or "").strip().lower()
+        key = str(body.get("key") or "").strip()
+        archived = body.get("archived")
+        if kind not in ("channel", "dm"):
+            self._error(400, "kind must be channel or dm")
+            return
+        if not key or len(key) > 512:
+            self._error(400, "archive key is required")
+            return
+        if not isinstance(archived, bool):
+            self._error(400, "archived must be true or false")
+            return
+        if kind == "channel" and key == AGENT_INBOX_CHANNEL:
+            # The inbox is the DM transport, not a room. Archiving it would
+            # hide every agent's private channel at once.
+            self._error(400, "the internal agent inbox cannot be archived")
+            return
+
+        db = None
+        try:
+            db = sqlite3.connect(str(self.db_path), timeout=5)
+            db.row_factory = sqlite3.Row
+            db.execute("PRAGMA busy_timeout=3000")
+            now = now_iso()
+            if kind == "channel":
+                if db.execute("SELECT 1 FROM channels WHERE code=?",
+                              (key,)).fetchone() is None:
+                    self._error(404, "channel not found")
+                    return
+                if archived:
+                    db.execute(
+                        "UPDATE channels SET archived_at=?, archived_by=?, "
+                        "updated_at=? WHERE code=?",
+                        (now, ident.member_id, now, key))
+                else:
+                    db.execute(
+                        "UPDATE channels SET archived_at=NULL, "
+                        "archived_by=NULL, updated_at=? WHERE code=?",
+                        (now, key))
+            else:
+                # Resolve the thread's newest message id. Scanned newest-first
+                # and stopped at the first match, so this is a short walk in
+                # the common case rather than a full DM history scan.
+                latest_id = 0
+                for row in db.execute(
+                        "SELECT id, member_id, recipients FROM messages "
+                        "WHERE recipients IS NOT NULL "
+                        "  AND recipients NOT IN ('', '[]') "
+                        "ORDER BY id DESC").fetchall():
+                    thread_key, _others = dm_thread_key(row, ident.member_id)
+                    if thread_key == key:
+                        latest_id = row["id"]
+                        break
+                if not latest_id:
+                    # Refuses a thread the operator is not part of, because
+                    # dm_thread_key returns "" for those and can never match.
+                    self._error(404, "DM thread not found")
+                    return
+                if archived:
+                    db.execute(
+                        "INSERT INTO dm_archives (owner_id, thread_key, "
+                        "archived_through_id, archived_at) VALUES (?,?,?,?) "
+                        "ON CONFLICT(owner_id, thread_key) DO UPDATE SET "
+                        "archived_through_id=excluded.archived_through_id, "
+                        "archived_at=excluded.archived_at",
+                        (ident.member_id, key, latest_id, now))
+                else:
+                    db.execute(
+                        "DELETE FROM dm_archives "
+                        "WHERE owner_id=? AND thread_key=?",
+                        (ident.member_id, key))
+            db.commit()
+        except sqlite3.Error as e:
+            sys.stderr.write(f"[nth_web] archive db error: {e}\n")
+            self._error(500, "archive update failed")
+            return
+        finally:
+            if db is not None:
+                try:
+                    db.close()
+                except sqlite3.Error:
+                    pass
+        # Report the EFFECTIVE state, not the state that was requested.
+        #
+        # A DM thread can also be archived because every counterpart is an
+        # archived AGENT, which is derived from agents.archived_at and cannot
+        # be cleared from here. Un-archiving such a thread deletes a
+        # dm_archives row that may not exist, changes nothing observable, and
+        # used to answer {"archived": false} — so the client reported success
+        # and the conversation stayed gone. Re-derive and say what is true.
+        result = {"ok": True, "kind": kind, "key": key, "archived": archived}
+        if kind == "dm":
+            still = self._agent_archived_stamp(key, ident.member_id)
+            if still and not archived:
+                result["archived"] = True
+                result["agent_archived"] = True
+                result["agent_archived_at"] = still
+                result["note"] = ("Your archive was cleared, but this "
+                                  "conversation stays archived because every "
+                                  "participant is an archived agent. Restore "
+                                  "the agent to bring it back.")
+            else:
+                result["agent_archived"] = bool(still)
+        self._json(result)
+
+    def _agent_archived_stamp(self, thread_key: str, viewer_id: str = "") -> str:
+        """Newest archive stamp if every COUNTERPART in `thread_key` is an
+        archived agent, else "". Mirrors all_archived() in _handle_dms.
+
+        The viewer is excluded deliberately: a canonical key names every
+        participant including the operator, and the operator is a human with no
+        `agents` row — counting them would make this return "" for every one of
+        the operator's own threads.
+        """
+        ids = (nconv.counterparts(thread_key, viewer_id) if viewer_id
+               else participants_in_key(thread_key))
+        if not ids:
+            return ""
+        db = None
+        try:
+            db = sqlite3.connect(str(self.db_path), timeout=5)
+            db.row_factory = sqlite3.Row
+            stamps = []
+            for member_id in ids:
+                row = db.execute(
+                    "SELECT archived_at FROM agents WHERE id = ?",
+                    (member_id,)).fetchone()
+                if row is None or not row["archived_at"]:
+                    return ""
+                stamps.append(row["archived_at"])
+            return max(stamps)
+        except sqlite3.Error:
+            # Degrade to "not agent-archived": the caller uses this only to
+            # add an explanation, and inventing one from a failed read would
+            # be worse than omitting it.
+            return ""
+        finally:
+            if db is not None:
+                try:
+                    db.close()
+                except sqlite3.Error:
+                    pass
+
+    def _handle_dms(self, parsed) -> None:
+        """The operator's unified, cross-channel DM surface.
+
+        New DMs live in the global agent inbox; older rows are scattered across
+        whatever topic channel they were sent in. Both are one conversation to
+        a reader, so this groups by PARTICIPANTS rather than by channel,
+        yielding one operator thread per counterpart plus a separate
+        agent-to-agent audit section. `?with=<thread-key>` also returns the
+        merged history for that one thread.
+        """
+        ident = self._require_operator()
+        if ident is None:
+            return
+        operator_id = ident.member_id
+        qs = parse_qs(parsed.query)
+        with_id = (qs.get("with", [""])[0] or "").strip()
+        archived = (qs.get("archived", ["0"])[0] == "1")
+        db = None
+        try:
+            db = sqlite3.connect(str(self.db_path), timeout=5)
+            db.row_factory = sqlite3.Row
+            db.execute("PRAGMA busy_timeout=3000")
+            # TWO SEPARATE WINDOWS, not one global one.
+            #
+            # A single `ORDER BY id DESC LIMIT 2000` over every DM row in the
+            # database let agent-to-agent traffic EVICT the operator's own
+            # conversations: 2,100 unrelated agent DMs and `your_dms` came back
+            # empty, while /api/channel-size?dm= still reported messages in a
+            # thread this endpoint claimed did not exist. The operator's inbox
+            # must be bounded by its OWN size, never by someone else's volume.
+            #
+            # instr() on the QUOTED id is an exact substring test against the
+            # recipients JSON — no LIKE wildcards, and an id that merely
+            # CONTAINS the operator's does not match. Python still confirms
+            # membership per row; this only narrows the window.
+            quoted_op = f'"{operator_id}"'
+            dm_select = (
+                "SELECT m.*, (mr.member_id IS NOT NULL) AS is_read "
+                "FROM messages m "
+                "LEFT JOIN message_reads mr "
+                "  ON mr.message_id = m.id AND mr.member_id = ? "
+                "WHERE m.recipients IS NOT NULL "
+                "  AND m.recipients NOT IN ('', '[]') ")
+            own_rows = db.execute(
+                dm_select
+                + "  AND (m.member_id = ? OR instr(m.recipients, ?) > 0) "
+                  "ORDER BY m.id DESC LIMIT 2000",
+                (operator_id, operator_id, quoted_op)).fetchall()
+            audit_rows = db.execute(
+                dm_select
+                + "  AND m.member_id != ? AND instr(m.recipients, ?) = 0 "
+                  "ORDER BY m.id DESC LIMIT 2000",
+                (operator_id, operator_id, quoted_op)).fetchall()
+            # Each list stays newest-first, and a thread lives entirely in one
+            # of them (it either involves the operator or it does not), so the
+            # "first row seen for a thread is its latest" rule below still
+            # holds across the concatenation.
+            rows = list(own_rows) + list(audit_rows)
+            name_cache: Dict[str, str] = {operator_id: ident.display_name}
+
+            def display_name(member_id: str) -> str:
+                if member_id not in name_cache:
+                    resolve_display_name(db, member_id, name_cache)
+                return name_cache[member_id]
+
+            archive_map = {r["thread_key"]: r for r in db.execute(
+                "SELECT thread_key, archived_through_id, archived_at "
+                "FROM dm_archives WHERE owner_id = ?",
+                (operator_id,)).fetchall()}
+
+            yours: Dict[str, Dict[str, Any]] = {}
+            agent_threads: Dict[str, Dict[str, Any]] = {}
+            for r in rows:
+                participants = set(parse_recipients(r["recipients"]))
+                participants.add(r["member_id"])
+                if operator_id in participants:
+                    key, others = dm_thread_key(r, operator_id)
+                    if not key:
+                        continue
+                    if key not in yours:
+                        # Rows arrive newest-first, so the first row seen for a
+                        # thread IS its latest — no max() bookkeeping needed.
+                        yours[key] = {
+                            "key": key, "member_ids": others,
+                            "name": ", ".join(display_name(i) for i in others),
+                            "channel": r["channel"], "last_id": r["id"],
+                            "last_at": r["created_at"],
+                            "preview": (r["content"] or "")[:120],
+                            "from": display_name(r["member_id"]),
+                            "unread": 0,
+                        }
+                    if r["member_id"] != operator_id and not r["is_read"]:
+                        yours[key]["unread"] += 1
+                else:
+                    key = dm_audit_thread_key(r)
+                    if key and key not in agent_threads:
+                        ids = sorted(participants)
+                        agent_threads[key] = {
+                            "key": key, "member_ids": ids,
+                            "name": " ↔ ".join(display_name(i) for i in ids),
+                            "channel": r["channel"], "last_id": r["id"],
+                            "last_at": r["created_at"],
+                            "preview": (r["content"] or "")[:120],
+                            "from": display_name(r["member_id"]),
+                            "unread": 0,
+                        }
+
+            # Archiving an AGENT archives the conversations you had with it.
+            # Otherwise a retired agent keeps a live-looking DM row in the
+            # sidebar forever: you cannot reply to it and it is not coming
+            # back until you unarchive. Derived rather than stored, so
+            # unarchiving the agent restores the thread with no bookkeeping.
+            archived_agents = {r["id"]: r["archived_at"] for r in db.execute(
+                "SELECT id, archived_at FROM agents "
+                "WHERE archived_at IS NOT NULL").fetchall()}
+
+            def all_archived(member_ids) -> str:
+                """Newest archive stamp if EVERY counterpart is an archived
+                agent, else "". One live participant keeps a group alive."""
+                ids = [i for i in (member_ids or []) if i]
+                if not ids or any(i not in archived_agents for i in ids):
+                    return ""
+                # .get rather than [] so this stays a total function: the guard
+                # above is what makes every id present, and a future edit to it
+                # should surface as a wrong archive state, not a 500 from deep
+                # inside the DM list.
+                return max((archived_agents.get(i) or "") for i in ids)
+
+            # TWO INDEPENDENT REASONS a thread can be hidden, reported
+            # separately. They used to collapse into one `archived` flag, and
+            # that flag could not describe a thread that was BOTH archived by
+            # you and archived because its agent was: the client would tell the
+            # operator "unarchive the agent", they would do exactly that, and
+            # the thread would still be gone because their own watermark
+            # survived. Having followed the only instruction available and
+            # failed, there was nothing else to try.
+            for key, thread in yours.items():
+                marker = archive_map.get(key)
+                # `self_archived` is a WATERMARK test: a message newer than the
+                # marker means the thread has spoken since you archived it, so
+                # it is live again on its own.
+                thread["self_archived"] = bool(
+                    marker
+                    and thread["last_id"] <= marker["archived_through_id"])
+                thread["self_archived_at"] = (marker["archived_at"]
+                                              if thread["self_archived"]
+                                              else None)
+                stamp = all_archived(thread["member_ids"])
+                thread["agent_archived"] = bool(stamp)
+                thread["agent_archived_at"] = stamp or None
+                # `archived` stays as the effective OR so existing readers keep
+                # working; the two causes above are what a client needs to say
+                # what to actually DO about it.
+                thread["archived"] = (thread["self_archived"]
+                                      or thread["agent_archived"])
+                thread["archived_at"] = (thread["self_archived_at"]
+                                         or thread["agent_archived_at"])
+
+            # Keep the UNFILTERED maps for the ?with= lookup below. Filtering
+            # first meant `requested` was None whenever the thread's archive
+            # state disagreed with the `archived` query param — which is
+            # exactly when ?with= is used from the archive browser — so it
+            # always fell through to parsing the raw key instead of using the
+            # thread it had already built.
+            all_yours = dict(yours)
+            all_agent_threads = dict(agent_threads)
+
+            yours = {k: t for k, t in yours.items()
+                     if bool(t["archived"]) == archived}
+            # Audit threads have no archive of their own: they follow their
+            # participants, disappearing once every one of them is archived.
+            for thread in agent_threads.values():
+                thread["agent_archived"] = bool(
+                    all_archived(thread["member_ids"]))
+            agent_threads = {k: t for k, t in agent_threads.items()
+                             if bool(t["agent_archived"]) == archived}
+
+            merged = []
+            if with_id:
+                marker = archive_map.get(with_id)
+                # One pass over rows (already newest-first): collect this
+                # thread's rows once, so the latest id is simply the first
+                # match and the event-building loop touches only this thread's
+                # rows rather than all 2000 fetched for the grouping above.
+                matched = []
+                for r in rows:
+                    key, _others = dm_thread_key(r, operator_id)
+                    if not key:
+                        key = dm_audit_thread_key(r)
+                    if key == with_id:
+                        matched.append(r)
+                latest = matched[0]["id"] if matched else 0
+                requested = (all_yours.get(with_id)
+                             or all_agent_threads.get(with_id))
+                # An agent-archived thread reads as archived here too, so
+                # opening it from the archive browser (which asks archived=1)
+                # actually returns its history instead of an empty thread.
+                thread_is_archived = bool(
+                    (marker and latest
+                     and latest <= marker["archived_through_id"])
+                    or all_archived((requested or {}).get("member_ids")
+                                    or participants_in_key(with_id)))
+                if thread_is_archived == archived:
+                    for r in reversed(matched):
+                        # Two-arg call on purpose. Upstream's _message_event
+                        # takes member_name straight off the row, which is
+                        # populated at send time; atrium's variant also takes a
+                        # name cache and re-resolves. Threading that through
+                        # here would change what the live tail and history
+                        # burst report as well, which is a different change
+                        # than adding this endpoint.
+                        evt = _message_event(db, r)
+                        evt["channel"] = r["channel"]
+                        merged.append(evt)
+
+            targets = []
+            for a in db.execute(
+                    "SELECT id, name, state, model FROM agents "
+                    "WHERE managed = 1 AND archived_at IS NULL "
+                    "ORDER BY name COLLATE NOCASE").fetchall():
+                targets.append({
+                    "id": a["id"],
+                    "name": resolve_display_name(db, a["id"]),
+                    "state": a["state"], "model": a["model"],
+                    "channels": public_agent_channels(db, a["id"]),
+                    "dm_channel": AGENT_INBOX_CHANNEL,
+                })
+        except sqlite3.Error as e:
+            sys.stderr.write(f"[nth_web] dms db error: {e}\n")
+            self._error(500, "dm list failed")
+            return
+        finally:
+            if db is not None:
+                try:
+                    db.close()
+                except sqlite3.Error:
+                    pass
+        self._json({
+            "ok": True,
+            "archived": archived,
+            "your_dms": list(yours.values()),
+            "agent_dms": list(agent_threads.values()),
+            "targets": targets,
+            "with": with_id,
+            "messages": merged,
+        })
+
+    def _handle_channel_create(self) -> None:
+        """Create a channel from the operator console.
+
+        MCP trio_connect still owns agent-created channels; this is the
+        human-facing equivalent. It creates the channel, places the
+        authenticated operator in it, and optionally pins a short objective.
+        """
+        ident = self._require_operator()
+        if ident is None:
+            return
+        body = self._read_json_body(max_bytes=4096)
+        if body is None:
+            return
+        # Type-check BEFORE calling any string method. `(body.get("code") or
+        # "")` passes a non-empty NON-string straight through, so {"code":
+        # 12345} reached .strip() and raised AttributeError — and do_POST has
+        # no wrapping handler, so the connection was dropped with no status
+        # line at all instead of answering 400.
+        raw_topic = body.get("topic")
+        raw_code = body.get("code")
+        for field, value in (("topic", raw_topic), ("code", raw_code)):
+            if value is not None and not isinstance(value, str):
+                self._error(400, f"{field} must be a string")
+                return
+        topic = (raw_topic or "").strip()[:500]
+        code = (raw_code or "").strip().lower()
+        if not code and topic:
+            code = re.sub(r"[^a-z0-9-]", "-", topic.lower())
+            code = re.sub(r"-+", "-", code).strip("-")[:32]
+        if not code:
+            code = "channel-" + secrets.token_hex(3)
+        if not CHANNEL_CODE_RE.match(code):
+            self._error(400, "channel code must be lowercase alphanumeric "
+                             "with hyphens, 1-32 chars")
+            return
+        if code == AGENT_INBOX_CHANNEL:
+            self._error(400, "that channel name is reserved for private "
+                             "agent messages")
+            return
+        # Three rows in one transaction, while the EventHub poller and member
+        # heartbeats are also writing under WAL. A brief write-lock used to
+        # surface as a one-shot 500, which the operator saw as "the modal
+        # closed and nothing happened" — the create dialog closes before this
+        # request resolves. Retry transient locks so routine contention heals.
+        last_err = None
+        for attempt in range(4):
+            db = sqlite3.connect(str(self.db_path), timeout=5)
+            db.row_factory = sqlite3.Row
+            try:
+                db.execute("PRAGMA busy_timeout=5000")
+                if db.execute("SELECT 1 FROM channels WHERE code = ?",
+                              (code,)).fetchone():
+                    self._error(409, "channel already exists")
+                    return
+                now = now_iso()
+                with db:
+                    db.execute(
+                        "INSERT INTO channels (code, status, created_at, "
+                        "updated_at) VALUES (?, 'active', ?, ?)",
+                        (code, now, now))
+                    op_id, op_name = ensure_operator_row(db, code, ident)
+                    created = db.execute(
+                        "INSERT INTO messages (channel, member_id, "
+                        "member_name, content, created_at) VALUES (?,?,?,?,?)",
+                        (code, op_id, op_name,
+                         f"[channel created] {topic}" if topic
+                         else "[channel created]", now))
+                    if topic:
+                        db.execute(
+                            "UPDATE channels SET pinned_message_id = ? "
+                            "WHERE code = ?", (created.lastrowid, code))
+                self._json({"ok": True,
+                            "channel": {"code": code, "topic": topic}},
+                           status=201)
+                return
+            except sqlite3.IntegrityError:
+                # Lost a race for the same code: the pre-check passed for both
+                # writers and one INSERT won the PK. Report the same clean 409
+                # the pre-check gives, not a 500.
+                self._error(409, "channel already exists")
+                return
+            except sqlite3.OperationalError as e:
+                last_err = e
+                if _is_lock_error(e):
+                    if attempt < 3:
+                        time.sleep(0.1 * (attempt + 1))
+                        continue
+                    break
+                sys.stderr.write(f"[nth_web] channel create db error: {e}\n")
+                self._error(500, "channel create failed")
+                return
+            except sqlite3.Error as e:
+                sys.stderr.write(f"[nth_web] channel create db error: {e}\n")
+                self._error(500, "channel create failed")
+                return
+            finally:
+                db.close()
+        sys.stderr.write(f"[nth_web] channel create lock timeout: {last_err}\n")
+        self._error(503, "channel create is busy, please retry")
+
     def _handle_search(self, parsed) -> None:
         """Full-history search: substring match over this channel's stored
         messages (beyond the ~200 the dashboard keeps in memory)."""
@@ -4965,7 +6926,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
         q = q[:200]
         _token, ident, _is_new = self._resolve_identity()
         if ident.source == IDENTITY_SOURCE_PENDING:
-            self._error(403, "identity required — POST /api/identify first")
+            self._error(403, "pick a name to join this channel first")
             return
         # Escape LIKE wildcards so a query like "50%" is a literal substring.
         esc = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
@@ -5167,7 +7128,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
 
         token, ident, _is_new = self._resolve_identity()
         if ident.source == IDENTITY_SOURCE_PENDING:
-            self._error(403, "identity required — POST /api/identify first")
+            self._error(403, "pick a name to join this channel first")
             return
 
         db = None
@@ -5434,7 +7395,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
             return
         _token, ident, _is_new = self._resolve_identity()
         if ident.source == IDENTITY_SOURCE_PENDING:
-            self._error(403, "identity required — POST /api/identify first")
+            self._error(403, "pick a name to join this channel first")
             return
         # Removing a member is destructive and roster-wide — restrict it to
         # trusted identities (a local shell or a Tailscale-verified peer). A
@@ -5846,7 +7807,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
         so there is nothing here to scope by channel in landing mode."""
         _token, ident, _is_new = self._resolve_identity()
         if ident.source == IDENTITY_SOURCE_PENDING:
-            self._error(403, "identity required — POST /api/identify first")
+            self._error(403, "pick a name to join this channel first")
             return
         # Bound concurrency before reading the (up to 25 MB) body, so a burst of
         # uploads can't buffer N×MAX_STT_BYTES or pile up behind the worker lock.
@@ -5954,7 +7915,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
             return
         _token, ident, _is_new = self._resolve_identity()
         if ident.source == IDENTITY_SOURCE_PENDING:
-            self._error(403, "identity required — POST /api/identify first")
+            self._error(403, "pick a name to join this channel first")
             return
         row = None
         db = None

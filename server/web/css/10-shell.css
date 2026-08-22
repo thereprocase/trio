@@ -70,5 +70,10 @@
     padding: 3px 6px; border-radius: 3px; font-family: inherit; font-size: 11px; cursor: pointer; }
   #settings-panel select:focus { outline: none; border-color: var(--accent); }
   #settings-panel input[type="range"] { width: 130px; cursor: pointer; accent-color: var(--accent); }
+  #settings-panel .settings-attribution {
+    border-top: 1px solid var(--border); padding-top: 8px; margin-top: 2px;
+    color: var(--dimmer); font-size: 10px; line-height: 1.35;
+  }
+  #settings-panel .settings-attribution a { color: var(--accent); }
 
   /* ── Chat ── */

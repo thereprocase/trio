@@ -57,6 +57,9 @@ check("the emoji list was injected as real JSON",
       re.search(r"const ANIMAL_EMOJIS = \[", served) is not None)
 check("the dictation language was injected as a quoted tag",
       re.search(r'const STT_WEB_LANG = "[a-z]{2}-[A-Z]{2}"', served) is not None)
+check("the Character icon attribution reaches the Settings drawer",
+      "SVG Repo" in served
+      and "creativecommons.org/licenses/by/4.0/" in served)
 
 # ── the declaration must match the directory ───────────────────────────
 # GROUND TRUTH IS THE DIRECTORY, NOT THE TUPLE. Deriving the expectation from

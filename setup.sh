@@ -60,7 +60,7 @@ if [ "${1:-}" = "hub-service" ] || [ "${1:-}" = "upgrade" ]; then
              nth_supervisor.py nth_request_log.py \
              nth_agent_manager.py \
              nth_codex_runtime.py \
-             nth_usage.py; do
+             nth_usage.py nth_conversation.py; do
         if [ -f "$HUB_DIR/$f" ] && ! cmp -s "$SCRIPT_DIR/server/$f" "$HUB_DIR/$f"; then
             cp "$HUB_DIR/$f" "$HUB_DIR/$f.bak-$STAMP"
         fi
@@ -418,6 +418,9 @@ cp "$SCRIPT_DIR/server/nth_codex_runtime.py" "$SERVER_DIR/nth_codex_runtime.py"
 cp "$SCRIPT_DIR/server/nth_agent_manager.py" "$SERVER_DIR/nth_agent_manager.py"
 # Quota-burn series + the arithmetic over it.
 cp "$SCRIPT_DIR/server/nth_usage.py" "$SERVER_DIR/nth_usage.py"
+# Conversation identity (canonical DM thread keys). nth_web imports it at
+# module scope.
+cp "$SCRIPT_DIR/server/nth_conversation.py" "$SERVER_DIR/nth_conversation.py"
 cp "$SCRIPT_DIR/server/nth_doctor.py" "$SERVER_DIR/nth_doctor.py"
 cp "$SCRIPT_DIR/server/nth_spoke_monitor.py" "$SERVER_DIR/nth_spoke_monitor.py"
 cp "$SCRIPT_DIR/server/codex_context_publisher.py" "$SERVER_DIR/codex_context_publisher.py"

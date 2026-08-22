@@ -318,6 +318,39 @@ def get_db() -> sqlite3.Connection:
             FOREIGN KEY (channel) REFERENCES channels(code)
         )
     """)
+    # Per-reader read state, for the workspace sidebar's unread counts.
+    #
+    # Deliberately NOT members.last_read. That column is a single high-water
+    # mark per member per channel: it answers "how far have I scrolled" and
+    # cannot answer "which messages have I not seen", because reading the
+    # newest message would mark every older one read. The sidebar needs the
+    # set, so the set is what is stored.
+    #
+    # Rows are written for the WEB operator only. Agents advance their
+    # watermark through trio_ack and never consult this table, so the two
+    # mechanisms do not interact and this stays one row per message the
+    # operator has actually seen.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS message_reads (
+            message_id  INTEGER NOT NULL,
+            member_id   TEXT NOT NULL,
+            read_at     TEXT NOT NULL,
+            PRIMARY KEY (message_id, member_id),
+            FOREIGN KEY (message_id) REFERENCES messages(id)
+        )
+    """)
+    # Covers the "has THIS member read THIS message" existence probe that the
+    # unread subqueries run per candidate row.
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_message_reads_member
+        ON message_reads (member_id, message_id)
+    """)
+    # Covers cleanup by message, so deleting a message's read rows is a lookup
+    # rather than a full scan.
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_message_reads_message
+        ON message_reads (message_id)
+    """)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS tasks (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -376,6 +409,13 @@ def get_db() -> sqlite3.Connection:
     # Migration: add pinned_message_id column (v2 feature)
     for col, table, defn in [
         ("pinned_message_id", "channels", "INTEGER"),
+        # Channel archive. Reversible by design: archiving stamps these and
+        # nothing else, so membership, tasks and history survive and a restore
+        # is a single UPDATE back to NULL. Nullable TEXT rather than a status
+        # value because `status` already means something else (active/ended)
+        # and overloading it would make "archived" and "ended" the same state.
+        ("archived_at", "channels", "TEXT"),
+        ("archived_by", "channels", "TEXT"),
         ("mentions", "messages", "TEXT NOT NULL DEFAULT ''"),
         # v7.1: #pound references — "talked about" without pinging. Separate
         # from mentions so the monitor can choose to notify on @ only while
@@ -418,6 +458,23 @@ def get_db() -> sqlite3.Connection:
     # sub-agents spawned with a read_only token cannot forge posts under
     # the parent's member_id. member_id stays the public identity;
     # session_token is the private mutation capability.
+    # DM archive markers, one per (owner, thread).
+    #
+    # Stored as a WATERMARK, not a flag: `archived_through_id` records how far
+    # the thread was archived. A newer message therefore un-archives the thread
+    # on its own, which is the behaviour a person expects — archiving a
+    # conversation means "I am done with this for now", not "never show me this
+    # agent again". A boolean would need explicit un-setting on every send, and
+    # forgetting that in one code path is how threads get silently lost.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS dm_archives (
+            owner_id            TEXT NOT NULL,
+            thread_key          TEXT NOT NULL,
+            archived_through_id INTEGER NOT NULL,
+            archived_at         TEXT NOT NULL,
+            PRIMARY KEY (owner_id, thread_key)
+        )
+    """)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS sessions (
             session_token   TEXT PRIMARY KEY,
@@ -4483,6 +4540,12 @@ def nth_cleanup(channel: str = "", all_ended: bool = False) -> str:
                 return json.dumps({"error": f'Channel "{channel}" is still active. End it first with nth_end.'})
             db.execute("DELETE FROM locks WHERE channel = ?", (channel,))
             db.execute("DELETE FROM tasks WHERE channel = ?", (channel,))
+            # Read receipts first: the message_reads -> messages FK is declared
+            # but never enforced (PRAGMA foreign_keys is off, no ON DELETE
+            # CASCADE), so deleting the messages first strands every receipt
+            # permanently in what is often the largest table in a busy channel.
+            db.execute("DELETE FROM message_reads WHERE message_id IN "
+                       "(SELECT id FROM messages WHERE channel = ?)", (channel,))
             db.execute("DELETE FROM messages WHERE channel = ?", (channel,))
             db.execute("DELETE FROM members WHERE channel = ?", (channel,))
             _doomed_files.append((_purge_channel_attachments(db, channel), channel))
@@ -4496,6 +4559,9 @@ def nth_cleanup(channel: str = "", all_ended: bool = False) -> str:
                 code = row["code"]
                 db.execute("DELETE FROM locks WHERE channel = ?", (code,))
                 db.execute("DELETE FROM tasks WHERE channel = ?", (code,))
+                # Same unenforced-FK reasoning as the single-channel path above.
+                db.execute("DELETE FROM message_reads WHERE message_id IN "
+                           "(SELECT id FROM messages WHERE channel = ?)", (code,))
                 db.execute("DELETE FROM messages WHERE channel = ?", (code,))
                 db.execute("DELETE FROM members WHERE channel = ?", (code,))
                 _doomed_files.append((_purge_channel_attachments(db, code), code))

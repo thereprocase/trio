@@ -18,6 +18,51 @@ PORTABILITY-6 (`setup.sh` never tries `py` on Windows; the working-indicator
 hook bakes a bare interpreter name into a persisted global hook command).
 
 
+### Workspace-API debt, recorded by the LOTC review (2026-08-16)
+
+Deliberate deferrals from `up/workspace-api`. Each is a decision, not an
+oversight — written here because a rationale that lives only in a commit body
+is not discoverable six months out.
+
+- **`/api/tools` is NOT in the workspace API.** It reads `tool_events`, and the
+  only writer is `nth_activity_hook.py` on the parallel `up/hooks` branch.
+  Shipping the reader without the writer would give a permanently empty
+  endpoint, and empty endpoints get "fixed" by people who do not know why they
+  are empty. It lands with `up/hooks`.
+- **`/api/landing` and `/api/channels` overlap, transitionally.** Landing is the
+  FLEET view (node check-ins, heartbeat liveness, totals — "what is running");
+  `/api/channels` is the sidebar (per-operator unread, preview, archive — "what
+  needs me"). Neither derives from the other. Landing goes away when the
+  workspace client replaces the landing page; unifying them before that client
+  exists would mean designing the merged endpoint blind.
+- ~~**`dm_thread_key` is VIEWER-RELATIVE and already persisted.**~~ **DONE**
+  (`6ab9d6a`). The key is now the sorted participant set, identical for every
+  viewer, in `server/nth_conversation.py`. Done before release precisely
+  because `dm_archives.thread_key` is half a primary key: with no rows shipped
+  yet it cost nothing, and after release it would have been a backfill.
+- **`JSON_OVERHEAD_CHARS_PER_MESSAGE = 80` and the `chars/4` divisor** drive
+  every token estimate and nothing pins either against a real envelope. A loose
+  bound test (±40%) would fail only when the envelope has genuinely changed
+  shape, which is exactly when the estimate has become a lie.
+- **Three unread predicates still disagree.** `/api/channels` excludes own
+  messages AND addressed rows; `/api/dms` excludes own messages and is
+  window-bounded; `/api/mentions` excludes own messages but applies no
+  addressed-row filter. A DM that @-mentions the operator counts in two of the
+  three. They should share one `unread_predicate(reader_id)` fragment, after
+  deciding once whether an addressed row is "unread mail".
+- **`_prune_delete_channel` reads its counts outside the transaction** and then
+  deletes attachments by enumerated id while deleting messages by channel, so
+  an attachment inserted in between survives as an orphan. Use
+  `DELETE FROM attachments WHERE channel = ?` inside the transaction and take
+  counts from `rowcount`.
+- **The four `_prune_*` actions each reimplement** the before/`_vacuum`/after/
+  `vacuum_deferred` pattern. A fifth that forgets `else before` would report the
+  whole DB as reclaimed. Extract a context manager before that happens.
+- **Workspace SSE resolves its channel set once at connect time**, so a channel
+  created after a client connects is invisible until it reconnects. Pump threads
+  are also one-per-connection and are only cleaned up on the next failed write,
+  gated by the 20s heartbeat.
+
 ### De-root the hub services
 **Severity:** Medium (security) | **Since:** v8.0.2 War Council (2026-08-11)
 
