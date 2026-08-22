@@ -27,6 +27,34 @@ SLEEPING_KEYWORDS = ("idle", "standing by", "tier 3", "agent-monitor")
 # reaches for a plain broadcast cannot spill hub plumbing into a real channel.
 AGENT_INBOX_CHANNEL = "nth-agent-inbox"
 
+# Durable provenance for channels archived by the hub's idle-channel policy.
+# Manual archives store the operator member id instead. The distinction is
+# load-bearing: a new message may automatically resurface only an AUTO archive;
+# an operator's explicit archive remains sticky until explicitly restored.
+AUTO_ARCHIVE_BY = "system:auto-idle-v1"
+AUTO_ARCHIVE_AFTER_SECONDS = 24 * 60 * 60
+
+# SQLite is the only credible all-writer boundary. Messages are inserted by the
+# MCP server, web UI, runtime adapters, supervisor and legacy dashboard; an
+# AFTER INSERT trigger prevents any one of those paths from writing invisibly
+# into an auto-archived channel. Manual archives never match the provenance.
+AUTO_ARCHIVE_RESURFACE_TRIGGER_SQL = f"""
+CREATE TRIGGER IF NOT EXISTS trg_messages_resurface_auto_archived
+AFTER INSERT ON messages
+WHEN EXISTS (
+    SELECT 1 FROM channels
+    WHERE code = NEW.channel AND archived_by = '{AUTO_ARCHIVE_BY}'
+)
+BEGIN
+    UPDATE channels
+       SET archived_at = NULL,
+           archived_by = NULL,
+           updated_at = NEW.created_at
+     WHERE code = NEW.channel
+       AND archived_by = '{AUTO_ARCHIVE_BY}';
+END
+"""
+
 # Operator/human member ids carry this prefix. Only the two AUTHENTICATED
 # tiers are all-seeing; a self-declared guest is not, and neither is an agent.
 OPERATOR_MEMBER_ID_PREFIX = "_op_"

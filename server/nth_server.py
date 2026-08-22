@@ -30,7 +30,8 @@ import sys
 sys.path.insert(0, str(Path(__file__).parent))
 from nth_constants import (SLEEPING_KEYWORDS, NTH_VERSION, project_context,
                            AGENT_INBOX_CHANNEL, can_see, is_all_seeing,
-                           narrow_wake, parse_recipients, BUDDY_AVATARS)
+                           narrow_wake, parse_recipients, BUDDY_AVATARS,
+                           AUTO_ARCHIVE_RESURFACE_TRIGGER_SQL)
 
 from mcp.server.fastmcp import FastMCP, Image
 
@@ -468,6 +469,9 @@ def get_db() -> sqlite3.Connection:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {defn}")
         except sqlite3.OperationalError:
             pass  # column already exists
+    # Install after the archive columns exist. This trigger is the shared
+    # resurface boundary for every current and future message writer.
+    conn.execute(AUTO_ARCHIVE_RESURFACE_TRIGGER_SQL)
     # v6: sessions table. Per-session watermark + capability role so
     # sub-agents spawned with a read_only token cannot forge posts under
     # the parent's member_id. member_id stays the public identity;

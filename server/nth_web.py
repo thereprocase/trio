@@ -63,7 +63,9 @@ import nth_usage as nusage
 import nth_conversation as nconv
 from nth_constants import (ANIMAL_EMOJIS, animal_for, animal_for_channel,
                            NTH_VERSION, project_context, AGENT_INBOX_CHANNEL, can_see, is_all_seeing,
-                           parse_recipients, narrow_wake, BUDDY_AVATARS)
+                           parse_recipients, narrow_wake, BUDDY_AVATARS,
+                           AUTO_ARCHIVE_BY, AUTO_ARCHIVE_AFTER_SECONDS,
+                           AUTO_ARCHIVE_RESURFACE_TRIGGER_SQL)
 
 
 # ───────── Config ─────────
@@ -2842,6 +2844,7 @@ _SUPERVISOR: Optional["nam.UnifiedAgentSupervisor"] = None
 _SUPERVISOR_LOCK = threading.Lock()
 _ROUTER = None
 _IDLE_REAPER = None
+_CHANNEL_ARCHIVER = None
 _LEASE = None
 
 
@@ -2853,9 +2856,9 @@ def _quiesce_agents() -> None:
     Keeping that seam means the lease knows nothing about the HTTP handler or
     the router globals, which is what would let it move to its own module.
     """
-    global _ROUTER, _IDLE_REAPER
+    global _ROUTER, _IDLE_REAPER, _CHANNEL_ARCHIVER
     NthWebHandler._agent_control_enabled = False
-    for thread in (_ROUTER, _IDLE_REAPER):
+    for thread in (_ROUTER, _IDLE_REAPER, _CHANNEL_ARCHIVER):
         try:
             if thread is not None:
                 thread.stop()
@@ -2863,6 +2866,7 @@ def _quiesce_agents() -> None:
             pass
     _ROUTER = None
     _IDLE_REAPER = None
+    _CHANNEL_ARCHIVER = None
 _RUNTIME_HEALTH: Dict[str, Tuple[float, Dict[str, Any]]] = {}
 
 
@@ -3092,6 +3096,95 @@ class AgentIdleReaper(threading.Thread):
                 if self.sup.hibernate(r["id"]):
                     slept.append(r["id"])
         return slept
+
+    def stop(self) -> None:
+        self._stop_event.set()
+
+
+def auto_archive_inactive_channels(db_path: Path, *, now: Optional[datetime] = None,
+                                   protected_channels=()) -> List[str]:
+    """Archive genuinely idle channels without destroying their history.
+
+    The recheck and update share one IMMEDIATE transaction.  If a writer wins
+    first, its new timestamp excludes the channel; if this sweep wins first,
+    the database trigger installed at startup immediately resurfaces the
+    auto-archive when that writer commits.  Manual archives never resurface.
+    """
+    now = now or datetime.now(timezone.utc)
+    now_s = now.isoformat()
+    cutoff_s = (now - timedelta(seconds=AUTO_ARCHIVE_AFTER_SECONDS)).isoformat()
+    fresh_s = (now - timedelta(seconds=120)).isoformat()
+    protected = {str(c) for c in protected_channels if c}
+    db = sqlite3.connect(str(db_path), timeout=10)
+    db.row_factory = sqlite3.Row
+    try:
+        db.execute("BEGIN IMMEDIATE")
+        rows = db.execute(
+            "SELECT c.code, COALESCE(MAX(m.created_at), c.created_at) activity_at "
+            "FROM channels c LEFT JOIN messages m ON m.channel=c.code "
+            "WHERE c.archived_at IS NULL AND c.code <> ? "
+            "GROUP BY c.code HAVING activity_at < ? ORDER BY activity_at",
+            (AGENT_INBOX_CHANNEL, cutoff_s),
+        ).fetchall()
+        archived = []
+        for row in rows:
+            channel = row["code"]
+            if channel in protected:
+                continue
+            # Do not hide work, live capabilities, fresh participants, or
+            # anything the human has not actually read yet.
+            busy = db.execute(
+                "SELECT "
+                " EXISTS(SELECT 1 FROM tasks WHERE channel=? AND status IN ('open','claimed','blocked')) OR "
+                " EXISTS(SELECT 1 FROM locks WHERE channel=? AND expires_at>?) OR "
+                " EXISTS(SELECT 1 FROM members WHERE channel=? AND active=1 AND last_seen>=?) OR "
+                " EXISTS(SELECT 1 FROM messages q WHERE q.channel=? AND q.choices<>'' "
+                "   AND NOT EXISTS(SELECT 1 FROM messages a WHERE a.channel=q.channel AND a.reply_to=q.id)) OR "
+                " EXISTS(SELECT 1 FROM messages u JOIN members h ON h.channel=u.channel "
+                "   AND h.kind='human' WHERE u.channel=? AND u.member_id<>h.id "
+                "   AND NOT EXISTS(SELECT 1 FROM message_reads r WHERE r.message_id=u.id AND r.member_id=h.id))",
+                (channel, channel, now_s, channel, fresh_s, channel, channel),
+            ).fetchone()[0]
+            if busy:
+                continue
+            cur = db.execute(
+                "UPDATE channels SET archived_at=?, archived_by=?, updated_at=? "
+                "WHERE code=? AND archived_at IS NULL AND code<>? "
+                "AND COALESCE((SELECT MAX(created_at) FROM messages WHERE channel=channels.code), created_at) < ?",
+                (now_s, AUTO_ARCHIVE_BY, now_s, channel, AGENT_INBOX_CHANNEL, cutoff_s),
+            )
+            if cur.rowcount:
+                archived.append(channel)
+        db.commit()
+        return archived
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+class ChannelAutoArchiver(threading.Thread):
+    """Lease-owned periodic durable archive sweep."""
+
+    def __init__(self, db_path: Path, interval: float = 300.0):
+        super().__init__(daemon=True)
+        self.db_path = db_path
+        self.interval = interval
+        self._stop_event = threading.Event()
+
+    def run(self) -> None:
+        while not self._stop_event.is_set():
+            try:
+                with NthWebHandler.hubs_lock:
+                    watched = [code for code, hub in NthWebHandler.hubs.items()
+                               if hub.subscriber_count()]
+                auto_archive_inactive_channels(self.db_path,
+                                               protected_channels=watched)
+            except Exception as exc:
+                sys.stderr.write(f"[nth_web] auto-archive sweep failed: {exc}\n")
+            if self._stop_event.wait(self.interval):
+                break
 
     def stop(self) -> None:
         self._stop_event.set()
@@ -9225,6 +9318,15 @@ def main() -> int:
     _mig = sqlite3.connect(str(db_path), timeout=5)
     try:
         ensure_ask_columns(_mig)
+        # A web process may be upgraded/restarted before the MCP server. Make
+        # the auto-resurface boundary available here too, before any EventHub,
+        # router or request writer can insert into messages.
+        channel_cols = {row[1] for row in _mig.execute(
+            "PRAGMA table_info(channels)").fetchall()}
+        for col in ("archived_at", "archived_by"):
+            if col not in channel_cols:
+                _mig.execute(f"ALTER TABLE channels ADD COLUMN {col} TEXT")
+        _mig.execute(AUTO_ARCHIVE_RESURFACE_TRIGGER_SQL)
         _mig.commit()
     except sqlite3.Error as e:
         print(f"[nth_web] schema forward-compat skipped: {e}", flush=True)
@@ -9267,7 +9369,7 @@ def main() -> int:
     if args.no_agent_control:
         NthWebHandler._agent_control_enabled = False
 
-    global _ROUTER, _IDLE_REAPER, _LEASE
+    global _ROUTER, _IDLE_REAPER, _CHANNEL_ARCHIVER, _LEASE
     if args.channel is None and not args.no_agent_control:
         _LEASE = AgentControlLease(db_path, on_lost=_quiesce_agents)
         blocking = _LEASE.acquire()
@@ -9288,6 +9390,8 @@ def main() -> int:
             db_path, supervisor,
             idle_seconds=max(0.0, args.agent_idle_minutes * 60.0))
         _IDLE_REAPER.start()
+        _CHANNEL_ARCHIVER = ChannelAutoArchiver(db_path)
+        _CHANNEL_ARCHIVER.start()
         # Off the startup path: reviving an agent can block for seconds and
         # must not delay binding the port.
         threading.Thread(target=resume_managed_agents,
