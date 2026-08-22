@@ -81,3 +81,40 @@
 @media (max-width:640px){
   :root{ --gutter:16px; }
 }
+
+/* Populated Messages/Attention inbox cards have three header peers: avatar,
+   identity copy, and a nowrap unread/waiting badge. In a flex row the identity
+   copy kept its min-content width, so a long agent/thread name plus the badge
+   widened the entire workspace beyond a 320-390px phone. Give the copy the
+   only fluid track and put status beneath it; the avatar remains a stable
+   anchor while every text-bearing descendant is allowed to shrink. */
+@media (max-width:640px){
+  .att-card{ min-width:0; padding:14px 12px; overflow:hidden; }
+  .att-card .ac-h{
+    display:grid;
+    grid-template-columns:36px minmax(0,1fr);
+    align-items:center;
+    min-width:0;
+  }
+  .att-card .ac-h>.av{ grid-column:1; grid-row:1 / span 2; }
+  .att-card .ac-h>span:not(.av):not(.waiting){ grid-column:2; min-width:0; }
+  .att-card .ac-h .who,
+  .att-card .ac-h .sub{
+    display:block;
+    max-width:100%;
+    overflow:hidden;
+    text-overflow:ellipsis;
+    white-space:nowrap;
+  }
+  .att-card .ac-h .waiting{
+    grid-column:2;
+    margin-left:0;
+    justify-self:start;
+    min-width:0;
+  }
+  .att-card .reason,
+  .att-card .reason p,
+  .att-card .att-detail,
+  .att-card .att-detail .r .v{ min-width:0; max-width:100%; overflow-wrap:anywhere; }
+  .att-card .reason pre{ max-width:100%; overflow:auto; }
+}
