@@ -62,7 +62,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from nth_constants import SLEEPING_KEYWORDS, NTH_VERSION, project_context
+from nth_constants import (SLEEPING_KEYWORDS, NTH_VERSION, project_context,
+                           can_see)
 
 # Own-session statusline snapshot (see nth_spoke_monitor.read_own_context).
 _CTX_DIR = Path(os.environ.get("XDG_STATE_HOME",
@@ -410,7 +411,8 @@ def monitor(channel, member_id, filter_mode="all", _db_path=None):
                 # on old DBs just get the pre-bang behavior.
                 try:
                     unread = db.execute(
-                        "SELECT id, mentions, refs, bangs, member_name, content FROM messages "
+                        "SELECT id, mentions, refs, bangs, recipients, member_id, "
+                        "member_name, content FROM messages "
                         "WHERE channel = ? AND id > ? AND member_id != ? "
                         "ORDER BY id",
                         (channel, local_hwm, member_id),
@@ -418,21 +420,42 @@ def monitor(channel, member_id, filter_mode="all", _db_path=None):
                 except sqlite3.OperationalError:
                     try:
                         unread = db.execute(
-                            "SELECT id, mentions, refs, member_name, content FROM messages "
+                            "SELECT id, mentions, refs, recipients, member_id, "
+                            "member_name, content FROM messages "
                             "WHERE channel = ? AND id > ? AND member_id != ? "
                             "ORDER BY id",
                             (channel, local_hwm, member_id),
                         ).fetchall()
                     except sqlite3.OperationalError:
                         unread = db.execute(
-                            "SELECT id, mentions, member_name, content FROM messages "
+                            "SELECT id, mentions, recipients, member_id, "
+                            "member_name, content FROM messages "
                             "WHERE channel = ? AND id > ? AND member_id != ? "
                             "ORDER BY id",
                             (channel, local_hwm, member_id),
                         ).fetchall()
 
                 if unread:
+                    # Advance the LOCAL watermark over the WHOLE raw batch
+                    # first, so a DM this member cannot see still moves the
+                    # cursor past it instead of re-surfacing on every tick.
                     local_hwm = max(m["id"] for m in unread)
+
+                    # Then drop DMs this member is not a party to, BEFORE
+                    # should_wake — otherwise the new_messages event carries a
+                    # content preview of a DM addressed to someone else, which
+                    # is itself the leak. The monitor only ever runs for an
+                    # agent, so kind is 'agent'; a pre-migration row with no
+                    # recipients is a broadcast, unchanged.
+                    unread = [
+                        m for m in unread
+                        if can_see(member_id, "agent",
+                                   (m["member_id"] if "member_id" in m.keys() else None),
+                                   (m["recipients"] if "recipients" in m.keys() else ""),
+                                   allow_all_seeing=False)
+                    ]
+
+                if unread:
 
                     mode = filter_mode if filter_mode in FILTER_MODES else "all"
                     relevant = []

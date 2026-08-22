@@ -85,6 +85,29 @@ def can_see(reader_id, reader_kind, sender_id, recipients_raw,
     return reader_id in recips
 
 
+def narrow_wake(wake_ids, recipient_ids, sender_id):
+    """For a scoped (DM) message, drop wake targets who aren't participants.
+
+    THE wake-vs-visibility invariant: a message may never WAKE someone who
+    cannot SEE it. A scoped message (non-empty recipients) is private to those
+    recipients plus the sender; anyone else named via @/#/! can't see it, so
+    waking them is the mentions⊄recipients bug — the woken-but-blind symptom
+    where an agent is pinged into a thread it can't read. This mirrors Slack:
+    mentioning someone who isn't in the DM/channel is inert text, not a ping.
+
+    Returns wake_ids filtered to the participant set (recipients ∪ sender),
+    order preserved. A broadcast (empty recipient_ids) is returned unchanged,
+    so public-channel @/#/! wake semantics are untouched. The predicate is the
+    exact complement of can_see's scoped branch, so wake can never drift from
+    visibility."""
+    if not recipient_ids:
+        return list(wake_ids)
+    participants = set(recipient_ids)
+    if sender_id is not None:
+        participants.add(sender_id)
+    return [w for w in wake_ids if w in participants]
+
+
 # ── Context snapshot projection ───────────────────────────────────────
 # Statusline/publisher snapshots carry far more than the UI renders:
 # transcript paths, working directories, project dirs and cumulative API

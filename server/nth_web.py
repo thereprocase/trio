@@ -58,7 +58,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 import nth_supervisor as nsup
 import nth_request_log as nrl
 from nth_constants import (ANIMAL_EMOJIS, animal_for, animal_for_channel,
-                           NTH_VERSION, project_context, AGENT_INBOX_CHANNEL)
+                           NTH_VERSION, project_context, AGENT_INBOX_CHANNEL, can_see, is_all_seeing,
+                           parse_recipients, narrow_wake)
 
 
 # ───────── Config ─────────
@@ -1433,6 +1434,50 @@ def attachments_for_message(db: sqlite3.Connection, msg_id: int) -> List[Dict[st
 
 
 # ───────── EventHub: polls DB, fans out SSE events ─────────
+def _event_visible_to(event: Dict[str, Any], viewer_id: Optional[str],
+                      all_seeing: bool) -> bool:
+    """Whether an SSE event may be delivered to a given viewer.
+
+    Only message events carry recipients and can be a DM; everything else
+    (roster, context, ...) is always delivered. An all-seeing operator sees
+    everything. For anyone else, allow_all_seeing is False on purpose: a guest
+    is a human but NOT the operator, and must not be able to use that to read
+    other people's DMs off the live feed.
+
+    THE single delivery predicate — the live tail and the reconnect history
+    burst both route through it, because a viewer denied a DM in real time and
+    then handed it on reconnect is the same leak with extra steps."""
+    if all_seeing:
+        return True
+    if event.get("type") != "message":
+        return True
+    return can_see(viewer_id, None, event.get("member_id"),
+                   event.get("recipients"), allow_all_seeing=False)
+
+
+def _message_event(db: sqlite3.Connection, r: sqlite3.Row) -> Dict[str, Any]:
+    """The SSE payload for one message row.
+
+    Shared by the history burst and the live tail. They were duplicate literals;
+    `recipients` is what scopes a DM in the dashboard, and a field present in
+    one path but not the other would show a private message as an ordinary one
+    depending only on whether you were watching when it arrived."""
+    keys = r.keys()
+    return {
+        "type": "message",
+        "id": r["id"],
+        "member_id": r["member_id"],
+        "member_name": r["member_name"] or r["member_id"],
+        "content": r["content"] or "",
+        "mentions": parse_mentions_json(r["mentions"]),
+        "refs": parse_mentions_json(r["refs"] if "refs" in keys else ""),
+        "bangs": parse_mentions_json(r["bangs"] if "bangs" in keys else ""),
+        "recipients": parse_recipients(r["recipients"] if "recipients" in keys else ""),
+        "created_at": r["created_at"],
+        "attachments": attachments_for_message(db, r["id"]),
+    }
+
+
 class EventHub:
     """Single background thread watches the DB and pushes JSON events to any
     subscribed SSE client. Each client owns a queue.Queue of pending payloads."""
@@ -1449,18 +1494,29 @@ class EventHub:
         self.idle_since: Optional[float] = None
 
     # ── subscription ──
-    def subscribe(self) -> queue.Queue:
+    def subscribe(self, viewer_id: Optional[str] = None,
+                  all_seeing: bool = True) -> queue.Queue:
+        """Register an SSE subscriber, scoped to what this viewer may see.
+
+        An all-seeing operator (loopback / tailnet) receives every message. Any
+        other viewer — a guest, a pending visitor — receives only broadcasts,
+        its own messages, and DMs addressed to it. The withholding happens
+        HERE, on the server: hiding a DM client-side would still have sent its
+        bytes to a browser that was never a party to it.
+
+        Defaults stay all-seeing so existing callers are unaffected."""
         q: queue.Queue = queue.Queue(maxsize=200)
         with self._lock:
-            self._subs.append(q)
+            self._subs.append((q, viewer_id, all_seeing))
         # Immediately send a current snapshot so the client renders right away.
-        self._prime_subscriber(q)
+        self._prime_subscriber(q, viewer_id, all_seeing)
         return q
 
     def unsubscribe(self, q: queue.Queue) -> None:
         with self._lock:
-            if q in self._subs:
-                self._subs.remove(q)
+            for sub in list(self._subs):
+                if sub[0] is q:
+                    self._subs.remove(sub)
             if not self._subs:
                 # Stamp the moment we went quiet; the reaper uses this to
                 # retire hubs for channels nobody is watching any more.
@@ -1470,7 +1526,8 @@ class EventHub:
         with self._lock:
             return len(self._subs)
 
-    def _prime_subscriber(self, q: queue.Queue) -> None:
+    def _prime_subscriber(self, q: queue.Queue, viewer_id: Optional[str] = None,
+                          all_seeing: bool = True) -> None:
         # try/finally so queue.Full or a transient sqlite error doesn't leak
         # the connection. A leaked read connection holds a SHARED lock and,
         # worse, if Python's default isolation_level has auto-BEGUN any write,
@@ -1486,23 +1543,16 @@ class EventHub:
             q.put_nowait(json.dumps(
                 {"type": "context", "sessions": _read_context_snapshots()}))
             rows = db.execute(
-                "SELECT id, member_id, member_name, content, mentions, refs, bangs, created_at "
+                "SELECT id, member_id, member_name, content, mentions, refs, bangs, "
+                "recipients, created_at "
                 "FROM messages WHERE channel = ? ORDER BY id DESC LIMIT ?",
                 (self.channel, HISTORY_LIMIT),
             ).fetchall()
             for r in reversed(rows):
-                q.put_nowait(json.dumps({
-                    "type": "message",
-                    "id": r["id"],
-                    "member_id": r["member_id"],
-                    "member_name": r["member_name"] or r["member_id"],
-                    "content": r["content"] or "",
-                    "mentions": parse_mentions_json(r["mentions"]),
-                    "refs": parse_mentions_json(r["refs"] if "refs" in r.keys() else ""),
-                    "bangs": parse_mentions_json(r["bangs"] if "bangs" in r.keys() else ""),
-                    "created_at": r["created_at"],
-                    "attachments": attachments_for_message(db, r["id"]),
-                }))
+                ev = _message_event(db, r)
+                if not _event_visible_to(ev, viewer_id, all_seeing):
+                    continue
+                q.put_nowait(json.dumps(ev))
         except (sqlite3.Error, queue.Full):
             pass
         finally:
@@ -1517,11 +1567,14 @@ class EventHub:
         payload = json.dumps(event)
         with self._lock:
             dead = []
-            for q in self._subs:
+            for sub in self._subs:
+                q, viewer_id, all_seeing = sub
+                if not _event_visible_to(event, viewer_id, all_seeing):
+                    continue
                 try:
                     q.put_nowait(payload)
                 except queue.Full:
-                    dead.append(q)
+                    dead.append(sub)
             for d in dead:
                 self._subs.remove(d)
 
@@ -1672,23 +1725,13 @@ class EventHub:
             while not self._stop.is_set():
                 try:
                     rows = db.execute(
-                        "SELECT id, member_id, member_name, content, mentions, refs, bangs, created_at "
+                        "SELECT id, member_id, member_name, content, mentions, refs, bangs, "
+                "recipients, created_at "
                         "FROM messages WHERE channel = ? AND id > ? ORDER BY id",
                         (self.channel, self.last_msg_id),
                     ).fetchall()
                     for r in rows:
-                        self._broadcast({
-                            "type": "message",
-                            "id": r["id"],
-                            "member_id": r["member_id"],
-                            "member_name": r["member_name"] or r["member_id"],
-                            "content": r["content"] or "",
-                            "mentions": parse_mentions_json(r["mentions"]),
-                            "refs": parse_mentions_json(r["refs"] if "refs" in r.keys() else ""),
-                            "bangs": parse_mentions_json(r["bangs"] if "bangs" in r.keys() else ""),
-                            "created_at": r["created_at"],
-                            "attachments": attachments_for_message(db, r["id"]),
-                        })
+                        self._broadcast(_message_event(db, r))
                         self.last_msg_id = r["id"]
 
                     members = self._fetch_roster(db)
@@ -3966,15 +4009,25 @@ class NthWebHandler(BaseHTTPRequestHandler):
             db.row_factory = sqlite3.Row
             db.execute("PRAGMA busy_timeout=3000")
             rows = db.execute(
-                "SELECT id, member_id, member_name, content, created_at FROM messages "
+                "SELECT id, member_id, member_name, content, recipients, created_at "
+                "FROM messages "
                 "WHERE channel = ? AND content LIKE ? ESCAPE '\\' "
                 "ORDER BY id DESC LIMIT 200",
                 (ch, like),
             ).fetchall()
+            # Search is a read path like any other and must obey the same
+            # visibility rule. Without this the DM transport is a fixed,
+            # well-known channel code, so any identified viewer could search it
+            # for a substring and read other people's private messages back
+            # verbatim — a full bypass of the predicate every other path
+            # enforces.
             results = [{"id": r["id"], "member_id": r["member_id"],
                         "member_name": r["member_name"] or r["member_id"],
                         "content": r["content"] or "", "created_at": r["created_at"]}
-                       for r in rows]
+                       for r in rows
+                       if can_see(ident.member_id, None, r["member_id"],
+                                  r["recipients"] if "recipients" in r.keys() else "",
+                                  allow_all_seeing=is_all_seeing(ident.member_id))]
         except sqlite3.Error as e:
             # sqlite3's message can carry table/column names and the db file
             # path — internal shape the browser has no business seeing. Log
@@ -4048,6 +4101,27 @@ class NthWebHandler(BaseHTTPRequestHandler):
         if len(set(attachment_ids)) != len(attachment_ids):
             self._error(400, "duplicate attachment id")
             return
+        # An addressed send is a REAL DM: it is stored with a recipients set and
+        # every read path withholds it from everyone else. Absent or empty means
+        # broadcast, i.e. unchanged behaviour. The operator is all-seeing, so
+        # their own dashboard still shows what they sent.
+        raw_recipients = body.get("recipients")
+        recipient_ids: list = []
+        if raw_recipients is not None:
+            if not isinstance(raw_recipients, list):
+                self._error(400, "invalid recipients")
+                return
+            if len(raw_recipients) > 64:
+                self._error(400, "too many recipients (max 64)")
+                return
+            for rid in raw_recipients:
+                if not isinstance(rid, str) or not rid.strip():
+                    self._error(400, "invalid recipients")
+                    return
+                rid = rid.strip()
+                if rid not in recipient_ids:
+                    recipient_ids.append(rid)
+
         if not content and not attachment_ids:
             self._error(400, "empty content")
             return
@@ -4130,15 +4204,23 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 mention_ids, ref_ids, bang_ids = _parse_sigils_against_roster(
                     db, send_channel, posted_content
                 )
+                # A DM must never WAKE someone who cannot SEE it: an @mention
+                # of a non-participant inside a private message would otherwise
+                # ping them about something they can't read.
+                if recipient_ids:
+                    mention_ids = narrow_wake(mention_ids, recipient_ids, op_id)
+                    ref_ids = narrow_wake(ref_ids, recipient_ids, op_id)
+                    bang_ids = narrow_wake(bang_ids, recipient_ids, op_id)
                 cursor = db.execute(
                     "INSERT INTO messages "
                     "(channel, member_id, member_name, content, created_at, "
-                    " mentions, refs, bangs) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    " mentions, refs, bangs, recipients) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (send_channel, op_id, op_name, posted_content, now,
                      json.dumps(mention_ids) if mention_ids else "",
                      json.dumps(ref_ids)     if ref_ids     else "",
-                     json.dumps(bang_ids)    if bang_ids    else ""),
+                     json.dumps(bang_ids)    if bang_ids    else "",
+                     json.dumps(recipient_ids) if recipient_ids else "[]"),
                 )
                 msg_id = cursor.lastrowid
                 # Link any uploaded attachments to this message (own, unlinked).
@@ -4736,18 +4818,28 @@ class NthWebHandler(BaseHTTPRequestHandler):
             op_id, _op_name = ensure_operator_row(db, ch, ident)
             row = db.execute(
                 # An attachment is readable once it is PUBLISHED (linked to a
-                # message everyone in the channel can see). Before that it is
-                # still in someone's composer, so only its uploader may fetch
-                # it. Ids are small sequential integers, so without this an
-                # image pasted and then thought better of stays readable by
-                # anyone who guesses its id. The fork's gate keyed this on a DM
-                # visibility engine that does not exist upstream; the
-                # uploader-only half is not DM-specific and is re-derived here.
-                "SELECT mime, path FROM attachments "
-                " WHERE id = ? AND channel = ? "
-                "   AND (message_id IS NOT NULL OR member_id = ?)",
+                # message) — but "published" is not the same as "public". The
+                # owning message carries the visibility, so join to it and
+                # apply the SAME predicate as every other read path. Without
+                # that, a DM's image was fetchable by anyone: attachment ids
+                # are small sequential integers and the DM transport is one
+                # fixed, well-known channel code, so guessing an id was enough.
+                # Before publication the attachment is still in someone's
+                # composer, so only its uploader may fetch it.
+                "SELECT a.mime AS mime, a.path AS path, a.member_id AS owner, "
+                "       a.message_id AS message_id, "
+                "       m.member_id AS sender, m.recipients AS recipients "
+                "  FROM attachments a "
+                "  LEFT JOIN messages m ON m.id = a.message_id "
+                " WHERE a.id = ? AND a.channel = ? "
+                "   AND (a.message_id IS NOT NULL OR a.member_id = ?)",
                 (att_id, ch, op_id),
             ).fetchone()
+            if row is not None and row["message_id"] is not None:
+                if not can_see(op_id, None, row["sender"],
+                               row["recipients"] if "recipients" in row.keys() else "",
+                               allow_all_seeing=is_all_seeing(op_id)):
+                    row = None
         except sqlite3.Error:
             row = None
         finally:
