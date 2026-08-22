@@ -416,12 +416,16 @@ PERMISSION_PROMPT_TOOL = "mcp__nth-trio__trio_permission_prompt"
 # Map the web dashboard permission profile to a `claude --permission-mode`.
 # Models the hub offers when creating an agent, with the effort levels each
 # accepts. Surfaced by /api/agent-models so the UI never hardcodes a model list.
+# ORDER IS THE PICKER'S ORDER, most capable first. Codex's list arrives from
+# its App Server already ranked; this one is ours to state, so state it.
+# `efforts` is per model and is not decoration — Haiku genuinely has no `max`,
+# and the picker reads this rather than offering a fixed low/medium/high.
 CLAUDE_MODELS = [
+    {"id": "fable", "name": "Fable", "efforts": ["low", "medium", "high", "max"]},
     {"id": "opus", "name": "Opus", "efforts": ["low", "medium", "high", "max"]},
     {"id": "sonnet", "name": "Sonnet", "efforts": ["low", "medium", "high", "max"],
      "default": True},
     {"id": "haiku", "name": "Haiku", "efforts": ["low", "medium", "high"]},
-    {"id": "fable", "name": "Fable", "efforts": ["low", "medium", "high", "max"]},
 ]
 
 PERMISSION_MODES = {

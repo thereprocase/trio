@@ -57,7 +57,8 @@ if [ "${1:-}" = "hub-service" ] || [ "${1:-}" = "upgrade" ]; then
     for f in nth_server.py nth_monitor.py nth_spoke_monitor.py nth_console.py \
              nth_dashboard.py nth_web.py nth_stt_worker.py quartet_server.py \
              nth_constants.py nth_doctor.py codex_context_publisher.py \
-             nth_supervisor.py nth_request_log.py; do
+             nth_supervisor.py nth_request_log.py \
+             nth_agent_manager.py; do
         if [ -f "$HUB_DIR/$f" ] && ! cmp -s "$SCRIPT_DIR/server/$f" "$HUB_DIR/$f"; then
             cp "$HUB_DIR/$f" "$HUB_DIR/$f.bak-$STAMP"
         fi
@@ -403,6 +404,7 @@ cp "$SCRIPT_DIR/server/nth_constants.py" "$SERVER_DIR/nth_constants.py"
 # present. tests/test-install-manifest.py enforces this against BOTH lists.
 cp "$SCRIPT_DIR/server/nth_supervisor.py" "$SERVER_DIR/nth_supervisor.py"
 cp "$SCRIPT_DIR/server/nth_request_log.py" "$SERVER_DIR/nth_request_log.py"
+cp "$SCRIPT_DIR/server/nth_agent_manager.py" "$SERVER_DIR/nth_agent_manager.py"
 cp "$SCRIPT_DIR/server/nth_doctor.py" "$SERVER_DIR/nth_doctor.py"
 cp "$SCRIPT_DIR/server/nth_spoke_monitor.py" "$SERVER_DIR/nth_spoke_monitor.py"
 cp "$SCRIPT_DIR/server/codex_context_publisher.py" "$SERVER_DIR/codex_context_publisher.py"
