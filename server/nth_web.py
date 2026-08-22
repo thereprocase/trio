@@ -31,6 +31,7 @@ import getpass
 import http.cookies
 import ipaddress
 import json
+import math
 import os
 import queue
 import re
@@ -3118,6 +3119,8 @@ class NthWebHandler(BaseHTTPRequestHandler):
             self._serve_html(body, set_cookie_token=token if is_new else None)
         elif path == "/api/health":
             self._handle_health()
+        elif path == "/api/usage/requests":
+            self._handle_usage_requests(parsed)
         elif path == "/api/agents":
             self._handle_agents_list(parsed)
         elif path == "/api/agent-models":
@@ -3351,6 +3354,65 @@ class NthWebHandler(BaseHTTPRequestHandler):
             self._error(404, "approval is missing or already resolved")
             return
         self._json({"ok": True, "approval_id": approval_id, "decision": decision})
+
+    def _handle_usage_requests(self, parsed: Any) -> None:
+        """Read the per-request token log, for diagnosing unexpected usage.
+
+        `token-events.json` keeps one event per TURN, which says how much was
+        burned but not why: a turn making forty tool round-trips collapses into
+        one number, so a runaway tool loop re-sending a large cached prompt
+        looks identical to one expensive prompt. nth_request_log.py has been
+        recording one entry per underlying API request since the supervisor
+        landed; this is the reader for it.
+
+        Opt-in (NTH_REQUEST_LOG). When the log is disabled this still answers
+        200 with `enabled: false` and how to turn it on, rather than 404 — a
+        diagnostic endpoint that looks broken when it is merely off wastes the
+        operator's time exactly when they are already debugging something.
+
+        Query params: since (unix seconds, or a `15m`/`2h`/`1d` shorthand),
+        agent, provider, kind (request|turn), limit.
+        """
+        if self._require_operator() is None:
+            return
+        params = parse_qs(parsed.query or "")
+
+        def _one(name: str) -> str:
+            values = params.get(name) or []
+            return str(values[0]).strip() if values else ""
+
+        since: Optional[float] = None
+        raw_since = _one("since")
+        if raw_since:
+            # Bounded digit run: an unbounded (\d+) lets `since=<400 nines>d`
+            # raise OverflowError out of do_GET, which has no wrapping handler
+            # — the client gets no response at all, not even a 500.
+            match = re.fullmatch(r"(\d{1,9})\s*([smhd])", raw_since.lower())
+            if match:
+                scale = {"s": 1, "m": 60, "h": 3600, "d": 86400}[match.group(2)]
+                since = time.time() - int(match.group(1)) * scale
+            else:
+                try:
+                    since = float(raw_since)
+                except (ValueError, OverflowError):
+                    since = None
+                # NaN compares False against every timestamp and Infinity
+                # excludes everything, so either would return an empty log that
+                # looks like "nothing was recorded" rather than a bad argument.
+                if since is not None and not math.isfinite(since):
+                    since = None
+        try:
+            limit = max(1, min(5000, int(_one("limit") or 500)))
+        except (ValueError, OverflowError):
+            limit = 500
+        payload = nrl.query(since=since, agent=_one("agent"),
+                            provider=_one("provider"), kind=_one("kind"),
+                            limit=limit)
+        if not payload["enabled"]:
+            payload["hint"] = (
+                f"Set {nrl.ENV_FLAG}=1 and restart the web server to start "
+                "logging. Entries already on disk are still returned.")
+        self._json({"ok": True, **payload})
 
     def _handle_health(self) -> None:
         """Operator-facing app, database, and provider runtime readiness."""
