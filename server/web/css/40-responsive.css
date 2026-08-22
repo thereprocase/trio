@@ -64,12 +64,12 @@
    Whoever built the search overlay already knew this: .search-top input is
    explicitly 16px. The composer was simply missed.
 
-   Cost, measured rather than waved away: with the composer empty the geometry is
-   byte-identical at every width. A draft that happens to sit on a wrap boundary
-   gains a line — at 360px one test draft took the composer 149px -> 176px and
-   the message list 625.3 -> 598.3. That is the whole price, and only for such
-   drafts; desktop keeps 15px and is untouched. */
-@media (max-width:880px){
+   Width is not the capability boundary: an iPad at 881-1024px still has a
+   coarse primary pointer and the same focus-zoom behaviour. Keying this to the
+   input device covers those layouts too while a mouse-primary desktop keeps
+   15px. With the composer empty the phone geometry is byte-identical; a draft
+   on a wrap boundary may gain a line (at 360px, 149px -> 176px). */
+@media (hover:none) and (pointer:coarse){
   .composer-shell .composer-input{ font-size:16px; }
 }
 

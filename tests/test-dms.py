@@ -361,6 +361,90 @@ try:
     check("(c-guest) _event_visible_to: roster always delivered",
           web._event_visible_to(roster_ev, GUEST, False) is True)
 
+    # Exercise the HTTP route itself.  The regression was that /api/events
+    # discarded the resolved identity and called hub.subscribe() with its
+    # all-seeing defaults, leaking every inbox DM to a guest browser.
+    original_resolve = web.NthWebHandler._resolve_identity
+    try:
+        web.NthWebHandler._resolve_identity = lambda self: (
+            "guest-cookie",
+            web.OperatorIdentity(GUEST, "Dave", web.IDENTITY_SOURCE_GUEST),
+            False,
+        )
+        with urllib.request.urlopen(
+                f"http://127.0.0.1:{port}/api/events", timeout=5) as stream:
+            initial = []
+            while GDM_ID not in [e.get("id") for e in initial]:
+                line = stream.readline().decode()
+                if line.startswith("data: "):
+                    initial.append(json.loads(line[6:]))
+            check("(c-http) guest prime withholds another pair's DM",
+                  DM_ID not in [e.get("id") for e in initial])
+
+            private_live = dict(dm_ev, id=DM_ID + 10000, content="live-secret")
+            visible_live = dict(dm_ev, id=DM_ID + 10001, content="live-for-guest",
+                                recipients=[GUEST])
+            private_update = dict(private_live, type="message_update")
+            visible_update = dict(visible_live, type="message_update")
+            hub._broadcast(private_live)
+            hub._broadcast(visible_live)
+            hub._broadcast(private_update)
+            hub._broadcast(visible_update)
+            tail = []
+            while not any(e.get("type") == "message_update" and
+                          e.get("id") == visible_live["id"] for e in tail):
+                line = stream.readline().decode()
+                if line.startswith("data: "):
+                    tail.append(json.loads(line[6:]))
+            check("(c-http) guest live tail withholds another pair's DM",
+                  private_live["id"] not in [e.get("id") for e in tail])
+            check("(c-http) guest live tail delivers addressed DM",
+                  any(e.get("type") == "message" and
+                      e.get("id") == visible_live["id"] for e in tail))
+            check("(c-http) guest tail withholds private message_update",
+                  not any(e.get("type") == "message_update" and
+                          e.get("id") == private_live["id"] for e in tail))
+
+        web.NthWebHandler._resolve_identity = lambda self: (
+            "pending-cookie",
+            web.OperatorIdentity("pending", "Visitor", web.IDENTITY_SOURCE_PENDING),
+            False,
+        )
+        with urllib.request.urlopen(
+                f"http://127.0.0.1:{port}/api/events", timeout=5) as stream:
+            pending_prime = []
+            while len(pending_prime) < 2:
+                line = stream.readline().decode()
+                if line.startswith("data: "):
+                    pending_prime.append(json.loads(line[6:]))
+            public_live = dict(bc_ev, id=BC_ID + 10002, content="public-live")
+            hub._broadcast(public_live)
+            while public_live["id"] not in [e.get("id") for e in pending_prime]:
+                line = stream.readline().decode()
+                if line.startswith("data: "):
+                    pending_prime.append(json.loads(line[6:]))
+            check("(c-http) pending visitor receives public broadcasts",
+                  public_live["id"] in [e.get("id") for e in pending_prime])
+            check("(c-http) pending visitor withholds another pair's DM",
+                  DM_ID not in [e.get("id") for e in pending_prime])
+
+        web.NthWebHandler._resolve_identity = lambda self: (
+            "operator-cookie",
+            web.OperatorIdentity(OP, "Gabe", web.IDENTITY_SOURCE_LOOPBACK),
+            False,
+        )
+        with urllib.request.urlopen(
+                f"http://127.0.0.1:{port}/api/events", timeout=5) as stream:
+            operator_prime = []
+            while DM_ID not in [e.get("id") for e in operator_prime]:
+                line = stream.readline().decode()
+                if line.startswith("data: "):
+                    operator_prime.append(json.loads(line[6:]))
+            check("(c-http) operator route remains all-seeing",
+                  DM_ID in [e.get("id") for e in operator_prime])
+    finally:
+        web.NthWebHandler._resolve_identity = original_resolve
+
     data = json.dumps({"content": "web dm to bob", "recipients": [bob]}).encode()
     req = urllib.request.Request(f"http://127.0.0.1:{port}/api/send", data=data, method="POST")
     req.add_header("Content-Type", "application/json")

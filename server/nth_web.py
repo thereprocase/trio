@@ -73,6 +73,7 @@ DB_POLL_INTERVAL = 0.5
 HISTORY_LIMIT = 200          # messages sent to a client on /api/history
 HUB_IDLE_REAP_S = 300        # retire a channel's EventHub after this long unwatched
 SSE_HEARTBEAT_SEC = 20       # keep-alive comment interval
+SSE_LIVE_BUFFER = 256        # bounded headroom after an atomic history prime
 
 # Paths that serve the app shell rather than data. The workspace client routes
 # with history.pushState, so these URLs appear in the address bar and get
@@ -1789,12 +1790,41 @@ class EventHub:
         bytes to a browser that was never a party to it.
 
         Defaults stay all-seeing so existing callers are unaffected."""
-        q: queue.Queue = queue.Queue(maxsize=200)
+        # Prime and registration are one cutover under the fan-out lock.  If a
+        # live row arrives while the snapshot is being built, _broadcast waits
+        # here and delivers it after registration; it cannot precede the
+        # snapshot, be duplicated by it, or fall into the gap between them.
         with self._lock:
+            through_id = self.last_msg_id
+            if self._thread is None or not self._thread.is_alive():
+                # Unit/offline callers historically use subscribe() without
+                # start().  Give them a complete current snapshot too.
+                through_id = self._db_message_highwater()
+            primed = self._prime_payloads(viewer_id, all_seeing, through_id)
+            # Capacity derives from the actual prime, rather than assuming a
+            # fixed number of control envelopes.  The live tail remains
+            # bounded: a client that cannot drain the extra buffer is removed
+            # by _broadcast instead of growing memory without limit.
+            q: queue.Queue = queue.Queue(maxsize=len(primed) + SSE_LIVE_BUFFER)
+            for payload in primed:
+                q.put_nowait(payload)
             self._subs.append((q, viewer_id, all_seeing))
-        # Immediately send a current snapshot so the client renders right away.
-        self._prime_subscriber(q, viewer_id, all_seeing)
         return q
+
+    def _db_message_highwater(self) -> int:
+        db = None
+        try:
+            db = sqlite3.connect(str(self.db_path), timeout=5)
+            row = db.execute(
+                "SELECT COALESCE(MAX(id), 0) FROM messages WHERE channel = ?",
+                (self.channel,),
+            ).fetchone()
+            return int(row[0] or 0)
+        except sqlite3.Error:
+            return 0
+        finally:
+            if db is not None:
+                db.close()
 
     def unsubscribe(self, q: queue.Queue) -> None:
         with self._lock:
@@ -1810,14 +1840,15 @@ class EventHub:
         with self._lock:
             return len(self._subs)
 
-    def _prime_subscriber(self, q: queue.Queue, viewer_id: Optional[str] = None,
-                          all_seeing: bool = True) -> None:
+    def _prime_payloads(self, viewer_id: Optional[str], all_seeing: bool,
+                        through_id: int) -> List[str]:
         # try/finally so queue.Full or a transient sqlite error doesn't leak
         # the connection. A leaked read connection holds a SHARED lock and,
         # worse, if Python's default isolation_level has auto-BEGUN any write,
         # holds the WAL writer lock until GC — which starved the monitor's
         # 0.5s polls below busy_timeout under contention.
         db = None
+        payloads: List[str] = []
         try:
             db = sqlite3.connect(str(self.db_path), timeout=5)
             db.row_factory = sqlite3.Row
@@ -1831,23 +1862,24 @@ class EventHub:
             # the comparison is undefined === "smoke" and the roster is never
             # applied at all: no member names, so no @mention chips, no
             # facepile, and nameFor() falling back to raw member ids.
-            q.put_nowait(json.dumps(
+            payloads.append(json.dumps(
                 {"type": "roster", "channel": self.channel, "members": members}))
-            q.put_nowait(json.dumps(
+            payloads.append(json.dumps(
                 {"type": "context", "sessions": _read_context_snapshots()}))
             rows = db.execute(
                 "SELECT id, member_id, member_name, content, mentions, refs, bangs, "
                 "recipients, reply_to, choices, selection, "
                 "retracted_at, retraction_reason, edited_at, created_at "
-                "FROM messages WHERE channel = ? ORDER BY id DESC LIMIT ?",
-                (self.channel, HISTORY_LIMIT),
+                "FROM messages WHERE channel = ? AND id <= ? "
+                "ORDER BY id DESC LIMIT ?",
+                (self.channel, through_id, HISTORY_LIMIT),
             ).fetchall()
             for r in reversed(rows):
                 ev = _message_event(db, r, self.channel)
                 if not _event_visible_to(ev, viewer_id, all_seeing):
                     continue
-                q.put_nowait(json.dumps(ev))
-        except (sqlite3.Error, queue.Full):
+                payloads.append(json.dumps(ev))
+        except sqlite3.Error:
             pass
         finally:
             if db is not None:
@@ -1855,22 +1887,27 @@ class EventHub:
                     db.close()
                 except sqlite3.Error:
                     pass
+        return payloads
 
     # ── broadcast ──
-    def _broadcast(self, event: Dict[str, Any]) -> None:
+    def _broadcast_locked(self, event: Dict[str, Any]) -> None:
+        """Fan out one event. Caller holds _lock."""
         payload = json.dumps(event)
+        dead = []
+        for sub in self._subs:
+            q, viewer_id, all_seeing = sub
+            if not _event_visible_to(event, viewer_id, all_seeing):
+                continue
+            try:
+                q.put_nowait(payload)
+            except queue.Full:
+                dead.append(sub)
+        for d in dead:
+            self._subs.remove(d)
+
+    def _broadcast(self, event: Dict[str, Any]) -> None:
         with self._lock:
-            dead = []
-            for sub in self._subs:
-                q, viewer_id, all_seeing = sub
-                if not _event_visible_to(event, viewer_id, all_seeing):
-                    continue
-                try:
-                    q.put_nowait(payload)
-                except queue.Full:
-                    dead.append(sub)
-            for d in dead:
-                self._subs.remove(d)
+            self._broadcast_locked(event)
 
     # ── DB poll ──
     def _fetch_roster(self, db: sqlite3.Connection) -> List[Dict[str, Any]]:
@@ -2082,6 +2119,12 @@ class EventHub:
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
             return
+        # Establish the tail high-water before the thread is exposed.  Without
+        # this, a subscriber can snapshot an empty high-water while _run is
+        # still seeding itself and permanently miss a row committed in between.
+        self.last_msg_id = self._db_message_highwater()
+        self._change_scan = now_iso()
+        self._stop.clear()
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
@@ -2099,20 +2142,6 @@ class EventHub:
             db.row_factory = sqlite3.Row
             db.execute("PRAGMA journal_mode=WAL")
             db.execute("PRAGMA busy_timeout=2000")
-            # Prime last_msg_id so we don't re-fire history on startup —
-            # primed subscribers already got the history through _prime_subscriber.
-            try:
-                row = db.execute(
-                    "SELECT COALESCE(MAX(id), 0) FROM messages WHERE channel = ?",
-                    (self.channel,),
-                ).fetchone()
-                self.last_msg_id = int(row[0] or 0)
-            except sqlite3.Error:
-                self.last_msg_id = 0
-            # Same reasoning as last_msg_id: start "now" so a hub restart does
-            # not re-broadcast every edit ever made.
-            self._change_scan = now_iso()
-
             while not self._stop.is_set():
                 try:
                     prev_last = self.last_msg_id
@@ -2124,8 +2153,13 @@ class EventHub:
                         (self.channel, self.last_msg_id),
                     ).fetchall()
                     for r in rows:
-                        self._broadcast(_message_event(db, r, self.channel))
-                        self.last_msg_id = r["id"]
+                        # Fan-out and its high-water advancement are one lock
+                        # transaction.  A subscriber cannot register after the
+                        # fan-out while still snapshotting the previous id.
+                        with self._lock:
+                            self._broadcast_locked(
+                                _message_event(db, r, self.channel))
+                            self.last_msg_id = r["id"]
 
                     # Edits and retractions of messages the tail has ALREADY
                     # sent (id <= prev_last) are pushed as `message_update` so
@@ -3596,7 +3630,12 @@ class NthWebHandler(BaseHTTPRequestHandler):
             if self.landing_mode and not self._channel_exists(ch):
                 self._error(404, f"no such channel: {ch}")
                 return
-            self._serve_sse(self._hub_for_channel(ch))
+            _token, ident, _is_new = self._resolve_identity()
+            self._serve_sse(
+                self._hub_for_channel(ch),
+                viewer_id=ident.member_id,
+                all_seeing=is_all_seeing(ident.member_id),
+            )
         elif path == "/api/search":
             self._handle_search(parsed)
         elif path == "/api/stt/health":
@@ -3720,7 +3759,8 @@ class NthWebHandler(BaseHTTPRequestHandler):
     def _error(self, status: int, msg: str) -> None:
         self._json({"error": msg}, status=status)
 
-    def _serve_sse(self, hub: EventHub) -> None:
+    def _serve_sse(self, hub: EventHub, viewer_id: Optional[str] = None,
+                   all_seeing: bool = True) -> None:
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-store")
@@ -3728,7 +3768,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
         self.send_header("X-Accel-Buffering", "no")
         self.end_headers()
 
-        q = hub.subscribe()
+        q = hub.subscribe(viewer_id=viewer_id, all_seeing=all_seeing)
         try:
             last_heartbeat = time.monotonic()
             while True:
