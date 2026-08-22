@@ -21,6 +21,7 @@ So the contract has two halves and both are pinned here:
 Usage: python tests/test-strict-port.py
 """
 import socket
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -97,6 +98,18 @@ try:
     # because this lands in a service log read hours later.
     check("the error suggests what to do about it",
           "stop it" in err.lower() or "different --port" in err.lower())
+
+    # A rejected bind is not a partially-started hub.  nth_server creates the
+    # lease table as part of the base schema, but only
+    # AgentControlLease.acquire() populates it.  An empty table therefore proves
+    # this process failed before acquiring the lease or reaching the guarded
+    # router/reaper/managed-agent resume path.
+    failed_db = tmp / "a.db"
+    with sqlite3.connect(failed_db) as conn:
+        lease_row = conn.execute(
+            "SELECT holder, pid FROM agent_control_lease WHERE id = 1").fetchone()
+    check("a busy strict port leaves no agent-control lease side effect",
+          lease_row is None)
 finally:
     held.close()
 
@@ -128,6 +141,21 @@ finally:
         except subprocess.TimeoutExpired:
             proc.kill()
     held.close()
+
+# The runtime assertion above catches today's acquire-before-bind regression.
+# Pin the rest of the startup ordering as well: adding a new control-plane
+# start before the socket would otherwise reintroduce process side effects
+# without necessarily creating a lease row first.
+source = WEB.read_text(encoding="utf-8")
+bind_at = source.index("server = QuietThreadingHTTPServer((host, port), NthWebHandler)")
+control_starts = {
+    "agent-control lease acquisition": source.index("blocking = _LEASE.acquire()"),
+    "agent router startup": source.index("_ROUTER.start()"),
+    "agent idle-reaper startup": source.index("_IDLE_REAPER.start()"),
+    "managed-agent resume": source.index("threading.Thread(target=resume_managed_agents"),
+}
+for label, start_at in control_starts.items():
+    check(f"the listening socket is bound before {label}", bind_at < start_at)
 
 print()
 if failures:

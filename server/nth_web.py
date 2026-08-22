@@ -9057,6 +9057,43 @@ def main() -> int:
     if host is None:
         host = "0.0.0.0" if args.tailnet else "127.0.0.1"
 
+    # Resolve the listening socket before starting ANY background work.  In
+    # particular, --strict-port is used by service managers: if its one port is
+    # occupied, startup must be a side-effect-free failure.  Acquiring the
+    # agent-control lease (and then starting the router, reaper, and resume
+    # thread) before this bind used to wake agents for a web server that never
+    # came up, and left the failed process's lease row behind.
+    #
+    # The default remains convenient for interactive use: without
+    # --strict-port, scan the same 50-port window as before.
+    requested_port = args.port
+    port = requested_port
+    server = None
+    attempts = 1 if args.strict_port else 50
+    for _ in range(attempts):
+        try:
+            server = QuietThreadingHTTPServer((host, port), NthWebHandler)
+            break
+        except OSError as exc:
+            if exc.errno == errno.EADDRINUSE:
+                port += 1
+                continue
+            raise
+    if server is None:
+        if args.strict_port:
+            sys.stderr.write(
+                f"Port {requested_port} is already in use and --strict-port was "
+                f"given, so no other port was tried.\n"
+                f"Something is already listening there — most likely another hub. "
+                f"Stop it, or start this one on a different --port.\n")
+        else:
+            sys.stderr.write(
+                f"No free port found in {requested_port}..{requested_port + 49}\n")
+        return 1
+    # Threaded server handles one SSE connection per thread; don't let them
+    # keep the process alive on Ctrl-C.
+    server.daemon_threads = True
+
     # Single-channel mode spins up its one event hub before serving.
     # One sweep at startup so a long-running install reclaims whatever leaked
     # while it was down, without waiting for someone to upload.
@@ -9156,38 +9193,6 @@ def main() -> int:
         # Started only after the control plane is actually up, so a hub that
         # dies during startup expires its lease instead of holding it.
         _LEASE.start_renewal()
-
-    # Let multiple channel dashboards start without manual port coordination.
-    # Under --strict-port that convenience becomes a hazard: a hub launched by a
-    # service manager quietly landing on port+1 leaves every registered client
-    # pointed at a dead address, and nothing reports an error.
-    requested_port = args.port
-    port = requested_port
-    server = None
-    attempts = 1 if args.strict_port else 50
-    for _ in range(attempts):
-        try:
-            server = QuietThreadingHTTPServer((host, port), NthWebHandler)
-            break
-        except OSError as exc:
-            if exc.errno == errno.EADDRINUSE:
-                port += 1
-                continue
-            raise
-    if server is None:
-        if args.strict_port:
-            sys.stderr.write(
-                f"Port {requested_port} is already in use and --strict-port was "
-                f"given, so no other port was tried.\n"
-                f"Something is already listening there — most likely another hub. "
-                f"Stop it, or start this one on a different --port.\n")
-        else:
-            sys.stderr.write(
-                f"No free port found in {requested_port}..{requested_port + 49}\n")
-        return 1
-    # Threaded server handles one SSE connection per thread; don't let them
-    # keep the process alive on Ctrl-C.
-    server.daemon_threads = True
 
     def stop_hubs():
         if hub is not None:
