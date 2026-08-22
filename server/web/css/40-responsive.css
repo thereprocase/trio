@@ -37,6 +37,15 @@
   .side-foot{ padding-bottom:calc(10px + env(safe-area-inset-bottom)); }
 }
 
+/* The off-canvas drawer had no drop shadow. 10-shell.css asks for --shadow-lg in
+   its own 880px block, but a later unconditional .sidebar rule sets the desktop
+   inset hairline and wins on source order — measured, the open drawer computed
+   `-1px 0 0 0 inset` at 360px. So a 300px panel floated over the conversation
+   with its only edge treatment on the wrong side. */
+@media (max-width:880px){
+  .sidebar{ box-shadow:var(--shadow-lg); }
+}
+
 /* The conversation gutter narrows on a phone; --gutter drives BOTH the message
    list and the composer, so they cannot drift apart again. Do not "fix" the
    composer alone by pinning it to 16px on mobile: measured, that aligns 640px
