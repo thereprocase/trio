@@ -390,6 +390,16 @@ def monitor(channel, member_id, filter_mode="all", _db_path=None):
                 # while we're asleep between polls; without this reconciliation
                 # we'd re-notify on messages the agent already acked. We take the
                 # max so we never regress.
+                # DEPENDS ON nth_server.nth_ack being strictly either/or: a
+                # session-token client's ack advances sessions.last_read and
+                # NEVER members.last_read. So both must be reconciled here.
+                # Do not drop the sessions read on the grounds that the
+                # capability is agent-global — it is not, on this schema, and
+                # removing it silently re-notifies every acknowledged message
+                # at a cost scaling with messages x agents. It retires only
+                # together with a sessions-global migration that makes ack
+                # write members.last_read as well.
+                # See tests/test-watermark-session-scope.py.
                 legacy_hwm = member["last_read"] or 0
                 try:
                     sess_row = db.execute(
