@@ -5,9 +5,10 @@
   const cap = s => s.charAt(0).toUpperCase() + s.slice(1);
   const KEY = 'trio.preferences.v1';
   // Each preset is a self-contained design — background family AND accent —
-  // so there's nothing left to pick independently. Light presets stay near
-  // white/off-white (color lives in the accent, not a full-page tint); dark
-  // presets can lean into a moodier color cast.
+  // so there's nothing left to pick independently. Inspired presets go one
+  // step further: css/35-historic.css replaces the component language too.
+  // `mode` still records which side of the light/dark quick-toggle remembers
+  // the preset; `family` controls how it is grouped in the picker.
   const themes = [
     { id: 'light-1', mode: 'light', label: 'Sagebrush' },
     { id: 'light-2', mode: 'light', label: 'Frost' },
@@ -21,9 +22,28 @@
     { id: 'dark-4', mode: 'dark', label: 'Abyss' },
     { id: 'dark-5', mode: 'dark', label: 'Noir' },
     { id: 'dark-6', mode: 'dark', label: 'Torch' },
+    { id: 'historic-win98', mode: 'light', family: 'inspired', label: 'Start Menu' },
+    { id: 'historic-gameboy', mode: 'light', family: 'inspired', label: 'Link Cable' },
+    { id: 'historic-geocities', mode: 'dark', family: 'inspired', label: 'Webmaster' },
+    { id: 'inspired-ipod', mode: 'light', family: 'inspired', label: 'Now Playing' },
+    { id: 'inspired-messenger', mode: 'dark', family: 'inspired', label: 'Walled Garden' },
+    { id: 'inspired-slack', mode: 'light', family: 'inspired', label: 'Threaded' },
   ];
   const lightThemes = themes.filter(theme => theme.mode === 'light');
   const darkThemes = themes.filter(theme => theme.mode === 'dark');
+  const modernLightThemes = lightThemes.filter(theme => theme.family !== 'inspired');
+  const modernDarkThemes = darkThemes.filter(theme => theme.family !== 'inspired');
+  const inspiredThemes = themes.filter(theme => theme.family === 'inspired');
+  const THEME_CARD_WIDTH = 104;
+  const THEME_CARD_GAP = 10;
+  // Keep incomplete rows visually balanced, but never split a group that can
+  // still fit in one row. Once it overflows, reduce only when a whole card no
+  // longer fits: 7 -> 4/3 -> 3/2/2 and 10 -> 5/5 -> 4/3/3 -> 3/3/2/2.
+  function themeGridColumns(count, availableWidth) {
+    const fit = Math.max(1, Math.floor((availableWidth + THEME_CARD_GAP) / (THEME_CARD_WIDTH + THEME_CARD_GAP)));
+    if (fit >= count) return count;
+    return Math.min(Math.ceil(count / 2), fit);
+  }
   const themeIds = themes.map(theme => theme.id);
   const lightThemeIds = lightThemes.map(theme => theme.id);
   const darkThemeIds = darkThemes.map(theme => theme.id);
@@ -132,18 +152,20 @@
     catch { Trio.state.sttHealth = 'unavailable'; }
   }
   function renderPage(panel) {
+    panel._themeLayoutObserver?.disconnect();
     panel.replaceChildren();
     const p = read();
     const hero = document.createElement('div'); hero.className = 'view-hero'; hero.innerHTML = '<h2>Settings & diagnostics</h2><p>Shape how the workspace looks, sounds, and keeps you informed.</p>';
     const appearance = document.createElement('section'); appearance.className = 'pref-group'; appearance.innerHTML = '<h3>Appearance</h3>';
-    const themeRow = document.createElement('div'); themeRow.className = 'pref-row pref-row-themes'; themeRow.innerHTML = '<div class="pr-txt"><div class="l">Theme presets</div><div class="d">Choose the light and dark themes used by the toggle. Each preset sets its own accent.</div></div>';
+    const themeRow = document.createElement('div'); themeRow.className = 'pref-row pref-row-themes'; themeRow.innerHTML = '<div class="pr-txt"><div class="l">Theme presets</div><div class="d">Choose a palette or an Inspired interface that restyles the controls, windows, navigation, and messages too.</div></div>';
     const themeChoices = document.createElement('div'); themeChoices.className = 'theme-choice';
-    [['lightTheme', 'Light default', lightThemes], ['darkTheme', 'Dark default', darkThemes]].forEach(([key, label, options]) => {
-      const group = document.createElement('div'); group.className = 'theme-choice-group';
+    const themeGroups = [];
+    [['lightTheme', 'Light default', modernLightThemes], ['darkTheme', 'Dark default', modernDarkThemes], ['theme', 'Inspired', inspiredThemes]].forEach(([key, label, options]) => {
+      const group = document.createElement('div'); group.className = `theme-choice-group theme-choice-group-${key}`;
       group.innerHTML = `<div class="theme-group-label">${label}</div>`;
       const choices = document.createElement('div'); choices.className = 'theme-choice';
-      options.forEach(option => { const b = document.createElement('button'); b.type = 'button'; b.className = 'theme-opt' + (p[key] === option.id ? ' on' : ''); b.setAttribute('aria-pressed', p[key] === option.id ? 'true' : 'false'); b.innerHTML = `<span class="swatch" data-theme="${option.id}"><span class="a"></span><span class="b"></span></span><span class="tl">${option.label}</span>`; b.addEventListener('click', () => { selectTheme(option.id); renderPage(panel); }); choices.append(b); });
-      group.append(choices); themeChoices.append(group);
+      options.forEach(option => { const selected = p[key] === option.id; const b = document.createElement('button'); b.type = 'button'; b.className = 'theme-opt' + (selected ? ' on' : ''); b.setAttribute('aria-pressed', selected ? 'true' : 'false'); b.innerHTML = `<span class="swatch" data-theme="${option.id}"><span class="a"></span><span class="b"></span></span><span class="tl">${option.label}</span>`; b.addEventListener('click', () => { selectTheme(option.id); renderPage(panel); }); choices.append(b); });
+      group.append(choices); themeChoices.append(group); themeGroups.push({ choices, count: options.length });
     });
     themeRow.append(themeChoices); appearance.append(themeRow);
     const behavior = document.createElement('section'); behavior.className = 'pref-group'; behavior.innerHTML = '<h3>Workspace behavior</h3>';
@@ -200,9 +222,18 @@
     const attribution = document.createElement('div'); attribution.className = 'pref-attribution';
     attribution.innerHTML = 'Character and brand icons from <a href="https://www.svgrepo.com/" target="_blank" rel="noreferrer">SVG Repo</a>, licensed under <a href="https://creativecommons.org/licenses/by/4.0/" target="_blank" rel="noreferrer">CC BY 4.0</a>.';
     panel.append(hero, appearance, behavior, notifyGroup, diagnosticsGroup, attribution);
+    const layoutThemes = () => themeGroups.forEach(({ choices, count }) => {
+      choices.style.setProperty('--theme-columns', themeGridColumns(count, choices.clientWidth));
+    });
+    if (typeof ResizeObserver !== 'undefined') {
+      panel._themeLayoutObserver = new ResizeObserver(layoutThemes);
+      themeGroups.forEach(({ choices }) => panel._themeLayoutObserver.observe(choices));
+    }
+    if (typeof requestAnimationFrame === 'function') requestAnimationFrame(layoutThemes);
+    else layoutThemes();
   }
   function init() { apply(); }
   function mount() { init(); }
   function unmount() {}
-  Trio.preferences = { init, mount, unmount, apply, save, selectTheme, toggle, reset, read, diagnostics, renderPage, themes, lightThemes, darkThemes };
+  Trio.preferences = { init, mount, unmount, apply, save, selectTheme, toggle, reset, read, diagnostics, renderPage, themeGridColumns, themes, lightThemes, darkThemes, inspiredThemes };
 })();
