@@ -126,6 +126,19 @@ AGENT_ACTIONS_WITH_BODY = (
 # Ceiling on one bulk request. Well above any realistic roster, low enough
 # that a malformed client can't queue thousands of process operations.
 MAX_BULK_AGENTS = 100
+# A much lower ceiling for the actions that START PROCESSES. The bulk loop is
+# synchronous inside one request thread and spawn() blocks up to 10s per agent
+# waiting for a session id, so 100 wakes is ~17 minutes in a single HTTP
+# request — far past any browser or proxy timeout, while the loop keeps
+# spawning. This bounds it to roughly two minutes, and the actions below it are
+# cheap DB updates where 100 is genuinely fine.
+MAX_BULK_SPAWNING_AGENTS = 12
+BULK_SPAWNING_ACTIONS = ("wake", "compact", "clear")
+# Consecutive identical failures that mean the WORLD is broken rather than the
+# agents. Three in a row of the same exception type and message is not three
+# bad agents, it is a locked database or a supervisor shutting down — and the
+# remaining agents will each pay the same timeout to learn the same fact.
+BULK_SYSTEMIC_STREAK = 3
 
 
 class AgentActionError(Exception):
@@ -3257,6 +3270,13 @@ class NthWebHandler(BaseHTTPRequestHandler):
             self._handle_delete()
         elif parsed.path == "/api/agents":
             self._handle_agent_create()
+        elif parsed.path == "/api/agents/bulk":
+            # Must precede the /api/agents/<id>/<action> arm below. It does not
+            # actually collide (that arm requires four slashes, this has three)
+            # but the ordering is load-bearing if either pattern is ever
+            # loosened, and a bulk request landing in the per-agent route would
+            # be read as an agent literally named "bulk".
+            self._handle_agents_bulk()
         elif (parsed.path.startswith("/api/agents/")
               and parsed.path.count("/") == 4):
             # /api/agents/<id>/<action>
@@ -4329,6 +4349,187 @@ class NthWebHandler(BaseHTTPRequestHandler):
             self._error(404, "agent not found or no-op")
             return
         self._json({"ok": True, "agent_id": agent_id, "action": action})
+
+    def _handle_agents_bulk(self) -> None:
+        """Run ONE action across MANY agents: `{agent_ids, action, params}`.
+
+        Each agent goes through _apply_agent_action independently, so a failure
+        on one never aborts the rest, and the response carries a per-agent row
+        with the status the single-agent route would have returned.
+
+        The response is 200 for a partial success, because that is the NORMAL
+        outcome of a bulk operation — one archived agent in a batch of twelve
+        is not a malformed request, and a 4xx would tell the client nothing
+        about which one. When NOTHING succeeded and every failure shares one
+        4xx status, that status is returned instead: "you named twelve agents
+        and none exist" is a bad request, and a script needs to notice it.
+
+        Two things a caller must know:
+
+        * **It is synchronous and unbounded in wall time.** The loop runs
+          inside this request thread. Process-affecting actions are capped at
+          MAX_BULK_SPAWNING_AGENTS for that reason; everything else is a cheap
+          DB update. A completed batch is logged in full, so what was applied
+          is recoverable from the journal even if the client gave up waiting.
+        * **A failed row does not guarantee nothing was applied.** `placement`
+          commits its channel rows and then notifies the agent outside that
+          transaction; if the notify fails the row reports failure while the
+          placement is live. Retrying is safe (the writes are idempotent) but
+          the state is not necessarily what the row implies.
+
+        `count` is the DE-DUPLICATED number of agents acted on, which may be
+        smaller than the number of ids sent.
+        """
+        ident = self._require_operator()
+        if ident is None or not self._require_agent_control():
+            return
+        body = self._read_json_body(max_bytes=65536)
+        if body is None:
+            return
+        action = str(body.get("action") or "").strip()
+        if action not in AGENT_ACTIONS:
+            self._error(400, f"unknown action: {action}")
+            return
+        raw_ids = body.get("agent_ids")
+        if not isinstance(raw_ids, list):
+            self._error(400, "agent_ids must be a list")
+            return
+        # Bound the input BEFORE the de-dupe walks it, so an oversized list is
+        # rejected rather than processed and then rejected.
+        if len(raw_ids) > MAX_BULK_AGENTS:
+            self._error(400, f"at most {MAX_BULK_AGENTS} agents per bulk request")
+            return
+        # De-dupe preserving the caller's order. Applying an action twice to one
+        # agent is wasted work at best, and for wake/compact/stop it is two
+        # competing operations against the same process. The set is only to keep
+        # membership O(1); the list is what carries the order.
+        agent_ids: List[str] = []
+        seen: set = set()
+        for raw in raw_ids:
+            aid = str(raw).strip()
+            if aid and aid not in seen:
+                seen.add(aid)
+                agent_ids.append(aid)
+        if not agent_ids:
+            self._error(400, "agent_ids is empty")
+            return
+        if (action in BULK_SPAWNING_ACTIONS
+                and len(agent_ids) > MAX_BULK_SPAWNING_AGENTS):
+            self._error(400, f"at most {MAX_BULK_SPAWNING_AGENTS} agents per "
+                             f"bulk {action} — it starts a process per agent "
+                             f"and this request is synchronous")
+            return
+        params = body.get("params")
+        if params is None:
+            params = {}
+        if not isinstance(params, dict):
+            self._error(400, "params must be an object")
+            return
+
+        # Which of these agents exist at all. Without this, "already in the
+        # requested state" is indistinguishable from "no such agent": the
+        # applier returns a falsy ok for both, and select-all -> wake on a
+        # healthy roster reported every row as 404 agent not found.
+        known: set = set()
+        try:
+            db = sqlite3.connect(str(self.db_path), timeout=5)
+            try:
+                db.execute("PRAGMA busy_timeout=3000")
+                marks = ",".join("?" * len(agent_ids))
+                known = {r[0] for r in db.execute(
+                    f"SELECT id FROM agents WHERE id IN ({marks})",
+                    agent_ids).fetchall()}
+            finally:
+                db.close()
+        except sqlite3.Error:
+            # Not fatal: without it a no-op is merely reported as 404 again.
+            pass
+
+        sup = get_supervisor()
+        results: List[Dict[str, Any]] = []
+        streak_key: Optional[Tuple[str, str]] = None
+        streak = 0
+        aborted: Optional[str] = None
+        for index, aid in enumerate(agent_ids):
+            if aborted is not None:
+                # Everything after a systemic abort is reported as untried, so
+                # a client can retry exactly these and nothing else.
+                results.append({"agent_id": aid, "ok": False, "status": 503,
+                                "error": f"skipped — {aborted}", "skipped": True})
+                continue
+            # `compact` wakes a stopped agent implicitly. Through the
+            # single-agent route that is one deliberate click; across a roster
+            # it would resurrect and bill every sleeping agent in the batch.
+            if action == "compact" and not sup.is_running(aid) and aid in known:
+                results.append({"agent_id": aid, "ok": False, "status": 409,
+                                "error": "agent is not running — wake it first"})
+                continue
+            try:
+                ok = self._apply_agent_action(aid, action, params, ident)
+            except AgentActionError as exc:
+                streak_key, streak = None, 0
+                results.append({"agent_id": aid, "ok": False,
+                                "status": exc.status, "error": exc.message})
+                continue
+            except Exception as exc:
+                # Deliberately broad: one agent in an unexpected state must not
+                # sink the batch, and every other agent's outcome is still worth
+                # returning. But an identical failure repeating is not N bad
+                # agents — it is one broken world (a locked database, a
+                # supervisor shutting down), and each remaining agent would pay
+                # the same timeout to rediscover it.
+                key = (type(exc).__name__, str(exc))
+                streak = streak + 1 if key == streak_key else 1
+                streak_key = key
+                sys.stderr.write(
+                    f"[nth_web] bulk {action} failed for {aid!r}: "
+                    f"{type(exc).__name__}: {exc}\n")
+                results.append({"agent_id": aid, "ok": False, "status": 500,
+                                "error": str(exc)})
+                if streak >= BULK_SYSTEMIC_STREAK and index + 1 < len(agent_ids):
+                    aborted = (f"{BULK_SYSTEMIC_STREAK} consecutive identical "
+                               f"failures ({type(exc).__name__}) — treating as "
+                               f"a systemic fault rather than per-agent")
+                    sys.stderr.write(f"[nth_web] bulk {action} aborted: {aborted}\n")
+                continue
+            streak_key, streak = None, 0
+            if ok:
+                results.append({"agent_id": aid, "ok": True})
+            elif aid in known:
+                results.append({"agent_id": aid, "ok": False, "status": 409,
+                                "error": "already in the requested state"})
+            else:
+                results.append({"agent_id": aid, "ok": False, "status": 404,
+                                "error": "agent not found"})
+
+        failed = [r for r in results if not r["ok"]]
+        # Log the whole outcome, not just the failures. The batch can outlive
+        # the client that asked for it, and without this there is no record
+        # anywhere of what a timed-out request actually applied.
+        sys.stderr.write(
+            f"[nth_web] bulk {action}: {len(results) - len(failed)}/"
+            f"{len(results)} applied"
+            + (f", {len(failed)} failed" if failed else "")
+            + (f", ABORTED ({aborted})" if aborted else "") + "\n")
+        payload = {
+            # `ok` means what it means on every other route in this file: the
+            # operation succeeded. A constant True here would report a batch in
+            # which all 100 agents failed as a success.
+            "ok": not failed,
+            "action": action,
+            "count": len(results),
+            "results": results,
+        }
+        if aborted:
+            payload["aborted"] = aborted
+        # No successes and one shared client-side status: this is a bad request,
+        # not a partial success, and it is the case a script most needs to see.
+        statuses = {r.get("status") for r in failed}
+        if (failed and len(failed) == len(results) and len(statuses) == 1
+                and 400 <= next(iter(statuses)) < 500):
+            self._json(payload, status=next(iter(statuses)))
+            return
+        self._json(payload)
 
     def _apply_agent_action(self, agent_id: str, action: str,
                             params: Dict[str, Any], ident) -> bool:
