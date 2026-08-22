@@ -488,17 +488,38 @@ def get_db() -> sqlite3.Connection:
             last_read       INTEGER NOT NULL DEFAULT 0,
             revoked_at      TEXT,
             last_turn_end   TEXT,
+            last_tool_name   TEXT,
+            last_tool_target TEXT,
+            last_tool_at     TEXT,
+            blocked_since    TEXT,
             FOREIGN KEY (channel) REFERENCES channels(code)
         )
     """)
-    # last_turn_end: stamped by the nth_turn_hook Stop/StopFailure hook when a
-    # Claude turn ends, so the dashboard can tell "working" (acted since the last
-    # turn end) from "idle" (turn ended, waiting). Added here too for DBs that
-    # predate the column (the CREATE above only fires for a fresh sessions table).
-    try:
-        conn.execute("ALTER TABLE sessions ADD COLUMN last_turn_end TEXT")
-    except sqlite3.OperationalError:
-        pass  # column already exists
+    # Columns written by the hooks, added here too for DBs that predate them
+    # (the CREATE above only fires for a fresh sessions table).
+    #
+    #   last_turn_end  — nth_turn_hook (Stop/StopFailure), so the dashboard can
+    #                    tell "working" (acted since the last turn end) from
+    #                    "idle" (turn ended, waiting).
+    #   last_tool_*    — nth_activity_hook (PreToolUse): which tool is running.
+    #   blocked_since  — nth_activity_hook: the session is frozen on an
+    #                    interactive prompt waiting for a human.
+    #
+    # The server owns this schema so the hooks never have to run DDL on the
+    # host's critical path. nth_activity_hook keeps its own _migrate() as a
+    # fallback for a hook upgraded ahead of its server, but with these here it
+    # is genuinely a fallback rather than the only creator — otherwise every
+    # existing DB paid a failed-write-then-migrate-then-retry on its first tool
+    # call, and that migration could itself fail under write contention and
+    # never complete.
+    for _col in ("last_turn_end TEXT", "last_tool_name TEXT",
+                 "last_tool_target TEXT", "last_tool_at TEXT",
+                 "blocked_since TEXT"):
+        try:
+            conn.execute(f"ALTER TABLE sessions ADD COLUMN {_col}")
+        except sqlite3.OperationalError:
+            pass  # column already exists
+
     # kind: 'agent' | 'human'. The managed-agent feature creates members rows
     # programmatically, so the roster needs to tell a spawned agent from a
     # person watching the dashboard. Defaults to 'agent' because every member
@@ -552,6 +573,93 @@ def get_db() -> sqlite3.Connection:
         except sqlite3.OperationalError:
             pass  # column already exists
 
+    # Recent tool calls per session, backing the roster's expandable
+    # recent-calls list. Keyed on the session FINGERPRINT (the raw
+    # CLAUDE_CODE_SESSION_ID), not session_token: one fingerprint can hold
+    # several live sessions (one per channel) and they share a single ring.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS tool_events (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            fingerprint TEXT NOT NULL,
+            tool_name   TEXT NOT NULL DEFAULT '',
+            target      TEXT NOT NULL DEFAULT '',
+            created_at  TEXT NOT NULL
+        )
+    """)
+    # tool_events predates this shape on any install that ran an earlier hooks
+    # build, where the ring was keyed on `session_id`. CREATE TABLE IF NOT
+    # EXISTS does not fire for a table that already exists, so `fingerprint`
+    # never appeared — and the index below then raised INSIDE get_db(), which
+    # is the function every MCP call and the whole dashboard open the database
+    # through. The effect was not a missing feature: the server could not open
+    # the database at all, so /trio could not connect and the roster stayed
+    # empty.
+    #
+    # This MUST be a rebuild, not an ALTER ... ADD COLUMN. The legacy column is
+    # `session_id TEXT NOT NULL` with no default, and it cannot be dropped in
+    # place on the SQLite versions we support. Merely adding `fingerprint`
+    # leaves that column behind, and the hook's insert — which names only the
+    # canonical columns — then dies on a NOT NULL constraint. That failure is an
+    # IntegrityError, so it escapes the hook's OperationalError handler and
+    # aborts the whole transaction, taking the sessions UPDATE with it. Net
+    # effect on every upgraded install: the ring stays empty AND last_tool_name
+    # is never stamped, so the roster reports a working agent as idle forever.
+    # Fresh installs got the canonical table from the CREATE above and were
+    # unaffected, which is why this only ever reproduced after an upgrade.
+    _TE_CANON = ("id", "fingerprint", "tool_name", "target", "created_at")
+    _te_cols = {row[1] for row in conn.execute("PRAGMA table_info(tool_events)")}
+    if _te_cols and _te_cols != set(_TE_CANON):
+        # Carry the fingerprint across from whichever column held it. Both may
+        # be present on an install that ran the earlier additive migration.
+        if "fingerprint" in _te_cols and "session_id" in _te_cols:
+            _fp_expr = "COALESCE(NULLIF(fingerprint, ''), session_id)"
+        elif "fingerprint" in _te_cols:
+            _fp_expr = "fingerprint"
+        elif "session_id" in _te_cols:
+            _fp_expr = "session_id"
+        else:
+            _fp_expr = "''"
+        try:
+            conn.execute("DROP TABLE IF EXISTS tool_events_rebuild")
+            conn.execute("""
+                CREATE TABLE tool_events_rebuild (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    fingerprint TEXT NOT NULL,
+                    tool_name   TEXT NOT NULL DEFAULT '',
+                    target      TEXT NOT NULL DEFAULT '',
+                    created_at  TEXT NOT NULL
+                )
+            """)
+            _te_carry = [c for c in ("id", "tool_name", "target", "created_at")
+                         if c in _te_cols]
+            conn.execute(
+                "INSERT INTO tool_events_rebuild "
+                f"(fingerprint, {', '.join(_te_carry)}) "
+                f"SELECT {_fp_expr}, {', '.join(_te_carry)} FROM tool_events"
+            )
+            # Dropping the table drops its indexes too; the CREATE INDEX below
+            # runs unconditionally and puts them back.
+            conn.execute("DROP TABLE tool_events")
+            conn.execute("ALTER TABLE tool_events_rebuild RENAME TO tool_events")
+        except sqlite3.Error:
+            # A rebuild we cannot complete must not take get_db() down with it —
+            # that is the exact failure this migration exists to undo. Leave the
+            # legacy table alone; the ring degrades, the server still opens.
+            try:
+                conn.execute("DROP TABLE IF EXISTS tool_events_rebuild")
+            except sqlite3.Error:
+                pass
+    try:
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_tool_events_fingerprint
+            ON tool_events (fingerprint, id)
+        """)
+    except sqlite3.Error:
+        # Only reachable if the rebuild above failed and left a legacy table
+        # with no `fingerprint` column. An index is an optimisation; get_db()
+        # is the door every MCP call and the dashboard come through, and it has
+        # already been shut once by exactly this statement.
+        pass
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_sessions_member
         ON sessions (channel, member_id)
@@ -903,6 +1011,16 @@ def _reap_sessions(db, now: datetime | None = None) -> None:
     db.execute(
         "DELETE FROM sessions WHERE revoked_at IS NOT NULL AND revoked_at < ?",
         (cutoff,),
+    )
+    # tool_events is capped per fingerprint by the activity hook, but nothing
+    # reclaimed rows for a fingerprint that never comes back — so every Claude
+    # session that ever ran a tool left ~20 rows behind permanently. Drop the
+    # rings of fingerprints that no longer have a live session, now that the
+    # DELETE above has removed the stale ones. Bounded by the same reap cadence,
+    # and never touches a fingerprint that is still connected.
+    db.execute(
+        "DELETE FROM tool_events WHERE fingerprint NOT IN "
+        "(SELECT fingerprint FROM sessions WHERE revoked_at IS NULL)"
     )
 
 
