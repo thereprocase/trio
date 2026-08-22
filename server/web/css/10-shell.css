@@ -1312,7 +1312,19 @@ h1,h2,h3,h4{ margin:0; font-weight:600; }
    help — measured 107px of clipping before and after at 360px. */
 .conversation-shell{display:grid;grid-template-columns:minmax(0,1fr);grid-template-rows:auto minmax(0,1fr) auto;min-width:0;min-height:100dvh;background:var(--bg)}
 .conversation-header{display:flex;align-items:center;gap:14px;min-height:68px;padding:13px 24px;border-bottom:1px solid var(--line);background:color-mix(in oklab,var(--bg) 78%,transparent);backdrop-filter:blur(8px)}
-.conversation-header h1{font:600 20px var(--font-display);margin:0;letter-spacing:-.01em}.conversation-header .tt{min-width:0;flex:1}.conversation-header .topic{margin:1px 0 0}.conversation-header #h-conn{color:var(--ink-3);font-size:11.5px}.conversation-header #h-conn .d{width:8px;height:8px;border-radius:50%;background:var(--ink-3)}.conversation-header #h-conn.live .d{background:var(--ok)}.conversation-header #h-conn.reconnect .d{background:var(--warn)}.conversation-header #h-conn.offline .d{background:var(--danger)}.nav-toggle{display:none}
+/* The title track is narrower than the title at BOTH scales, so the ellipsis
+   cannot be mobile-only. Below 880 this depends on the grid-template-columns
+   fix above and must not be split from it: nowrap alone turns the title into
+   an unbreakable min-content floor and made the overflow WORSE, 107px -> 262px
+   at 360px. Between 881 and ~1000px a hyphenated code wraps to two lines and
+   inflates this fixed header row 71.8px -> 96.8px; a code with NO hyphen has no
+   break opportunity at all and paints straight across .topbar-actions —
+   measured by pixel diff at 881px, 528 pixels of title ink over the controls,
+   x 533..663. display:block is required because .topbar h1 is display:flex and
+   text-overflow does not apply to a flex container. The truncated name gets its
+   tooltip from c88398c; without that companion this trades a visible overflow
+   for an unreadable truncation. */
+.conversation-header h1{font:600 20px var(--font-display);margin:0;letter-spacing:-.01em;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.conversation-header .tt{min-width:0;flex:1}.conversation-header .topic{margin:1px 0 0}.conversation-header #h-conn{color:var(--ink-3);font-size:11.5px}.conversation-header #h-conn .d{width:8px;height:8px;border-radius:50%;background:var(--ink-3)}.conversation-header #h-conn.live .d{background:var(--ok)}.conversation-header #h-conn.reconnect .d{background:var(--warn)}.conversation-header #h-conn.offline .d{background:var(--danger)}.nav-toggle{display:none}
 .conversation-header .icon-btn{width:34px;height:34px}.conversation-header .icon-btn svg,.side-foot .icon-btn svg{width:18px;height:18px}
 .messages{overflow:auto;min-height:0;padding:22px 0 10px;background:var(--bg)}
 .composer-shell{position:relative;padding:10px 26px 20px;border-top:0;background:var(--bg)}
@@ -1325,14 +1337,6 @@ h1,h2,h3,h4{ margin:0; font-weight:600; }
 .workspace-view{position:absolute;inset:68px 0 0;overflow:auto;background:var(--bg);padding:28px 34px 60px;z-index:3}.workspace-view > *{max-width:1040px;margin-left:auto;margin-right:auto}.workspace-view h2{font-family:var(--font-display);font-size:30px;letter-spacing:-.02em}.workspace-view .home-empty{padding:24px 0}.workspace-view .home-grid{margin-top:18px}
 dialog{margin:auto;padding:0;border:0;background:transparent;color:var(--ink);max-width:calc(100vw - 32px);overflow:visible}dialog::backdrop{background:color-mix(in oklab,var(--bg-sink) 70%,transparent);backdrop-filter:blur(4px)}.modal-close{font-size:22px;line-height:1}.control-modal{min-width:min(520px,calc(100vw - 32px));max-height:calc(100vh - 32px);overflow:auto;padding:24px;border:0;border-radius:var(--r-xl);background:var(--surface);color:var(--ink);box-shadow:var(--shadow-lg)}.control-modal h2{font:600 24px var(--font-display);margin:0 0 18px}.control-modal .modal-desc{margin:-10px 0 14px;color:var(--ink-3);font-size:13px}.control-modal label{display:grid;gap:7px;margin:14px 0;font-size:13px;font-weight:600}.control-modal input,.control-modal select,.control-modal textarea{width:100%;border:1.5px solid var(--line);border-radius:12px;padding:10px 12px;background:var(--surface-2);color:var(--ink)}.control-modal footer{display:flex;justify-content:flex-end;gap:8px;margin-top:22px}.control-modal footer button{padding:9px 14px;border-radius:10px;background:var(--bg-sink);font-weight:700}.control-modal footer .primary{background:var(--accent);color:#fff}.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
 @media (max-width:880px){.nav-toggle{display:grid}.conversation-header{padding:12px 16px}.conversation-header .topbar-actions{gap:2px}.conversation-header #h-conn{display:none}.workspace-view{inset:64px 0 0;padding:22px 18px 40px}}
-/* The channel title wraps instead of ellipsing, which grows the header to
-   144.8px (four lines) at 390px and eats that much message space. display:block
-   is required — .topbar h1 is display:flex, and text-overflow does not apply to
-   a flex container. Depends on the grid-template-columns fix above and must not
-   be split from it: nowrap turns the title into an unbreakable min-content
-   floor, so on an uncapped max-content track it makes the overflow WORSE
-   (measured 107px -> 262px at 360px). Together they measure 0. */
-@media (max-width:880px){.conversation-header h1{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
 .rail-item{display:flex;align-items:center;justify-content:space-between;width:100%;gap:8px;padding:9px 10px;border:0;border-radius:var(--r-sm);background:none;color:var(--ink);text-align:left}.rail-item:hover{background:var(--surface-hover)}.rail-copy{display:grid;gap:1px;min-width:0}.rail-copy strong{font-weight:600;overflow:hidden;text-overflow:ellipsis}.rail-copy small{color:var(--ink-3);overflow:hidden;text-overflow:ellipsis}.rail-badge{border-radius:var(--r-full);padding:1px 7px;background:var(--warm);color:#fff;font-size:11px}.rail-section{margin:14px 0}.rail-section h2{padding:0 10px 6px;color:var(--ink-3);font-size:11px;letter-spacing:.09em;text-transform:uppercase}.workspace-view{padding:24px;margin:20px;border:1px solid var(--line);border-radius:var(--r-lg);background:var(--surface)}.agent-drawer{position:fixed;z-index:20;right:18px;top:18px;bottom:18px;width:min(360px,calc(100vw - 36px));overflow:auto;padding:20px;border:1px solid var(--line);border-radius:var(--r-lg);background:var(--surface-2);box-shadow:var(--shadow-lg)}.agent-card,.task-row{display:grid;gap:6px;padding:12px 0;border-bottom:1px solid var(--line-soft)}
 .agent-filters { display:flex; flex-wrap:wrap; gap:6px; margin:12px 0; }
 .agent-filters button { padding:5px 10px; border:0; border-radius:99px; background:var(--bg-sink); color:var(--ink-3); font-size:12px; font-weight:700; }
