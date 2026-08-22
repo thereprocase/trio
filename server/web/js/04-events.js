@@ -3,8 +3,19 @@
   const Trio = window.Trio = window.Trio || {};
   const events = Trio.events = Trio.events || new EventTarget();
   let stream;
+  let currentChannel = null;
   let lastId = null;
   let state = 'connecting';
+  const STALE_AFTER_MS = 45_000;
+  const WATCHDOG_INTERVAL_MS = 10_000;
+  let workspaceStartedAt = 0;
+  let channelStartedAt = 0;
+  let workspaceLastReceivedAt = 0;
+  let channelLastReceivedAt = 0;
+  let watchdog = null;
+  let lifecycleInstalled = false;
+  let sawHidden = false;
+  let lastLifecycleRestartAt = 0;
   function setConnection(text, failed = false) {
     const el = document.getElementById('h-conn');
     const cls = failed ? (text === 'offline' ? 'offline' : 'reconnect') : 'live';
@@ -54,7 +65,28 @@
   // the shared inbox) even though live events are flowing. workspaceLive tracks
   // it so the per-channel paths below don't clobber the pill back to offline.
   let workspaceLive = false;
+  function markChannelFresh() {
+    channelLastReceivedAt = Date.now();
+    if (!workspaceStream) { setConnection('live'); notify('live'); }
+  }
+  function markWorkspaceFresh() {
+    workspaceLastReceivedAt = Date.now();
+    const wasLive = workspaceLive;
+    workspaceLive = true;
+    setConnection('live');
+    if (!wasLive) notify('workspace:live');
+  }
+  function ensureWatchdog() {
+    if (!watchdog) watchdog = setInterval(() => checkEventFreshness(), WATCHDOG_INTERVAL_MS);
+  }
+  function maybeStopWatchdog() {
+    if (!workspaceStream && !stream && watchdog) {
+      clearInterval(watchdog);
+      watchdog = null;
+    }
+  }
   function startEvents(channel = null) {
+    currentChannel = channel || null;
     if (!channel) {
       // No per-channel stream to open. Only report offline if the operator's
       // workspace stream isn't carrying the feed.
@@ -62,29 +94,112 @@
       return;
     }
     stream?.close();
-    if (!workspaceLive) setConnection('connecting');
+    channelLastReceivedAt = 0;
+    if (!workspaceLive && !workspaceStream) setConnection('connecting…', true);
     notify('connecting');
-    stream = new EventSource(Trio.api.url('/api/events'));
-    stream.onopen = () => { setConnection('live'); notify('live'); };
-    stream.onmessage = onMessage;
-    stream.onerror = () => { if (!workspaceLive) setConnection('reconnecting…', true); notify('reconnecting'); };
+    channelStartedAt = Date.now();
+    const source = new EventSource(Trio.api.url('/api/events'));
+    stream = source;
+    source.onopen = () => {
+      if (stream !== source) return;
+      channelStartedAt = Date.now();
+      if (!workspaceStream) setConnection('waiting for updates…', true);
+      notify('connected');
+    };
+    source.onmessage = event => {
+      if (stream !== source) return;
+      markChannelFresh(); onMessage(event);
+    };
+    source.addEventListener('heartbeat', () => { if (stream === source) markChannelFresh(); });
+    source.onerror = () => {
+      if (stream !== source) return;
+      if (!workspaceLive) setConnection('reconnecting…', true);
+      notify('reconnecting');
+    };
+    ensureWatchdog();
   }
   let workspaceStream;
   function startWorkspaceEvents() {
     workspaceStream?.close();
+    workspaceLive = false;
+    workspaceLastReceivedAt = 0;
+    workspaceStartedAt = Date.now();
+    setConnection('connecting…', true);
     notify('workspace:connecting');
-    workspaceStream = new EventSource('/api/workspace/events');
-    workspaceStream.onopen = () => { workspaceLive = true; setConnection('live'); notify('workspace:live'); };
-    workspaceStream.onmessage = onMessage;
-    workspaceStream.onerror = () => { workspaceLive = false; setConnection('reconnecting…', true); notify('workspace:reconnecting'); };
+    const source = new EventSource('/api/workspace/events');
+    workspaceStream = source;
+    source.onopen = () => {
+      if (workspaceStream !== source) return;
+      workspaceStartedAt = Date.now();
+      setConnection('waiting for updates…', true); notify('workspace:connected');
+    };
+    source.onmessage = event => {
+      if (workspaceStream !== source) return;
+      markWorkspaceFresh(); onMessage(event);
+    };
+    source.addEventListener('heartbeat', () => { if (workspaceStream === source) markWorkspaceFresh(); });
+    source.onerror = () => {
+      if (workspaceStream !== source) return;
+      workspaceLive = false; setConnection('reconnecting…', true); notify('workspace:reconnecting');
+    };
+    ensureWatchdog();
   }
-  function stopWorkspaceEvents() { workspaceStream?.close(); workspaceStream = null; workspaceLive = false; notify('workspace:offline'); setConnection('offline', true); }
-  function stopEvents() { stream?.close(); stream = null; if (!workspaceLive) setConnection('offline', true); notify('offline', { reason: 'stopped' }); }
+  function restartVisibleStreams() {
+    if (document.visibilityState === 'hidden' || document.hidden) return;
+    const hadWorkspace = !!workspaceStream;
+    if (hadWorkspace) startWorkspaceEvents();
+    if (currentChannel) startEvents(currentChannel);
+  }
+  function checkEventFreshness(now = Date.now()) {
+    if (document.visibilityState === 'hidden' || document.hidden) return false;
+    const checkingWorkspace = !!workspaceStream;
+    if (!checkingWorkspace && !stream) return false;
+    const proofAt = checkingWorkspace
+      ? (workspaceLastReceivedAt || workspaceStartedAt)
+      : (channelLastReceivedAt || channelStartedAt);
+    if (now - proofAt <= STALE_AFTER_MS) return false;
+    workspaceLive = false;
+    setConnection('reconnecting…', true);
+    notify(checkingWorkspace ? 'workspace:stale' : 'stale', {
+      lastReceivedAt: (checkingWorkspace ? workspaceLastReceivedAt : channelLastReceivedAt) || null,
+    });
+    if (checkingWorkspace) restartVisibleStreams();
+    else if (currentChannel) startEvents(currentChannel);
+    return true;
+  }
+  function recoverFromLifecycle() {
+    const now = Date.now();
+    if (now - lastLifecycleRestartAt < 1_000) return;
+    lastLifecycleRestartAt = now;
+    restartVisibleStreams();
+  }
+  function installLifecycleRecovery() {
+    if (lifecycleInstalled) return;
+    lifecycleInstalled = true;
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'hidden' || document.hidden) { sawHidden = true; return; }
+      if (sawHidden) { sawHidden = false; recoverFromLifecycle(); }
+    });
+    window.addEventListener('pageshow', event => { if (event.persisted) recoverFromLifecycle(); });
+    window.addEventListener('online', recoverFromLifecycle);
+  }
+  function stopWorkspaceEvents() {
+    workspaceStream?.close(); workspaceStream = null; workspaceLive = false;
+    workspaceStartedAt = 0; workspaceLastReceivedAt = 0;
+    notify('workspace:offline'); setConnection('offline', true); maybeStopWatchdog();
+  }
+  function stopEvents() {
+    stream?.close(); stream = null; currentChannel = null; channelStartedAt = 0; channelLastReceivedAt = 0;
+    if (!workspaceLive) setConnection('offline', true);
+    notify('offline', { reason: 'stopped' }); maybeStopWatchdog();
+  }
+  installLifecycleRecovery();
   Trio.startEvents = startEvents;
   Trio.stopEvents = stopEvents;
   Trio.startWorkspaceEvents = startWorkspaceEvents;
   Trio.stopWorkspaceEvents = stopWorkspaceEvents;
   Trio.events = events;
+  Trio.checkEventFreshness = checkEventFreshness;
   // Exposed for testability — the DOM test harness has no real EventSource,
   // so this is the entry point tests use to simulate an SSE payload arriving
   // (from either stream; dispatch() itself doesn't know which one a given

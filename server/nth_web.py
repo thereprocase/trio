@@ -3739,9 +3739,9 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 except queue.Empty:
                     now = time.monotonic()
                     if now - last_heartbeat >= SSE_HEARTBEAT_SEC:
-                        # SSE "comment" line — keeps the connection alive
-                        # through intermediate proxies without polluting data.
-                        self.wfile.write(b": keepalive\n\n")
+                        # A named event is both a proxy keepalive and visible
+                        # proof of freshness to browser-side watchdogs.
+                        self.wfile.write(b"event: heartbeat\ndata: {}\n\n")
                         self.wfile.flush()
                         last_heartbeat = now
         except (BrokenPipeError, ConnectionResetError, OSError):
@@ -5705,7 +5705,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 except queue.Empty:
                     now = time.monotonic()
                     if now - last_heartbeat >= SSE_HEARTBEAT_SEC:
-                        self.wfile.write(b": keepalive\n\n")
+                        self.wfile.write(b"event: heartbeat\ndata: {}\n\n")
                         self.wfile.flush()
                         last_heartbeat = now
         except (BrokenPipeError, ConnectionResetError, OSError):

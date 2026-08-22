@@ -209,7 +209,11 @@ process.on('exit', cleanup);
   const harness = require('./dom-harness');
   const sandbox = harness.load().window;
   sandbox.fetch = (url, init) => request(BASE, url, init);
-  sandbox.EventSource = function () { this.close = () => {}; };
+  sandbox.EventSource = function () {
+    this.addEventListener = () => {};
+    this.removeEventListener = () => {};
+    this.close = () => {};
+  };
   delete sandbox.Trio;
   sandbox.window.Trio = undefined;
 

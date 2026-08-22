@@ -419,6 +419,7 @@ function collectMatches(root, group, out) {
 // ── document / window ───────────────────────────────────────────────────────
 function makeDocument() {
   const byId = new Map();
+  const listeners = {};
   const doc = {
     _byId: byId,
     documentElement: new FakeElement('html'),
@@ -433,7 +434,11 @@ function makeDocument() {
     querySelector() { return null; },
     querySelectorAll() { return []; },
     getElementsByClassName() { return []; },
-    addEventListener() {}, removeEventListener() {},
+    addEventListener(type, fn) { (listeners[type] = listeners[type] || []).push(fn); },
+    removeEventListener(type, fn) {
+      const a = listeners[type] || []; const i = a.indexOf(fn); if (i >= 0) a.splice(i, 1);
+    },
+    dispatchEvent(event) { (listeners[event.type] || []).slice().forEach(fn => fn(event)); return true; },
     hidden: false,
     visibilityState: 'visible',
     readyState: 'complete',
@@ -458,19 +463,30 @@ function makeLocalStorage() {
 }
 
 class FakeEventSource {
-  constructor(url) { this.url = url; this.readyState = 0; this.closed = false; FakeEventSource.instances.push(this); }
-  addEventListener() {} removeEventListener() {} close() { this.closed = true; }
+  constructor(url) { this.url = url; this.readyState = 0; this.closed = false; this._listeners = {}; FakeEventSource.instances.push(this); }
+  addEventListener(type, fn) { (this._listeners[type] = this._listeners[type] || []).push(fn); }
+  removeEventListener(type, fn) {
+    const a = this._listeners[type] || []; const i = a.indexOf(fn); if (i >= 0) a.splice(i, 1);
+  }
+  close() { this.closed = true; this.readyState = 2; }
   // Test helpers to drive the connection lifecycle the real EventSource fires.
   fireOpen() { this.readyState = 1; if (this.onopen) this.onopen(); }
   fireError() { if (this.onerror) this.onerror(); }
+  fireMessage(data = '{}') { if (this.onmessage) this.onmessage({ data: String(data) }); }
+  fireHeartbeat() { (this._listeners.heartbeat || []).slice().forEach(fn => fn({ type: 'heartbeat', data: '{}' })); }
 }
 FakeEventSource.instances = [];
 
 function buildSandbox() {
   const document = makeDocument();
   const noop = () => {};
+  const windowListeners = {};
   const window = {
-    addEventListener: noop, removeEventListener: noop,
+    addEventListener(type, fn) { (windowListeners[type] = windowListeners[type] || []).push(fn); },
+    removeEventListener(type, fn) {
+      const a = windowListeners[type] || []; const i = a.indexOf(fn); if (i >= 0) a.splice(i, 1);
+    },
+    dispatchEvent(event) { (windowListeners[event.type] || []).slice().forEach(fn => fn(event)); return true; },
     matchMedia: () => ({ matches: false, addEventListener: noop, removeEventListener: noop, addListener: noop }),
     localStorage: makeLocalStorage(),
     location: { href: 'http://localhost/', origin: 'http://localhost', hostname: 'localhost', protocol: 'http:', search: '', pathname: '/' },

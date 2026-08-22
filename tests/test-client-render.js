@@ -920,20 +920,23 @@ check('roster clobber: the roster CustomEvent still dispatches even when not app
 // per-channel stream) leaves the pill stuck "offline" while events flow. Bug:
 // startWorkspaceEvents never called setConnection, so a live workspace stream
 // couldn't clear the offline set by startEvents(no-channel).
-check('connection pill: workspace stream open sets it live', () => {
+check('connection pill: workspace heartbeat, not socket open, proves it live', () => {
   const ES = cx.window.EventSource; ES.instances.length = 0;
   H.Trio.startWorkspaceEvents();
   const ws = ES.instances.find(s => String(s.url).includes('/api/workspace/events'));
   assert.ok(ws, 'workspace EventSource should be created');
   ws.fireOpen();
   const conn = cx.document.getElementById('h-conn');
+  assert.ok(!String(conn.className).includes('live'), 'open-but-silent stream must not claim live');
+  ws.fireHeartbeat();
   assert.ok(String(conn.className).includes('live') && !String(conn.className).includes('offline'),
-    'workspace open should set the pill live, got: ' + conn.className);
+    'workspace heartbeat should set the pill live, got: ' + conn.className);
 });
 check('connection pill: no per-channel stream does NOT clobber a live workspace pill', () => {
   const ES = cx.window.EventSource; ES.instances.length = 0;
   H.Trio.startWorkspaceEvents();
-  ES.instances.find(s => String(s.url).includes('/api/workspace/events')).fireOpen();
+  const ws = ES.instances.find(s => String(s.url).includes('/api/workspace/events'));
+  ws.fireOpen(); ws.fireHeartbeat();
   H.Trio.startEvents('');            // Home view / inbox DM — no channel
   const conn = cx.document.getElementById('h-conn');
   assert.ok(!String(conn.className).includes('offline'),
@@ -944,12 +947,75 @@ check('connection pill: workspace error shows reconnecting, then recovers to liv
   const ES = cx.window.EventSource; ES.instances.length = 0;
   H.Trio.startWorkspaceEvents();
   const ws = ES.instances.find(s => String(s.url).includes('/api/workspace/events'));
-  ws.fireOpen(); ws.fireError();
+  ws.fireOpen(); ws.fireHeartbeat(); ws.fireError();
   const conn = cx.document.getElementById('h-conn');
   assert.ok(String(conn.className).includes('reconnect'), 'workspace error should show reconnecting: ' + conn.className);
-  ws.fireOpen();
+  ws.fireOpen(); ws.fireHeartbeat();
   assert.ok(String(conn.className).includes('live') && !String(conn.className).includes('offline'));
   H.Trio.stopWorkspaceEvents();       // reset module workspaceLive for later tests
+});
+check('connection freshness: an open-but-silent workspace stream is restarted', () => {
+  const ES = cx.window.EventSource; ES.instances.length = 0;
+  H.Trio.startWorkspaceEvents();
+  const first = ES.instances.find(s => String(s.url).includes('/api/workspace/events'));
+  first.fireOpen();
+  assert.strictEqual(H.Trio.checkEventFreshness(Date.now() + 46_000), true);
+  assert.ok(first.closed, 'stale stream should be closed');
+  assert.strictEqual(ES.instances.filter(s => String(s.url).includes('/api/workspace/events')).length, 2);
+  H.Trio.stopWorkspaceEvents();
+});
+check('connection freshness: an open-but-silent channel-only stream is restarted', () => {
+  const ES = cx.window.EventSource; ES.instances.length = 0;
+  H.Trio.startEvents('guest-channel');
+  const first = ES.instances[0]; first.fireOpen(); first.fireHeartbeat();
+  assert.strictEqual(H.Trio.checkEventFreshness(Date.now() + 46_000), true);
+  assert.ok(first.closed, 'stale channel-only stream should be closed');
+  assert.strictEqual(ES.instances.length, 2);
+  H.Trio.stopEvents();
+});
+check('connection freshness: slow connect gets a fresh heartbeat deadline on open', () => {
+  const ES = cx.window.EventSource; ES.instances.length = 0;
+  const realNow = cx.window.Date.now;
+  let now = 1_000;
+  cx.window.Date.now = () => now;
+  try {
+    H.Trio.startWorkspaceEvents();
+    const ws = ES.instances[0];
+    now = 40_000; ws.fireOpen();
+    assert.strictEqual(H.Trio.checkEventFreshness(50_000), false,
+      'successful open should reset the proof deadline');
+  } finally {
+    cx.window.Date.now = realNow;
+    H.Trio.stopWorkspaceEvents();
+  }
+});
+check('connection freshness: returning visible restarts workspace and channel streams once', () => {
+  const ES = cx.window.EventSource; ES.instances.length = 0;
+  H.Trio.startWorkspaceEvents(); H.Trio.startEvents('chanA');
+  const before = ES.instances.slice();
+  cx.document.hidden = true; cx.document.visibilityState = 'hidden';
+  cx.document.dispatchEvent(new Event('visibilitychange'));
+  assert.strictEqual(ES.instances.length, before.length, 'hidden transition must not restart streams');
+  cx.document.hidden = false; cx.document.visibilityState = 'visible';
+  cx.document.dispatchEvent(new Event('visibilitychange'));
+  assert.strictEqual(ES.instances.length, before.length + 2, 'visible transition restarts both required streams');
+  cx.window.dispatchEvent({ type: 'pageshow', persisted: true });
+  cx.window.dispatchEvent(new Event('online'));
+  assert.strictEqual(ES.instances.length, before.length + 2, 'clustered resume signals must coalesce');
+  before.forEach(source => assert.ok(source.closed, 'superseded stream should be closed'));
+  H.Trio.stopEvents(); H.Trio.stopWorkspaceEvents();
+});
+check('connection freshness: callbacks from a replaced stream cannot overwrite live state', () => {
+  const ES = cx.window.EventSource; ES.instances.length = 0;
+  H.Trio.startWorkspaceEvents();
+  const old = ES.instances[0]; old.fireOpen();
+  H.Trio.startWorkspaceEvents();
+  const current = ES.instances[1]; current.fireOpen(); current.fireHeartbeat();
+  old.fireError();
+  const conn = cx.document.getElementById('h-conn');
+  assert.ok(String(conn.className).includes('live') && !String(conn.className).includes('reconnect'),
+    'late error from closed generation must be ignored');
+  H.Trio.stopWorkspaceEvents();
 });
 
 // The workspace refresh loop (15s interval + on-message) must re-poll
