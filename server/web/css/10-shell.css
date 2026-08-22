@@ -1312,7 +1312,7 @@ h1,h2,h3,h4{ margin:0; font-weight:600; }
    then CLIPS the excess instead of scrolling it, putting Send and the header
    buttons physically off-screen on a phone. min-width:0 on this element does not
    help — measured 107px of clipping before and after at 360px. */
-.conversation-shell{display:grid;grid-template-columns:minmax(0,1fr);grid-template-rows:auto minmax(0,1fr) auto;min-width:0;min-height:100dvh;background:var(--bg)}
+.conversation-shell{display:grid;grid-template-columns:minmax(0,1fr);grid-template-rows:auto auto minmax(0,1fr) auto auto;min-width:0;min-height:100dvh;background:var(--bg)}
 .conversation-header{display:flex;align-items:center;gap:14px;min-height:68px;padding:13px 24px;border-bottom:1px solid var(--line);background:color-mix(in oklab,var(--bg) 78%,transparent);backdrop-filter:blur(8px)}
 /* The title track is narrower than the title at BOTH scales, so the ellipsis
    cannot be mobile-only. Below 880 this depends on the grid-template-columns

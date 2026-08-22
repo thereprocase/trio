@@ -331,3 +331,27 @@ body.compact .day-separator, body.compact .unread-divider { margin:4px 0; }
    tint washes out (see screenshot). Mirror the file-link treatment: white text
    on a translucent-white pill — legible on the blue bubble regardless of tone. */
 .message.own .inline-mention,.message.msg.me .inline-mention{ background:color-mix(in srgb,#fff 22%,transparent); color:#fff; }
+
+/* The "not receiving updates" strip (#chat-freshness, 3176e42). It is a sibling
+   of .messages, not a child, which is what keeps it on screen — inside the
+   scroller it would scroll away exactly when the reader needs it. It sits above
+   the composer rather than pinned to the viewport bottom, so it never competes
+   with the composer's env(safe-area-inset-bottom) or lands under the iOS home
+   indicator.
+
+   Shares --gutter with the message list and the composer so all three left
+   edges line up; that token exists precisely so these cannot drift apart.
+   Borrows the warning vocabulary already used by .conn.reconnect rather than
+   inventing a second one. [hidden] gives display:none from the UA sheet, so the
+   row costs nothing until it is shown — measured, the shell goes from three grid
+   rows to four only while visible, and .messages keeps the minmax(0,1fr) row
+   either way. */
+.chat-freshness{
+  padding:7px var(--gutter);
+  border-top:1px solid var(--line);
+  background:var(--warn-tint);
+  color:color-mix(in oklab,var(--warn) 74%,var(--ink));
+  font-size:12.5px;
+  line-height:1.4;
+  text-align:center;
+}
