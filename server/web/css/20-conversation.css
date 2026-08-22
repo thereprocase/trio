@@ -75,7 +75,14 @@ body.message-numbers .message-id { display:inline; }
 .message.own .message-body a.file-link:hover { background: color-mix(in srgb, var(--bubble-me-ink, #fff) 28%, transparent); }
 .message.own .message-body a.file-link.file-link-err { color: #fff; background: rgba(163, 68, 68, 0.55); }
 .edited-mark { opacity:.7; font-size:.82em; }.private-badge,.confidence { border-radius:99px; padding:1px 7px; font-size:10px; font-weight:700; text-transform:uppercase; }.private-badge { background:var(--warm-soft); color:var(--warm); }.confidence-low { background:#f8dddd; color:#a34444; }.confidence-medium { background:#f6eac5; color:#806216; }.confidence-high { background:#dcecdf; color:#37724a; }
-.message-targets { display:flex; flex-wrap:wrap; gap:5px; margin:0 0 8px; }.target-group { display:flex; align-items:center; gap:4px; font-size:11px; color:var(--ink-3); }.target-chip,.attachment-pill { border:0; border-radius:99px; padding:3px 8px; background:var(--accent-tint); color:var(--accent-strong); font:inherit; font-size:12px; }.sigil { font-weight:700; }.sigil-mention { color:var(--accent-strong); }.sigil-ref { color:#96701d; }.sigil-bang { color:var(--warm); }
+.message-targets { display:flex; flex-wrap:wrap; gap:5px; margin:0 0 8px; }/* Wraps because a sigil group is one chip PER MEMBER ROW, and a channel's
+   roster only grows. `!all` here rendered 11 chips at 654px on a 412px
+   phone: a non-wrapping flex row is an unbreakable min-content floor, it
+   escapes .message-content (which does set min-width:0), and .messages is a
+   single overflow:auto scroller — so ONE wide message made the whole list
+   scroll sideways and every other message lost its left margin.
+   Measured at 412px: 386px of overflow before, 0 after. */
+.target-group { display:flex; flex-wrap:wrap; min-width:0; align-items:center; gap:4px; font-size:11px; color:var(--ink-3); }.target-chip,.attachment-pill { border:0; border-radius:99px; padding:3px 8px; background:var(--accent-tint); color:var(--accent-strong); font:inherit; font-size:12px; }.sigil { font-weight:700; }.sigil-mention { color:var(--accent-strong); }.sigil-ref { color:#96701d; }.sigil-bang { color:var(--warm); }
 .day-separator { align-self:center; margin:8px 0; padding:3px 10px; border-radius:99px; background:var(--bg-sink); color:var(--ink-3); font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.04em; }
 .unread-divider { align-self:center; margin:12px 0; padding:3px 10px; border-radius:99px; background:var(--warm-soft); color:var(--warm); font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.04em; }
 .reply-context { display:inline-flex; font-size:11px; color:var(--accent-strong); margin-bottom:6px; text-decoration:none; }
