@@ -51,7 +51,8 @@ exact values as observed rather than guaranteed, and re-check them if the browse
 changes. By default it answered **`(hover:none)` true at every width**, with
 *both* `(pointer:coarse)` and `(pointer:fine)` **false**. So a "desktop is
 byte-identical" claim about any rule inside `@media (hover:none)` is, by default,
-measured on a phone.
+measured in a **non-hover input environment** — which is the phone branch of your
+CSS, whatever the viewport width says.
 
 Force real pointer types at launch:
 
@@ -80,7 +81,7 @@ is guaranteed by the protocol or an artefact of this build is not established
 here, so treat a session that has called it as **tainted** for hover and pointer
 queries rather than assuming it recovers. A loop that does
 `browser.touch(width < 700)` and then measures a `(hover:none)` rule at 1440px is
-measuring a phone and cannot tell.
+still evaluating the non-hover branch, and cannot tell.
 
 **Use one browser per pointer mode.** It costs a process and removes the whole
 question.
@@ -162,7 +163,11 @@ them* and disturbs the index while they are mid-edit. It also contradicts the
 rule directly above: the whole point of the worktree is that you stop touching
 the shared tree at all. Instead, build a worktree at a known commit, copy in only
 the files **you** own, and run there. If your files reproduce the red in
-isolation it is yours; if they do not, it was never yours to bisect.
+isolation, it is yours. If they do not, all you have established is that **your
+diff alone does not cause it** — not that you are uninvolved. A failure can live
+in the join between your change and something else that landed, so the next step
+is an isolated *integration* worktree containing both, not a shrug. Either way,
+never stash a peer's path to find out.
 
 ## `PY=` is an environment variable, and it applies to the JS tests too
 
@@ -177,15 +182,29 @@ is not real.
 
 ## Clean up your browsers
 
-One browser per agent is fine; a 66-agent sweep is not. At one sampled point
-during the 2026-08-22 run — a single observation, not a total for the sweep —
-`ps` showed **16 orphaned Chromium instances** whose parent had already exited,
-and `/tmp` held **960 `cdp-profile-*` directories**; killing the orphans moved
-resident memory from 19 GB to 16 GB of 30 GB. The cause was that `close()` was
-only reached on the happy path, so any script raising mid-measurement orphaned
-both the process and its directory.
+Scale is not the bug. Dozens of browsers are fine with reliable teardown; what
+fails is **happy-path-only cleanup, compounding**. During the 2026-08-22 run a
+driver reached `close()` only on the success path, so every script that raised
+mid-measurement orphaned both its process and its `--user-data-dir`, and a sweep
+turned a per-run leak into an accumulation.
+
+Exact counts are deliberately omitted: they were observed live and no inspectable
+artifact was committed, so quoting them here would be a number without provenance
+— the thing this file exists to discourage. Take your own:
+
+```bash
+# Self-excluding pattern: plain `grep chromium` matches its OWN grep process and
+# inflates the count — the exact false confidence this file is about.
+ps -eo pid,ppid,etimes,args | grep '[c]hromium' | grep -- '--remote-debugging-port'
+find /tmp -maxdepth 1 -name 'cdp-profile-*' -type d | wc -l
+```
+
+An orphan is identified by **reparenting — `ppid` of 1 — not by matching the
+process name.** A live browser owned by a running script looks identical to a
+dead one's leftovers in a name-only match.
 
 Remove the profile directory when you reap the process, and use a context manager
-so an exception mid-measurement still cleans up. Verify the fix by tracking the
-instance's own directory path, not by counting `/tmp` — a concurrent browser will
-move that count under you.
+so an exception mid-measurement still cleans up.
+
+Verify the fix by tracking the instance's own directory path, not by counting
+`/tmp` — a concurrent browser will move that count under you.
