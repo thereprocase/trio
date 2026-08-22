@@ -47,15 +47,25 @@ body.message-numbers .message-id { display:inline; }
    unchanged. Desktop is untouched — measured with hover/pointer types forced at
    launch, because headless Chromium answers (hover:none) true at every width.
 
-   The gap must be at least twice the inset, or neighbours overlap and the one
-   later in paint order steals the other's edge. At gap:8px a tap on the FIRST
-   button's own right-edge pixel was measured landing on the SECOND button —
-   an expanded target that makes a real control less reliable, not more. 18px
-   clears two 9px insets exactly. */
+   Horizontal only, and that is a deliberate limit rather than an oversight. A
+   real card renders exactly ONE button here, so there is no horizontal
+   neighbour to collide with — but there is very little vertical room: the tools
+   row sits 2px under the bubble and .message.msg has 3px of padding with the
+   message list at gap 0. Expanding vertically was measured to do one of two
+   wrong things: upward it swallowed taps meant for the bubble (a link on the
+   last line is reachable there), and downward it was simply blocked by the next
+   message, so it bought nothing. Measured, tapping 9px above/below:
+
+     inset:-9px     up -> COPY (steals the bubble)   down -> COPY or OTHER-MSG
+     inset:0 -9px   up -> BUBBLE (correct)           down -> OTHER-MSG (correct)
+
+   So the honest claim is 44x26, not 44x44: the area roughly doubles and the
+   axis a thumb misses most in a control row is fixed, while nothing else loses
+   a tap. Meeting the full 44px floor vertically needs real spacing, which costs
+   list height, and that is a separate decision. */
 @media (hover:none) {
-  .message-tools { gap:18px; }
   .message-tools .copy-btn { position:relative; }
-  .message-tools .copy-btn::after { content:""; position:absolute; inset:-9px; border-radius:inherit; }
+  .message-tools .copy-btn::after { content:""; position:absolute; inset:0 -9px; border-radius:inherit; }
 }
 
 .message-body { overflow-wrap:anywhere; line-height:1.55; }
