@@ -18,6 +18,8 @@ let failures = 0;
 function check(name, fn) { try { fn(); console.log('PASS: ' + name); } catch (e) { failures++; console.log('FAIL: ' + name + ' — ' + e.message); } }
 
 const INDEX = fs.readFileSync(path.join(__dirname, '..', 'server', 'web', 'index.html'), 'utf8');
+const SHELL_CSS = fs.readFileSync(path.join(__dirname, '..', 'server', 'web', 'css', '10-shell.css'), 'utf8');
+const WORKSPACE_CSS = fs.readFileSync(path.join(__dirname, '..', 'server', 'web', 'css', '30-workspace.css'), 'utf8');
 
 /* ---------- markup contract (asserted against the file, not the harness) ---------- */
 
@@ -45,6 +47,18 @@ check('markup: the connection pill is no longer a competing live region', () => 
   // strip owns the announcement; the pill stays a visual indicator.
   const pill = INDEX.slice(INDEX.indexOf('id="h-conn"'), INDEX.indexOf('>', INDEX.indexOf('id="h-conn"')));
   assert.ok(!/aria-live/.test(pill), '#h-conn must not carry aria-live');
+});
+check('layout: optional rows cannot displace messages or composer', () => {
+  const expected = [
+    ['conversation-header', 1], ['private-banner', 2], ['messages', 3],
+    ['chat-freshness', 4], ['composer-shell', 5],
+  ];
+  for (const [name, row] of expected) {
+    assert.ok(new RegExp(`conversation-shell>\\.${name}\\{grid-row:${row}\\}`).test(SHELL_CSS),
+      `${name} must stay pinned to grid row ${row}`);
+  }
+  assert.ok(/workspace-page[^\n]*chat-freshness[^\n]*\{display:none\}/.test(WORKSPACE_CSS),
+    'workspace routes must defensively hide the conversation freshness row');
 });
 
 /* ---------- published snapshot ---------- */

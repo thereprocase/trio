@@ -343,11 +343,16 @@ body.compact .day-separator, body.compact .unread-divider { margin:4px 0; }
    edges line up; that token exists precisely so these cannot drift apart.
    Borrows the warning vocabulary already used by .conn.reconnect rather than
    inventing a second one. [hidden] gives display:none from the UA sheet, so the
-   row costs nothing until it is shown — measured, the shell goes from three grid
-   rows to four only while visible, and .messages keeps the minmax(0,1fr) row
-   either way. */
+   row costs nothing until it is shown. Each child has an explicit grid row, so
+   an optional hidden banner/strip collapses without shifting messages or the
+   composer into the flexible message track. */
 .chat-freshness{
-  padding:7px var(--gutter);
+  /* Full-bleed tint so a connectivity warning cannot be mistaken for message
+     content, but the TEXT column matches the 820px conversation column that
+     .message.msg and .private-banner both use — so the words line up with the
+     messages instead of starting 60px to their left. Below 820px the max()
+     falls through to --gutter and it behaves like every other row. */
+  padding:7px max(var(--gutter), calc((100% - 820px) / 2));
   border-top:1px solid var(--line);
   background:var(--warn-tint);
   color:color-mix(in oklab,var(--warn) 74%,var(--ink));
