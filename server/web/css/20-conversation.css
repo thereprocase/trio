@@ -37,14 +37,15 @@ body.message-numbers .message-id { display:inline; }
 
 /* Revealing these on touch is only half the job — what it exposes is a 26px
    target, 35% of the 44px floor by area. Grow the HIT AREA, not the button: an
-   absolutely-positioned pseudo-element is out of flow, so the tap target reaches
+   absolutely-positioned pseudo-element is out of flow, so the target widens to
    44px for free. Sizing the button itself to 44px also works and costs 18px of
    height PER MESSAGE, because on touch this row is permanently visible —
    measured +11.1% on the message list's scroll height, which in a 500-message
    channel is thousands of pixels of extra scrolling for no visual gain.
-   Verified by hit-testing: a tap 6px outside the visual box lands on the button
-   at both corners, while the row stays 26px tall and the list height is
-   unchanged. Desktop is untouched — measured with hover/pointer types forced at
+   Verified by hit-testing on real cards: a tap 6px to the LEFT or RIGHT of the
+   visual box lands on the button, while the row stays 26px tall and the list
+   height is unchanged. Taps above and below correctly do NOT land on it — see
+   below. Desktop is untouched — measured with hover/pointer types forced at
    launch, because headless Chromium answers (hover:none) true at every width.
 
    Horizontal only, and that is a deliberate limit rather than an oversight. A
