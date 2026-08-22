@@ -201,6 +201,84 @@ check('the badge appears once live members exceed the cap',
 check('the badge describes what it counts',
       pile.querySelector('.more')?.getAttribute('aria-label') === '1 more here');
 
+// ── the mobile cap ──────────────────────────────────────────────────────────
+// 360px is the width that decides this, not 390: three faces still leave a
+// readable ~70px of title at 390px but only ~40px at 360px. Two faces is what
+// the narrowest supported header can afford; the badge is what stops the
+// smaller cap from becoming a smaller lie.
+//
+// The cap is asserted through the MODEL with an explicit limit, never through
+// the render path, because dom-harness pins matchMedia to { matches: false } —
+// a "mobile" assertion made through renderFacePile would quietly exercise the
+// desktop branch and pass.
+const fivePresent = [member('a', 'working'), member('b', 'working'), member('c', 'working'),
+                     member('d', 'working'), member('e', 'working')];
+check('the narrow cap shows two faces',
+      model(fivePresent, [], null, 2).faces.length === 2);
+check('and the badge accounts for the other three',
+      model(fivePresent, [], null, 2).overflow === 3);
+check('the wide cap still shows four',
+      model(fivePresent, [], null, 4).faces.length === 4);
+check('faces + overflow is the present count at either cap',
+      [2, 4].every(cap => (r => r.faces.length + r.overflow === 5)(model(fivePresent, [], null, cap))));
+
+// The rendered badge at the narrow cap, since the number and its label are the
+// part a person actually reads.
+state.members = new Map(fivePresent.map(m => [m.id, m]));
+Trio.workspace.renderFacePile();
+const wideBadge = pile.querySelector('.more');
+check('the desktop render is unchanged at four faces plus one over',
+      pile.querySelectorAll('.av').length === 4 && wideBadge?.textContent === '+1');
+
+// The model assertions above prove the cap ARITHMETIC but not that the render
+// path consults the viewport at all — hardcoding the wide limit back into
+// renderFacePile passes every one of them. Overriding the harness's permanently
+// -false matchMedia is what closes that gap, and it is the only way to reach
+// the narrow branch here.
+let added = 0, removed = 0, narrow = false;
+let onChange = null, removedFn = null;
+const realMatchMedia = cx.context.window.matchMedia;
+cx.context.window.matchMedia = () => ({
+  get matches() { return narrow; },
+  addEventListener: (_type, fn) => { added++; onChange = fn; },
+  removeEventListener: (_type, fn) => { removed++; removedFn = fn; },
+});
+
+narrow = true;
+Trio.workspace.renderFacePile();
+check('a narrow viewport renders two faces, not four',
+      pile.querySelectorAll('.av').length === 2);
+check('and the badge counts the three it dropped',
+      pile.querySelector('.more')?.textContent === '+3');
+check('the badge still says what it counts',
+      pile.querySelector('.more')?.getAttribute('aria-label') === '3 more here');
+
+narrow = false;
+Trio.workspace.renderFacePile();
+check('crossing back to wide repaints to four immediately',
+      pile.querySelectorAll('.av').length === 4 && pile.querySelector('.more')?.textContent === '+1');
+
+// A media-query listener has to exist, DO something, and be surrendered — or
+// rotating a phone leaves the wrong count until an unrelated repaint. Counting
+// registrations alone is not enough: a listener wired to a no-op would satisfy
+// that and change nothing on rotation, so the callback is captured and fired.
+Trio.workspace.mount();
+check('mounting registers exactly one viewport listener', added === 1);
+
+narrow = true;
+onChange?.({ matches: true });
+check('the listener repaints to the narrow cap when the breakpoint is crossed',
+      pile.querySelectorAll('.av').length === 2 && pile.querySelector('.more')?.textContent === '+3');
+narrow = false;
+onChange?.({ matches: false });
+check('and back to four crossing the other way',
+      pile.querySelectorAll('.av').length === 4 && pile.querySelector('.more')?.textContent === '+1');
+
+Trio.workspace.unmount();
+check('unmounting removes it again', removed === 1);
+check('and removes the same callback it registered', removedFn === onChange);
+cx.context.window.matchMedia = realMatchMedia;
+
 console.log();
 if (failures.length) {
   console.log(`FAILED — ${failures.length} of ${failures.length + passed}`);

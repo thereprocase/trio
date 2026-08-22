@@ -230,7 +230,10 @@
     // THIS module failed to mount; answering boot from the route name alone
     // would leave that case with no owner at all, which is a worse failure than
     // the double-open being removed. Guarding on startEvents rather than using
-    // `?.` keeps the claim true when the events module is absent too.
+    // `?.` matters for the same reason: with the events module absent nothing
+    // is opened, and the flag must not report ownership of a stream that does
+    // not exist. (Boot cannot rescue that case either — it is equally unable to
+    // call an absent startEvents — but a false claim would hide the reason.)
     if (Trio.startEvents) { Trio.startEvents(state.channel); streamOpenedByRoute = true; }
     // If the details drawer is open, re-render it for the conversation we just
     // switched to. Otherwise it keeps the previous conversation's topic /
@@ -394,16 +397,28 @@
   // unclassifiable member here is a client-state bug, and painting it as a
   // present participant with an offline dot would be the pile contradicting
   // itself — exactly the failure this change exists to remove.
-  // How many faces the header can afford. Named rather than inlined because a
-  // narrower limit for small viewports is a separate change that has to be
-  // measured first, and this is the single place it will move when it is.
-  const FACE_LIMIT = 4;
+  // How many faces the header can afford, which is not a constant. The width
+  // that decides it is 360px, not 390: measured, three faces still leave a
+  // readable ~70px of title at 390px but only ~40px at 360px, which is too few
+  // characters to tell you which room you are in. Two faces plus a badge is
+  // what the narrowest supported header can spend, and the badge is what keeps
+  // the count honest once the cap starts hiding people.
+  //
+  // 880px is the breakpoint the header's own mobile rules already use; sharing
+  // it is deliberate, so the JS cap and the CSS layout cannot disagree.
+  const FACE_LIMIT_WIDE = 4;
+  const FACE_LIMIT_NARROW = 2;
+  const FACE_MEDIA = '(max-width: 880px)';
+  const faceLimit = () => {
+    try { return window.matchMedia?.(FACE_MEDIA)?.matches ? FACE_LIMIT_NARROW : FACE_LIMIT_WIDE; }
+    catch { return FACE_LIMIT_WIDE; }
+  };
   // Pure, and separated from the DOM on purpose: tests/dom-harness.js stubs
   // matchMedia to a permanent { matches: false }, so any limit read from a
   // media query in here would make a "mobile" assertion silently exercise the
   // desktop branch and pass. The limit is an argument so a regression can set
   // it directly.
-  function facePileModel(members, agents, operator, limit = FACE_LIMIT) {
+  function facePileModel(members, agents, operator, limit = FACE_LIMIT_WIDE) {
     const agentsById = new Map(listOf(agents).map(agent => [agent.id, agent]));
     const present = listOf(members).map(member => {
       // Merge the supervisor's {live,busy,state} over the roster member — the
@@ -436,7 +451,7 @@
       : allMembers).filter(m => !m.archived);
     const operator = state.operator || state.meta?.operator;
     if (operator?.id && !members.some(member => member.id === operator.id)) members.push(operator);
-    const { faces, overflow } = facePileModel(members, agentArray(), operator, FACE_LIMIT);
+    const { faces, overflow } = facePileModel(members, agentArray(), operator, faceLimit());
     faces.forEach(({ member, status }) => {
       const node = document.createElement('span');
       node.innerHTML = avatarFor(member, status);
@@ -2035,6 +2050,12 @@
   }
   let refreshInterval = null;
   let agentsInterval = null;
+  // Held across a mount so it can be removed again: without a listener the face
+  // cap is only re-evaluated on the next roster event or 5s agent poll, so
+  // rotating a phone would leave four faces crammed into a narrow header, or two
+  // faces and a needless "+N" on a wide one, until something unrelated repainted.
+  let faceMedia = null;
+  let faceMediaChange = null;
   // Dedicated faster poll for agent live/busy/state (+context) so connected/
   // sleeping/compacting transitions show within ~5s — cheaper bits than the full
   // 15s workspace refresh, operator-gated, no agent tokens. Working/idle + tool
@@ -2045,8 +2066,18 @@
   // and be surrendered on unmount. Without that it would answer for a previous
   // page lifetime, and 06-core would skip its fallback on evidence that had
   // expired.
-  function mount() { streamOpenedByRoute = false; refresh(); renderFacePile(); if (!refreshInterval) refreshInterval = setInterval(refresh, 15000); if (!agentsInterval) agentsInterval = setInterval(pollAgents, 5000); unroute = Trio.router?.on?.(onRoute); wsl = onWorkspaceUpdate; Trio.events?.addEventListener?.('workspace:updated', wsl); preferencesChanged = onPreferencesChanged; Trio.events?.addEventListener?.('preferences:changed', preferencesChanged); Trio.events?.addEventListener?.('roster', renderFacePile); Trio.events?.addEventListener?.('roster', refreshDrawerMembers); Trio.events?.addEventListener?.('message', onMessageForDrawer); Trio.events?.addEventListener?.('message', onMessageLiveRefresh); const searchBtn = $('search-btn'); if (searchBtn) { searchBtn.addEventListener('click', openSearch); } const detailsBtn = $('details-btn'); if (detailsBtn) { detailsClick = showDetails; detailsBtn.addEventListener('click', detailsClick); } const drawerClose = $('channel-drawer-close'); if (drawerClose) drawerClose.addEventListener('click', closeDetails); const drawerResize = $('channel-drawer-resize'); if (drawerResize) drawerResize.addEventListener('pointerdown', startDrawerResize); const menuButton = $('channel-more-btn'); if (menuButton) { menuButtonClick = openChannelMenu; menuButton.addEventListener('click', menuButtonClick); } const accountTrigger = $('account-trigger'); if (accountTrigger) { accountTriggerClick = openAccountMenu; accountTrigger.addEventListener('click', accountTriggerClick); } menuClick = event => { if (!event.target.closest('#channel-menu, #channel-more-btn')) closeChannelMenu(); if (!event.target.closest('#account')) closeAccountMenu(); }; menuKeydown = event => { if (event.key === 'Escape') { closeChannelMenu(); closeDetails(); closeAccountMenu(); } }; document.addEventListener('click', menuClick); document.addEventListener('keydown', menuKeydown); searchKeydown = onSearchKey; document.addEventListener('keydown', searchKeydown); }
-  function unmount() { streamOpenedByRoute = false; closeChannelMenu(); closeDetails(); if (drawerResizeEnd) drawerResizeEnd(); if (refreshInterval) { clearInterval(refreshInterval); refreshInterval = null; } if (agentsInterval) { clearInterval(agentsInterval); agentsInterval = null; } if (unroute) { unroute(); unroute = null; } if (wsl) { Trio.events?.removeEventListener?.('workspace:updated', wsl); wsl = null; } if (preferencesChanged) { Trio.events?.removeEventListener?.('preferences:changed', preferencesChanged); preferencesChanged = null; } Trio.events?.removeEventListener?.('roster', renderFacePile); Trio.events?.removeEventListener?.('roster', refreshDrawerMembers); Trio.events?.removeEventListener?.('message', onMessageForDrawer); Trio.events?.removeEventListener?.('message', onMessageLiveRefresh); clearTimeout(liveRefreshDebounce); clearTimeout(drawerActivityDebounce); const searchBtn = $('search-btn'); if (searchBtn && openSearch) searchBtn.removeEventListener('click', openSearch); const detailsBtn = $('details-btn'); if (detailsBtn && detailsClick) detailsBtn.removeEventListener('click', detailsClick); const drawerClose = $('channel-drawer-close'); if (drawerClose) drawerClose.removeEventListener('click', closeDetails); const drawerResize = $('channel-drawer-resize'); if (drawerResize) drawerResize.removeEventListener('pointerdown', startDrawerResize); const menuButton = $('channel-more-btn'); if (menuButton && menuButtonClick) menuButton.removeEventListener('click', menuButtonClick); const accountTrigger = $('account-trigger'); if (accountTrigger && accountTriggerClick) accountTrigger.removeEventListener('click', accountTriggerClick); closeAccountMenu(); if (menuClick) document.removeEventListener('click', menuClick); if (menuKeydown) document.removeEventListener('keydown', menuKeydown); if (searchKeydown) document.removeEventListener('keydown', searchKeydown); }
+  function mountFaceMedia() {
+    try { faceMedia = window.matchMedia?.(FACE_MEDIA) || null; } catch { faceMedia = null; }
+    if (!faceMedia) return;
+    faceMediaChange = () => renderFacePile();
+    faceMedia.addEventListener?.('change', faceMediaChange);
+  }
+  function unmountFaceMedia() {
+    if (faceMedia && faceMediaChange) faceMedia.removeEventListener?.('change', faceMediaChange);
+    faceMedia = null; faceMediaChange = null;
+  }
+  function mount() { streamOpenedByRoute = false; mountFaceMedia(); refresh(); renderFacePile(); if (!refreshInterval) refreshInterval = setInterval(refresh, 15000); if (!agentsInterval) agentsInterval = setInterval(pollAgents, 5000); unroute = Trio.router?.on?.(onRoute); wsl = onWorkspaceUpdate; Trio.events?.addEventListener?.('workspace:updated', wsl); preferencesChanged = onPreferencesChanged; Trio.events?.addEventListener?.('preferences:changed', preferencesChanged); Trio.events?.addEventListener?.('roster', renderFacePile); Trio.events?.addEventListener?.('roster', refreshDrawerMembers); Trio.events?.addEventListener?.('message', onMessageForDrawer); Trio.events?.addEventListener?.('message', onMessageLiveRefresh); const searchBtn = $('search-btn'); if (searchBtn) { searchBtn.addEventListener('click', openSearch); } const detailsBtn = $('details-btn'); if (detailsBtn) { detailsClick = showDetails; detailsBtn.addEventListener('click', detailsClick); } const drawerClose = $('channel-drawer-close'); if (drawerClose) drawerClose.addEventListener('click', closeDetails); const drawerResize = $('channel-drawer-resize'); if (drawerResize) drawerResize.addEventListener('pointerdown', startDrawerResize); const menuButton = $('channel-more-btn'); if (menuButton) { menuButtonClick = openChannelMenu; menuButton.addEventListener('click', menuButtonClick); } const accountTrigger = $('account-trigger'); if (accountTrigger) { accountTriggerClick = openAccountMenu; accountTrigger.addEventListener('click', accountTriggerClick); } menuClick = event => { if (!event.target.closest('#channel-menu, #channel-more-btn')) closeChannelMenu(); if (!event.target.closest('#account')) closeAccountMenu(); }; menuKeydown = event => { if (event.key === 'Escape') { closeChannelMenu(); closeDetails(); closeAccountMenu(); } }; document.addEventListener('click', menuClick); document.addEventListener('keydown', menuKeydown); searchKeydown = onSearchKey; document.addEventListener('keydown', searchKeydown); }
+  function unmount() { streamOpenedByRoute = false; unmountFaceMedia(); closeChannelMenu(); closeDetails(); if (drawerResizeEnd) drawerResizeEnd(); if (refreshInterval) { clearInterval(refreshInterval); refreshInterval = null; } if (agentsInterval) { clearInterval(agentsInterval); agentsInterval = null; } if (unroute) { unroute(); unroute = null; } if (wsl) { Trio.events?.removeEventListener?.('workspace:updated', wsl); wsl = null; } if (preferencesChanged) { Trio.events?.removeEventListener?.('preferences:changed', preferencesChanged); preferencesChanged = null; } Trio.events?.removeEventListener?.('roster', renderFacePile); Trio.events?.removeEventListener?.('roster', refreshDrawerMembers); Trio.events?.removeEventListener?.('message', onMessageForDrawer); Trio.events?.removeEventListener?.('message', onMessageLiveRefresh); clearTimeout(liveRefreshDebounce); clearTimeout(drawerActivityDebounce); const searchBtn = $('search-btn'); if (searchBtn && openSearch) searchBtn.removeEventListener('click', openSearch); const detailsBtn = $('details-btn'); if (detailsBtn && detailsClick) detailsBtn.removeEventListener('click', detailsClick); const drawerClose = $('channel-drawer-close'); if (drawerClose) drawerClose.removeEventListener('click', closeDetails); const drawerResize = $('channel-drawer-resize'); if (drawerResize) drawerResize.removeEventListener('pointerdown', startDrawerResize); const menuButton = $('channel-more-btn'); if (menuButton && menuButtonClick) menuButton.removeEventListener('click', menuButtonClick); const accountTrigger = $('account-trigger'); if (accountTrigger && accountTriggerClick) accountTrigger.removeEventListener('click', accountTriggerClick); closeAccountMenu(); if (menuClick) document.removeEventListener('click', menuClick); if (menuKeydown) document.removeEventListener('keydown', menuKeydown); if (searchKeydown) document.removeEventListener('keydown', searchKeydown); }
   Trio.workspace = {init: mount, mount, unmount, render: renderRail, renderFacePile, facePileModel,
     didOpenStream: () => streamOpenedByRoute, refresh, archive, archiveCurrent, openChannel, openDm, openDmByKey, openDmDialog, dmTargets, groupNavigation, isStaleThread, staleThreadDays, attentionCount, selectors, showView, search: openSearch, doSearch, modal, toast, showDetails, channelStatus, toolSuffix, usageTone, resetLabel, contextBadge, formatTokenEstimate, refreshDrawerActivity, refreshDrawerMembers, messageCountLabel, createChannel, openTaskModal, detailMember, renderSubagentList, subagentsFromResponse, openAccountMenu, closeAccountMenu, dismissQuestion, undismissQuestion, isQuestionDismissed, trendChip, dailyChangeLine, projectionLine};
 })();
