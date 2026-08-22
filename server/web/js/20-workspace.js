@@ -144,6 +144,12 @@
   };
   function attentionCount(meta = state.meta || {}) { return selectors.pendingApprovals({ approvals: meta.approvals }); }
   function openChannel(code, extra = '') {
+    // Picking a destination dismisses the mobile drawer. Below 880px it is an
+    // overlay lying on top of the conversation you just chose, so leaving it up
+    // made every navigation end by hunting for the strip of scrim beside it.
+    // Trio.nav no-ops when the drawer is already shut, which is the desktop case
+    // and also every route-driven call that no human clicked.
+    Trio.nav?.close?.();
     const readOnly = extra === 'archived';
     if (Trio.router?.navigate) Trio.router.navigate('channel', { code, archived: readOnly });
     loadConversation(code, '#' + code, readOnly ? 'Archived channel — read only' : 'Live agent workspace', readOnly, false);
@@ -213,6 +219,7 @@
     if ($('channel-drawer')?.classList.contains('open')) showDetails(true);
   }
   function openDm(dm, readOnly = false, audit = false) {
+    Trio.nav?.close?.();
     const auditReadOnly = !!audit;
     state.dmMemberIds = (dm.member_ids || []).slice();
     state.dmTargetId = state.dmMemberIds[0] || '';
@@ -431,6 +438,7 @@
     pile.classList.toggle('hidden', !faces.length);
   }
   function navigateView(view) {
+    Trio.nav?.close?.();
     const route = { home: 'home', attention: 'attention', messages: 'messages', tasks: 'tasks', roster: 'roster', prefs: 'prefs', archive: 'archive', data: 'data' }[view] || 'home';
     if (Trio.router?.navigate) Trio.router.navigate(route);
     else showView(view);

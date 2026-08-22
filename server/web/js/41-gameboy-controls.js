@@ -157,7 +157,12 @@
       return focusTarget(mainTarget);
     }
     const sidebar = document.querySelector('.sidebar');
-    if (sidebar && getComputedStyle(sidebar).display === 'none') document.getElementById('nav-toggle')?.click();
+    // Gate on the viewport, not on `display`. The mobile drawer is moved off
+    // screen with a transform and keeps `display:flex`, so the old check never
+    // fired and this focused a rail sitting outside the viewport. Ask the drawer
+    // to open instead of synthesising a click on the hamburger, which became a
+    // real toggle when it gained aria-expanded and would close an open drawer.
+    if (Trio.nav?.isNarrow?.()) Trio.nav.open();
     const navTarget = document.querySelector('.nav-item.active,.dm-item.active,.rail-item.active')
       || focusables(sidebar || document)[0];
     return focusTarget(navTarget);
