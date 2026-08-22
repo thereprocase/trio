@@ -208,7 +208,7 @@ try:
         "SELECT id, member_id, member_name, content, mentions, refs, bangs, "
         "reply_to, recipients, retracted_at, retraction_reason, "
         "created_at FROM messages WHERE id=?", (DM_ID,)).fetchone()
-    ev = web._message_event(db, sse_row)
+    ev = web._message_event(db, sse_row, CH)
 finally:
     db.close()
 check("(b) SSE event carries recipients", ev.get("recipients") == [bob])

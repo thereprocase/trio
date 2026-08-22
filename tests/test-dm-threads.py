@@ -116,6 +116,34 @@ try:
     # Bob and Carol talk to each other; the operator is not involved.
     dm_row(CH_B, bob, "Bob", [carol], "agent to agent")
 
+    # ── /api/meta must not require a channel ──────────────────────────────
+    # The workspace boots at "/" with NO channel selected and calls /api/meta to
+    # learn who it is. This used to 400 in landing mode, so boot() set
+    # state.operator = null for the whole session and every "am I a party to
+    # this?" check answered no. It surfaced as DMs that listed but rendered
+    # empty — neither side's messages — which reads as an agent that never
+    # replied rather than as a broken identity.
+    #
+    # Identity is global: _resolve_identity() never consults a channel, and the
+    # channel in the response is only echoed back.
+    _keep_landing, _keep_channel = web.NthWebHandler.landing_mode, web.NthWebHandler.channel
+    web.NthWebHandler.landing_mode, web.NthWebHandler.channel = True, None
+    try:
+        st_m, meta = http(port, "/api/meta")
+        check("meta: 200 with no channel param (landing mode)", st_m == 200)
+        check("meta: still identifies the operator without a channel",
+              bool((meta.get("operator") or {}).get("id")))
+        check("meta: channel is empty rather than absent",
+              meta.get("channel") == "")
+        st_c, meta_c = http(port, "/api/meta?channel=" + CH_A)
+        check("meta: a named channel is still echoed back",
+              st_c == 200 and meta_c.get("channel") == CH_A)
+        check("meta: same operator either way",
+              (meta.get("operator") or {}).get("id")
+              == (meta_c.get("operator") or {}).get("id"))
+    finally:
+        web.NthWebHandler.landing_mode, web.NthWebHandler.channel = _keep_landing, _keep_channel
+
     st, body = http(port, "/api/dms")
     check("dms: answers 200", st == 200 and body.get("ok") is True)
     mine = {t["key"]: t for t in body["your_dms"]}

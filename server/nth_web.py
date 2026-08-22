@@ -74,6 +74,27 @@ HISTORY_LIMIT = 200          # messages sent to a client on /api/history
 HUB_IDLE_REAP_S = 300        # retire a channel's EventHub after this long unwatched
 SSE_HEARTBEAT_SEC = 20       # keep-alive comment interval
 
+# Paths that serve the app shell rather than data. The workspace client routes
+# with history.pushState, so these URLs appear in the address bar and get
+# bookmarked, reloaded and pasted — every one of them has to return the same
+# page or the app 404s on refresh. The client's own table (web/js/03-router.js)
+# maps each to a view; this set is the server half of that contract and must
+# list every path in it.
+UI_PATHS = frozenset((
+    "/", "/index.html",
+    "/inbox", "/attention",      # the attention view, both spellings
+    "/messages",
+    "/tasks",
+    "/agents", "/roster",        # the roster view, both spellings
+    "/settings", "/preferences",  # the prefs view, both spellings
+    "/archive",
+    "/data",
+    # The fleet index: hosts, check-ins and a channel list across the whole
+    # deployment. A different question from "my workspace", so a different
+    # path — "/" belongs to the app.
+    "/fleet",
+))
+
 # Claude Code's own statusline state — module-level so tests can point it at a
 # fixture instead of the real user's file.
 STATUSLINE_STATE_PATH = Path.home() / ".claude" / "statusline-state.json"
@@ -1670,16 +1691,32 @@ def _event_visible_to(event: Dict[str, Any], viewer_id: Optional[str],
                    event.get("recipients"), allow_all_seeing=False)
 
 
-def _message_event(db: sqlite3.Connection, r: sqlite3.Row) -> Dict[str, Any]:
+def _message_event(db: sqlite3.Connection, r: sqlite3.Row,
+                   channel: str) -> Dict[str, Any]:
     """The SSE payload for one message row.
 
     Shared by the history burst and the live tail. They were duplicate literals;
     `recipients` is what scopes a DM in the dashboard, and a field present in
     one path but not the other would show a private message as an ordinary one
-    depending only on whether you were watching when it arrived."""
+    depending only on whether you were watching when it arrived.
+
+    `channel` is REQUIRED, and required positionally, because the operator's
+    workspace-wide stream (/api/workspace/events) merges every channel's hub
+    queue into one connection. The client decides where a message belongs by
+    comparing this field to the room on screen, and its guard reads
+    `msg.channel && … !== state.channel` — which SHORT-CIRCUITS when the field
+    is absent. So an unstamped event does not get dropped or logged; it renders
+    into whatever conversation the operator happens to have open, and it also
+    silently disables channel mute and the cross-channel desktop popup, both of
+    which key off the same field.
+
+    A default here would restore exactly that failure, quietly, the first time
+    someone adds a call site. Making it positional means a missed one is a
+    TypeError at the call, not a wrong pixel three screens away."""
     keys = r.keys()
     return {
         "type": "message",
+        "channel": channel,
         "id": r["id"],
         "member_id": r["member_id"],
         "member_name": r["member_name"] or r["member_id"],
@@ -1768,7 +1805,16 @@ class EventHub:
             db.row_factory = sqlite3.Row
             db.execute("PRAGMA busy_timeout=2000")
             members = self._fetch_roster(db)
-            q.put_nowait(json.dumps({"type": "roster", "members": members}))
+            # `channel` is not decoration. The client multiplexes two SSE
+            # streams — this per-channel one and the operator's workspace-wide
+            # one — and applies a roster only when it belongs to the channel on
+            # screen, because the workspace stream also carries the agent-inbox
+            # roster, which lists every agent ever created. Without this field
+            # the comparison is undefined === "smoke" and the roster is never
+            # applied at all: no member names, so no @mention chips, no
+            # facepile, and nameFor() falling back to raw member ids.
+            q.put_nowait(json.dumps(
+                {"type": "roster", "channel": self.channel, "members": members}))
             q.put_nowait(json.dumps(
                 {"type": "context", "sessions": _read_context_snapshots()}))
             rows = db.execute(
@@ -1779,7 +1825,7 @@ class EventHub:
                 (self.channel, HISTORY_LIMIT),
             ).fetchall()
             for r in reversed(rows):
-                ev = _message_event(db, r)
+                ev = _message_event(db, r, self.channel)
                 if not _event_visible_to(ev, viewer_id, all_seeing):
                     continue
                 q.put_nowait(json.dumps(ev))
@@ -1819,13 +1865,18 @@ class EventHub:
         # can be launched standalone against a DB whose server has not restarted
         # — folding both into one try/except would drop filter_mode and the
         # context % for every member just because the turn column is missing.
-        def _roster_sql(turn: bool, v72: bool) -> str:
+        def _roster_sql(turn: bool, v72: bool, kind: bool) -> str:
             cols = [
                 "m.id AS id", "m.name AS name", "m.status_text AS status_text",
                 "m.last_seen AS member_last_seen", "m.last_read AS member_last_read",
                 "m.messenger_heartbeat AS messenger_heartbeat",
                 "m.watchdog_heartbeat AS watchdog_heartbeat",
             ]
+            # Its own tier for the same reason the others have theirs: a DB
+            # predating this column must not also lose filter_mode and the
+            # context %, which is what folding it into v72 would do.
+            if kind:
+                cols.append("m.kind AS kind")
             if v72:
                 cols += ["m.filter_mode AS filter_mode", "m.context_json AS context_json"]
             cols += [
@@ -1844,9 +1895,12 @@ class EventHub:
                     "ORDER BY m.joined_at")
 
         rows = None
-        for _turn, _v72 in ((True, True), (False, True), (False, False)):
+        for _turn, _v72, _kind in ((True, True, True), (False, True, True),
+                                   (True, True, False), (False, True, False),
+                                   (False, False, False)):
             try:
-                rows = db.execute(_roster_sql(_turn, _v72), (self.channel,)).fetchall()
+                rows = db.execute(_roster_sql(_turn, _v72, _kind),
+                                  (self.channel,)).fetchall()
                 break
             except sqlite3.OperationalError:
                 continue
@@ -1899,6 +1953,12 @@ class EventHub:
             out.append({
                 "id": r["id"],
                 "name": r["name"] or r["id"],
+                # The client reads `member.kind || 'agent'`, so omitting this
+                # does not blank a field — it silently relabels every HUMAN as
+                # an agent: wrong role badge on their messages, "agent" in the
+                # @-autocomplete, a subagent box under their name, and a
+                # "Remove from channel" button the server will then refuse.
+                "kind": (r["kind"] if "kind" in keys else None) or "agent",
                 "status_text": r["status_text"] or "",
                 "last_seen": effective_last_seen,
                 "last_read": effective_last_read,
@@ -1966,7 +2026,7 @@ class EventHub:
                         (self.channel, self.last_msg_id),
                     ).fetchall()
                     for r in rows:
-                        self._broadcast(_message_event(db, r))
+                        self._broadcast(_message_event(db, r, self.channel))
                         self.last_msg_id = r["id"]
 
                     # Edits and retractions of messages the tail has ALREADY
@@ -1986,7 +2046,7 @@ class EventHub:
                         (self.channel, prev_last, self._change_scan, self._change_scan),
                     ).fetchall()
                     for r in changed:
-                        ev = _message_event(db, r)
+                        ev = _message_event(db, r, self.channel)
                         ev["type"] = "message_update"
                         self._broadcast(ev)
                     self._change_scan = scan_now
@@ -1995,7 +2055,11 @@ class EventHub:
                     snapshot = json.dumps(members, sort_keys=True)
                     if snapshot != self._last_roster_snapshot:
                         self._last_roster_snapshot = snapshot
-                        self._broadcast({"type": "roster", "members": members})
+                        # Stamped with the channel for the same reason as the
+                        # initial roster above — the client filters on it.
+                        self._broadcast({"type": "roster",
+                                         "channel": self.channel,
+                                         "members": members})
 
                     # Context rings: cheap (few tiny local files); broadcast
                     # only when the payload actually changed. The age fields
@@ -3324,10 +3388,22 @@ class NthWebHandler(BaseHTTPRequestHandler):
             # before an identity cookie exists.
             self._serve_avatar(path)
             return
-        if path == "/" or path == "/index.html":
+        if path in UI_PATHS:
             # Mint a cookie on first visit so /api/meta + /api/events carry it.
             token, _ident, is_new = self._resolve_identity()
-            body = LANDING_HTML if self.landing_mode else INDEX_HTML
+            # The APP is what "/" serves, in either mode. The workspace client
+            # has its own Home — channels, DMs, attention, tasks, agents — and
+            # that is what an operator refreshing the page expects to land on.
+            # Landing mode used to serve the fleet index here instead, so a
+            # plain reload dropped you out of your workspace onto a different
+            # page; and since managed agents are only enabled in landing mode,
+            # anyone who wanted agents had to live on the fleet page.
+            #
+            # The fleet index is still served, at /fleet — it answers a
+            # genuinely different question (which hosts and channels exist
+            # across the deployment) and nothing about it belongs on the path
+            # people reload all day.
+            body = LANDING_HTML if path == "/fleet" else INDEX_HTML
             self._serve_html(body, set_cookie_token=token if is_new else None)
         elif self.landing_mode and path.startswith("/c/"):
             code = path[3:].rstrip("/")
@@ -3337,12 +3413,18 @@ class NthWebHandler(BaseHTTPRequestHandler):
             if not self._channel_exists(code):
                 self._error(404, f"no such channel: {code}")
                 return
-            token, _ident, is_new = self._resolve_identity()
-            # The channel code passed CHANNEL_CODE_RE, so this substitution
-            # cannot inject into the script context.
-            body = INDEX_HTML.replace(
-                "/*__API_QS__*/''", json.dumps(f"?channel={code}"))
-            self._serve_html(body, set_cookie_token=token if is_new else None)
+            # This used to serve the dashboard inline, substituting
+            # "?channel=<code>" into a /*__API_QS__*/'' marker in the client.
+            # The workspace client has no such marker — it reads ?channel=
+            # straight off location.search — so the substitution would no-op
+            # and every /c/<code> link would quietly open the default channel
+            # instead of the one asked for. Redirecting reaches the same page
+            # by the route the client already understands. The code passed
+            # CHANNEL_CODE_RE, so it is safe in a Location header.
+            self.send_response(302)
+            self.send_header("Location", f"/?channel={code}")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
         elif path == "/api/health":
             self._handle_health()
         elif path == "/api/usage":
@@ -3377,13 +3459,23 @@ class NthWebHandler(BaseHTTPRequestHandler):
         elif path == "/api/workspace/events":
             self._serve_workspace_sse()
         elif path == "/api/meta":
+            # Deliberately NOT channel-gated. Identity is global: it comes from
+            # the request's transport and _resolve_identity() never consults a
+            # channel — the channel is only echoed back.
+            #
+            # The workspace boots at "/" with NO channel selected and calls this
+            # to learn who it is. While this 400'd, boot() set state.operator =
+            # null for the WHOLE session, and every "am I a party to this?"
+            # check silently answered no. The visible symptom was DMs: the
+            # thread list (built server-side) showed the conversation, and
+            # opening it rendered nothing — not the agent's messages, not your
+            # own — because the client drops any message it cannot confirm you
+            # belong to. Landing mode only; the single-channel handler always
+            # has a channel to return.
             ch = self._channel_for_request(parsed)
-            if ch is None:
-                self._error(400, "channel query param required")
-                return
             token, ident, is_new = self._resolve_identity()
             self._json({
-                "channel": ch,
+                "channel": ch or "",
                 "operator": {
                     "id": ident.member_id,
                     "name": ident.display_name,
@@ -3934,6 +4026,11 @@ class NthWebHandler(BaseHTTPRequestHandler):
             # runtime will extend.
             "runtime": runtimes["claude"],
             "runtimes": runtimes,
+            # The dispatcher's allowlist, verbatim. The client builds its
+            # provider picker from this; without it, it fell back to the KEYS
+            # of `runtimes` — which is hardcoded to claude alone — so Codex
+            # never appeared as an option however well it was working.
+            "providers": list(get_supervisor().providers()),
             "supervisor": {"live_agents": len(get_supervisor().live_ids())},
         })
 
@@ -4243,7 +4340,17 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 "SELECT id, name, model, state, managed, session_id, pid, "
                 "effort, runtime_provider, runtime_ref, cwd, permission_profile, "
                 "wake_mode, avatar_name, created_at, last_active_at, archived_at, "
-                "context_pct, context_tokens "
+                "context_pct, context_tokens, "
+                # The agent's own status line. It lives on members (it is set
+                # per channel), not on agents, so it has to be joined back —
+                # without it every agent card reads the canned "Connected and
+                # ready." no matter what the agent last said about itself.
+                # An agent can sit in several channels; take its most recently
+                # CHANGED non-empty status, which is the one it would want
+                # shown, rather than an arbitrary channel's.
+                "(SELECT m.status_text FROM members m "
+                "  WHERE m.id = agents.id AND COALESCE(m.status_text, '') != '' "
+                "  ORDER BY m.status_changed_at DESC LIMIT 1) AS status_text "
                 "FROM agents WHERE managed = 1 AND archived_at IS "
                 + ("NOT NULL" if archived else "NULL") + " ORDER BY created_at"
             ).fetchall()
@@ -4266,6 +4373,8 @@ class NthWebHandler(BaseHTTPRequestHandler):
                     "cwd": r["cwd"] or "",
                     "permission_profile": r["permission_profile"] or "balanced",
                     "wake_mode": r["wake_mode"] or "at",
+                    "status_text": (r["status_text"]
+                                    if "status_text" in r.keys() else "") or "",
                     "avatar_url": avatar_url(r["avatar_name"] or r["name"]),
                     "session_id": r["session_id"], "pid": r["pid"],
                     "channels": chans,
@@ -6768,9 +6877,13 @@ class NthWebHandler(BaseHTTPRequestHandler):
                         # here would change what the live tail and history
                         # burst report as well, which is a different change
                         # than adding this endpoint.
-                        evt = _message_event(db, r)
-                        evt["channel"] = r["channel"]
-                        merged.append(evt)
+                        # This query spans channels, so the channel comes off
+                        # the row rather than from a hub. It used to be stamped
+                        # on after the fact — the only path that got it right,
+                        # which is what proved the SSE paths were wrong. Now it
+                        # goes through the same required parameter as everyone
+                        # else, so the two cannot drift apart again.
+                        merged.append(_message_event(db, r, r["channel"]))
 
             targets = []
             for a in db.execute(
@@ -7790,8 +7903,19 @@ class NthWebHandler(BaseHTTPRequestHandler):
                     db.close()
                 except sqlite3.Error:
                     pass
+        # `url` is not redundant with `id`. The composer does
+        # `url: apiUrl(attachment.url)` on the response, and apiUrl() ends up in
+        # `path.includes('?')` — so an absent url is not an empty thumbnail, it
+        # is a TypeError inside uploadOne's try. Its catch has already revoked
+        # the blob preview and spliced the placeholder out of the array, so the
+        # image the user just uploaded DISAPPEARS from the composer and they get
+        # a raw JS error toast, while the row and file sit on disk until GC.
+        # The comment this replaces claimed the client builds the URL itself;
+        # it builds it only for messages already rendered (11-conversation.js),
+        # not here.
         self._json({"ok": True, "id": att_id, "mime": mime,
-                    "filename": filename})   # client builds the URL with its channel
+                    "filename": filename,
+                    "url": f"/api/attachment/{att_id}"})
         # Opportunistic GC: uploading is exactly when abandoned uploads accrue,
         # and it is already a slow path. Rate-limited internally, and after the
         # response so it can never delay the client.
@@ -8001,20 +8125,48 @@ WEB_SOURCE_DIR = Path(__file__).resolve().parent / "web"
 
 # Cascade order — later layers override earlier ones.
 WEB_CSS_FILES = (
-    "css/00-themes.css",        # :root tokens and every named theme
-    "css/10-shell.css",         # header, settings drawer, search panel
-    "css/20-conversation.css",  # chat rows, sigils, file links, ack badges
-    "css/30-roster.css",        # roster sidebar, channel stats, fatal errors
-    "css/40-composer.css",      # composer, targets, dictation, attachments
-    "css/50-responsive.css",    # @media overrides — must stay last
+    "css/00-tokens.css",        # :root design tokens and the named themes
+    "css/10-shell.css",         # sidebar, topbar, drawers, dialogs, toasts
+    "css/20-conversation.css",  # message rows, ask cards, attachments
+    "css/30-workspace.css",     # home/inbox/tasks/roster/prefs pages
+    "css/40-responsive.css",    # @media overrides — must stay last
 )
 
-# One file today. The client is a single IIFE whose functions all share one
-# closure, so it cannot be split across <script> tags without first rewriting
-# its scoping — a split would leave each half unable to see the other. The
-# tuple exists so that rewrite can land file-by-file without touching the
-# serving path.
-WEB_JS_FILES = ("js/app.js",)
+# Load order is a real dependency order. Each file is its own IIFE hanging a
+# namespace off `window.Trio`, so a module may only be listed after every
+# module it reads at definition time:
+#
+#   01-store / 02-api          plumbing everything else builds on
+#   03-router / 04-events      read the store / the api
+#   05-loader                  standalone
+#   06-core                    requires store + api; defines boot()
+#   07-lifecycle / 08-sidebar  mount machinery
+#   09-ui                      toasts, modals, confirmations
+#   10-markdown … 14-lightbox  rendering; read core, api and ui
+#   20-workspace … 46-data     features; read everything above
+#   90-boot                    runs last; mounts the features
+#
+# THE FILENAME PREFIXES ARE THE ORDER, and that is worth keeping true. This
+# tuple used to run 02 before 00 — core installed a fallback `Trio.api` that
+# won whenever it loaded first, quietly costing api.upload() and the error
+# normalisation — so the prefixes said one thing and the tuple did another, and
+# the obvious tidy-up ("surely 00 goes first") was a silent breakage. Core now
+# REQUIRES store and api rather than shadowing them, and is renumbered to 06
+# (ui to 09) to match. The declaration must therefore equal sorted(), which
+# tests/test-web-bundle.py checks against the DIRECTORY rather than against
+# this tuple — an independent oracle, as the CSS half already had.
+#
+# 99-test-hook is stripped from the served bundle by _strip_test_hook and
+# exists only so the Node DOM harness can reach the module registry.
+WEB_JS_FILES = (
+    "js/01-store.js", "js/02-api.js", "js/03-router.js", "js/04-events.js",
+    "js/05-loader.js", "js/06-core.js", "js/07-lifecycle.js",
+    "js/08-sidebar.js", "js/09-ui.js", "js/10-markdown.js",
+    "js/11-conversation.js", "js/12-composer.js", "js/13-file-links.js",
+    "js/14-lightbox.js", "js/20-workspace.js", "js/30-agents.js",
+    "js/40-preferences.js", "js/45-notifications.js", "js/46-data.js",
+    "js/90-boot.js", "js/99-test-hook.js",
+)
 
 
 def _read_web_source(relative_path: str) -> str:
@@ -8044,6 +8196,26 @@ def _strip_test_hook(html: str) -> str:
         "", html, flags=re.DOTALL)
 
 
+# The pure ask-picker helpers live in nth_ask_client.js rather than inline in
+# a web/ module for one reason: they are require()-able under Node, so they can
+# be unit-tested. The `isAskChoices` gate is the render predicate for every
+# interactive question — when it is wrong, every picker silently degrades to
+# plain text, which is exactly the kind of failure a browser-only bundle hides.
+# .resolve() follows the symlinked dev install back to the repo directory where
+# the sibling .js actually lives. The trailing CommonJS export guard is dropped
+# from the inlined copy; in the browser it would be dead code.
+def _load_ask_helpers() -> str:
+    try:
+        js = Path(__file__).resolve().with_name("nth_ask_client.js").read_text(
+            encoding="utf-8")
+    except OSError as exc:
+        raise RuntimeError(
+            "required web source missing: nth_ask_client.js — it must be "
+            "installed alongside nth_web.py"
+        ) from exc
+    return js.split("if (typeof module")[0].rstrip()
+
+
 def _web_speech_lang(code: str) -> str:
     """Map NTH_STT_LANG to a BCP-47 tag for the browser's SpeechRecognition.
 
@@ -8063,25 +8235,24 @@ def _web_speech_lang(code: str) -> str:
     }.get(code.lower(), code)
 
 
-# Composed at import time — the same one-shot substitutions the single literal
-# used to take, now applied per source file: inject the emoji list so
-# server-side animal_for() and client-side animalFor() stay in sync, give web
-# dictation the same language as the local path, and drop the test hook from
-# the shipped bundle.
+# Composed at import time. Each marker occurs in exactly one source file, and
+# keeps working whichever file it later moves to, so per-file rendering is
+# equivalent to the single pass the monolithic literal used to take.
+#
+# The animal-emoji injection that used to live here is gone: it existed to keep
+# the old client's animalFor() in sync with the server's, and the workspace
+# client draws identities from the checked-in SVG avatars plus a tone hash
+# instead. The server still computes animal names for the roster payload — only
+# the client-side copy of the table is obsolete. A dead no-op replace() would
+# read like a live contract to whoever touches this next.
 
 
 def _render_web_source(relative_path: str) -> str:
-    """Read one browser source and apply the import-time substitutions.
-
-    Per-file is equivalent to the old single pass over the whole page: each
-    marker occurs in exactly one source, and a marker keeps working whichever
-    file it later moves to.
-    """
+    """Read one browser source and apply the import-time substitutions."""
     return (
         _read_web_source(relative_path)
-        .replace("/*__ANIMAL_EMOJIS__*/", json.dumps([e for _, e in ANIMAL_EMOJIS]))
-        .replace("/*__ANIMAL_NAMES__*/",  json.dumps([n for n, _ in ANIMAL_EMOJIS]))
         .replace("/*__STT_LANG__*/'en-US'", json.dumps(_web_speech_lang(STT_LANGUAGE)))
+        .replace("/*__ASK_HELPERS__*/", _load_ask_helpers())
     )
 
 

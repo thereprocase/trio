@@ -337,8 +337,8 @@ mem.execute(
     "INSERT INTO messages VALUES (2,'h','Gabe','x','','','','',?,1,'t')",
     (json.dumps({"picked": [0], "custom": ""}),),
 )
-q_ev = web._message_event(mem, mem.execute("SELECT * FROM messages WHERE id=1").fetchone())
-a_ev = web._message_event(mem, mem.execute("SELECT * FROM messages WHERE id=2").fetchone())
+q_ev = web._message_event(mem, mem.execute("SELECT * FROM messages WHERE id=1").fetchone(), "askchan")
+a_ev = web._message_event(mem, mem.execute("SELECT * FROM messages WHERE id=2").fetchone(), "askchan")
 check("event: question carries choices dict", isinstance(q_ev["choices"], dict)
       and q_ev["choices"]["options"] == ["x", "y"])
 check("event: question has no selection", q_ev["selection"] is None)
@@ -349,7 +349,7 @@ check("event: answer carries reply_to", a_ev["reply_to"] == 1)
 old_row = mem.execute(
     "SELECT id, member_id, member_name, content, mentions, refs, bangs, created_at "
     "FROM messages WHERE id=1").fetchone()
-old_ev = web._message_event(mem, old_row)
+old_ev = web._message_event(mem, old_row, "askchan")
 check("event: older row (no new columns) -> None fields, no crash",
       old_ev["choices"] is None and old_ev["selection"] is None and old_ev["reply_to"] is None)
 mem.close()
