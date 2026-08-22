@@ -86,9 +86,19 @@ Trio.api.get = async () => ({ operator: { id: 'op', name: 'op', source: 'loopbac
   check('opening a DM paints a tooltip', !!h().title);
   check('...and it matches the name being shown', h().title === h().textContent);
 
-  // 4. the topbar update path.
-  Trio.workspace.updateTopbar?.('#' + LONGEST, 'subtitle');
-  check('the topbar update paints a tooltip', h().title === h().textContent);
+  // 4. the topbar update path, reached through showView() because
+  // updateTopbar is internal and NOT exported. Calling
+  // `Trio.workspace.updateTopbar?.(...)` here was a silent no-op — optional
+  // chaining swallowed it — and the equality that followed then passed on the
+  // stale title left by the DM assertion above. A green that proved nothing,
+  // in the very file written to stop exactly that.
+  //
+  // Poison the element first, so the assertion can only pass if this path
+  // actually repaints it rather than inheriting a matching pair.
+  Trio.setChannelTitle('#poisoned-should-be-overwritten');
+  Trio.workspace.showView('tasks');
+  check('the topbar update path repaints the text', h().textContent === 'Tasks');
+  check('...and its tooltip with it', h().title === 'Tasks');
   Trio.workspace.unmount();
 
   // ── nobody writes the element behind the setter's back ────────────────────
