@@ -117,6 +117,7 @@ class CodexAppServerClient:
         # would reorder them.
         self._notify_executor = ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="codex-notify")
+        self._notify_executor_closed = False
 
     def start(self, timeout: float = DEFAULT_TIMEOUT) -> Dict[str, Any]:
         if self.alive():
@@ -126,6 +127,15 @@ class CodexAppServerClient:
             self._request_executor = ThreadPoolExecutor(
                 max_workers=8, thread_name_prefix="codex-req")
             self._request_executor_closed = False
+        if self._notify_executor_closed:
+            # stop() closes both callback executors. A later start is a normal
+            # recovery path after an authentication/configuration failure or an
+            # App Server restart, so notifications need a fresh executor too.
+            # Without it submit() raises RuntimeError (swallowed in _read_loop)
+            # and every turn/completed event silently disappears.
+            self._notify_executor = ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix="codex-notify")
+            self._notify_executor_closed = False
         self.proc = subprocess.Popen(
             self.command,
             stdin=subprocess.PIPE,
@@ -308,6 +318,7 @@ class CodexAppServerClient:
         self._request_executor.shutdown(wait=False)
         self._request_executor_closed = True
         self._notify_executor.shutdown(wait=False)
+        self._notify_executor_closed = True
 
 
 def codex_cli_diagnostics(timeout: float = 5.0) -> Dict[str, Any]:
