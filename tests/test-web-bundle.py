@@ -130,7 +130,8 @@ check("Trailhead and High Tide expose their signature hardware motifs",
       and ':root[data-theme="inspired-high-tide"] .brand-mark::before' in historic_css
       and 'clip-path:polygon(44% 0,56% 0' in historic_css
       and 'content:"REUSE"' in historic_css
-      and 'border-top:7px solid #f07661' in historic_css)
+      and 'background:#00a0df' in historic_css
+      and 'border-top:7px solid #e8476a' in historic_css)
 check("retired Windows 3.1 preset is absent from tokens and component skins",
       "historic-win31" not in tokens_css and "historic-win31" not in historic_css)
 
