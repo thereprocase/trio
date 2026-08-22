@@ -122,6 +122,14 @@ check("Inspired skins include platform-native control vocabularies",
       and "background:#69386b" in historic_css
       and ".dm-item > .av {" in historic_css
       and "border-radius:5px" in historic_css)
+check("Trailhead and High Tide expose their signature hardware motifs",
+      '.swatch[data-theme="inspired-trailhead"]::before' in historic_css
+      and ':root[data-theme="inspired-trailhead"] .brand-mark::after' in historic_css
+      and 'box-shadow:0 0 12px rgba(210,228,141,.5)' in historic_css
+      and '.swatch[data-theme="inspired-high-tide"]::before' in historic_css
+      and ':root[data-theme="inspired-high-tide"] .brand-mark::before' in historic_css
+      and 'content:"☀"' in historic_css
+      and 'border-top:7px solid #f07661' in historic_css)
 check("retired Windows 3.1 preset is absent from tokens and component skins",
       "historic-win31" not in tokens_css and "historic-win31" not in historic_css)
 
