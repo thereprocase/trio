@@ -1,4 +1,4 @@
-@media (max-width:880px) { .app { grid-template-columns:1fr; }.sidebar { position:fixed; z-index:2; inset:0 auto 0 0; width:300px; transform:translateX(-105%); transition:transform .25s ease; }.app.nav-open .sidebar { transform:none; }.nav-toggle { display:block; }.scrim-nav { position:fixed; inset:0; z-index:1; background:#0006; }.app.nav-open + .scrim-nav { display:block; } }
+@media (max-width:880px) { .app { grid-template-columns:1fr; }.sidebar { position:fixed; z-index:2; inset:0 auto 0 0; width:300px; transform:translateX(-105%); transition:transform .25s ease; }.app.nav-open .sidebar { transform:none; }.scrim-nav { position:fixed; inset:0; z-index:1; background:#0006; }.app.nav-open + .scrim-nav { display:block; } }
 
 /* These live here rather than in the 880px block of 10-shell.css because
    30-workspace.css re-declares .workspace-view and .pref-row unconditionally and
@@ -53,6 +53,24 @@
    is pixel-identical either way. */
 @media (max-width:880px){
   .app.nav-open .sidebar{ box-shadow:var(--shadow-lg); }
+}
+
+/* The composer input has no font-size of its own, so it inherits body's 15px.
+   iOS Safari zooms the page in whenever an editable under 16px takes focus and
+   does NOT zoom back out on blur, so the operator is left on a zoomed,
+   horizontally-panned page after every message — on the most-used control in the
+   app. 16px is the exact WebKit threshold; 15.5px still zooms.
+
+   Whoever built the search overlay already knew this: .search-top input is
+   explicitly 16px. The composer was simply missed.
+
+   Cost, measured rather than waved away: with the composer empty the geometry is
+   byte-identical at every width. A draft that happens to sit on a wrap boundary
+   gains a line — at 360px one test draft took the composer 149px -> 176px and
+   the message list 625.3 -> 598.3. That is the whole price, and only for such
+   drafts; desktop keeps 15px and is untouched. */
+@media (max-width:880px){
+  .composer-shell .composer-input{ font-size:16px; }
 }
 
 /* The conversation gutter narrows on a phone; --gutter drives BOTH the message
