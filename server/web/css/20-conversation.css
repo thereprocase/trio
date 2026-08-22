@@ -308,9 +308,25 @@ body.compact .day-separator, body.compact .unread-divider { margin:4px 0; }
 .inline-mention[data-tone="plum"]{ background:color-mix(in oklab,#6f3f64 22%,transparent); color:#6f3f64; }
 
 /* @all / !all — animated rainbow shimmer text (background-clip:text). */
-@keyframes mhl-shimmer{ to{ background-position:200% center; } }
-.inline-all{ border-radius:6px; padding:0 3px; font-weight:700; background-image:linear-gradient(100deg,#e07a6a,#e0a24d,#4c9a7d,#6c7ae0,#a05c8c,#e07a6a); background-size:200% auto; animation:mhl-shimmer 3s linear infinite; -webkit-background-clip:text; background-clip:text; color:transparent; -webkit-text-fill-color:transparent; }
-@media (prefers-reduced-motion:reduce){ .inline-all{ animation:none; } }
+.inline-all{ border-radius:6px; padding:0 3px; font-weight:700; background-image:linear-gradient(100deg,#e07a6a,#e0a24d,#4c9a7d,#6c7ae0,#a05c8c,#e07a6a); background-size:200% auto; background-position:0 center; -webkit-background-clip:text; background-clip:text; color:transparent; -webkit-text-fill-color:transparent; }
+/* The gradient is static. It used to animate background-position — a paint
+   property, never compositable — through background-clip:text, so every frame
+   re-rasterised a six-stop gradient through a glyph mask, PER CHIP, forever.
+   `!all` is a first-class broadcast primitive here, so a busy channel puts
+   dozens on screen and none of them ever stop.
+
+   Measured on a 3s IDLE window (no scroll, no input) with 100 chips rendered:
+   removing this one animation took style recalculations from 180 to 3 and
+   main-thread task time from 1.226s to 0.062s — roughly 41% of the main thread
+   reclaimed while the page does nothing. The status-ring ripple, the more
+   obvious suspect, accounted for almost none of it. The ratio is the finding;
+   the absolute seconds are headless-on-desktop and a phone is far slower.
+
+   This is why the lag was intermittent: it tracked how much `!all` was on
+   screen, not what the user was doing. Disabled everywhere rather than on touch
+   — the desktop cost was the same 40%-ish, and a mobile-only fix would have left
+   it burning there for a decoration nobody asked for. The chip keeps its rainbow
+   gradient and its identity; only the per-frame repaint is gone. */
 /* Own-message bubble is accent-coloured with white text, so a translucent tone
    tint washes out (see screenshot). Mirror the file-link treatment: white text
    on a translucent-white pill — legible on the blue bubble regardless of tone. */
