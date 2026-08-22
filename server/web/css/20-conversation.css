@@ -35,6 +35,29 @@ body.message-numbers .message-id { display:inline; }
 .code-block .code-copy:hover { background:var(--surface-hover); color:var(--ink); }
 @media (hover:none) { .message-tools, .code-block .code-copy { opacity:1; } }
 
+/* Revealing these on touch is only half the job — what it exposes is a 26px
+   target, 35% of the 44px floor by area. Grow the HIT AREA, not the button: an
+   absolutely-positioned pseudo-element is out of flow, so the tap target reaches
+   44px for free. Sizing the button itself to 44px also works and costs 18px of
+   height PER MESSAGE, because on touch this row is permanently visible —
+   measured +11.1% on the message list's scroll height, which in a 500-message
+   channel is thousands of pixels of extra scrolling for no visual gain.
+   Verified by hit-testing: a tap 6px outside the visual box lands on the button
+   at both corners, while the row stays 26px tall and the list height is
+   unchanged. Desktop is untouched — measured with hover/pointer types forced at
+   launch, because headless Chromium answers (hover:none) true at every width.
+
+   The gap must be at least twice the inset, or neighbours overlap and the one
+   later in paint order steals the other's edge. At gap:8px a tap on the FIRST
+   button's own right-edge pixel was measured landing on the SECOND button —
+   an expanded target that makes a real control less reliable, not more. 18px
+   clears two 9px insets exactly. */
+@media (hover:none) {
+  .message-tools { gap:18px; }
+  .message-tools .copy-btn { position:relative; }
+  .message-tools .copy-btn::after { content:""; position:absolute; inset:-9px; border-radius:inherit; }
+}
+
 .message-body { overflow-wrap:anywhere; line-height:1.55; }
 .message-body p:first-child { margin-top:0; }.message-body p:last-child { margin-bottom:0; }
 .message-body pre,.message-body code { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; background:var(--code-bg); color:var(--code-ink); border-radius:6px; }.message-body pre { overflow:auto; padding:10px; }
