@@ -109,6 +109,12 @@
         catch (e) { console.error('boot: mounting "' + name + '" failed', e); }
       });
     };
+    // BEFORE the await, deliberately. Trio.boot() fetches /api/meta, and until
+    // it resolves the off-canvas sidebar would sit focusable and announced —
+    // the exact defect the drawer exists to remove, held open for as long as
+    // the network takes, and indefinitely if that request hangs. The listeners
+    // below can wait for boot; the closed state cannot.
+    drawer.sync();
     if (!(await Trio.boot(mountFeatures))) return;
     const navToggle = $('nav-toggle');
     navToggle?.addEventListener('click', () => drawer.isOpen() ? drawer.close() : drawer.open());

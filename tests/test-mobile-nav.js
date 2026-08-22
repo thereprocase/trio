@@ -184,6 +184,20 @@ check('the sidebar carries the id aria-controls points at',
 check('the drawer is never given aria-hidden',
       aside.getAttribute('aria-hidden') == null);
 
+// ── the closed state is applied BEFORE the network wait ─────────────────────
+// Pinned by source order because the assertions above cannot see it: they call
+// sync() by hand, so they exercise the function and never the lifecycle. This
+// shipped wrong once — sync() sat after `await Trio.boot(...)`, which fetches
+// /api/meta, so on a narrow first load the sidebar stayed focusable and
+// announced for the whole round trip, and indefinitely if that request hung.
+// The listeners can wait for boot; the closed state cannot.
+const bootSrc = require('fs').readFileSync(
+  require('path').join(__dirname, '..', 'server', 'web', 'js', '90-boot.js'), 'utf8');
+const syncAt = bootSrc.indexOf('drawer.sync();');
+const awaitAt = bootSrc.indexOf('await Trio.boot(');
+check('90-boot calls drawer.sync() before awaiting boot',
+      syncAt !== -1 && awaitAt !== -1 && syncAt < awaitAt);
+
 console.log();
 if (failures.length) {
   console.log(`FAILED — ${failures.length} of ${failures.length + passed}`);
