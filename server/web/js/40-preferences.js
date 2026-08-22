@@ -28,6 +28,8 @@
     { id: 'inspired-ipod', mode: 'light', family: 'inspired', label: 'Now Playing' },
     { id: 'inspired-messenger', mode: 'dark', family: 'inspired', label: 'Walled Garden' },
     { id: 'inspired-slack', mode: 'light', family: 'inspired', label: 'Threaded' },
+    { id: 'inspired-trailhead', mode: 'dark', family: 'inspired', label: 'Trailhead' },
+    { id: 'inspired-high-tide', mode: 'light', family: 'inspired', label: 'High Tide' },
   ];
   const lightThemes = themes.filter(theme => theme.mode === 'light');
   const darkThemes = themes.filter(theme => theme.mode === 'dark');

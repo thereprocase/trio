@@ -100,7 +100,8 @@ check(f"WEB_CSS_FILES declares every layer on disk, in prefix order "
 tokens_css = (WEB / "css" / "00-tokens.css").read_text(encoding="utf-8")
 historic_css = (WEB / "css" / "35-historic.css").read_text(encoding="utf-8")
 for preset in ("historic-win98", "historic-gameboy", "historic-geocities",
-               "inspired-ipod", "inspired-messenger", "inspired-slack"):
+               "inspired-ipod", "inspired-messenger", "inspired-slack",
+               "inspired-trailhead", "inspired-high-tide"):
     check(f"{preset} declares design tokens and a component skin",
           f'[data-theme="{preset}"]' in tokens_css
           and historic_css.count(f'[data-theme="{preset}"]') >= 12)

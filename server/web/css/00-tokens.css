@@ -242,6 +242,35 @@
   --r-xs:3px; --r-sm:4px; --r-md:6px; --r-lg:8px; --r-xl:10px; --r-full:999px;
   --shadow-sm:0 1px 1px rgba(0,0,0,.1); --shadow-md:0 4px 12px rgba(0,0,0,.15); --shadow-lg:0 12px 32px rgba(0,0,0,.2); --shadow-pop:0 8px 28px rgba(0,0,0,.25);
 }
+[data-theme="inspired-trailhead"] {
+  --font-display:Inter,"Helvetica Neue",Arial,sans-serif;
+  --font-body:Inter,"Helvetica Neue",Arial,sans-serif;
+  --avatar-svg-filter:invert(1);
+  --bg:#111512; --bg-sink:#0b0e0c; --surface:#1b211d; --surface-2:#242b26; --surface-hover:#2b332d;
+  --sidebar:#151a17; --sidebar-hover:#29312b; --line:#39423b; --line-soft:#2b332d;
+  --ink:#f0f1eb; --ink-2:#c0c5b9; --ink-3:#858d80; --ink-inv:#171b18;
+  --bubble-agent:#242b26; --bubble-me:#d2e48d; --bubble-me-ink:#182014;
+  --code-bg:#111512; --code-ink:#d2e48d;
+  --accent:#d2e48d; --accent-strong:#e2f3a5; --accent-tint:#303a25;
+  --warm:#e5a96f; --warm-soft:#3b2d20; --focus:#d2e48d;
+  --st-online:#a8c86a; --st-thinking:#e5a96f; --st-idle:#737c70; --st-offline:#555d54;
+  --r-xs:5px; --r-sm:9px; --r-md:13px; --r-lg:18px; --r-xl:24px; --r-full:999px;
+  --shadow-sm:0 1px 2px rgba(0,0,0,.35); --shadow-md:0 8px 24px rgba(0,0,0,.38); --shadow-lg:0 24px 60px rgba(0,0,0,.55); --shadow-pop:0 14px 42px rgba(0,0,0,.52);
+}
+[data-theme="inspired-high-tide"] {
+  --font-display:"Avenir Next",Avenir,"Helvetica Neue",Arial,sans-serif;
+  --font-body:"Avenir Next",Avenir,"Helvetica Neue",Arial,sans-serif;
+  --bg:#dff3f1; --bg-sink:#c7e8e4; --surface:#f8fffe; --surface-2:#ffffff; --surface-hover:#e8f8f6;
+  --sidebar:#087c7e; --sidebar-hover:#0b6e70; --line:#addbd6; --line-soft:#d2ebe8;
+  --ink:#163738; --ink-2:#426668; --ink-3:#728f90; --ink-inv:#ffffff;
+  --bubble-agent:#ffffff; --bubble-me:#087c7e; --bubble-me-ink:#ffffff;
+  --code-bg:#e7f5f3; --code-ink:#075d60;
+  --accent:#087c7e; --accent-strong:#056265; --accent-tint:#cceae6;
+  --warm:#ee775c; --warm-soft:#fce3dc; --focus:#11a1a3;
+  --st-online:#238b68; --st-thinking:#d88435; --st-idle:#84aaa7; --st-offline:#a9c5c2;
+  --r-xs:8px; --r-sm:13px; --r-md:18px; --r-lg:24px; --r-xl:30px; --r-full:999px;
+  --shadow-sm:0 2px 5px rgba(13,92,91,.10); --shadow-md:0 8px 24px rgba(13,92,91,.14); --shadow-lg:0 24px 58px rgba(13,72,73,.22); --shadow-pop:0 14px 42px rgba(13,72,73,.24);
+}
 
 /* ---- DARK presets ----
    Shared mechanical tokens (shadows, inverse ink, the secondary "warm" chip
