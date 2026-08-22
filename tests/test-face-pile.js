@@ -297,6 +297,24 @@ check('crossing back to wide repaints to four immediately',
 Trio.workspace.mount();
 check('mounting registers exactly one viewport listener', added === 1);
 
+// The pile is not decoration: it is the direct channel-roster affordance.
+// Exercise the recorded DOM listeners explicitly because dom-harness records
+// element handlers but deliberately does not synthesize browser click events.
+const drawer = cx.document.getElementById('channel-drawer');
+const prevent = () => {};
+pile._listeners.click.at(-1)({ type: 'click', preventDefault: prevent });
+check('clicking the face pile opens the existing channel drawer',
+      drawer.classList.contains('open') && pile.getAttribute('aria-expanded') === 'true');
+cx.document.getElementById('channel-drawer-close')._listeners.click.at(-1)({ type: 'click' });
+check('closing the drawer resets face-pile aria-expanded',
+      !drawer.classList.contains('open') && pile.getAttribute('aria-expanded') === 'false');
+pile._listeners.keydown.at(-1)({ type: 'keydown', key: 'Enter', preventDefault: prevent });
+check('Enter opens the channel roster from the face pile', drawer.classList.contains('open'));
+cx.document.getElementById('channel-drawer-close')._listeners.click.at(-1)({ type: 'click' });
+pile._listeners.keydown.at(-1)({ type: 'keydown', key: ' ', preventDefault: prevent });
+check('Space opens the channel roster from the face pile', drawer.classList.contains('open'));
+cx.document.getElementById('channel-drawer-close')._listeners.click.at(-1)({ type: 'click' });
+
 narrow = true;
 onChange?.({ matches: true });
 check('the listener repaints to the narrow cap when the breakpoint is crossed',
@@ -309,6 +327,8 @@ check('and back to four crossing the other way',
 Trio.workspace.unmount();
 check('unmounting removes it again', removed === 1);
 check('and removes the same callback it registered', removedFn === onChange);
+check('unmounting removes face-pile click and keyboard handlers',
+      pile._listeners.click.length === 0 && pile._listeners.keydown.length === 0);
 cx.context.window.matchMedia = realMatchMedia;
 
 console.log();

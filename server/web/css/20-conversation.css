@@ -307,7 +307,7 @@ body.compact .day-separator, body.compact .unread-divider { margin:4px 0; }
 .inline-mention[data-tone="amber"]{ background:color-mix(in oklab,#c9772f 24%,transparent); color:#8f6220; }
 .inline-mention[data-tone="plum"]{ background:color-mix(in oklab,#6f3f64 22%,transparent); color:#6f3f64; }
 
-/* @all / !all — animated rainbow shimmer text (background-clip:text). */
+/* @all / !all — static rainbow text (background-clip:text). */
 .inline-all{ border-radius:6px; padding:0 3px; font-weight:700; background-image:linear-gradient(100deg,#e07a6a,#e0a24d,#4c9a7d,#6c7ae0,#a05c8c,#e07a6a); background-size:200% auto; background-position:0 center; -webkit-background-clip:text; background-clip:text; color:transparent; -webkit-text-fill-color:transparent; }
 /* The gradient is static. It used to animate background-position — a paint
    property, never compositable — through background-clip:text, so every frame
