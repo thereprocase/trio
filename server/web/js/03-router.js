@@ -32,18 +32,20 @@
     const dm = q.get('dm') || '';
     const channel = q.get('channel') || '';
     const archived = q.get('archived') === '1';
-    if (dm) return { name: archived ? 'audit' : 'dm', params: { key: dm }, title: 'DM ' + dm, readOnly: archived };
+    const audit = q.get('audit') === '1';
+    if (dm) return { name: audit ? 'audit' : 'dm', params: { key: dm, ...(archived && !audit ? { archived: true } : {}) }, title: 'DM ' + dm, readOnly: audit || archived };
     if (channel) return { name: 'channel', params: { code: channel, archived }, title: 'trio#' + channel, readOnly: archived };
     const name = pageRoutes[pathname] || 'home';
     return { name, params: {}, title: name === 'home' ? 'nth' : name, readOnly: false };
   }
   function serialize(route) {
     const params = route.params || {};
-    const extra = params.archived ? '&archived=1' : '';
     if (route.name === 'dm' || route.name === 'audit') {
+      const extra = route.name === 'audit' ? '&audit=1' : params.archived ? '&archived=1' : '';
       return '/?dm=' + encodeURIComponent(params.key) + extra;
     }
     if (route.name === 'channel') {
+      const extra = params.archived ? '&archived=1' : '';
       return '/?channel=' + encodeURIComponent(params.code) + extra;
     }
     return pagePaths[route.name] || '/';

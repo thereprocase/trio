@@ -100,19 +100,17 @@
     // used to happen on every channel click, relocated to page boot. Ask the
     // router what it did rather than assuming nothing happened.
     //
-    // Ask what HAPPENED, not what was intended. Reading the route name would be
-    // the obvious test and it is wrong: 90-boot isolates per-feature mount
-    // failures on purpose, so the router can apply a channel route while the
-    // workspace module failed to mount — route name would then say "already
-    // handled" and nobody would ever open a stream. didOpenStream() is set at
-    // the actual call site, so a failed workspace mount falls back here
-    // correctly, which is the resilience guarantee 90-boot exists to provide.
+    // Ask whether the mounted workspace claimed ownership, not merely which
+    // route was intended. 90-boot isolates per-feature mount failures, so the
+    // router can apply a route while workspace did not mount; route name alone
+    // would then say "handled" and nobody would open a stream. The per-mount
+    // claim remains false in that case, preserving this resilience fallback.
     //
-    // Only the channel route reaches this synchronously. dm/audit load through
-    // an async openDmByKey and have a second bootstrap in 90-boot, so they keep
-    // today's behaviour; that double-open is real and filed separately rather
-    // than fixed here on a guess.
-    if (root.startEvents && !root.workspace?.didOpenStream?.()) root.startEvents(root.state.channel);
+    // DM/audit routes resolve their transport channel asynchronously, but
+    // claim feed ownership before that lookup begins. Do not open the default
+    // channel in the gap: it is the wrong feed and would immediately be torn
+    // down again. A failed workspace mount makes no claim, so fallback remains.
+    if (root.startEvents && !root.workspace?.didClaimRouteFeed?.()) root.startEvents(root.state.channel);
     // Cross-channel notifications (chime/desktop popup for a channel you're
     // NOT currently viewing) need the workspace-wide SSE stream — but
     // /api/workspace/events is operator-only server-side (403 for anyone

@@ -144,10 +144,11 @@
   };
   function attentionCount(meta = state.meta || {}) { return selectors.pendingApprovals({ approvals: meta.approvals }); }
   const channelSubtitle = readOnly => readOnly ? 'Archived channel — read only' : 'Live agent workspace';
-  // Set by loadConversation once it has opened the event stream; read by
-  // 06-core during boot to decide whether it still needs to open one. See the
-  // comment at the assignment for why this is a fact rather than an intention.
-  let streamOpenedByRoute = false;
+  // Set synchronously by a route that owns feed selection. Channel routes know
+  // their feed immediately; DM/audit routes claim it before their asynchronous
+  // metadata lookup so core cannot open the default channel in that gap. A
+  // workspace mount failure never reaches onRoute and therefore makes no claim.
+  let routeFeedClaimed = false;
   function openChannel(code, extra = '') {
     // Picking a destination dismisses the mobile drawer. Below 880px it is an
     // overlay lying on top of the conversation you just chose, so leaving it up
@@ -187,6 +188,7 @@
     state.readOnly = !!readOnly;
     state.dmAudit = !!isAudit;
     state.dmKey = isDm ? (state.dmKey || '') : '';
+    if (!isDm) state.dmRouteResolved = true;
     state.dmLoading = false;
     state.dmError = '';
     // Leaving a DM for a channel must also drop the DM's target identity —
@@ -223,18 +225,7 @@
     // channel + dmKey are final. openChannel fires the router before this point,
     // so the router hook alone would load stale state (Bug C).
     Trio.composer?.refresh?.();
-    // Claim ownership only when the call actually happened — the flag is read
-    // by 06-core to decide whether it still needs to open the stream, so it has
-    // to record a fact rather than an intention. 90-boot deliberately isolates
-    // per-feature mount failures, so the router can apply a channel route while
-    // THIS module failed to mount; answering boot from the route name alone
-    // would leave that case with no owner at all, which is a worse failure than
-    // the double-open being removed. Guarding on startEvents rather than using
-    // `?.` matters for the same reason: with the events module absent nothing
-    // is opened, and the flag must not report ownership of a stream that does
-    // not exist. (Boot cannot rescue that case either — it is equally unable to
-    // call an absent startEvents — but a false claim would hide the reason.)
-    if (Trio.startEvents) { Trio.startEvents(state.channel); streamOpenedByRoute = true; }
+    if (Trio.startEvents) { Trio.startEvents(state.channel); routeFeedClaimed = true; }
     // If the details drawer is open, re-render it for the conversation we just
     // switched to. Otherwise it keeps the previous conversation's topic /
     // members / size row — e.g. a stale "Conversation size" (or, before this,
@@ -244,13 +235,17 @@
   function openDm(dm, readOnly = false, audit = false) {
     Trio.nav?.close?.();
     const auditReadOnly = !!audit;
+    state.dmRouteResolved = true;
     state.dmMemberIds = (dm.member_ids || []).slice();
     state.dmTargetId = state.dmMemberIds[0] || '';
     state.dmName = dm.name || dm.key;
     state.dmKey = dm.key;
     state.dmThread = dm;
     loadConversation(dm.channel || state.channel, 'DM ' + state.dmName, auditReadOnly ? 'Agent-to-agent audit' : readOnly ? 'Archived private conversation' : 'Private conversation', readOnly || auditReadOnly, true, auditReadOnly);
-    if (Trio.router?.navigate) Trio.router.navigate(auditReadOnly ? 'audit' : 'dm', { key: dm.key, ...(readOnly && !auditReadOnly ? { archived: true } : {}) });
+    const route = Trio.router?.current?.();
+    const routeAlreadyExact = route?.name === (auditReadOnly ? 'audit' : 'dm')
+      && route?.params?.key === dm.key;
+    if (Trio.router?.navigate && !routeAlreadyExact) Trio.router.navigate(auditReadOnly ? 'audit' : 'dm', { key: dm.key, ...(readOnly && !auditReadOnly ? { archived: true } : {}) });
     Trio.loader?.cancel?.('dm:' + dm.key);
     state.dmLoading = true; state.dmError = ''; Trio.conversation?.render?.();
     // Capture the navigation generation and dm key after loadConversation so
@@ -271,24 +266,89 @@
       state.dmLoading = false; state.dmError = error.message || 'Could not load DM'; Trio.conversation?.render?.();
     });
   }
-  function openDmByKey(key, audit = false) {
-    if (!key) return;
+  function openDmByKey(key, audit = false, routeOwned = false, archived = false) {
+    if (!key) return Promise.resolve(false);
     const gen = navGen;
-    api.get('/api/dms?with=' + encodeURIComponent(key)).then(data => {
+    const firstPath = archived
+      ? '/api/dms?archived=1&with=' + encodeURIComponent(key)
+      : '/api/dms?with=' + encodeURIComponent(key);
+    return api.get(firstPath).then(data => {
       if (gen !== navGen) return null;
+      if (archived) {
+        const dm = (data.your_dms || []).find(d => d.key === key);
+        if (dm) return openDm(dm, true, false);
+        throw new Error('Archived conversation not found');
+      }
       const auditThread = (data.agent_dms || []).find(d => d.key === key);
-      if (audit && auditThread) return openDm(auditThread, false, true);
+      // An audit route must never degrade into an operator DM with the same
+      // key: that would turn a declared read-only view into a writable one.
+      if (audit) {
+        if (auditThread) return openDm(auditThread, false, true);
+        throw new Error('Audit conversation not found');
+      }
       const yours = (data.your_dms || []).find(d => d.key === key);
       if (yours) return openDm(yours, false, false);
       if (auditThread) return openDm(auditThread, false, true);
       return api.get('/api/dms?archived=1&with=' + encodeURIComponent(key));
     }).then(data => {
       if (gen !== navGen) return;
-      if (data) { const dm = (data.your_dms || []).find(d => d.key === key); if (dm) openDm(dm, true); }
+      if (!data) return;
+      const dm = (data.your_dms || []).find(d => d.key === key);
+      if (dm) return openDm(dm, true);
+      throw new Error('Conversation not found');
     }).catch(error => {
       if (gen !== navGen) return;
-      Trio.ui.toast(error.message || 'Could not load DM');
+      const message = error.message || 'Could not load DM';
+      if (routeOwned) {
+        state.dmLoading = false;
+        state.dmError = message;
+        Trio.conversation?.render?.();
+        Trio.composer?.syncReadOnly?.();
+      } else Trio.ui.toast(message);
     });
+  }
+  function beginDmRoute(key, audit, archived = false) {
+    // Claim before the first await and close any previous channel feed. A
+    // failed lookup then remains visibly offline with an inline DM error,
+    // rather than silently continuing to show the previous/default channel.
+    routeFeedClaimed = true;
+    navGen++;
+    Trio.loader?.cancelAll?.('dm:');
+    Trio.stopEvents?.();
+    if (Trio.store) Trio.store.set('session.channel', '');
+    state.view = 'conversation';
+    showConversationPage();
+    state.channel = '';
+    state.members = new Map();
+    state.readOnly = !!audit || !!archived;
+    state.dmAudit = !!audit;
+    state.dmRouteResolved = false;
+    state.dmKey = key;
+    state.dmName = key;
+    state.dmThread = null;
+    state.dmTargetId = '';
+    state.dmMemberIds = [];
+    state.dmLoading = true;
+    state.dmError = '';
+    state.messages = new Map();
+    state.messageDomById = new Map();
+    state.answers = new Map();
+    document.getElementById('h-channel').textContent = 'DM ' + key;
+    document.getElementById('h-meta').textContent = audit ? 'Agent-to-agent audit'
+      : archived ? 'Archived private conversation' : 'Private conversation';
+    const banner = document.getElementById('private-banner');
+    if (banner) {
+      banner.classList.remove('hidden');
+      banner.classList.toggle('audit', !!audit);
+      banner.textContent = audit ? 'Agent-to-agent audit — read only'
+        : archived ? 'Archived private conversation — read only' : 'Private conversation';
+    }
+    renderFacePile();
+    Trio.conversation?.render?.();
+    // Load this DM's own draft (or an empty one) so text from the previous
+    // public channel cannot remain visible in a box labelled private. refresh
+    // also applies the unresolved-route read-only gate.
+    Trio.composer?.refresh?.();
   }
   const toast = (m, timeout, action) => Trio.ui.toast(m, timeout, action);
   const modal = (t, b, s) => Trio.ui.modal(t, b, s);
@@ -397,15 +457,11 @@
   // unclassifiable member here is a client-state bug, and painting it as a
   // present participant with an offline dot would be the pile contradicting
   // itself — exactly the failure this change exists to remove.
-  // How many faces the header can afford, which is not a constant. The width
-  // that decides it is 360px, not 390: measured, three faces still leave a
-  // readable ~70px of title at 390px but only ~40px at 360px, which is too few
-  // characters to tell you which room you are in. Two faces plus a badge is
-  // what the narrowest supported header can spend, and the badge is what keeps
-  // the count honest once the cap starts hiding people.
-  //
-  // 880px is the breakpoint the header's own mobile rules already use; sharing
-  // it is deliberate, so the JS cap and the CSS layout cannot disagree.
+  // How many faces the header can afford, which is not a constant: at 360px
+  // three faces leave only about 40px for the title. Two faces plus a badge is
+  // the most the narrow header can spend and still say which room you are in,
+  // and the badge keeps the count honest at either width. 880px is the header's
+  // own mobile breakpoint, so JS and CSS cannot disagree about the layout.
   const FACE_LIMIT_WIDE = 4;
   const FACE_LIMIT_NARROW = 2;
   const FACE_MEDIA = '(max-width: 880px)';
@@ -1153,10 +1209,17 @@
     panel.append(list);
   }
   function showView(view) {
+    // A route lookup for a DM may still be awaiting metadata. Leaving for a
+    // workspace page invalidates that navigation before clearing its visible
+    // identity; otherwise the late promise can reopen the private thread the
+    // operator explicitly left and move browser history back into it.
+    navGen++;
+    Trio.loader?.cancelAll?.('dm:');
     state.view = view;
     state.channel = '';
     state.dmKey = '';
     state.dmName = '';
+    state.dmRouteResolved = true;
     state.readOnly = false;
     state.members = new Map();
     Trio.stopEvents?.();
@@ -1477,7 +1540,15 @@
       loadConversation(route.params.code, '#' + route.params.code,
                        channelSubtitle(!!route.params.archived), !!route.params.archived, false);
     }
-    else if ((route.name === 'dm' || route.name === 'audit') && state.dmKey !== route.params.key) openDmByKey(route.params.key, route.name === 'audit');
+    else if (route.name === 'dm' || route.name === 'audit') {
+      const audit = route.name === 'audit';
+      const archived = route.name === 'dm' && !!route.params.archived;
+      const currentArchived = !!state.readOnly && !state.dmAudit;
+      if (state.dmKey !== route.params.key || state.dmAudit !== audit || currentArchived !== archived) {
+        beginDmRoute(route.params.key, audit, archived);
+        openDmByKey(route.params.key, audit, true, archived);
+      } else routeFeedClaimed = true;
+    }
     else if (route.name === 'home') showView('home');
     else if (route.name === 'attention') showView('attention');
     else if (route.name === 'messages') showView('messages');
@@ -2050,10 +2121,8 @@
   }
   let refreshInterval = null;
   let agentsInterval = null;
-  // Held across a mount so it can be removed again: without a listener the face
-  // cap is only re-evaluated on the next roster event or 5s agent poll, so
-  // rotating a phone would leave four faces crammed into a narrow header, or two
-  // faces and a needless "+N" on a wide one, until something unrelated repainted.
+  // Held across a mount so it can be removed again. Otherwise rotating a phone
+  // leaves the old face cap until an unrelated roster event or agent poll.
   let faceMedia = null;
   let faceMediaChange = null;
   // Dedicated faster poll for agent live/busy/state (+context) so connected/
@@ -2061,11 +2130,8 @@
   // 15s workspace refresh, operator-gated, no agent tokens. Working/idle + tool
   // use come faster still, over the roster SSE (see renderFacePile/refreshDrawerMembers).
   function pollAgents() { return (Trio.agents?.refresh?.() || Promise.resolve()).then(() => { renderFacePile(); refreshDrawerMembers(); }); }
-  // The stream claim is per-mount: it says "this workspace opened the stream
-  // during the boot now in progress", so it has to start false on every mount
-  // and be surrendered on unmount. Without that it would answer for a previous
-  // page lifetime, and 06-core would skip its fallback on evidence that had
-  // expired.
+  // Feed ownership is per mount and is surrendered on unmount; otherwise a
+  // later boot could skip core's fallback using evidence from an old lifetime.
   function mountFaceMedia() {
     try { faceMedia = window.matchMedia?.(FACE_MEDIA) || null; } catch { faceMedia = null; }
     if (!faceMedia) return;
@@ -2076,8 +2142,8 @@
     if (faceMedia && faceMediaChange) faceMedia.removeEventListener?.('change', faceMediaChange);
     faceMedia = null; faceMediaChange = null;
   }
-  function mount() { streamOpenedByRoute = false; mountFaceMedia(); refresh(); renderFacePile(); if (!refreshInterval) refreshInterval = setInterval(refresh, 15000); if (!agentsInterval) agentsInterval = setInterval(pollAgents, 5000); unroute = Trio.router?.on?.(onRoute); wsl = onWorkspaceUpdate; Trio.events?.addEventListener?.('workspace:updated', wsl); preferencesChanged = onPreferencesChanged; Trio.events?.addEventListener?.('preferences:changed', preferencesChanged); Trio.events?.addEventListener?.('roster', renderFacePile); Trio.events?.addEventListener?.('roster', refreshDrawerMembers); Trio.events?.addEventListener?.('message', onMessageForDrawer); Trio.events?.addEventListener?.('message', onMessageLiveRefresh); const searchBtn = $('search-btn'); if (searchBtn) { searchBtn.addEventListener('click', openSearch); } const detailsBtn = $('details-btn'); if (detailsBtn) { detailsClick = showDetails; detailsBtn.addEventListener('click', detailsClick); } const drawerClose = $('channel-drawer-close'); if (drawerClose) drawerClose.addEventListener('click', closeDetails); const drawerResize = $('channel-drawer-resize'); if (drawerResize) drawerResize.addEventListener('pointerdown', startDrawerResize); const menuButton = $('channel-more-btn'); if (menuButton) { menuButtonClick = openChannelMenu; menuButton.addEventListener('click', menuButtonClick); } const accountTrigger = $('account-trigger'); if (accountTrigger) { accountTriggerClick = openAccountMenu; accountTrigger.addEventListener('click', accountTriggerClick); } menuClick = event => { if (!event.target.closest('#channel-menu, #channel-more-btn')) closeChannelMenu(); if (!event.target.closest('#account')) closeAccountMenu(); }; menuKeydown = event => { if (event.key === 'Escape') { closeChannelMenu(); closeDetails(); closeAccountMenu(); } }; document.addEventListener('click', menuClick); document.addEventListener('keydown', menuKeydown); searchKeydown = onSearchKey; document.addEventListener('keydown', searchKeydown); }
-  function unmount() { streamOpenedByRoute = false; unmountFaceMedia(); closeChannelMenu(); closeDetails(); if (drawerResizeEnd) drawerResizeEnd(); if (refreshInterval) { clearInterval(refreshInterval); refreshInterval = null; } if (agentsInterval) { clearInterval(agentsInterval); agentsInterval = null; } if (unroute) { unroute(); unroute = null; } if (wsl) { Trio.events?.removeEventListener?.('workspace:updated', wsl); wsl = null; } if (preferencesChanged) { Trio.events?.removeEventListener?.('preferences:changed', preferencesChanged); preferencesChanged = null; } Trio.events?.removeEventListener?.('roster', renderFacePile); Trio.events?.removeEventListener?.('roster', refreshDrawerMembers); Trio.events?.removeEventListener?.('message', onMessageForDrawer); Trio.events?.removeEventListener?.('message', onMessageLiveRefresh); clearTimeout(liveRefreshDebounce); clearTimeout(drawerActivityDebounce); const searchBtn = $('search-btn'); if (searchBtn && openSearch) searchBtn.removeEventListener('click', openSearch); const detailsBtn = $('details-btn'); if (detailsBtn && detailsClick) detailsBtn.removeEventListener('click', detailsClick); const drawerClose = $('channel-drawer-close'); if (drawerClose) drawerClose.removeEventListener('click', closeDetails); const drawerResize = $('channel-drawer-resize'); if (drawerResize) drawerResize.removeEventListener('pointerdown', startDrawerResize); const menuButton = $('channel-more-btn'); if (menuButton && menuButtonClick) menuButton.removeEventListener('click', menuButtonClick); const accountTrigger = $('account-trigger'); if (accountTrigger && accountTriggerClick) accountTrigger.removeEventListener('click', accountTriggerClick); closeAccountMenu(); if (menuClick) document.removeEventListener('click', menuClick); if (menuKeydown) document.removeEventListener('keydown', menuKeydown); if (searchKeydown) document.removeEventListener('keydown', searchKeydown); }
+  function mount() { routeFeedClaimed = false; mountFaceMedia(); refresh(); renderFacePile(); if (!refreshInterval) refreshInterval = setInterval(refresh, 15000); if (!agentsInterval) agentsInterval = setInterval(pollAgents, 5000); unroute = Trio.router?.on?.(onRoute); wsl = onWorkspaceUpdate; Trio.events?.addEventListener?.('workspace:updated', wsl); preferencesChanged = onPreferencesChanged; Trio.events?.addEventListener?.('preferences:changed', preferencesChanged); Trio.events?.addEventListener?.('roster', renderFacePile); Trio.events?.addEventListener?.('roster', refreshDrawerMembers); Trio.events?.addEventListener?.('message', onMessageForDrawer); Trio.events?.addEventListener?.('message', onMessageLiveRefresh); const searchBtn = $('search-btn'); if (searchBtn) { searchBtn.addEventListener('click', openSearch); } const detailsBtn = $('details-btn'); if (detailsBtn) { detailsClick = showDetails; detailsBtn.addEventListener('click', detailsClick); } const drawerClose = $('channel-drawer-close'); if (drawerClose) drawerClose.addEventListener('click', closeDetails); const drawerResize = $('channel-drawer-resize'); if (drawerResize) drawerResize.addEventListener('pointerdown', startDrawerResize); const menuButton = $('channel-more-btn'); if (menuButton) { menuButtonClick = openChannelMenu; menuButton.addEventListener('click', menuButtonClick); } const accountTrigger = $('account-trigger'); if (accountTrigger) { accountTriggerClick = openAccountMenu; accountTrigger.addEventListener('click', accountTriggerClick); } menuClick = event => { if (!event.target.closest('#channel-menu, #channel-more-btn')) closeChannelMenu(); if (!event.target.closest('#account')) closeAccountMenu(); }; menuKeydown = event => { if (event.key === 'Escape') { closeChannelMenu(); closeDetails(); closeAccountMenu(); } }; document.addEventListener('click', menuClick); document.addEventListener('keydown', menuKeydown); searchKeydown = onSearchKey; document.addEventListener('keydown', searchKeydown); }
+  function unmount() { routeFeedClaimed = false; unmountFaceMedia(); closeChannelMenu(); closeDetails(); if (drawerResizeEnd) drawerResizeEnd(); if (refreshInterval) { clearInterval(refreshInterval); refreshInterval = null; } if (agentsInterval) { clearInterval(agentsInterval); agentsInterval = null; } if (unroute) { unroute(); unroute = null; } if (wsl) { Trio.events?.removeEventListener?.('workspace:updated', wsl); wsl = null; } if (preferencesChanged) { Trio.events?.removeEventListener?.('preferences:changed', preferencesChanged); preferencesChanged = null; } Trio.events?.removeEventListener?.('roster', renderFacePile); Trio.events?.removeEventListener?.('roster', refreshDrawerMembers); Trio.events?.removeEventListener?.('message', onMessageForDrawer); Trio.events?.removeEventListener?.('message', onMessageLiveRefresh); clearTimeout(liveRefreshDebounce); clearTimeout(drawerActivityDebounce); const searchBtn = $('search-btn'); if (searchBtn && openSearch) searchBtn.removeEventListener('click', openSearch); const detailsBtn = $('details-btn'); if (detailsBtn && detailsClick) detailsBtn.removeEventListener('click', detailsClick); const drawerClose = $('channel-drawer-close'); if (drawerClose) drawerClose.removeEventListener('click', closeDetails); const drawerResize = $('channel-drawer-resize'); if (drawerResize) drawerResize.removeEventListener('pointerdown', startDrawerResize); const menuButton = $('channel-more-btn'); if (menuButton && menuButtonClick) menuButton.removeEventListener('click', menuButtonClick); const accountTrigger = $('account-trigger'); if (accountTrigger && accountTriggerClick) accountTrigger.removeEventListener('click', accountTriggerClick); closeAccountMenu(); if (menuClick) document.removeEventListener('click', menuClick); if (menuKeydown) document.removeEventListener('keydown', menuKeydown); if (searchKeydown) document.removeEventListener('keydown', searchKeydown); }
   Trio.workspace = {init: mount, mount, unmount, render: renderRail, renderFacePile, facePileModel,
-    didOpenStream: () => streamOpenedByRoute, refresh, archive, archiveCurrent, openChannel, openDm, openDmByKey, openDmDialog, dmTargets, groupNavigation, isStaleThread, staleThreadDays, attentionCount, selectors, showView, search: openSearch, doSearch, modal, toast, showDetails, channelStatus, toolSuffix, usageTone, resetLabel, contextBadge, formatTokenEstimate, refreshDrawerActivity, refreshDrawerMembers, messageCountLabel, createChannel, openTaskModal, detailMember, renderSubagentList, subagentsFromResponse, openAccountMenu, closeAccountMenu, dismissQuestion, undismissQuestion, isQuestionDismissed, trendChip, dailyChangeLine, projectionLine};
+    didClaimRouteFeed: () => routeFeedClaimed, refresh, archive, archiveCurrent, openChannel, openDm, openDmByKey, openDmDialog, dmTargets, groupNavigation, isStaleThread, staleThreadDays, attentionCount, selectors, showView, search: openSearch, doSearch, modal, toast, showDetails, channelStatus, toolSuffix, usageTone, resetLabel, contextBadge, formatTokenEstimate, refreshDrawerActivity, refreshDrawerMembers, messageCountLabel, createChannel, openTaskModal, detailMember, renderSubagentList, subagentsFromResponse, openAccountMenu, closeAccountMenu, dismissQuestion, undismissQuestion, isQuestionDismissed, trendChip, dailyChangeLine, projectionLine};
 })();

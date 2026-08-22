@@ -245,8 +245,11 @@
   function renderedContent() {
     return getText().trim();
   }
+  function hasDmRecipients() {
+    return !!(state.dmMemberIds?.length || state.dmTargetId);
+  }
   function validate() {
-    if (state.readOnly) return false;
+    if (state.readOnly || (state.dmKey && (state.dmRouteResolved === false || !hasDmRecipients()))) return false;
     // An in-flight upload's placeholder has id:0 and gets silently dropped by
     // buildSendPayload's `id > 0` filter — sending mid-upload used to eat the
     // attachment with no warning (LOTC/Frodo). Block send until every pending
@@ -255,6 +258,10 @@
     return !!renderedContent() || state.pendingAttachments.length > 0;
   }
   function buildSendPayload() {
+    // Declaring a DM without recipients must never fall through to a channel
+    // post. The disabled composer is UX; this throw is the privacy boundary for
+    // programmatic callers and any future send path that bypasses validate().
+    if (state.dmKey && !hasDmRecipients()) throw new Error('Private conversation has no resolved recipients');
     const body = {
       content: renderedContent(),
       attachment_ids: state.pendingAttachments.map(a => a.id).filter(id => Number.isInteger(id) && id > 0),
@@ -360,6 +367,10 @@
       [m.name, m.id].some(tok => tok && new RegExp('[@!]' + reEsc(tok) + '(?:\\b|$)', 'i').test(text)));
   }
   async function send() {
+    if (state.dmKey && !hasDmRecipients()) {
+      Trio.ui.toast('Private conversation is not ready — message not sent.');
+      return false;
+    }
     if (!validate()) return false;
     let content = renderedContent();
     const isDM = !!(state.dmKey || state.dmTargetId || (state.dmMemberIds && state.dmMemberIds.length));
@@ -377,9 +388,9 @@
     }
     noMentionConfirmed = false;
     const button = byId('send'); if (button) button.disabled = true;
-    const body = buildSendPayload();
-    body.content = content;
     try {
+      const body = buildSendPayload();
+      body.content = content;
       const result = await api.post(apiUrl('/api/send'), body);
       // Clear THIS conversation's composer state (text + @-targets + images);
       // other threads' drafts are untouched (Bug C).
@@ -655,10 +666,13 @@
     if (!text) return;
     // contenteditable div — no .disabled/.placeholder; use contentEditable and a
     // data-placeholder rendered via CSS :empty::before.
-    const ro = !!state.readOnly;
+    const resolvingDm = !!state.dmKey && state.dmRouteResolved === false;
+    const ro = !!state.readOnly || resolvingDm;
     text.contentEditable = ro ? 'false' : 'true';
     text.setAttribute('aria-readonly', String(ro));
-    text.dataset.placeholder = ro ? 'This conversation is archived.' : 'Message the room…';
+    text.dataset.placeholder = resolvingDm && state.dmError ? 'Private conversation unavailable.'
+      : resolvingDm ? 'Resolving private conversation…'
+      : state.readOnly ? 'This conversation is archived.' : 'Message the room…';
   }
   function syncReadOnly() { setInputState(input()); updateSendState(); }
   function init() {
