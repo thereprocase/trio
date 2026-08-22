@@ -167,7 +167,7 @@
 .swatch[data-theme="inspired-high-tide"] {
   position:relative; overflow:hidden; border:1px solid #83c9c2; border-radius:12px; padding:4px; background:linear-gradient(135deg,#ffd554 0 33%,#55c7ca 34% 67%,#f07661 68%);
 }
-.swatch[data-theme="inspired-high-tide"]::before { content:""; position:absolute; z-index:2; left:50%; top:7px; width:19px; height:27px; translate:-50% 0; border-radius:5px 5px 8px 8px; background:#fff; box-shadow:0 0 0 2px #171a19,0 2px 4px rgba(0,0,0,.3); }
+.swatch[data-theme="inspired-high-tide"]::before { content:"•\A Y"; white-space:pre; display:grid; place-items:center; position:absolute; z-index:2; left:50%; top:7px; width:19px; height:27px; translate:-50% 0; border-radius:5px 5px 8px 8px; background:#fff; color:#087c7e; box-shadow:0 0 0 2px #171a19,0 2px 4px rgba(0,0,0,.3); font:900 7px/6px Arial,sans-serif; text-align:center; }
 .swatch[data-theme="inspired-high-tide"]::after { content:""; position:absolute; z-index:3; left:50%; top:3px; width:15px; height:7px; translate:-50% 0; border-radius:5px 5px 2px 2px; background:#171a19; }
 .swatch[data-theme="inspired-high-tide"] .a,
 .swatch[data-theme="inspired-high-tide"] .b { display:none; }
@@ -1382,10 +1382,10 @@
 :root[data-theme="inspired-high-tide"] .brand-sub,
 :root[data-theme="inspired-high-tide"] .nav-head h3,
 :root[data-theme="inspired-high-tide"] .rail-section h2 { color:#fff; }
-:root[data-theme="inspired-high-tide"] .brand-mark { position:relative; overflow:visible; border:0; border-radius:8px 8px 11px 11px; background:#f07661; box-shadow:inset 0 0 0 2px rgba(255,255,255,.82),0 4px 0 rgba(0,45,46,.18); }
+:root[data-theme="inspired-high-tide"] .brand-mark { position:relative; overflow:visible; border:0; border-radius:8px 8px 11px 11px; background:radial-gradient(circle at 50% 32%,#fff 0 2.5px,transparent 3px),#f07661; box-shadow:inset 0 0 0 2px rgba(255,255,255,.82),0 4px 0 rgba(0,45,46,.18); }
 :root[data-theme="inspired-high-tide"] .brand-mark svg { opacity:0; }
 :root[data-theme="inspired-high-tide"] .brand-mark::before { content:""; position:absolute; left:8px; right:8px; top:-5px; height:8px; border-radius:5px 5px 2px 2px; background:#171a19; }
-:root[data-theme="inspired-high-tide"] .brand-mark::after { content:"☀"; position:absolute; inset:0; display:grid; place-items:center; color:#fff; font-size:18px; line-height:1; }
+:root[data-theme="inspired-high-tide"] .brand-mark::after { content:""; position:absolute; left:10px; top:15px; width:22px; height:18px; background:#fff; clip-path:polygon(44% 0,56% 0,58% 31%,90% 10%,100% 24%,62% 51%,86% 100%,69% 100%,50% 67%,31% 100%,14% 100%,38% 51%,0 24%,10% 10%,42% 31%); }
 :root[data-theme="inspired-high-tide"] .nav-item,
 :root[data-theme="inspired-high-tide"] .dm-item,
 :root[data-theme="inspired-high-tide"] .rail-item { min-height:39px; border-radius:12px; color:#e8ffff; }
@@ -1425,6 +1425,11 @@
 :root[data-theme="inspired-high-tide"] .roster-grid .agent-card:nth-child(3n+2) { border-top:7px solid #f07661; }
 :root[data-theme="inspired-high-tide"] .home-card:nth-child(3n),
 :root[data-theme="inspired-high-tide"] .roster-grid .agent-card:nth-child(3n) { border-top:7px solid #ffd554; }
+:root[data-theme="inspired-high-tide"] .home-card { position:relative; overflow:hidden; }
+:root[data-theme="inspired-high-tide"] .home-card::after { position:absolute; right:-7px; top:11px; padding:3px 12px; border:2px solid #171a19; border-radius:999px; background:#ffd554; color:#171a19; font:800 9px/1 var(--font-body); letter-spacing:.08em; rotate:8deg; box-shadow:2px 2px 0 rgba(0,0,0,.16); }
+:root[data-theme="inspired-high-tide"] .home-card:nth-child(3n+1)::after { content:"ROAM"; background:#55c7ca; rotate:-7deg; }
+:root[data-theme="inspired-high-tide"] .home-card:nth-child(3n+2)::after { content:"REUSE"; background:#f07661; color:#fff; rotate:6deg; }
+:root[data-theme="inspired-high-tide"] .home-card:nth-child(3n)::after { content:"WILD"; }
 :root[data-theme="inspired-high-tide"] .status-chip,
 :root[data-theme="inspired-high-tide"] .channel-status-chip,
 :root[data-theme="inspired-high-tide"] .context-badge { border:2px solid #171a19; border-radius:999px; background:#fff; color:#171a19; }
