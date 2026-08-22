@@ -432,6 +432,17 @@ def get_db() -> sqlite3.Connection:
         # ambient message will actually be heard before spending the tokens
         # to post it. Not security — agents can lie. Etiquette signal only.
         ("filter_mode", "members", "TEXT NOT NULL DEFAULT 'all'"),
+        # The operator's REQUESTED listening mode — the spec, where
+        # filter_mode above is the status. Nullable on purpose: NULL means "no
+        # override, use whatever the monitor was launched with".
+        #
+        # Two columns, deliberately. One column cannot be both a published fact
+        # and a desired state — whoever writes the status overwrites the
+        # request on their next heartbeat, which is precisely how a dashboard
+        # filter change would revert within 10 seconds. The monitor READS this
+        # one, publishes the resulting effective mode into filter_mode, and
+        # never writes here.
+        ("filter_mode_requested", "members", "TEXT"),
         # v7.3.1: full statusline snapshot relayed by the member's monitor
         # (JSON: used_pct, model, cwd, harness payload, _relayed_at).
         ("context_json", "members", "TEXT"),
