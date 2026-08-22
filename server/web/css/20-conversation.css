@@ -120,7 +120,10 @@ body.message-numbers .message-id { display:inline; }
 .lightbox-error { font:600 15px var(--font-body); padding:24px 28px; border-radius:var(--r-md); background:var(--surface); color:var(--ink); box-shadow:var(--shadow-lg); }
 body.compact .message { padding:8px 10px; }
 body.compact .messages { padding:14px clamp(12px,3vw,40px); gap:8px; }
-body.compact .composer-shell { padding:8px clamp(12px,3vw,40px) 12px; }
+/* padding-bottom is deliberately NOT declared: it comes from the base rule so
+   the safe-area inset applies here too. --composer-pad-b carries this variant's
+   intended 12px. */
+body.compact .composer-shell { --composer-pad-b:12px; padding-top:8px; padding-inline:clamp(12px,3vw,40px); }
 body.compact .day-separator, body.compact .unread-divider { margin:4px 0; }
 .home-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); gap:12px; margin-bottom:20px; }
 .home-card { display:flex; flex-direction:column; align-items:flex-start; gap:4px; padding:14px; border:1px solid var(--line); border-radius:var(--r-md); background:var(--surface); text-align:left; }
@@ -237,7 +240,7 @@ body.compact .day-separator, body.compact .unread-divider { margin:4px 0; }
 .message.msg .message-avatar.tone-eucalyptus{background:linear-gradient(150deg,#4c9a7d,#2f6b54)}
 .message.msg .message-avatar.tone-amber{background:linear-gradient(150deg,#e0a24d,#c9772f)}
 .message.msg .message-avatar.tone-plum{background:linear-gradient(150deg,#a05c8c,#6f3f64)}
-.composer-shell{border-top:0;background:var(--bg);padding:8px var(--gutter) calc(20px + env(safe-area-inset-bottom))}.composer-shell .composer-inner{padding:8px;background:var(--surface-2);border:1px solid var(--line);border-radius:var(--r-lg);box-shadow:var(--shadow-md)}.composer-shell textarea{border:0;box-shadow:none;background:transparent;resize:none;min-height:42px;padding:8px 10px 2px}.composer-shell textarea:focus{border:0;box-shadow:none}.composer-shell .comp-bar{padding:0 4px 2px}
+.composer-shell{border-top:0;background:var(--bg);padding:8px var(--gutter) calc(var(--composer-pad-b) + env(safe-area-inset-bottom))}.composer-shell .composer-inner{padding:8px;background:var(--surface-2);border:1px solid var(--line);border-radius:var(--r-lg);box-shadow:var(--shadow-md)}.composer-shell textarea{border:0;box-shadow:none;background:transparent;resize:none;min-height:42px;padding:8px 10px 2px}.composer-shell textarea:focus{border:0;box-shadow:none}.composer-shell .comp-bar{padding:0 4px 2px}
 /* Contenteditable message box — transparent field inside the .composer-inner
    surface, mirroring the old textarea. Renders @-mention chips inline as you
    type (buildMentionHtml in 12-composer.js). */

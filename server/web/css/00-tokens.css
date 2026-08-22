@@ -27,6 +27,13 @@
      screens in 40-responsive.css. */
   --gutter: max(24px, 7vw);
 
+  /* The composer's bottom padding, named so the safe-area inset can be applied
+     ONCE. On mobile the composer is the bottom-most row of a 100dvh grid, so it
+     sits in the home-indicator zone; density and theme variants each replace the
+     padding shorthand, and adding env() to only the default left two shipped
+     modes uncovered. Variants now set this token and leave padding-bottom alone. */
+  --composer-pad-b: 20px;
+
   /* motion */
   --ease: cubic-bezier(.22,.61,.36,1);
   --ease-soft: cubic-bezier(.34,1.2,.64,1);
