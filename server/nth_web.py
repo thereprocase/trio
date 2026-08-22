@@ -4868,6 +4868,18 @@ class NthWebHandler(BaseHTTPRequestHandler):
                         (agent_id, name, model, prompt, nsup.ST_SPAWNING, effort,
                          provider, cwd, permission_profile, wake_mode, reclaim_secret,
                          assigned_avatar, now))
+            except sqlite3.IntegrityError as e:
+                # ONLY the buddy-icon collision is a conflict. Any other
+                # integrity fault here — an id collision out of our own
+                # generator, a broken foreign key — is a server fault and must
+                # keep reporting as one; calling every IntegrityError a "buddy
+                # icon conflict" would be a confident wrong diagnosis pointing
+                # the reader at the wrong subsystem entirely.
+                if "avatar_name" not in str(e):
+                    self._error(500, f"db error: {e}")
+                    return
+                self._error(409, f"buddy icon conflict: {e}")
+                return
             except sqlite3.Error as e:
                 self._error(500, f"db error: {e}")
                 return
@@ -5495,10 +5507,26 @@ class NthWebHandler(BaseHTTPRequestHandler):
                     if not assigned_avatar or used_elsewhere:
                         assigned_avatar = pick_agent_avatar(
                             db, agent["name"] if agent else "", agent_id)
-                    cur = db.execute(
-                        "UPDATE agents SET archived_at=NULL, archived_by=NULL, "
-                        "state=?, pid=NULL, avatar_name=? WHERE id=?",
-                        (nsup.ST_STOPPED, assigned_avatar, agent_id))
+                    # The precheck above re-picks when the portrait was claimed
+                    # while this agent was archived, so the constraint is
+                    # unreachable here in normal operation — which is exactly
+                    # the argument that was made for the MCP setter, and it did
+                    # not excuse leaving that path unhandled either. If the
+                    # structural backstop ever does fire, this raises out
+                    # through _handle_agent_action, which catches only
+                    # AgentActionError, and the HTTP socket closes on the
+                    # caller. A 409 is a far better answer than a dropped
+                    # connection. Non-avatar integrity faults still propagate.
+                    try:
+                        cur = db.execute(
+                            "UPDATE agents SET archived_at=NULL, archived_by=NULL, "
+                            "state=?, pid=NULL, avatar_name=? WHERE id=?",
+                            (nsup.ST_STOPPED, assigned_avatar, agent_id))
+                    except sqlite3.IntegrityError as exc:
+                        if "avatar_name" not in str(exc):
+                            raise
+                        raise AgentActionError(
+                            409, f"buddy icon conflict: {exc}") from exc
                     if cur.rowcount == 0:
                         raise AgentActionError(404, "agent not found")
                     # Restore public presence only in channels where the agent

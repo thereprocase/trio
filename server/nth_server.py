@@ -36,6 +36,9 @@ from mcp.server.fastmcp import FastMCP, Image
 
 DB_DIR = Path.home() / ".claude" / "nth"
 DB_PATH = DB_DIR / "nth.db"
+# Set once the buddy-icon uniqueness index has been reported as unavailable,
+# so a database with pre-existing duplicates warns once rather than per request.
+_AVATAR_INDEX_WARNED = False
 # Mirrors nth_web.ATTACH_DIR. Both readers of attachments.path must agree
 # on where a channel's files legitimately live, so the containment check
 # means the same thing on the MCP side as on the web side.
@@ -735,6 +738,45 @@ def get_db() -> sqlite3.Connection:
     conn.execute(
         "UPDATE agents SET runtime_ref=session_id "
         "WHERE runtime_ref IS NULL AND session_id IS NOT NULL")
+    # Buddy icons must be unique among ACTIVE agents: the face pile's whole job
+    # is telling agents apart, so two identical avatars are a user-visible
+    # correctness failure. Both writers already allocate inside BEGIN IMMEDIATE,
+    # which is what makes concurrent selection safe — but that leaves the
+    # invariant defended only by two call sites remembering to do it. A future
+    # third writer, a manual edit or a restore breaks it silently, and nothing
+    # notices. The index makes it structural instead of cultural.
+    #
+    # Partial, because archived agents keep their portrait so unarchiving can
+    # restore it, and because '' is the legitimate not-yet-assigned value —
+    # neither may collide.
+    #
+    # Guarded, because this runs on every database open: a hard failure here
+    # would raise at import and the hub would not start at all. A database that
+    # already contains duplicates therefore keeps today's application-enforced
+    # behaviour and says so, rather than becoming unbootable over a constraint
+    # it predates.
+    # Retried on every open so the index appears by itself once an operator
+    # resolves the duplicates — but warned about only once per process, because
+    # get_db() runs per request and a dirty database would otherwise write this
+    # line thousands of times a day.
+    try:
+        conn.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_agents_avatar_active
+            ON agents (avatar_name)
+            WHERE archived_at IS NULL AND avatar_name != ''
+        """)
+    except sqlite3.IntegrityError as exc:
+        # ONLY the duplicate case. A broader catch would report corruption, I/O
+        # failure or a schema fault as "duplicates already present" — a
+        # confident wrong diagnosis for a fault that deserves to surface.
+        global _AVATAR_INDEX_WARNED
+        if not _AVATAR_INDEX_WARNED:
+            _AVATAR_INDEX_WARNED = True
+            _safe_print(
+                f"[nth] buddy-icon uniqueness index not created ({exc}); "
+                "duplicates already present. Allocation remains "
+                "application-enforced — resolve the duplicates to restore it.",
+                file=sys.stderr)
     conn.execute("""
         CREATE TABLE IF NOT EXISTS agent_runtime_history (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -4206,6 +4248,11 @@ def nth_set_avatar(channel: str, member_id: str, avatar_name: str,
     if err:
         return json.dumps({"error": err})
     db = get_db()
+    # Bound before the try so the IntegrityError handler below can always name
+    # something. The handler runs after this is assigned in every realistic
+    # path, but "realistic" is not a guarantee, and a NameError raised from an
+    # error handler replaces a clear refusal with a confusing crash.
+    desired = (avatar_name or "auto").strip()
     try:
         # The uniqueness decision and update are one writer transaction. Two
         # agents choosing the same free buddy concurrently must not both pass a
@@ -4216,7 +4263,6 @@ def nth_set_avatar(channel: str, member_id: str, avatar_name: str,
         if auth_error:
             db.execute("ROLLBACK")
             return json.dumps({"error": auth_error})
-        desired = (avatar_name or "auto").strip()
         used = {row[0] for row in db.execute(
             "SELECT avatar_name FROM agents WHERE archived_at IS NULL "
             "AND avatar_name != '' AND id != ?", (member_id,)).fetchall()}
@@ -4246,6 +4292,18 @@ def nth_set_avatar(channel: str, member_id: str, avatar_name: str,
             "avatar_url": f"/avatars/{desired}/avatar.svg",
             "unchanged": unchanged,
         })
+    except sqlite3.IntegrityError:
+        # The uniqueness index rejected a value the checks above accepted, which
+        # means the invariant was violated by something outside this path. It is
+        # unreachable in normal operation — BEGIN IMMEDIATE serialises writers
+        # and `desired in used` already screens it — so this exists so that the
+        # backstop firing produces the same honest refusal the pre-check gives,
+        # rather than an unhandled exception escaping the tool.
+        try:
+            db.execute("ROLLBACK")
+        except sqlite3.DatabaseError:
+            pass
+        return json.dumps({"error": f"Buddy icon '{desired}' is already in use."})
     finally:
         db.close()
 
