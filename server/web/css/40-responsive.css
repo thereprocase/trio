@@ -8,14 +8,19 @@
    (.workspace-view{padding:22px 18px 40px}, measured as 34px at every width).
    This file loads last, so a rule placed here actually applies. */
 
-/* A preference row is label + control on one line. The control is flex:none, and
-   a <select> sizes to its widest option — so when the row runs out of room the
-   label is what gives. Measured at 412px: the "Speech-to-text engine" label box
-   collapsed to 15px wide and 752px tall, one character per line. Let the row wrap
-   and give the label its own full-width line instead of squeezing it to nothing. */
+/* A preference row is label + control on one line. 30-workspace.css already lets
+   the row wrap here, but wrapping never triggers: .pr-txt is flex:1 with
+   min-width:0, so it shrinks instead of pushing the control down. Meanwhile a
+   <select> is width:auto — it sizes to its widest OPTION, measured 267px, not the
+   120px its min-width suggests — and flex:none forbids it shrinking at all. So
+   the label absorbs the entire shortfall: at 412px the "Speech-to-text engine"
+   label measured 15px wide and 752px tall, one character per line.
+
+   Scoped to rows with a wide control. Applying it to every row was measured to
+   push the 48px switch off a plain toggle row onto a second line and add 193px
+   of page height at 360px, for no benefit — those rows were never squeezed. */
 @media (max-width:640px){
-  .pref-row{ flex-wrap:wrap; }
-  .pref-row .pr-txt{ flex:1 1 100%; }
+  .pref-row:has(> .pref-select, > .pref-range) .pr-txt{ flex:1 1 100%; }
 }
 
 /* 34px of horizontal padding each side is a desktop number; on a 360px phone it
