@@ -86,7 +86,12 @@
     if (!wasLive) notify('workspace:live');
   }
   function ensureWatchdog() {
-    if (!watchdog) watchdog = setInterval(() => checkEventFreshness(), WATCHDOG_INTERVAL_MS);
+    if (!watchdog) {
+      watchdog = setInterval(() => checkEventFreshness(), WATCHDOG_INTERVAL_MS);
+      // Browser timers are numeric; Node's test timers support unref so a
+      // passive watchdog cannot keep a completed harness process alive.
+      watchdog?.unref?.();
+    }
   }
   function maybeStopWatchdog() {
     if (!workspaceStream && !stream && watchdog) {
