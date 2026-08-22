@@ -28,7 +28,9 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import gzip
 import http.cookies
+import io
 import ipaddress
 import json
 import math
@@ -95,6 +97,77 @@ UI_PATHS = frozenset((
     # path — "/" belongs to the app.
     "/fleet",
 ))
+
+
+# ───────── HTML transfer encoding ─────────
+# The app shell is one inlined page — every stylesheet and every client module
+# in a single response, by design (no bundler, no build step). That makes it
+# large and extremely compressible: it is almost entirely CSS and JS text.
+#
+# Compression here is deliberately confined to the two static shells and is
+# never applied to JSON, SSE or attachments. That confinement is a security
+# boundary, not a scoping convenience. A compressed response leaks size
+# information about its own contents, which is exploitable (BREACH) when a
+# secret and attacker-controlled input share one body. The shells are module
+# constants with no per-request substitution, and the identity cookie travels
+# in a header rather than the body, so neither ingredient exists here. Widen
+# this to a response that reflects request data and that stops being true.
+
+
+def _gzip_bytes(raw: bytes) -> bytes:
+    """Compress once, deterministically.
+
+    mtime=0 because GzipFile otherwise stamps the current time into the header,
+    which would make an otherwise byte-identical build produce different output
+    on every import and defeat any content comparison across two runs.
+    """
+    buf = io.BytesIO()
+    with gzip.GzipFile(fileobj=buf, mode="wb", compresslevel=6, mtime=0) as gz:
+        gz.write(raw)
+    return buf.getvalue()
+
+
+def _accepts_gzip(header: Optional[str]) -> bool:
+    """Whether the client accepts gzip, honouring RFC 9110 q-values.
+
+    The q=0 case is the whole reason this is a parser and not a substring test.
+    `gzip;q=0` means "gzip is NOT acceptable" while still containing the word
+    gzip, so `"gzip" in header` gets it exactly backwards and answers a client
+    that just told us it cannot decode gzip with a gzipped body. Same for
+    `*;q=0`, which refuses everything not named explicitly.
+
+    An explicit gzip entry always wins over the wildcard, whichever order they
+    appear in: `*;q=0, gzip` accepts and `*, gzip;q=0` refuses.
+    """
+    if not header:
+        return False
+    explicit: Optional[float] = None
+    wildcard: Optional[float] = None
+    for part in header.split(","):
+        token, _, params = part.strip().partition(";")
+        token = token.strip().lower()
+        if not token:
+            continue
+        weight = 1.0
+        for param in params.split(";"):
+            name, _, value = param.partition("=")
+            if name.strip().lower() == "q":
+                try:
+                    weight = float(value.strip())
+                except ValueError:
+                    # A malformed q is a malformed preference. Treating it as
+                    # "not acceptable" keeps us on the uncompressed path, which
+                    # every client can read.
+                    weight = 0.0
+                break
+        if token == "gzip":
+            explicit = weight
+        elif token == "*":
+            wildcard = weight
+    if explicit is not None:
+        return explicit > 0
+    return wildcard is not None and wildcard > 0
+
 
 # Claude Code's own statusline state — module-level so tests can point it at a
 # fixture instead of the real user's file.
@@ -3758,8 +3831,25 @@ class NthWebHandler(BaseHTTPRequestHandler):
     # ── handlers ──
     def _serve_html(self, body: str, set_cookie_token: Optional[str] = None) -> None:
         payload = body.encode("utf-8")
+        encoding = None
+        if _accepts_gzip(self.headers.get("Accept-Encoding")):
+            # Only ever a lookup, never a compress: the dict is keyed by the
+            # shell objects themselves, so anything that is not one of the two
+            # precomputed constants misses and is served as-is. That is what
+            # keeps a future per-request page from silently being compressed.
+            compressed = _HTML_GZIP.get(body)
+            if compressed is not None:
+                payload, encoding = compressed, "gzip"
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
+        if encoding:
+            self.send_header("Content-Encoding", encoding)
+        # Sent whether or not we compressed: the response genuinely varies by
+        # this header, and advertising that only on the compressed branch is how
+        # an intermediary ends up handing a gzipped body to a client that did
+        # not ask for one.
+        self.send_header("Vary", "Accept-Encoding")
+        # Must describe the bytes actually written, not the decoded length.
         self.send_header("Content-Length", str(len(payload)))
         self.send_header("Cache-Control", "no-store")
         if set_cookie_token:
@@ -8861,6 +8951,16 @@ LANDING_HTML = r"""<!doctype html>
 </body>
 </html>
 """
+
+
+# Populated here rather than beside _accepts_gzip because it needs both shells
+# to exist, and they are built at the bottom of this module. Compressing at
+# import costs one pass over each page at startup and removes it from every
+# request; the shell is served on every reload and every pushState-bookmarked
+# URL in UI_PATHS, so the per-request path is the one worth keeping empty.
+_HTML_GZIP: Dict[str, bytes] = {
+    html: _gzip_bytes(html.encode("utf-8")) for html in (INDEX_HTML, LANDING_HTML)
+}
 
 
 # ───────── Entry ─────────
