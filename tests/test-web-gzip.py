@@ -67,6 +67,18 @@ ACCEPT_CASES = [
     ("*;q=0, gzip",              True,  "explicit gzip overrides wildcard refusal"),
     ("*, gzip;q=0",              False, "explicit refusal overrides wildcard accept"),
     ("gzip;q=bogus",             False, "malformed q falls back to uncompressed"),
+    ("gzip;q=2",                 False, "q above one is malformed"),
+    ("gzip;q=1.1",               False, "q above one with decimal is malformed"),
+    ("gzip;q=0.0001",            False, "q with excess precision is malformed"),
+    ("gzip;q=1e-3",              False, "exponent q form is malformed"),
+    ("gzip;q=+0.5",              False, "signed q form is malformed"),
+    ("gzip;q=inf",               False, "infinite q form is malformed"),
+    ("gzip;q=0, gzip",           False, "first duplicate refusal is honored"),
+    ("gzip, gzip;q=0",           False, "last duplicate refusal is honored"),
+    ("gzip;q=1;q=0",             False, "repeated q parameter is malformed"),
+    ("gzip;foo",                 False, "bare extension parameter is malformed"),
+    ("gzip;foo=bar",             False, "extension parameter is malformed"),
+    ("gzip;q=.5;q=bogus",        False, "short and repeated q forms are malformed"),
 ]
 for header, expected, label in ACCEPT_CASES:
     check(f"accept-encoding: {label}", web._accepts_gzip(header) is expected)
@@ -115,10 +127,16 @@ def get(port, path, accept_encoding="__omit__", read_body=True):
     """
     conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
     try:
-        headers = {}
-        if accept_encoding != "__omit__":
-            headers["Accept-Encoding"] = accept_encoding
-        conn.request("GET", path, headers=headers)
+        if isinstance(accept_encoding, list):
+            conn.putrequest("GET", path)
+            for value in accept_encoding:
+                conn.putheader("Accept-Encoding", value)
+            conn.endheaders()
+        else:
+            headers = {}
+            if accept_encoding != "__omit__":
+                headers["Accept-Encoding"] = accept_encoding
+            conn.request("GET", path, headers=headers)
         resp = conn.getresponse()
         body = resp.read() if read_body else b""
         return resp.status, dict(resp.getheaders()), body
@@ -177,6 +195,12 @@ try:
     st, h, body = get(port, "/", "identity")
     check("identity: not compressed", "Content-Encoding" not in h)
     check("identity: body is the plain shell", body == raw_shell)
+
+    # Separate physical field-lines have the same semantics as a comma-joined
+    # field value. A refusal in either line keeps the response readable.
+    st, h, body = get(port, "/", ["gzip", "gzip;q=0"])
+    check("duplicate accept-encoding lines honor refusal",
+          "Content-Encoding" not in h and body == raw_shell)
 
     # 4 — the other shell. /fleet serves LANDING_HTML through the same method.
     raw_landing = web.LANDING_HTML.encode("utf-8")

@@ -73,6 +73,7 @@ DB_PATH = Path.home() / ".claude" / "nth" / "nth.db"
 DEFAULT_PORT = 8765
 DB_POLL_INTERVAL = 0.5
 HISTORY_LIMIT = 200          # messages sent to a client on /api/history
+WORKSPACE_RECONNECT_LIMIT = 1000  # bounded cross-channel reconnect catch-up
 HUB_IDLE_REAP_S = 300        # retire a channel's EventHub after this long unwatched
 SSE_HEARTBEAT_SEC = 20       # keep-alive comment interval
 SSE_LIVE_BUFFER = 256        # bounded headroom after an atomic history prime
@@ -141,32 +142,67 @@ def _accepts_gzip(header: Optional[str]) -> bool:
     """
     if not header:
         return False
-    explicit: Optional[float] = None
-    wildcard: Optional[float] = None
+    explicit: List[float] = []
+    wildcard: List[float] = []
     for part in header.split(","):
-        token, _, params = part.strip().partition(";")
-        token = token.strip().lower()
+        fields = [field.strip() for field in part.split(";")]
+        token = fields[0].lower()
         if not token:
             continue
         weight = 1.0
-        for param in params.split(";"):
-            name, _, value = param.partition("=")
-            if name.strip().lower() == "q":
-                try:
-                    weight = float(value.strip())
-                except ValueError:
-                    # A malformed q is a malformed preference. Treating it as
-                    # "not acceptable" keeps us on the uncompressed path, which
-                    # every client can read.
-                    weight = 0.0
-                break
+        if len(fields) > 1:
+            # Accept-Encoding permits only the optional `;q=...` weight after
+            # a coding. Unknown, bare, or repeated parameters make that member
+            # malformed; compression is optional, so fail safely to identity.
+            name, separator, value = fields[1].partition("=")
+            raw_weight = value.strip()
+            if (len(fields) != 2 or name.strip().lower() != "q" or
+                    not separator or not re.fullmatch(
+                        r"(?:0(?:\.[0-9]{0,3})?|1(?:\.0{0,3})?)",
+                        raw_weight)):
+                weight = 0.0
+            else:
+                weight = float(raw_weight)
         if token == "gzip":
-            explicit = weight
+            explicit.append(weight)
         elif token == "*":
-            wildcard = weight
-    if explicit is not None:
-        return explicit > 0
-    return wildcard is not None and wildcard > 0
+            wildcard.append(weight)
+    # Repeated field-lines are combined before parsing, so duplicate coding
+    # entries can occur. Conflicting duplicates are ambiguous and compression
+    # is optional; require every applicable declaration to permit it. This
+    # keeps malformed or q=0 input on the universally-readable identity path.
+    if explicit:
+        return all(weight > 0 for weight in explicit)
+    return bool(wildcard) and all(weight > 0 for weight in wildcard)
+
+
+def _workspace_sse_frame(payload: str) -> bytes:
+    """Frame one multiplexed event and cursor only newly-created messages."""
+    frame = f"data: {payload}\n\n"
+    try:
+        event = json.loads(payload)
+        if event.get("type") == "message" and event.get("id") is not None:
+            frame = f"id: {int(event['id'])}\n" + frame
+    except (TypeError, ValueError, json.JSONDecodeError):
+        pass
+    return frame.encode("utf-8")
+
+
+def _workspace_message_rows(db: sqlite3.Connection, channels: List[str],
+                            after_id: int,
+                            limit: int = HISTORY_LIMIT) -> List[sqlite3.Row]:
+    """Read one globally ordered page for the workspace's scalar cursor."""
+    if not channels:
+        return []
+    placeholders = ",".join("?" for _ in channels)
+    return db.execute(
+        "SELECT id, channel, member_id, member_name, content, mentions, "
+        "refs, bangs, recipients, reply_to, choices, selection, "
+        "retracted_at, retraction_reason, edited_at, created_at "
+        f"FROM messages WHERE id > ? AND channel IN ({placeholders}) "
+        "ORDER BY id ASC LIMIT ?",
+        (after_id, *channels, limit),
+    ).fetchall()
 
 
 # Claude Code's own statusline state — module-level so tests can point it at a
@@ -1854,7 +1890,8 @@ class EventHub:
     # ── subscription ──
     def subscribe(self, viewer_id: Optional[str] = None,
                   all_seeing: bool = True,
-                  include_history: bool = True) -> queue.Queue:
+                  include_history: bool = True,
+                  catch_up_after_id: Optional[int] = None) -> queue.Queue:
         """Register an SSE subscriber, scoped to what this viewer may see.
 
         An all-seeing operator (loopback / tailnet) receives every message. Any
@@ -1879,7 +1916,8 @@ class EventHub:
                 through_id = self._db_message_highwater()
             primed = self._prime_payloads(
                 viewer_id, all_seeing, through_id,
-                include_history=include_history)
+                include_history=include_history,
+                catch_up_after_id=catch_up_after_id)
             # Capacity derives from the actual prime, rather than assuming a
             # fixed number of control envelopes.  The live tail remains
             # bounded: a client that cannot drain the extra buffer is removed
@@ -1921,7 +1959,8 @@ class EventHub:
 
     def _prime_payloads(self, viewer_id: Optional[str], all_seeing: bool,
                         through_id: int,
-                        include_history: bool = True) -> List[str]:
+                        include_history: bool = True,
+                        catch_up_after_id: Optional[int] = None) -> List[str]:
         # try/finally so queue.Full or a transient sqlite error doesn't leak
         # the connection. A leaked read connection holds a SHARED lock and,
         # worse, if Python's default isolation_level has auto-BEGUN any write,
@@ -1946,7 +1985,20 @@ class EventHub:
                 {"type": "roster", "channel": self.channel, "members": members}))
             payloads.append(json.dumps(
                 {"type": "context", "sessions": _read_context_snapshots()}))
-            if include_history:
+            if catch_up_after_id is not None:
+                rows = db.execute(
+                    "SELECT id, member_id, member_name, content, mentions, refs, bangs, "
+                    "recipients, reply_to, choices, selection, "
+                    "retracted_at, retraction_reason, edited_at, created_at "
+                    "FROM messages WHERE channel = ? AND id > ? AND id <= ? "
+                    "ORDER BY id ASC",
+                    (self.channel, catch_up_after_id, through_id),
+                ).fetchall()
+                for r in rows:
+                    ev = _message_event(db, r, self.channel)
+                    if _event_visible_to(ev, viewer_id, all_seeing):
+                        payloads.append(json.dumps(ev))
+            elif include_history:
                 rows = db.execute(
                     "SELECT id, member_id, member_name, content, mentions, refs, bangs, "
                     "recipients, reply_to, choices, selection, "
@@ -3840,7 +3892,12 @@ class NthWebHandler(BaseHTTPRequestHandler):
     def _serve_html(self, body: str, set_cookie_token: Optional[str] = None) -> None:
         payload = body.encode("utf-8")
         encoding = None
-        if _accepts_gzip(self.headers.get("Accept-Encoding")):
+        # RFC field-lines are comma-combined before parsing. get() sees only
+        # one line with some Message implementations and would make behavior
+        # depend on which duplicate happened to survive.
+        accept_encoding = ",".join(
+            self.headers.get_all("Accept-Encoding") or [])
+        if _accepts_gzip(accept_encoding):
             # Only ever a lookup, never a compress: the dict is keyed by the
             # shell objects themselves, so anything that is not one of the two
             # precomputed constants misses and is served as-is. That is what
@@ -5830,12 +5887,59 @@ class NthWebHandler(BaseHTTPRequestHandler):
                              "Tailscale")
             return
 
+        parsed = urlparse(self.path)
+        supplied_after = parse_qs(parsed.query).get("after_id", [None])[0]
+        header_after = self.headers.get("Last-Event-ID")
+        reconnect_after: Optional[int] = None
+        if supplied_after is not None:
+            try:
+                reconnect_after = max(0, int(supplied_after))
+            except (TypeError, ValueError):
+                self._error(400, "after_id must be a non-negative integer")
+                return
+        if header_after:
+            try:
+                header_cursor = max(0, int(header_after))
+                reconnect_after = max(reconnect_after or 0, header_cursor)
+            except (TypeError, ValueError):
+                # EventSource permits an opaque Last-Event-ID. We only emit
+                # integer message ids, so an unrelated value is not our cursor.
+                pass
+
+        channel_baselines: Dict[str, int] = {}
+        workspace_message_cursor = 0
         if not self.landing_mode:
             # Single-channel mode owns exactly one hub, and _hub_for_channel
             # returns it whatever code it is asked for — looping over channels
             # here would subscribe to the same hub many times and deliver
             # every message that many times over.
             channels = [self.channel]
+            db = None
+            try:
+                db = sqlite3.connect(str(self.db_path), timeout=5)
+                row = db.execute(
+                    "SELECT COALESCE(MAX(id), 0) FROM messages WHERE channel = ?",
+                    (self.channel,),
+                ).fetchone()
+                if reconnect_after is not None:
+                    floor = db.execute(
+                        "SELECT id FROM messages WHERE channel = ? AND id > ? "
+                        "ORDER BY id DESC LIMIT 1 OFFSET ?",
+                        (self.channel, reconnect_after,
+                         WORKSPACE_RECONNECT_LIMIT - 1),
+                    ).fetchone()
+                    channel_baselines[self.channel] = max(
+                        reconnect_after, int(floor[0]) - 1 if floor else 0)
+                else:
+                    channel_baselines[self.channel] = int(row[0] or 0)
+                workspace_message_cursor = channel_baselines[self.channel]
+            except sqlite3.Error as e:
+                sys.stderr.write(f"[nth_web] workspace sse db error: {e}\n")
+                self._error(500, "workspace stream failed")
+                return
+            finally:
+                if db is not None:
+                    db.close()
         else:
             db = None
             try:
@@ -5847,9 +5951,35 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 # operator's first connection a permanent thread-count ratchet
                 # as channels accumulate. A channel nobody has touched in 30
                 # days warming its hub on first view instead is a fine trade.
-                channels = [r["code"] for r in db.execute(
-                    "SELECT code FROM channels WHERE archived_at IS NULL "
-                    "AND updated_at > datetime('now', '-30 days')").fetchall()]
+                rows = db.execute(
+                    "SELECT c.code, COALESCE(MAX(m.id), 0) AS baseline_id "
+                    "FROM channels c LEFT JOIN messages m ON m.channel = c.code "
+                    "WHERE c.archived_at IS NULL "
+                    "AND c.updated_at > datetime('now', '-30 days') "
+                    "GROUP BY c.code").fetchall()
+                channels = [r["code"] for r in rows]
+                channel_baselines = {
+                    r["code"]: int(r["baseline_id"] or 0) for r in rows}
+                if reconnect_after is not None:
+                    # Message ids are global, so one cursor covers every room.
+                    # Bound a very old reconnect to the newest N messages total
+                    # rather than allocating an unbounded prime per workspace.
+                    floor = db.execute(
+                        "SELECT m.id FROM messages m JOIN channels c "
+                        "ON c.code = m.channel WHERE m.id > ? "
+                        "AND c.archived_at IS NULL "
+                        "AND c.updated_at > datetime('now', '-30 days') "
+                        "ORDER BY m.id DESC LIMIT 1 OFFSET ?",
+                        (reconnect_after, WORKSPACE_RECONNECT_LIMIT - 1),
+                    ).fetchone()
+                    effective_after = max(
+                        reconnect_after, int(floor[0]) - 1 if floor else 0)
+                    channel_baselines = {
+                        code: effective_after for code in channels}
+                    workspace_message_cursor = effective_after
+                else:
+                    workspace_message_cursor = max(
+                        channel_baselines.values(), default=0)
             except sqlite3.Error as e:
                 sys.stderr.write(f"[nth_web] workspace sse db error: {e}\n")
                 self._error(500, "workspace stream failed")
@@ -5868,7 +5998,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
         self.send_header("X-Accel-Buffering", "no")
         self.end_headers()
 
-        merged: queue.Queue = queue.Queue(maxsize=500)
+        merged: Optional[queue.Queue] = None
         subs = []
         stop = threading.Event()
 
@@ -5879,6 +6009,15 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 except queue.Empty:
                     continue
                 try:
+                    if json.loads(payload).get("type") == "message":
+                        # New messages come from the single global ordered tail
+                        # below. Independent per-channel pumps cannot safely
+                        # advance one scalar reconnect cursor.
+                        continue
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    pass
+                try:
+                    assert merged is not None
                     merged.put(payload, timeout=1.0)
                 except queue.Full:
                     # Say so rather than drop in silence: a full merge queue
@@ -5887,6 +6026,37 @@ class NthWebHandler(BaseHTTPRequestHandler):
                     if not stop.is_set():
                         sys.stderr.write("[nth_web] workspace SSE: merged "
                                          "queue full, dropping payload\n")
+
+        def pump_messages(after_id: int) -> None:
+            """Tail new workspace messages once, globally ordered by DB id."""
+            if not channels:
+                return
+            cursor = after_id
+            while not stop.is_set():
+                db = None
+                try:
+                    db = sqlite3.connect(str(self.db_path), timeout=5)
+                    db.row_factory = sqlite3.Row
+                    rows = _workspace_message_rows(db, channels, cursor)
+                    for row in rows:
+                        event = _message_event(db, row, row["channel"])
+                        payload = json.dumps(event)
+                        assert merged is not None
+                        try:
+                            merged.put(payload, timeout=1.0)
+                        except queue.Full:
+                            # Do not advance: retry this id after the writer has
+                            # drained capacity. Ordered delivery stays intact.
+                            break
+                        cursor = int(row["id"])
+                except sqlite3.Error as e:
+                    if not stop.is_set():
+                        sys.stderr.write(
+                            f"[nth_web] workspace message tail db error: {e}\n")
+                finally:
+                    if db is not None:
+                        db.close()
+                stop.wait(DB_POLL_INTERVAL)
 
         try:
             for ch in channels:
@@ -5900,12 +6070,22 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 q = hub.subscribe(viewer_id=viewer_id, all_seeing=True,
                                   include_history=False)
                 subs.append((hub, q))
+            # Subscribe every hub before draining any of them, then size the
+            # merge queue for the exact control/catch-up prime plus live
+            # headroom. A fixed 500-slot queue dropped roster/context payloads
+            # deterministically once a workspace exceeded 250 recent rooms.
+            merged = queue.Queue(
+                maxsize=sum(q.qsize() for _hub, q in subs) + SSE_LIVE_BUFFER)
+            for _hub, q in subs:
                 threading.Thread(target=pump, args=(q,), daemon=True).start()
+            threading.Thread(
+                target=pump_messages, args=(workspace_message_cursor,),
+                daemon=True).start()
             last_heartbeat = time.monotonic()
             while True:
                 try:
                     payload = merged.get(timeout=1.0)
-                    self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
+                    self.wfile.write(_workspace_sse_frame(payload))
                     self.wfile.flush()
                 except queue.Empty:
                     now = time.monotonic()

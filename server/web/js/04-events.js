@@ -117,12 +117,19 @@
     events.dispatchEvent(new CustomEvent(type, { detail: payload }));
     if (payload.id != null && (type === 'message' || type === 'message_update')) { lastId = payload.id; }
   }
-  function onMessage(event) {
+  let workspaceLastMessageId = 0;
+  function onMessage(event, trackWorkspace = false) {
     try {
       const payload = JSON.parse(event.data);
-      if (Array.isArray(payload)) { payload.forEach(dispatch); }
-      else if (Array.isArray(payload.messages)) { payload.messages.forEach(dispatch); }
-      else { dispatch(payload); }
+      const deliver = item => {
+        dispatch(item);
+        if (trackWorkspace && item?.type === 'message' && Number.isInteger(item.id)) {
+          workspaceLastMessageId = Math.max(workspaceLastMessageId, item.id);
+        }
+      };
+      if (Array.isArray(payload)) { payload.forEach(deliver); }
+      else if (Array.isArray(payload.messages)) { payload.messages.forEach(deliver); }
+      else { deliver(payload); }
     } catch (error) { console.warn('invalid Trio event', error); }
   }
   // For the operator the workspace-wide stream (/api/workspace/events) is the
@@ -223,7 +230,9 @@
     workspaceStartedAt = Date.now();
     setConnection('connecting…', true);
     notify('workspace:connecting');
-    const source = new EventSource('/api/workspace/events');
+    const cursor = workspaceLastMessageId > 0
+      ? '?after_id=' + encodeURIComponent(workspaceLastMessageId) : '';
+    const source = new EventSource('/api/workspace/events' + cursor);
     workspaceStream = source;
     source.onopen = () => {
       if (workspaceStream !== source) return;
@@ -231,10 +240,13 @@
       workspaceLastReceivedAt = 0;
       workspaceLive = false;
       setConnection('waiting for updates…', true); notify('workspace:connected');
+      // Begin the initial REST snapshot only after the server has captured the
+      // stream baselines, closing the browser snapshot/live cutover too.
+      events.dispatchEvent(new CustomEvent('workspace:stream-open'));
     };
     source.onmessage = event => {
       if (workspaceStream !== source) return;
-      markWorkspaceFresh(); onMessage(event);
+      markWorkspaceFresh(); onMessage(event, true);
     };
     source.addEventListener('heartbeat', () => { if (workspaceStream === source) markWorkspaceFresh(); });
     source.onerror = () => {

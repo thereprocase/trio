@@ -1,6 +1,7 @@
 """Regression coverage for the EventHub snapshot/live cutover."""
 import json
 import shutil
+import sqlite3
 import sys
 import tempfile
 import threading
@@ -18,6 +19,16 @@ def check(name, condition):
     print(("PASS" if condition else "FAIL") + ": " + name)
     if not condition:
         failures.append(name)
+
+
+message_frame = web._workspace_sse_frame(json.dumps(
+    {"type": "message", "id": 42, "content": "cursor"})).decode()
+check("workspace SSE message frame publishes its reconnect cursor",
+      message_frame.startswith("id: 42\ndata: "))
+roster_frame = web._workspace_sse_frame(json.dumps(
+    {"type": "roster", "id": 99, "members": []})).decode()
+check("workspace SSE control frames do not regress the message cursor",
+      roster_frame.startswith("data: ") and not roster_frame.startswith("id:"))
 
 
 tmp = tempfile.mkdtemp(prefix="nth_sse_cutover_")
@@ -153,6 +164,51 @@ try:
     check("subscriber at fan-out/high-water boundary receives row exactly once",
           [e.get("id") for e in boundary_events].count(boundary_row) == 1)
     hub.unsubscribe(boundary_q)
+
+    # Workspace startup first snapshots each channel's high-water mark, then
+    # starts/subscribes its hubs sequentially. A message committed between
+    # those operations is already beneath the new hub's live high-water and
+    # must be delivered by the bounded catch-up, without replaying older rows.
+    workspace_baseline = boundary_row
+    workspace_gap = json.loads(srv.nth_send(
+        channel=channel, member_id=member, message="workspace-startup-gap",
+        session_token=token))["message_id"]
+    hub.last_msg_id = workspace_gap
+    hub._thread = LiveThread()
+    workspace_q = hub.subscribe(
+        include_history=False, catch_up_after_id=workspace_baseline)
+    workspace_events = []
+    while not workspace_q.empty():
+        workspace_events.append(json.loads(workspace_q.get_nowait()))
+    workspace_ids = [e.get("id") for e in workspace_events
+                     if e.get("type") == "message"]
+    check("workspace startup catch-up delivers the snapshot/live gap exactly once",
+          workspace_ids == [workspace_gap])
+    check("workspace startup catch-up still excludes pre-snapshot history",
+          all(mid > workspace_baseline for mid in workspace_ids))
+    hub.unsubscribe(workspace_q)
+
+    # A scalar reconnect cursor is safe only because the workspace now reads
+    # all channels through one ordered DB tail. Independent hub pump scheduling
+    # used to allow the higher id through first, then reconnect skipped lower.
+    other = json.loads(srv.nth_connect(
+        summary="other", name="Other", channel="sse-other"))
+    lower = json.loads(srv.nth_send(
+        channel=channel, member_id=member, message="lower-before-disconnect",
+        session_token=token))["message_id"]
+    higher = json.loads(srv.nth_send(
+        channel=other["channel"], member_id=other["member_id"],
+        message="higher-before-disconnect",
+        session_token=other["session_token"]))["message_id"]
+    db = srv.get_db()
+    try:
+        db.row_factory = sqlite3.Row
+        ordered = web._workspace_message_rows(
+            db, [other["channel"], channel], lower - 1)
+    finally:
+        db.close()
+    check("two-channel workspace tail is globally ordered before cursor advance",
+          [row["id"] for row in ordered] == [lower, higher])
 finally:
     shutil.rmtree(tmp, ignore_errors=True)
 
