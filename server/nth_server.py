@@ -28,7 +28,8 @@ from pathlib import Path
 # Add server/ to sys.path so nth_constants can be imported when MCP spawns this
 import sys
 sys.path.insert(0, str(Path(__file__).parent))
-from nth_constants import SLEEPING_KEYWORDS, NTH_VERSION, project_context
+from nth_constants import (SLEEPING_KEYWORDS, NTH_VERSION, project_context,
+                           AGENT_INBOX_CHANNEL)
 
 from mcp.server.fastmcp import FastMCP, Image
 
@@ -40,6 +41,12 @@ DB_PATH = DB_DIR / "nth.db"
 # Beside the DB, matching nth_web.attach_dir_for(), so a scratch DB
 # genuinely isolates its files.
 ATTACH_DIR = DB_DIR / "attachments"
+
+# One nth_server.py subprocess is spawned per managed agent (each `claude`
+# invocation gets its own --mcp-config stdio child), so this process only ever
+# speaks for one trio identity. Captured on connect so the permission gate can
+# tag approvals with who they are for.
+_AGENT_IDENTITY: dict = {"id": "", "name": ""}
 
 CHANNEL_CODE_PATTERN = re.compile(r"^[a-z0-9][a-z0-9\-]{0,31}$")
 MAX_MESSAGE_LENGTH = 4000
@@ -235,6 +242,8 @@ def get_db() -> sqlite3.Connection:
             last_read   INTEGER NOT NULL DEFAULT 0,
             joined_at   TEXT NOT NULL,
             active      INTEGER NOT NULL DEFAULT 1,
+            kind        TEXT NOT NULL DEFAULT 'agent',
+            model       TEXT NOT NULL DEFAULT '',
             PRIMARY KEY (id, channel),
             FOREIGN KEY (channel) REFERENCES channels(code)
         )
@@ -274,6 +283,16 @@ def get_db() -> sqlite3.Connection:
             expires_at  TEXT NOT NULL,
             PRIMARY KEY (channel, resource),
             FOREIGN KEY (channel) REFERENCES channels(code)
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS agent_control_lease (
+            id          INTEGER PRIMARY KEY CHECK (id = 1),
+            holder      TEXT NOT NULL,
+            host        TEXT NOT NULL DEFAULT '',
+            pid         INTEGER,
+            acquired_at TEXT NOT NULL,
+            expires_at  REAL NOT NULL
         )
     """)
     # Index for efficient unread-message queries in nth_poll
@@ -355,6 +374,33 @@ def get_db() -> sqlite3.Connection:
         conn.execute("ALTER TABLE sessions ADD COLUMN last_turn_end TEXT")
     except sqlite3.OperationalError:
         pass  # column already exists
+    # kind: 'agent' | 'human'. The managed-agent feature creates members rows
+    # programmatically, so the roster needs to tell a spawned agent from a
+    # person watching the dashboard. Defaults to 'agent' because every member
+    # that predates this column arrived through trio_connect, which only agents
+    # call; the web layer stamps 'human' on operator rows as it creates them.
+    try:
+        conn.execute("ALTER TABLE members ADD COLUMN kind TEXT NOT NULL DEFAULT 'agent'")
+    except sqlite3.OperationalError:
+        pass  # column already exists
+
+    # model: the agent's model tier, surfaced on the roster so an operator can
+    # see what each member is running without opening it.
+    try:
+        conn.execute("ALTER TABLE members ADD COLUMN model TEXT NOT NULL DEFAULT ''")
+    except sqlite3.OperationalError:
+        pass  # column already exists
+
+    # recipients: JSON array of member_ids a message is scoped to; empty or
+    # '[]' means broadcast. Introduced here because the agent inbox needs it:
+    # every managed agent shares that one transport, so an agent's reply must
+    # be scoped to whoever addressed it or every other agent in the inbox
+    # would read it. The user-facing DM feature builds on the same column.
+    try:
+        conn.execute("ALTER TABLE messages ADD COLUMN recipients TEXT NOT NULL DEFAULT '[]'")
+    except sqlite3.OperationalError:
+        pass  # column already exists
+
     conn.execute("""
         CREATE INDEX IF NOT EXISTS idx_sessions_member
         ON sessions (channel, member_id)
@@ -363,6 +409,121 @@ def get_db() -> sqlite3.Connection:
         CREATE INDEX IF NOT EXISTS idx_sessions_fingerprint
         ON sessions (fingerprint, revoked_at)
     """)
+    # ── Managed agents ────────────────────────────────────────────────
+    # An `agents` row is the durable identity of an agent the hub can launch:
+    # who it is, what it runs, where, and under which permission profile. It
+    # outlives any single OS process, so an agent can be stopped and started
+    # without losing its name, avatar or channel memberships.
+    # The supervisor (nth_supervisor.py) owns the OS process; `members` becomes
+    # the per-channel presence/join record via agent_channels. `managed=0` marks
+    # an externally launched (terminal) agent trio only observes.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS agents (
+            id             TEXT PRIMARY KEY,
+            name           TEXT NOT NULL,
+            model          TEXT NOT NULL DEFAULT '',
+            base_prompt    TEXT NOT NULL DEFAULT '',
+            state          TEXT NOT NULL DEFAULT 'stopped',
+            managed        INTEGER NOT NULL DEFAULT 1,
+            session_id     TEXT,
+            pid            INTEGER,
+            owner          TEXT,
+            effort         TEXT NOT NULL DEFAULT '',
+            runtime_provider TEXT NOT NULL DEFAULT 'claude',
+            runtime_ref    TEXT,
+            cwd            TEXT NOT NULL DEFAULT '',
+            permission_profile TEXT NOT NULL DEFAULT 'balanced',
+            wake_mode      TEXT NOT NULL DEFAULT 'at',
+            avatar_name    TEXT NOT NULL DEFAULT '',
+            reclaim_secret TEXT NOT NULL DEFAULT '',
+            created_at     TEXT NOT NULL,
+            last_active_at TEXT,
+            archived_at    TEXT,
+            archived_by    TEXT
+        )
+    """)
+    # Additive migrations for databases created by earlier unified-hub phases.
+    agent_columns = {
+        "effort": "TEXT NOT NULL DEFAULT ''",
+        "runtime_provider": "TEXT NOT NULL DEFAULT 'claude'",
+        "runtime_ref": "TEXT",
+        "cwd": "TEXT NOT NULL DEFAULT ''",
+        "permission_profile": "TEXT NOT NULL DEFAULT 'balanced'",
+        "wake_mode": "TEXT NOT NULL DEFAULT 'at'",
+        "reclaim_secret": "TEXT NOT NULL DEFAULT ''",
+        "avatar_name": "TEXT NOT NULL DEFAULT ''",
+        "archived_at": "TEXT",
+        "archived_by": "TEXT",
+        "context_pct": "REAL",
+        "context_tokens": "INTEGER",
+    }
+    for column, definition in agent_columns.items():
+        try:
+            conn.execute(f"ALTER TABLE agents ADD COLUMN {column} {definition}")
+        except sqlite3.OperationalError:
+            pass  # already present
+    conn.execute(
+        "UPDATE agents SET runtime_ref=session_id "
+        "WHERE runtime_ref IS NULL AND session_id IS NOT NULL")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS agent_runtime_history (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            agent_id    TEXT NOT NULL,
+            provider    TEXT NOT NULL,
+            runtime_ref TEXT NOT NULL,
+            disposition TEXT NOT NULL,
+            created_at  TEXT NOT NULL
+        )
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_agent_runtime_history_agent
+        ON agent_runtime_history (agent_id, id)
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS agent_channels (
+            agent_id    TEXT NOT NULL,
+            channel     TEXT NOT NULL,
+            member_id   TEXT NOT NULL,
+            joined_at   TEXT NOT NULL,
+            PRIMARY KEY (agent_id, channel),
+            FOREIGN KEY (agent_id) REFERENCES agents(id),
+            FOREIGN KEY (channel) REFERENCES channels(code)
+        )
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_agent_channels_channel
+        ON agent_channels (channel)
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_agent_channels_member
+        ON agent_channels (member_id)
+    """)
+
+    # Claude-side permission approvals (mirrors the in-memory Codex approval
+    # inbox in nth_codex_runtime.py, but DB-backed: the tool that raises these
+    # runs in a headless `claude` subprocess, a different OS process from the
+    # hub that resolves them, so a shared table is the only thing both sides
+    # can see). See trio_permission_prompt below + nsup.AgentSupervisor's
+    # pending_approvals/resolve_approval.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS approvals (
+            id          TEXT PRIMARY KEY,
+            agent_id    TEXT NOT NULL DEFAULT '',
+            agent_name  TEXT NOT NULL DEFAULT '',
+            provider    TEXT NOT NULL DEFAULT 'claude',
+            tool_name   TEXT NOT NULL DEFAULT '',
+            tool_input  TEXT NOT NULL DEFAULT '',
+            status      TEXT NOT NULL DEFAULT 'pending',
+            decision    TEXT NOT NULL DEFAULT '',
+            created_at  TEXT NOT NULL,
+            resolved_at TEXT
+        )
+    """)
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_approvals_status
+        ON approvals (status, id)
+    """)
+
     # v7.3: fleet check-ins. One row per (hostname, transport) — a machine
     # running both a stdio server and a monitor gets two rows. Spoke rows
     # come from client-declared node_host on connect (the hub can't see a
@@ -645,6 +806,8 @@ def nth_connect(
     pin_topic: bool = False,
     node_host: str = "",
     node_version: str = "",
+    resume_member_id: str = "",
+    reclaim_secret: str = "",
 ) -> str:
     """Join an nth channel. Creates the channel if it doesn't exist.
 
@@ -673,6 +836,13 @@ def nth_connect(
             server-side, so declaring it here puts your machine on the fleet view.
         node_version: Your local nth install version (from nth_constants), so
             the fleet view can flag version drift between hub and spokes.
+        resume_member_id: Reclaim a pre-assigned identity instead of minting a
+            new one. A hub-spawned agent is told its id at launch; connecting
+            as that id re-attaches to the row the hub already created rather
+            than duplicating it.
+        reclaim_secret: Required with resume_member_id. The hub mints a fresh
+            one on every spawn, so a secret leaked from an old process or an
+            old transcript cannot reclaim a currently-running agent.
     """
     if channel:
         err = validate_channel_code(channel)
@@ -689,9 +859,48 @@ def nth_connect(
     summary = summary[:MAX_SUMMARY_LENGTH] if summary else ""
     skills = skills[:MAX_SKILLS_LENGTH] if skills else ""
 
-    member_id = generate_member_id()
+    # Identity reclaim. A supervisor-spawned agent connects AS its pre-assigned
+    # member_id rather than minting a new one, so its row, its channel
+    # placements and every @mention that targets it all keep referring to the
+    # same identity. Without this the agent silently becomes a SECOND member:
+    # the router's "never feed an agent its own message" check stops matching,
+    # the reply-dedup probe stops matching, and the roster never sees its
+    # heartbeat. When resume_member_id is empty — every ordinary caller —
+    # behaviour is unchanged.
+    reclaiming = bool(resume_member_id and resume_member_id.strip())
+    member_id = resume_member_id.strip() if reclaiming else generate_member_id()
     now = now_iso()
     db = get_db()
+
+    if reclaiming:
+        # Authenticate against the GLOBAL agents row before looking at the
+        # channel-local member row: otherwise a first connect to a new channel
+        # could claim a known canonical id without holding its secret.
+        registered = db.execute(
+            "SELECT reclaim_secret FROM agents WHERE id = ?", (member_id,)
+        ).fetchone()
+        if registered:
+            stored = ((registered["reclaim_secret"]
+                       if "reclaim_secret" in registered.keys() else "") or "")
+            supplied = (reclaim_secret or "").strip()
+            if not stored or not supplied or not secrets.compare_digest(stored, supplied):
+                db.close()
+                return json.dumps({
+                    "error": "Cannot reclaim this identity: invalid or missing "
+                             "reclaim_secret."})
+        else:
+            # An unknown id is never honoured — otherwise a caller could claim
+            # an arbitrary identity on a first join. Fall through to minting a
+            # fresh one, except for a human row, which is refused outright.
+            requested = db.execute(
+                "SELECT kind FROM members WHERE id = ? AND channel = ?",
+                (member_id, channel)).fetchone()
+            if requested and ((requested["kind"] if "kind" in requested.keys()
+                               else "agent") or "agent") != "agent":
+                db.close()
+                return json.dumps({"error": "Cannot reclaim this identity."})
+            reclaiming = False
+            member_id = generate_member_id()
 
     try:
         _reap_sessions(db)
@@ -717,12 +926,22 @@ def nth_connect(
                     (member_id, channel, name, summary, skills, now, now),
                 )
             except sqlite3.IntegrityError:
-                member_id = generate_member_id()
-                db.execute(
-                    "INSERT INTO members (id, channel, name, summary, skills, last_seen, joined_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (member_id, channel, name, summary, skills, now, now),
-                )
+                if reclaiming:
+                    # The row is ours and already here — this is a RE-attach,
+                    # which is the whole point. Minting a new id would create
+                    # the duplicate identity reclaim exists to prevent.
+                    db.execute(
+                        "UPDATE members SET name = ?, summary = ?, skills = ?, "
+                        "last_seen = ?, active = 1 WHERE id = ? AND channel = ?",
+                        (name, summary, skills, now, member_id, channel),
+                    )
+                else:
+                    member_id = generate_member_id()
+                    db.execute(
+                        "INSERT INTO members (id, channel, name, summary, skills, last_seen, joined_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (member_id, channel, name, summary, skills, now, now),
+                    )
             db.execute(
                 "UPDATE channels SET updated_at = ? WHERE code = ?",
                 (now, channel),
@@ -854,6 +1073,12 @@ def nth_connect(
             f"python3 ~/.claude/skills/nth/server/nth_monitor.py "
             f"{channel} {member_id} --filter about"
         )
+        # Whose approvals this process files. Set here, after any reclaim
+        # collision has been resolved, so a rejected reclaim can never poison
+        # this process's approval identity with someone else's member_id.
+        _AGENT_IDENTITY["id"] = member_id
+        _AGENT_IDENTITY["name"] = name
+
         resp = {
             "ok": True,
             "channel": channel,
@@ -1599,6 +1824,96 @@ def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: st
             time.sleep(2)
     finally:
         db.close()
+
+
+# How long trio_permission_prompt waits for a human to resolve a pending
+# approval from the nth dashboard before auto-denying. Mirrors the Codex
+# approval-inbox timeout in nth_codex_runtime.py so both providers behave the
+# same from an operator's perspective.
+APPROVAL_TIMEOUT_SECONDS = 120.0
+APPROVAL_POLL_INTERVAL_SECONDS = 0.5
+
+# Caps mirroring MAX_SUMMARY_LENGTH/MAX_SKILLS_LENGTH above — a gated tool
+# call's name/input is driven by the CLI runtime rather than a user directly,
+# but nothing stops an oversized value from bloating this row and the
+# dashboard's /api/approvals payload (Aragorn).
+MAX_APPROVAL_FIELD_LENGTH = 200
+MAX_APPROVAL_INPUT_LENGTH = 4000
+
+
+@mcp.tool(name=f"{TOOL_PREFIX}_permission_prompt")
+def nth_permission_prompt(tool_name: str, input: dict | None = None) -> str:
+    """Framework-invoked permission gate — NOT a model-facing tool.
+
+    Claude Code calls this itself (via --permission-prompt-tool) whenever a
+    managed headless agent's tool call isn't auto-allowed; the model never
+    chooses to call it. Files a pending row in `approvals` and blocks, polling
+    the DB, until a human resolves it from the nth dashboard's approval
+    inbox (nsup.AgentSupervisor.resolve_approval) or the timeout denies it.
+
+    Returns the JSON text Claude Code's permission-prompt-tool protocol
+    expects: {"behavior": "allow"} or {"behavior": "deny", "message": str}.
+    """
+    approval_id = f"cap_{secrets.token_hex(6)}"
+    now = now_iso()
+    agent_id = (_AGENT_IDENTITY["id"] or "")[:MAX_APPROVAL_FIELD_LENGTH]
+    agent_name = (_AGENT_IDENTITY["name"] or "")[:MAX_APPROVAL_FIELD_LENGTH]
+    safe_tool_name = (tool_name or "")[:MAX_APPROVAL_FIELD_LENGTH]
+    tool_input = json.dumps(input or {})[:MAX_APPROVAL_INPUT_LENGTH]
+    db = get_db()
+    try:
+        db.execute(
+            "INSERT INTO approvals (id, agent_id, agent_name, provider, "
+            "tool_name, tool_input, status, created_at) VALUES (?,?,?,?,?,?,?,?)",
+            (approval_id, agent_id, agent_name, "claude",
+             safe_tool_name, tool_input, "pending", now))
+        db.commit()
+    finally:
+        db.close()
+
+    decision = "decline"
+    deadline = time.monotonic() + APPROVAL_TIMEOUT_SECONDS
+    resolved = False
+    while time.monotonic() < deadline:
+        time.sleep(APPROVAL_POLL_INTERVAL_SECONDS)
+        db = get_db()
+        try:
+            row = db.execute(
+                "SELECT status, decision FROM approvals WHERE id = ?",
+                (approval_id,)).fetchone()
+        finally:
+            db.close()
+        if row and row["status"] == "resolved":
+            decision = row["decision"] or "decline"
+            resolved = True
+            break
+
+    if not resolved:
+        db = get_db()
+        try:
+            cur = db.execute(
+                "UPDATE approvals SET status='expired', resolved_at=? "
+                "WHERE id=? AND status='pending'", (now_iso(), approval_id))
+            db.commit()
+            if cur.rowcount == 0:
+                # A human resolved it in the gap between our last poll and
+                # this expiry write (WHERE status='pending' made it a no-op)
+                # — honor what's actually persisted rather than reporting a
+                # stale deny for a decision the operator already made (Sauron).
+                row = db.execute(
+                    "SELECT decision FROM approvals WHERE id = ?",
+                    (approval_id,)).fetchone()
+                if row and row["decision"]:
+                    decision = row["decision"]
+        finally:
+            db.close()
+
+    if decision == "accept":
+        return json.dumps({"behavior": "allow"})
+    return json.dumps({
+        "behavior": "deny",
+        "message": "Denied (or timed out waiting for a response) via the nth approval inbox.",
+    })
 
 
 @mcp.tool(name=f"{TOOL_PREFIX}_ack")

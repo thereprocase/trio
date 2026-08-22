@@ -4,9 +4,86 @@
 # Single source of truth for the release version. Surfaces in the startup
 # banner, the hub's /healthz + /fleet endpoints, node check-ins, and
 # nth_doctor's local-vs-hub version match.
+import json
+
 NTH_VERSION = "8.1.1-beta.1"
 
 SLEEPING_KEYWORDS = ("idle", "standing by", "tier 3", "agent-monitor")
+
+# Hidden transport for managed agents. A supervised agent is launched with this
+# as its channel so the hub can talk to it (prompts in, output back) without
+# that traffic appearing in whatever room the agent is actually a member of.
+# nth_server scopes every message here to its addressee, so a model that
+# reaches for a plain broadcast cannot spill hub plumbing into a real channel.
+AGENT_INBOX_CHANNEL = "nth-agent-inbox"
+
+# Operator/human member ids carry this prefix. Only the two AUTHENTICATED
+# tiers are all-seeing; a self-declared guest is not, and neither is an agent.
+OPERATOR_MEMBER_ID_PREFIX = "_op_"
+OPERATOR_ALL_SEEING_PREFIXES = ("_op_l_", "_op_t_")
+
+# A legitimate recipient set is small. The cap bounds the work every read path
+# does per message, so a malformed row cannot make reads expensive.
+MAX_RECIPIENTS = 256
+
+
+def is_all_seeing(reader_id, reader_kind=None) -> bool:
+    """True ONLY for the authenticated dashboard operator — a loopback or
+    tailnet identity (`_op_l_` / `_op_t_`). Guests (`_op_g_`), pending
+    visitors (`_op_p_`) and agents are not: being human is not enough, only
+    the verified operator identity is. Unknown `_op_` sub-prefixes fail
+    CLOSED."""
+    if not reader_id:
+        return False
+    return str(reader_id).startswith(OPERATOR_ALL_SEEING_PREFIXES)
+
+
+# ── Message scoping ───────────────────────────────────────────────────
+# A message may be addressed to specific members rather than the whole
+# channel. THE predicate lives here, in the leaf module every side imports,
+# so the "can this reader see this message" decision is made in exactly one
+# place — copy-pasting subtly different filters into each read path is how a
+# private message leaks.
+
+def parse_recipients(raw) -> list:
+    """messages.recipients -> list of member_ids. Empty/NULL/'[]' means
+    broadcast. Anything unparseable also returns [] — fail OPEN to broadcast,
+    because a corrupt value must never silently hide a message from everyone.
+    Capped: a legitimate recipient set is small, and an unbounded list here
+    would be a cheap way to make every read path do unbounded work."""
+    if not raw:
+        return []
+    if isinstance(raw, (list, tuple)):
+        return [str(x) for x in raw][:MAX_RECIPIENTS]
+    try:
+        v = json.loads(raw)
+    except (TypeError, ValueError):
+        return []
+    if isinstance(v, list):
+        return [str(x) for x in v][:MAX_RECIPIENTS]
+    return []
+
+
+def can_see(reader_id, reader_kind, sender_id, recipients_raw,
+            allow_all_seeing=True) -> bool:
+    """Whether reader R may see message M. True iff ANY of:
+      * M is a broadcast (recipients empty), or
+      * R is the sender, or
+      * R is in M's recipients, or
+      * R is all-seeing AND that is permitted here.
+
+    allow_all_seeing is False on every agent-facing path, because those
+    identify their caller only by a member_id the caller supplies and the
+    server cannot authenticate."""
+    if allow_all_seeing and is_all_seeing(reader_id, reader_kind):
+        return True
+    recips = parse_recipients(recipients_raw)
+    if not recips:
+        return True  # broadcast
+    if reader_id is not None and reader_id == sender_id:
+        return True
+    return reader_id in recips
+
 
 # ── Context snapshot projection ───────────────────────────────────────
 # Statusline/publisher snapshots carry far more than the UI renders:
