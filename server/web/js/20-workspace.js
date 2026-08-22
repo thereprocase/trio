@@ -1580,6 +1580,9 @@
   const SUBAGENT_TTL = 15000;
   const subagentCache = new Map();   // member id -> { at, items }
   const subagentPending = new Set();
+  function subagentsFromResponse(data) {
+    return Array.isArray(data?.subagents) ? data.subagents : [];
+  }
   function renderSubagentList(items) {
     if (!items || !items.length) return '';
     const MAX = 4;
@@ -1598,13 +1601,13 @@
       if (subagentPending.has(id)) return;
       subagentPending.add(id);
       Trio.api.get('/api/tools?member=' + encodeURIComponent(id))
-        .then(d => (d && d.subagents) || [])
+        .then(subagentsFromResponse)
         // A failure caches an empty list exactly like a success does. The
         // subagent feed is written by the activity hook, which is not part of
-        // every deployment — where it is absent the endpoint 404s, and caching
-        // only the success path would re-request on every single drawer render
-        // forever. An empty list renders nothing, and the TTL means the client
-        // starts showing subagents on its own once the hook is installed.
+        // every deployment. A request can also fail while the hub restarts;
+        // caching only the success path would then re-request on every single
+        // drawer render forever. An empty list renders nothing, and the TTL
+        // means the client starts showing subagents after recovery/install.
         .catch(() => [])
         .then(items => {
           subagentCache.set(id, { at: Date.now(), items });
@@ -1933,5 +1936,5 @@
   function pollAgents() { return (Trio.agents?.refresh?.() || Promise.resolve()).then(() => { renderFacePile(); refreshDrawerMembers(); }); }
   function mount() { refresh(); renderFacePile(); if (!refreshInterval) refreshInterval = setInterval(refresh, 15000); if (!agentsInterval) agentsInterval = setInterval(pollAgents, 5000); unroute = Trio.router?.on?.(onRoute); wsl = onWorkspaceUpdate; Trio.events?.addEventListener?.('workspace:updated', wsl); Trio.events?.addEventListener?.('roster', renderFacePile); Trio.events?.addEventListener?.('roster', refreshDrawerMembers); Trio.events?.addEventListener?.('message', onMessageForDrawer); Trio.events?.addEventListener?.('message', onMessageLiveRefresh); const searchBtn = $('search-btn'); if (searchBtn) { searchBtn.addEventListener('click', openSearch); } const detailsBtn = $('details-btn'); if (detailsBtn) { detailsClick = showDetails; detailsBtn.addEventListener('click', detailsClick); } const drawerClose = $('channel-drawer-close'); if (drawerClose) drawerClose.addEventListener('click', closeDetails); const drawerResize = $('channel-drawer-resize'); if (drawerResize) drawerResize.addEventListener('pointerdown', startDrawerResize); const menuButton = $('channel-more-btn'); if (menuButton) { menuButtonClick = openChannelMenu; menuButton.addEventListener('click', menuButtonClick); } const accountTrigger = $('account-trigger'); if (accountTrigger) { accountTriggerClick = openAccountMenu; accountTrigger.addEventListener('click', accountTriggerClick); } menuClick = event => { if (!event.target.closest('#channel-menu, #channel-more-btn')) closeChannelMenu(); if (!event.target.closest('#account')) closeAccountMenu(); }; menuKeydown = event => { if (event.key === 'Escape') { closeChannelMenu(); closeDetails(); closeAccountMenu(); } }; document.addEventListener('click', menuClick); document.addEventListener('keydown', menuKeydown); searchKeydown = onSearchKey; document.addEventListener('keydown', searchKeydown); }
   function unmount() { closeChannelMenu(); closeDetails(); if (drawerResizeEnd) drawerResizeEnd(); if (refreshInterval) { clearInterval(refreshInterval); refreshInterval = null; } if (agentsInterval) { clearInterval(agentsInterval); agentsInterval = null; } if (unroute) { unroute(); unroute = null; } if (wsl) { Trio.events?.removeEventListener?.('workspace:updated', wsl); wsl = null; } Trio.events?.removeEventListener?.('roster', renderFacePile); Trio.events?.removeEventListener?.('roster', refreshDrawerMembers); Trio.events?.removeEventListener?.('message', onMessageForDrawer); Trio.events?.removeEventListener?.('message', onMessageLiveRefresh); clearTimeout(liveRefreshDebounce); clearTimeout(drawerActivityDebounce); const searchBtn = $('search-btn'); if (searchBtn && openSearch) searchBtn.removeEventListener('click', openSearch); const detailsBtn = $('details-btn'); if (detailsBtn && detailsClick) detailsBtn.removeEventListener('click', detailsClick); const drawerClose = $('channel-drawer-close'); if (drawerClose) drawerClose.removeEventListener('click', closeDetails); const drawerResize = $('channel-drawer-resize'); if (drawerResize) drawerResize.removeEventListener('pointerdown', startDrawerResize); const menuButton = $('channel-more-btn'); if (menuButton && menuButtonClick) menuButton.removeEventListener('click', menuButtonClick); const accountTrigger = $('account-trigger'); if (accountTrigger && accountTriggerClick) accountTrigger.removeEventListener('click', accountTriggerClick); closeAccountMenu(); if (menuClick) document.removeEventListener('click', menuClick); if (menuKeydown) document.removeEventListener('keydown', menuKeydown); if (searchKeydown) document.removeEventListener('keydown', searchKeydown); }
-  Trio.workspace = {init: mount, mount, unmount, render: renderRail, renderFacePile, refresh, archive, archiveCurrent, openChannel, openDm, openDmByKey, openDmDialog, dmTargets, groupNavigation, isStaleThread, staleThreadDays, attentionCount, selectors, showView, search: openSearch, doSearch, modal, toast, showDetails, channelStatus, toolSuffix, usageTone, resetLabel, contextBadge, formatTokenEstimate, refreshDrawerActivity, refreshDrawerMembers, messageCountLabel, createChannel, openTaskModal, detailMember, renderSubagentList, openAccountMenu, closeAccountMenu, dismissQuestion, undismissQuestion, isQuestionDismissed, trendChip, dailyChangeLine, projectionLine};
+  Trio.workspace = {init: mount, mount, unmount, render: renderRail, renderFacePile, refresh, archive, archiveCurrent, openChannel, openDm, openDmByKey, openDmDialog, dmTargets, groupNavigation, isStaleThread, staleThreadDays, attentionCount, selectors, showView, search: openSearch, doSearch, modal, toast, showDetails, channelStatus, toolSuffix, usageTone, resetLabel, contextBadge, formatTokenEstimate, refreshDrawerActivity, refreshDrawerMembers, messageCountLabel, createChannel, openTaskModal, detailMember, renderSubagentList, subagentsFromResponse, openAccountMenu, closeAccountMenu, dismissQuestion, undismissQuestion, isQuestionDismissed, trendChip, dailyChangeLine, projectionLine};
 })();

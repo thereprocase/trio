@@ -3483,6 +3483,8 @@ class NthWebHandler(BaseHTTPRequestHandler):
         elif (path.startswith("/api/agents/") and path.endswith("/activity")
               and path.count("/") == 4):
             self._handle_agent_activity(path.split("/")[3], parsed)
+        elif path == "/api/tools":
+            self._handle_tools(parsed)
         elif self.landing_mode and path == "/api/landing":
             self._json(_landing_snapshot(self.db_path))
         elif path == "/api/channels":
@@ -4486,6 +4488,97 @@ class NthWebHandler(BaseHTTPRequestHandler):
             return
         events = get_supervisor().activity(agent_id, limit=limit)
         self._json({"ok": True, "agent_id": agent_id, "events": events})
+
+    def _handle_tools(self, parsed) -> None:
+        """Recent sub-agent starts for one member in the current channel.
+
+        ``nth_activity_hook`` records a small, privacy-trimmed tool ring by
+        Claude session fingerprint.  The workspace drawer needs only Task /
+        Agent starts from that ring; returning every tool would expose file
+        basenames and grep patterns to a surface that never renders them.
+
+        A fingerprint can accumulate several non-revoked session rows when a
+        Claude session reconnects.  Only its newest row in this channel owns
+        the ring.  Without that scope, querying a stale roster identity would
+        reveal activity performed after a newer identity replaced it.
+        """
+        channel = self._channel_for_request(parsed)
+        if channel is None:
+            self._error(400, "channel query param required")
+            return
+        _token, ident, _is_new = self._resolve_identity()
+        if ident.source == IDENTITY_SOURCE_PENDING:
+            self._error(403, "pick a name to join this channel first")
+            return
+        qs = parse_qs(parsed.query)
+        member_id = (qs.get("member", [""])[0] or "").strip()
+        if not member_id or len(member_id) > 128:
+            self._error(400, "member query param required")
+            return
+        try:
+            limit = int(qs.get("limit", ["20"])[0])
+        except (TypeError, ValueError, OverflowError):
+            limit = 20
+        limit = min(max(limit, 1), 50)
+
+        db = None
+        try:
+            db = sqlite3.connect(str(self.db_path), timeout=5)
+            db.row_factory = sqlite3.Row
+            db.execute("PRAGMA busy_timeout=3000")
+            member = db.execute(
+                "SELECT 1 FROM members WHERE channel=? AND id=? AND active=1",
+                (channel, member_id),
+            ).fetchone()
+            if member is None:
+                self._error(404, "member not found in this channel")
+                return
+            try:
+                rows = db.execute(
+                    "WITH current_fingerprints AS ("
+                    " SELECT DISTINCT s.fingerprint FROM sessions s"
+                    " WHERE s.channel=? AND s.member_id=?"
+                    "   AND s.revoked_at IS NULL AND s.fingerprint!=''"
+                    "   AND s.session_token=("
+                    "     SELECT s2.session_token FROM sessions s2"
+                    "     WHERE s2.channel=s.channel"
+                    "       AND s2.fingerprint=s.fingerprint"
+                    "       AND s2.revoked_at IS NULL"
+                    "     ORDER BY s2.connected_at DESC, s2.session_token DESC"
+                    "     LIMIT 1)"
+                    ")"
+                    " SELECT te.id, te.tool_name, te.target, te.created_at"
+                    " FROM tool_events te"
+                    " JOIN current_fingerprints cf"
+                    "   ON cf.fingerprint=te.fingerprint"
+                    " WHERE te.tool_name IN ('Task','Agent')"
+                    " ORDER BY te.id DESC LIMIT ?",
+                    (channel, member_id, limit),
+                ).fetchall()
+            except sqlite3.OperationalError as exc:
+                # A hook-less / not-yet-migrated install has no ring.  That is
+                # an empty optional feature, not a broken drawer or a 404 loop.
+                if "no such table: tool_events" not in str(exc).lower():
+                    raise
+                rows = []
+        except sqlite3.Error as exc:
+            sys.stderr.write(f"[nth_web] tools db error: {exc}\n")
+            self._error(500, "tool activity unavailable")
+            return
+        finally:
+            if db is not None:
+                try:
+                    db.close()
+                except sqlite3.Error:
+                    pass
+
+        subagents = [
+            {"id": r["id"], "tool_name": r["tool_name"],
+             "target": r["target"] or "", "created_at": r["created_at"]}
+            for r in rows
+        ]
+        self._json({"ok": True, "member_id": member_id,
+                    "count": len(subagents), "subagents": subagents})
 
     def _handle_approvals(self) -> None:
         if self._require_operator() is None or not self._require_agent_control():

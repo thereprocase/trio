@@ -35,7 +35,14 @@ const cx = baseContext();
 let failures = 0;
 function check(name, cond) { console.log((cond ? 'PASS: ' : 'FAIL: ') + name); if (!cond) failures++; }
 const { Trio } = cx;
-const { detailMember, renderSubagentList } = Trio.workspace;
+const { detailMember, renderSubagentList, subagentsFromResponse } = Trio.workspace;
+
+// --- HTTP response contract -----------------------------------------------
+const apiItems = [{ id: 7, target: 'sauron', tool_name: 'Agent', created_at: new Date().toISOString() }];
+check('extracts the /api/tools subagents array',
+  subagentsFromResponse({ ok: true, member_id: 'ag_1', count: 1, subagents: apiItems }) === apiItems);
+check('malformed or missing API data degrades to an empty list',
+  subagentsFromResponse(null).length === 0 && subagentsFromResponse({ subagents: {} }).length === 0);
 
 // --- detailMember: placeholder only for agents ---------------------------
 Trio.state.operator = { id: 'op1', name: 'jd' };

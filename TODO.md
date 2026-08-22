@@ -47,11 +47,6 @@ Deliberate deferrals from `up/workspace-api`. Each is a decision, not an
 oversight — written here because a rationale that lives only in a commit body
 is not discoverable six months out.
 
-- **`/api/tools` is NOT in the workspace API.** It reads `tool_events`, and the
-  only writer is `nth_activity_hook.py` on the parallel `up/hooks` branch.
-  Shipping the reader without the writer would give a permanently empty
-  endpoint, and empty endpoints get "fixed" by people who do not know why they
-  are empty. It lands with `up/hooks`.
 - **`/api/landing` and `/api/channels` overlap, transitionally.** Landing is the
   FLEET view (node check-ins, heartbeat liveness, totals — "what is running");
   `/api/channels` is the sidebar (per-operator unread, preview, archive — "what
