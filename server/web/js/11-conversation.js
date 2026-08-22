@@ -670,8 +670,63 @@
   }
 
   function ordered() { return [...state.messages.values()].sort((a, b) => Number(a.id) - Number(b.id)); }
+  // A history prime arrives as hundreds of synchronous `message` events. Paint
+  // the first one immediately (so ordinary live delivery keeps its current
+  // synchronous behavior), then collect the rest until the next frame. That
+  // turns a 500-message prime from 500 growing-list layouts into one immediate
+  // insert plus one fragment append. State is still updated synchronously.
+  let pendingInsertIds = new Set();
+  let pendingInsertFrame = 0;
+  let pendingWasNear = false;
+  function cancelPendingInserts() {
+    if (pendingInsertFrame) cancelAnimationFrame(pendingInsertFrame);
+    pendingInsertFrame = 0;
+    pendingInsertIds.clear();
+    pendingWasNear = false;
+  }
+  function insertCardInOrder(list, card, id) {
+    const next = [...list.children].find(el => el.dataset?.messageId && Number(el.dataset.messageId) > Number(id));
+    if (next) list.insertBefore(card, next); else list.append(card);
+  }
+  function flushPendingInserts() {
+    const ids = [...pendingInsertIds].sort((a, b) => Number(a) - Number(b));
+    const wasNear = pendingWasNear;
+    pendingInsertFrame = 0;
+    pendingInsertIds.clear();
+    pendingWasNear = false;
+    const list = dom();
+    if (!list || !ids.length) return;
+    const cards = ids.flatMap(id => {
+      const msg = state.messages.get(id);
+      return msg && !state.messageDomById.has(id) ? [[id, cardFor(msg)]] : [];
+    });
+    if (!cards.length) return;
+    // Prime history is ordered, so its tail can be appended as one DOM write.
+    // Retain the old ordered-insert defense for the rare prime/live race where
+    // an older id arrives after a newer card is already present.
+    const paintedIds = [...list.children]
+      .map(el => Number(el.dataset?.messageId)).filter(Number.isFinite);
+    const lastPainted = paintedIds.length ? Math.max(...paintedIds) : -Infinity;
+    if (cards.every(([id]) => Number(id) > lastPainted)) {
+      const fragment = document.createDocumentFragment();
+      cards.forEach(([id, card]) => { fragment.append(card); state.messageDomById.set(id, card); });
+      list.append(fragment);
+    } else {
+      cards.forEach(([id, card]) => { insertCardInOrder(list, card, id); state.messageDomById.set(id, card); });
+    }
+    if (wasNear) { list.scrollTop = list.scrollHeight; markRead(); }
+    pruneMessages();
+  }
+  function openInsertWindow(wasNear) {
+    if (pendingInsertFrame) return;
+    pendingWasNear = wasNear;
+    pendingInsertFrame = requestAnimationFrame(flushPendingInserts);
+  }
   function render() {
     const list = dom(); if (!list) return;
+    // A full render already paints every state.messages entry; discard a
+    // scheduled incremental tail so the same cards cannot be appended twice.
+    cancelPendingInserts();
     const stick = nearBottom(list); list.replaceChildren(); state.messageDomById.clear();
     const messages = ordered();
     if (!messages.length) {
@@ -770,6 +825,10 @@
     const existing = state.messageDomById.get(msg.id);
     const list = dom();
     if (!existing) {
+      if (pendingInsertFrame) {
+        pendingInsertIds.add(msg.id);
+        return;
+      }
       if (list) {
         {
           const card = cardFor(state.messages.get(msg.id));
@@ -777,14 +836,14 @@
           // newer id ahead of older history: insert in id order instead of
           // blindly appending, so a late-arriving older message still lands
           // before the newer cards already painted.
-          const nextSibling = [...list.children].find(el => el.dataset?.messageId && Number(el.dataset.messageId) > Number(msg.id));
-          if (nextSibling) list.insertBefore(card, nextSibling); else list.append(card);
+          insertCardInOrder(list, card, msg.id);
           state.messageDomById.set(msg.id, card);
         }
       }
       else { render(); }
       if (wasNear && list) { list.scrollTop = list.scrollHeight; markRead(); }
       pruneMessages();
+      if (list) openInsertWindow(wasNear);
       return;
     }
     const replacement = cardFor(state.messages.get(msg.id)); existing.replaceWith(replacement); state.messageDomById.set(msg.id, replacement);
@@ -862,6 +921,7 @@
     }
   }
   function unmount() {
+    cancelPendingInserts();
     for (const [type, fn] of Object.entries(listeners)) {
       if (Array.isArray(fn) && fn[0]?.removeEventListener) { fn[0].removeEventListener(type === 'listScroll' ? 'scroll' : 'click', fn[1]); }
       else { events?.removeEventListener(type, fn); }
