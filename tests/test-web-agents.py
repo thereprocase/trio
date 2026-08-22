@@ -10,6 +10,7 @@ import json
 import os
 import shutil
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import threading
@@ -72,6 +73,7 @@ web._DB_PATH_GLOBAL = srv.DB_PATH
 web._SUPERVISOR = None  # fresh supervisor bound to the temp DB
 
 server = None
+foreign_archive_proc = None
 try:
     server = web.QuietThreadingHTTPServer(("127.0.0.1", 0), web.NthWebHandler)
     server.daemon_threads = True
@@ -164,6 +166,62 @@ try:
     st, d = http(port, "/api/agents?archived=1", "GET")
     ids = [a["id"] for a in d.get("agents", [])]
     check("archive: surfaced under ?archived=1", aid in ids)
+
+    # Archive is destructive too: it must pass through the same cross-hub
+    # ownership guard as stop/hibernate/clear. The pid is the only durable
+    # evidence that another hub owns this live process, so stamping pid=NULL
+    # before trying to stop it makes the guard blind and permits a duplicate
+    # agent on the next wake.
+    foreign_id = "ag_foreign_archive"
+    marker = web.nsup.AGENT_ID_MARKER.format(agent_id=foreign_id)
+    foreign_archive_proc = subprocess.Popen(
+        [sys.executable, "-c", f"import time # {marker}\ntime.sleep(120)"],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    for _ in range(50):
+        if web.nsup._pid_cmdline(foreign_archive_proc.pid):
+            break
+        time.sleep(0.05)
+    foreign_now = srv.now_iso()
+    db = sqlite3.connect(str(srv.DB_PATH))
+    db.execute(
+        "INSERT INTO agents (id,name,model,state,managed,pid,created_at,last_active_at) "
+        "VALUES (?,?,'sonnet','running',1,?,?,?)",
+        (foreign_id, "ForeignArchive", foreign_archive_proc.pid,
+         foreign_now, foreign_now))
+    db.execute(
+        "INSERT INTO members (id,channel,name,last_seen,joined_at,kind,active) "
+        "VALUES (?, 'chan-x', ?, ?, ?, 'agent', 1)",
+        (foreign_id, "ForeignArchive", foreign_now, foreign_now))
+    db.execute("INSERT INTO agent_channels (agent_id,channel,member_id,joined_at) "
+               "VALUES (?, 'chan-x', ?, ?)",
+               (foreign_id, foreign_id, foreign_now))
+    db.execute(
+        "INSERT INTO sessions "
+        "(session_token,member_id,channel,role,fingerprint,connected_at,last_seen) "
+        "VALUES ('foreign-archive-token',?,'chan-x','primary','foreign',?,?)",
+        (foreign_id, foreign_now, foreign_now))
+    db.commit()
+    db.close()
+
+    st, detail = http(port, f"/api/agents/{foreign_id}/archive", "POST")
+    foreign_row = row(foreign_id)
+    db = sqlite3.connect(str(srv.DB_PATH))
+    foreign_active = db.execute(
+        "SELECT active FROM members WHERE id=? AND channel='chan-x'",
+        (foreign_id,)).fetchone()
+    foreign_revoked = db.execute(
+        "SELECT revoked_at FROM sessions WHERE session_token='foreign-archive-token'"
+    ).fetchone()
+    db.close()
+    check("archive: refuses a live process owned by another hub",
+          st == 409 and str(foreign_archive_proc.pid) in detail.get("error", ""))
+    check("archive: preserves foreign ownership evidence and durable state",
+          foreign_row is not None
+          and foreign_row["pid"] == foreign_archive_proc.pid
+          and foreign_row["state"] == "running"
+          and foreign_row["archived_at"] is None)
+    check("archive: refusal leaves presence and sessions untouched",
+          foreign_active == (1,) and foreign_revoked == (None,))
 
     # ── unarchive (restore presence; agent stays stopped until woken) ──
     st, _ = http(port, f"/api/agents/{aid}/unarchive", "POST")
@@ -347,6 +405,12 @@ try:
     finally:
         web.NthWebHandler._resolve_identity = _orig
 finally:
+    if foreign_archive_proc is not None:
+        try:
+            foreign_archive_proc.kill()
+            foreign_archive_proc.wait(timeout=2)
+        except Exception:
+            pass
     if server is not None:
         server.shutdown()
     if web._SUPERVISOR is not None:

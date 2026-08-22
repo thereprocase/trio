@@ -3839,9 +3839,17 @@ class NthWebHandler(BaseHTTPRequestHandler):
             finally:
                 db.close()
         elif action == "archive":
-            # Soft-delete: stamp archived_at FIRST (so the agent is hidden from
-            # the roster even if the runtime stop fails), then stop the runtime,
-            # revoke sessions, and deactivate presence. The private inbox is a
+            # Stop BEFORE changing any durable state. agents.pid is the only
+            # cross-hub ownership evidence; clearing it first makes stop() blind
+            # to a foreign live process and lets archive report success while
+            # that process keeps running. ForeignAgentError is translated to a
+            # 409 by _apply_agent_action, leaving pid/state/presence/sessions
+            # untouched so the operator can explicitly reclaim the orphan.
+            if not sup.stop(agent_id):
+                raise AgentActionError(404, "agent not found")
+
+            # Soft-delete after the runtime is confirmed stopped: revoke
+            # sessions and deactivate presence. The private inbox is a
             # full-agent capability, not a placement: remove its member and
             # agent_channels rows so this archive is a true teardown. Keep the
             # agents row and public agent_channels so unarchive can restore the
@@ -3868,14 +3876,6 @@ class NthWebHandler(BaseHTTPRequestHandler):
                         (now, agent_id))
             finally:
                 db.close()
-            # Stop the runtime after the DB is stamped. If stop fails the agent
-            # is still archived (hidden, sessions revoked) — the operator can
-            # investigate via the archived view. This avoids the orphaned state
-            # where stop succeeds but the DB transaction fails.
-            try:
-                sup.stop(agent_id)
-            except Exception:
-                pass
             ok = True
         elif action == "unarchive":
             db = sqlite3.connect(str(self.db_path), timeout=5)
