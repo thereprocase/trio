@@ -326,6 +326,76 @@
   // Shared with 11-conversation.js via Trio.avatarTone (00-core.js) — see its
   // comment there for why this needed to stop being a bare per-label hash.
   const avatarTone = Trio.avatarTone;
+  // ── face pile ─────────────────────────────────────────────────────────────
+  // The pile answers "who is in this room RIGHT NOW". That contract was
+  // written here long before it was implemented: the code filtered only
+  // `archived`, sliced four records off an unclassified roster, and then
+  // reported `+N` across every member the channel had ever held. A room with
+  // three live agents and eight departed ones therefore showed four faces and
+  // "+7", and neither number was true.
+  //
+  // The fix is an ordering one: liveness has to decide WHO is chosen, not just
+  // how their dot is painted, so classification moves ahead of the slice.
+  //
+  // Present is an explicit allow-list rather than "everything except offline".
+  // channelStatus() already collapses anything it does not recognise to
+  // 'offline', so an exclusion list would silently admit a future status that
+  // nobody decided about; this way adding one forces the choice. `sleeping`
+  // and `errored` are deliberately absent — channelStatus only returns those
+  // on its non-live branch, so they mean "not here", and an agent that is
+  // sleeping but still heartbeating reaches us as `idle` from member_status()
+  // anyway. The drawer remains the place to find everyone.
+  // Order is the rank. One relation here comes from the server and the rest is
+  // a judgement call, so they are worth separating: member_status() explicitly
+  // ranks `blocked` above `working`, because a blocked session looks busy from
+  // outside but sits there until a human answers it — that is the costliest
+  // face to lose behind a "+N". The placement of `compacting` is ours; it never
+  // passes through member_status() at all (it is supervisor-only), and it sits
+  // above active/idle because it is a busy state the operator may be waiting on.
+  const PRESENT_STATUSES = ['blocked', 'working', 'compacting', 'active', 'idle'];
+  // Index doubles as rank: the cap sheds the least informative faces rather
+  // than an arbitrary tail. Sort is stable, so equal ranks keep roster order.
+  const PRESENCE_RANK = new Map(PRESENT_STATUSES.map((status, i) => [status, i]));
+  // A no-signal record is deliberately NOT given the benefit of the doubt here,
+  // unlike the stale-thread filter above which treats a missing timestamp as
+  // fresh. The two differ because the evidence differs: a channel genuinely may
+  // carry no last_at, whereas the roster boundary always supplies a status
+  // (nth_web.py's member_status returns one of blocked/working/active/idle/
+  // stale/dead, and a member with no heartbeat at all reads `dead`). The only
+  // status-free record the client ever holds is the operator's own
+  // {id,name,source,pending}, which is forced to `active` below. So an
+  // unclassifiable member here is a client-state bug, and painting it as a
+  // present participant with an offline dot would be the pile contradicting
+  // itself — exactly the failure this change exists to remove.
+  // How many faces the header can afford. Named rather than inlined because a
+  // narrower limit for small viewports is a separate change that has to be
+  // measured first, and this is the single place it will move when it is.
+  const FACE_LIMIT = 4;
+  // Pure, and separated from the DOM on purpose: tests/dom-harness.js stubs
+  // matchMedia to a permanent { matches: false }, so any limit read from a
+  // media query in here would make a "mobile" assertion silently exercise the
+  // desktop branch and pass. The limit is an argument so a regression can set
+  // it directly.
+  function facePileModel(members, agents, operator, limit = FACE_LIMIT) {
+    const agentsById = new Map(listOf(agents).map(agent => [agent.id, agent]));
+    const present = listOf(members).map(member => {
+      // Merge the supervisor's {live,busy,state} over the roster member — the
+      // same source the channel drawer uses — so the pile agrees with the
+      // drawer instead of reading only the heartbeat-based roster status.
+      const agent = agentsById.get(member.id);
+      const merged = agent ? { ...member, ...agent } : member;
+      // The operator viewing this dashboard is present by definition, and
+      // their bare {id,name,source} shape carries no status/live/state for
+      // channelStatus to read — it normalises to 'offline'. Classifying before
+      // the slice means this special case has to move here too, or the one
+      // participant guaranteed to be in the room is the first one dropped.
+      const status = (operator?.id && member.id === operator.id) ? 'active' : channelStatus(merged);
+      return { member: merged, status };
+    }).filter(row => PRESENCE_RANK.has(row.status));
+    present.sort((a, b) => PRESENCE_RANK.get(a.status) - PRESENCE_RANK.get(b.status));
+    const cap = Math.max(1, Number(limit) || 1);
+    return { faces: present.slice(0, cap), overflow: Math.max(0, present.length - cap) };
+  }
   function renderFacePile() {
     const pile = $('face-pile'); if (!pile) return;
     if (!state.channel) { pile.classList.add('hidden'); return; }
@@ -336,38 +406,29 @@
     // channel roster (which lists every agent ever created).
     const members = (state.dmKey && Array.isArray(state.dmMemberIds) && state.dmMemberIds.length
       ? allMembers.filter(m => state.dmMemberIds.includes(m.id))
-      // The face-pile answers "who's in this room right now" — an archived
-      // agent isn't, so it doesn't get a face (the drawer still lists it).
       : allMembers).filter(m => !m.archived);
     const operator = state.operator || state.meta?.operator;
     if (operator?.id && !members.some(member => member.id === operator.id)) members.push(operator);
-    // Merge the supervisor's {live,busy,state} over the roster member — the same
-    // source the channel drawer uses — so the face-pile dot agrees with the
-    // drawer/roster instead of reading only the heartbeat-based roster status.
-    const agentsById = new Map(agentArray().map(a => [a.id, a]));
-    const withAgent = member => { const agent = agentsById.get(member.id); return agent ? { ...member, ...agent } : member; };
-    const visible = members.slice(0, 4);
-    visible.forEach(member => {
-      const merged = withAgent(member);
+    const { faces, overflow } = facePileModel(members, agentArray(), operator, FACE_LIMIT);
+    faces.forEach(({ member, status }) => {
       const node = document.createElement('span');
-      // The human operator viewing this dashboard is inherently present —
-      // their bare {id,name,source} shape carries no status/live/state for
-      // channelStatus to read, which previously fell through to 'offline'.
-      const status = (operator?.id && member.id === operator.id) ? 'active' : channelStatus(merged);
-      node.innerHTML = avatarFor(merged, status);
+      node.innerHTML = avatarFor(member, status);
       const face = node.firstElementChild;
       const label = member.name || member.id || 'Channel member';
       face.setAttribute('aria-label', label + (status === 'working' ? ' — actively working' : ''));
-      face.title = label + toolSuffix(merged, status);
+      face.title = label + toolSuffix(member, status);
       pile.append(face);
     });
-    if (members.length > visible.length) {
+    if (overflow) {
       const more = document.createElement('span');
-      more.className = 'more'; more.textContent = '+' + (members.length - visible.length);
-      more.setAttribute('aria-label', `${members.length - visible.length} more channel members`);
+      // Counts only members the pile is about — the ones actually here. The
+      // old count included every departed record, which is what made "+7"
+      // read as seven more agents in a room that had three.
+      more.className = 'more'; more.textContent = '+' + overflow;
+      more.setAttribute('aria-label', `${overflow} more here`);
       pile.append(more);
     }
-    pile.classList.toggle('hidden', !members.length);
+    pile.classList.toggle('hidden', !faces.length);
   }
   function navigateView(view) {
     const route = { home: 'home', attention: 'attention', messages: 'messages', tasks: 'tasks', roster: 'roster', prefs: 'prefs', archive: 'archive', data: 'data' }[view] || 'home';
@@ -1513,6 +1574,16 @@
         // "working" + the tool chip appear in near-realtime, rather than waiting
         // for the slower /api/agents poll's busy flag.
         const rosterStatus = String(member.status || '').toLowerCase();
+        // `blocked` has to be answered before the working/idle split, not
+        // folded into it. A blocked session is frozen on an interactive host
+        // prompt: it is mid-turn, so it is live and its heartbeats are fresh,
+        // but it will sit there indefinitely until a human replies. Because it
+        // is neither 'working' nor busy, this branch used to return `idle` for
+        // it the moment /api/agents supplied {live,state} — so the drawer, the
+        // status chip and the face-pile all described a stuck agent as merely
+        // quiet, and the one state that needs a human was the one state the UI
+        // hid. member_status() ranks it above `working` for this reason.
+        if (rosterStatus === 'blocked') return 'blocked';
         return (rosterStatus === 'working' || member.busy) ? 'working' : 'idle';
       }
       if (rawState === 'error' || rawState === 'errored') return 'errored';
@@ -1941,5 +2012,5 @@
   function pollAgents() { return (Trio.agents?.refresh?.() || Promise.resolve()).then(() => { renderFacePile(); refreshDrawerMembers(); }); }
   function mount() { refresh(); renderFacePile(); if (!refreshInterval) refreshInterval = setInterval(refresh, 15000); if (!agentsInterval) agentsInterval = setInterval(pollAgents, 5000); unroute = Trio.router?.on?.(onRoute); wsl = onWorkspaceUpdate; Trio.events?.addEventListener?.('workspace:updated', wsl); preferencesChanged = onPreferencesChanged; Trio.events?.addEventListener?.('preferences:changed', preferencesChanged); Trio.events?.addEventListener?.('roster', renderFacePile); Trio.events?.addEventListener?.('roster', refreshDrawerMembers); Trio.events?.addEventListener?.('message', onMessageForDrawer); Trio.events?.addEventListener?.('message', onMessageLiveRefresh); const searchBtn = $('search-btn'); if (searchBtn) { searchBtn.addEventListener('click', openSearch); } const detailsBtn = $('details-btn'); if (detailsBtn) { detailsClick = showDetails; detailsBtn.addEventListener('click', detailsClick); } const drawerClose = $('channel-drawer-close'); if (drawerClose) drawerClose.addEventListener('click', closeDetails); const drawerResize = $('channel-drawer-resize'); if (drawerResize) drawerResize.addEventListener('pointerdown', startDrawerResize); const menuButton = $('channel-more-btn'); if (menuButton) { menuButtonClick = openChannelMenu; menuButton.addEventListener('click', menuButtonClick); } const accountTrigger = $('account-trigger'); if (accountTrigger) { accountTriggerClick = openAccountMenu; accountTrigger.addEventListener('click', accountTriggerClick); } menuClick = event => { if (!event.target.closest('#channel-menu, #channel-more-btn')) closeChannelMenu(); if (!event.target.closest('#account')) closeAccountMenu(); }; menuKeydown = event => { if (event.key === 'Escape') { closeChannelMenu(); closeDetails(); closeAccountMenu(); } }; document.addEventListener('click', menuClick); document.addEventListener('keydown', menuKeydown); searchKeydown = onSearchKey; document.addEventListener('keydown', searchKeydown); }
   function unmount() { closeChannelMenu(); closeDetails(); if (drawerResizeEnd) drawerResizeEnd(); if (refreshInterval) { clearInterval(refreshInterval); refreshInterval = null; } if (agentsInterval) { clearInterval(agentsInterval); agentsInterval = null; } if (unroute) { unroute(); unroute = null; } if (wsl) { Trio.events?.removeEventListener?.('workspace:updated', wsl); wsl = null; } if (preferencesChanged) { Trio.events?.removeEventListener?.('preferences:changed', preferencesChanged); preferencesChanged = null; } Trio.events?.removeEventListener?.('roster', renderFacePile); Trio.events?.removeEventListener?.('roster', refreshDrawerMembers); Trio.events?.removeEventListener?.('message', onMessageForDrawer); Trio.events?.removeEventListener?.('message', onMessageLiveRefresh); clearTimeout(liveRefreshDebounce); clearTimeout(drawerActivityDebounce); const searchBtn = $('search-btn'); if (searchBtn && openSearch) searchBtn.removeEventListener('click', openSearch); const detailsBtn = $('details-btn'); if (detailsBtn && detailsClick) detailsBtn.removeEventListener('click', detailsClick); const drawerClose = $('channel-drawer-close'); if (drawerClose) drawerClose.removeEventListener('click', closeDetails); const drawerResize = $('channel-drawer-resize'); if (drawerResize) drawerResize.removeEventListener('pointerdown', startDrawerResize); const menuButton = $('channel-more-btn'); if (menuButton && menuButtonClick) menuButton.removeEventListener('click', menuButtonClick); const accountTrigger = $('account-trigger'); if (accountTrigger && accountTriggerClick) accountTrigger.removeEventListener('click', accountTriggerClick); closeAccountMenu(); if (menuClick) document.removeEventListener('click', menuClick); if (menuKeydown) document.removeEventListener('keydown', menuKeydown); if (searchKeydown) document.removeEventListener('keydown', searchKeydown); }
-  Trio.workspace = {init: mount, mount, unmount, render: renderRail, renderFacePile, refresh, archive, archiveCurrent, openChannel, openDm, openDmByKey, openDmDialog, dmTargets, groupNavigation, isStaleThread, staleThreadDays, attentionCount, selectors, showView, search: openSearch, doSearch, modal, toast, showDetails, channelStatus, toolSuffix, usageTone, resetLabel, contextBadge, formatTokenEstimate, refreshDrawerActivity, refreshDrawerMembers, messageCountLabel, createChannel, openTaskModal, detailMember, renderSubagentList, subagentsFromResponse, openAccountMenu, closeAccountMenu, dismissQuestion, undismissQuestion, isQuestionDismissed, trendChip, dailyChangeLine, projectionLine};
+  Trio.workspace = {init: mount, mount, unmount, render: renderRail, renderFacePile, facePileModel, refresh, archive, archiveCurrent, openChannel, openDm, openDmByKey, openDmDialog, dmTargets, groupNavigation, isStaleThread, staleThreadDays, attentionCount, selectors, showView, search: openSearch, doSearch, modal, toast, showDetails, channelStatus, toolSuffix, usageTone, resetLabel, contextBadge, formatTokenEstimate, refreshDrawerActivity, refreshDrawerMembers, messageCountLabel, createChannel, openTaskModal, detailMember, renderSubagentList, subagentsFromResponse, openAccountMenu, closeAccountMenu, dismissQuestion, undismissQuestion, isQuestionDismissed, trendChip, dailyChangeLine, projectionLine};
 })();
