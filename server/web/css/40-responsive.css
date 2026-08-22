@@ -28,3 +28,20 @@
 @media (max-width:880px){
   .workspace-view{ padding:22px 16px 40px; }
 }
+
+/* The drawer footer's notch allowance. 10-shell.css declared this inside its own
+   880px block and it never applied — 30-workspace.css re-declares .side-foot and
+   loads later. It was the ONLY use of env() in the whole tree, so until now the
+   codebase's sole piece of home-indicator handling did nothing. */
+@media (max-width:880px){
+  .side-foot{ padding-bottom:calc(10px + env(safe-area-inset-bottom)); }
+}
+
+/* The conversation gutter narrows on a phone; --gutter drives BOTH the message
+   list and the composer, so they cannot drift apart again. Do not "fix" the
+   composer alone by pinning it to 16px on mobile: measured, that aligns 640px
+   but makes 720px and 768px worse (-24.4px -> -34.4px of misalignment), because
+   .messages is on a viewport-relative gutter up there, not a flat 16px. */
+@media (max-width:640px){
+  :root{ --gutter:16px; }
+}

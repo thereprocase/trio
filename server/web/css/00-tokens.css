@@ -19,6 +19,14 @@
   --sp-1: 4px;  --sp-2: 8px;  --sp-3: 12px; --sp-4: 16px;
   --sp-5: 24px; --sp-6: 32px; --sp-7: 48px;
 
+  /* The conversation column's horizontal gutter. Named because two components
+     have to agree on it: the message list and the composer beneath it are the
+     two edges the eye tracks, and they had drifted apart one edit at a time —
+     measured 45.7px of misalignment at 1024px. A value shared by more than one
+     selector gets a name; a one-off stays a literal. Overridden for narrow
+     screens in 40-responsive.css. */
+  --gutter: max(24px, 7vw);
+
   /* motion */
   --ease: cubic-bezier(.22,.61,.36,1);
   --ease-soft: cubic-bezier(.34,1.2,.64,1);
