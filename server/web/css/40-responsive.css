@@ -40,10 +40,19 @@
 /* The off-canvas drawer had no drop shadow. 10-shell.css asks for --shadow-lg in
    its own 880px block, but a later unconditional .sidebar rule sets the desktop
    inset hairline and wins on source order — measured, the open drawer computed
-   `-1px 0 0 0 inset` at 360px. So a 300px panel floated over the conversation
-   with its only edge treatment on the wrong side. */
+   `-1px 0 0 0 inset` at 360px.
+
+   Scoped to the OPEN drawer, and that scoping is the whole point. The closed
+   drawer is not hidden, it is translateX(-105%): still visibility:visible,
+   opacity:1, display:flex, with its right edge at x=-15px. --shadow-lg has a
+   zero x-offset and a 50px blur, so unscoped it spills ~25px back onto the
+   screen while the drawer is SHUT — which is the state a phone is in almost all
+   the time. Measured at 390px light: the leftmost 28px of every screen darkened,
+   mean column luminance 231.6 -> 221.6 at x=0, 8036 differing pixel samples; the
+   dark themes' 60px blur reached x=47. Scoping costs nothing — the open drawer
+   is pixel-identical either way. */
 @media (max-width:880px){
-  .sidebar{ box-shadow:var(--shadow-lg); }
+  .app.nav-open .sidebar{ box-shadow:var(--shadow-lg); }
 }
 
 /* The conversation gutter narrows on a phone; --gutter drives BOTH the message
