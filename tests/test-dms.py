@@ -76,7 +76,8 @@ def dm_row(msg_id):
     db = srv.get_db()
     try:
         return db.execute(
-            "SELECT channel, member_id, recipients, mentions FROM messages WHERE id=?",
+            "SELECT channel, member_id, recipients, mentions, author_session "
+            "FROM messages WHERE id=?",
             (msg_id,)).fetchone()
     finally:
         db.close()
@@ -96,7 +97,10 @@ def message_exists_in_channel(msg_id, channel):
 A = json.loads(srv.nth_connect(summary="a", name="Alice", channel="dmtest"))
 CH = A["channel"]
 alice = A["member_id"]
-bob = json.loads(srv.nth_connect(summary="b", name="Bob", channel=CH))["member_id"]
+alice_token = A["session_token"]
+B = json.loads(srv.nth_connect(summary="b", name="Bob", channel=CH))
+bob = B["member_id"]
+bob_token = B["session_token"]
 carol = json.loads(srv.nth_connect(summary="c", name="Carol", channel=CH))["member_id"]
 
 # Everyone reads the channel up to now so join chatter doesn't confound polls.
@@ -104,9 +108,13 @@ srv.nth_poll(channel=CH, member_id=bob, wait_seconds=0)
 srv.nth_poll(channel=CH, member_id=carol, wait_seconds=0)
 
 # ── Alice DMs Bob ──
-dm = json.loads(srv.nth_dm(channel=CH, member_id=alice, message="secret-for-bob", to="Bob"))
+dm = json.loads(srv.nth_dm(
+    channel=CH, member_id=alice, message="secret-for-bob", to="Bob",
+    session_token=alice_token))
 DM_ID = dm["message_id"]
 check("trio_dm: ok", dm.get("ok") is True)
+check("trio_dm: a topic-channel primary token authenticates the inbox write",
+      dm_row(DM_ID)["author_session"] == alice_token)
 check("trio_dm: new DM row is in the global inbox",
       dm_row(DM_ID)["channel"] == AGENT_INBOX_CHANNEL)
 check("trio_dm: new DM is absent from the topic channel",
@@ -115,6 +123,46 @@ check("trio_dm: recipients resolved to Bob", dm.get("recipients") == [bob])
 row = dm_row(DM_ID)
 check("trio_dm: recipients stored on row", json.loads(row["recipients"]) == [bob])
 check("trio_dm: recipient auto-added to ping set", bob in json.loads(row["mentions"] or "[]"))
+
+# The channel-less lookup relaxes only the irrelevant transport equality.  It
+# must retain every capability boundary carried by the session row.
+mismatched = json.loads(srv.nth_dm(
+    channel=CH, member_id=alice, message="must not send", to="Bob",
+    session_token=bob_token))
+check("trio_dm token: another member's primary token is rejected",
+      "does not match member_id" in mismatched.get("error", ""))
+
+db = srv.get_db()
+try:
+    read_only_token = srv._mint_session_token(
+        db, alice, CH, role="read_only", fingerprint="dm-read-only")
+    revoked_token = srv._mint_session_token(
+        db, alice, CH, role="primary", fingerprint="dm-revoked")
+    db.execute("UPDATE sessions SET revoked_at=? WHERE session_token=?",
+               (srv.now_iso(), revoked_token))
+    db.commit()
+finally:
+    db.close()
+
+read_only = json.loads(srv.nth_dm(
+    channel=CH, member_id=alice, message="must not send", to="Bob",
+    session_token=read_only_token))
+check("trio_dm token: a read-only token remains rejected",
+      "role 'read_only' cannot send" in read_only.get("error", ""))
+revoked = json.loads(srv.nth_dm(
+    channel=CH, member_id=alice, message="must not send", to="Bob",
+    session_token=revoked_token))
+check("trio_dm token: a revoked token remains rejected",
+      "Invalid or revoked session_token" in revoked.get("error", ""))
+db = srv.get_db()
+try:
+    rejected_writes = db.execute(
+        "SELECT COUNT(*) FROM messages WHERE channel=? AND content=?",
+        (AGENT_INBOX_CHANNEL, "must not send")).fetchone()[0]
+finally:
+    db.close()
+check("trio_dm token: rejected capabilities stored no message",
+      rejected_writes == 0)
 
 # unresolved recipient is rejected (no silent broadcast)
 bad = json.loads(srv.nth_dm(channel=CH, member_id=alice, message="x", to="Nobody"))

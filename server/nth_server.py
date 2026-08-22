@@ -768,6 +768,26 @@ def _get_session(db, channel: str, session_token: str):
     return row
 
 
+def _get_session_by_token(db, session_token: str):
+    """Look up a live session for a channel-less capability.
+
+    Most mutations are scoped to one topic channel and must use
+    ``_get_session`` so the token proves membership in that exact channel.
+    A DM is different: it is stored on the hidden global inbox transport, while
+    the primary token that authenticates its author was minted by connect on a
+    topic channel.  The token is globally unique and still carries its original
+    channel/member/role provenance in the returned row; callers must check the
+    member and role exactly as they do for a channel-scoped lookup.
+    """
+    if not session_token:
+        return None
+    return db.execute(
+        "SELECT * FROM sessions WHERE session_token = ? "
+        "AND revoked_at IS NULL",
+        (session_token,),
+    ).fetchone()
+
+
 def _sentinel_nag(member) -> str:
     """Check caller's Monitor heartbeat freshness. Returns a nag string or empty.
 
@@ -2218,10 +2238,15 @@ def nth_dm(channel: str = "", member_id: str = "", message: str = "",
             return json.dumps({"error": "Could not establish inbox presence."})
 
         # Same session-token capability check as nth_send: a provided token
-        # must be valid, match member_id, and be a 'primary' (not read_only) role.
+        # must be valid, match member_id, and be a 'primary' (not read_only)
+        # role.  The lookup itself is token-only because the session was minted
+        # on the caller's topic channel while this message is stored on the
+        # hidden global inbox transport.  The row still carries its source
+        # channel for provenance; only the transport equality is inapplicable
+        # to this channel-less operation.
         author_session = None
         if session_token:
-            sess = _get_session(db, channel, session_token)
+            sess = _get_session_by_token(db, session_token)
             if not sess:
                 return json.dumps({"error": "Invalid or revoked session_token."})
             if sess["member_id"] != member_id:
