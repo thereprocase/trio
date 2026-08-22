@@ -19,6 +19,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from http.client import RemoteDisconnected
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -63,6 +64,13 @@ def http(port, path):
         with urllib.request.urlopen(req, timeout=8) as resp:
             raw = resp.read().decode()
             return resp.status, (json.loads(raw) if raw else {})
+    except (RemoteDisconnected, ConnectionError) as exc:
+        # The handler raised out of do_GET, which has no wrapping exception
+        # handler: the socket closed with no status line at all. Report it as
+        # status 0 rather than letting it abort the run — a dropped connection
+        # is a RESULT this suite deliberately tests for, and one traceback
+        # would hide every check after it.
+        return 0, f"connection dropped: {exc}"
     except urllib.error.HTTPError as e:
         try:
             return e.code, json.loads(e.read().decode())
