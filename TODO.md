@@ -2,6 +2,29 @@
 
 ## Open
 
+### Features dropped in the workspace-UI port (decide, don't rediscover)
+**Since:** 2026-08-16 | **Status:** deliberate, open to reversal
+
+Replacing the single-pane client (`js/app.js`) with the workspace UI dropped
+four things. One was restored; these three were not, and are recorded here so
+the choice is visible rather than discovered later as a regression.
+
+- **In-channel filter box** (`#filter` + the "filter active" banner). Narrowed
+  the VISIBLE message list in place. Largely subsumed by full-history search on
+  Ctrl/Cmd+K, which is strictly more capable but a different gesture — search
+  opens a panel, the filter narrowed the conversation you were reading.
+  Reinstate if in-place narrowing turns out to be the thing people used.
+- **Channel stats + sparkline** (`#chanstats`, `#sparkline`). Message-rate
+  panel in the roster sidebar. Partly replaced by the usage panel and the
+  details drawer's channel size.
+- **Per-member stats drill-down** (`renderMemberStatsHTML`). Per-agent message
+  rates on roster expand. Partly replaced by the roster's context % and status.
+
+Restored instead: **Alt+1..9 / Alt+A / Alt+0 target picker** — addressing a
+message at specific agents is the core operator gesture here, and it had gone
+from one keystroke to typed `@` autocomplete. See `tests/test-target-picker.js`.
+
+
 ### v9 plan — see PLAN-2026-08-15-v9.md
 **Since:** 2026-08-15 | **Status:** planned, not started
 
@@ -17,6 +40,46 @@ engine was handed audio it cannot decode and ffmpeg was never pinned) and
 PORTABILITY-6 (`setup.sh` never tries `py` on Windows; the working-indicator
 hook bakes a bare interpreter name into a persisted global hook command).
 
+
+### Workspace-API debt, recorded by the LOTC review (2026-08-16)
+
+Deliberate deferrals from `up/workspace-api`. Each is a decision, not an
+oversight — written here because a rationale that lives only in a commit body
+is not discoverable six months out.
+
+- **`/api/landing` and `/api/channels` overlap, transitionally.** Landing is the
+  FLEET view (node check-ins, heartbeat liveness, totals — "what is running");
+  `/api/channels` is the sidebar (per-operator unread, preview, archive — "what
+  needs me"). Neither derives from the other. Landing goes away when the
+  workspace client replaces the landing page; unifying them before that client
+  exists would mean designing the merged endpoint blind.
+- ~~**`dm_thread_key` is VIEWER-RELATIVE and already persisted.**~~ **DONE**
+  (`6ab9d6a`). The key is now the sorted participant set, identical for every
+  viewer, in `server/nth_conversation.py`. Done before release precisely
+  because `dm_archives.thread_key` is half a primary key: with no rows shipped
+  yet it cost nothing, and after release it would have been a backfill.
+- **`JSON_OVERHEAD_CHARS_PER_MESSAGE = 80` and the `chars/4` divisor** drive
+  every token estimate and nothing pins either against a real envelope. A loose
+  bound test (±40%) would fail only when the envelope has genuinely changed
+  shape, which is exactly when the estimate has become a lie.
+- **Three unread predicates still disagree.** `/api/channels` excludes own
+  messages AND addressed rows; `/api/dms` excludes own messages and is
+  window-bounded; `/api/mentions` excludes own messages but applies no
+  addressed-row filter. A DM that @-mentions the operator counts in two of the
+  three. They should share one `unread_predicate(reader_id)` fragment, after
+  deciding once whether an addressed row is "unread mail".
+- **`_prune_delete_channel` reads its counts outside the transaction** and then
+  deletes attachments by enumerated id while deleting messages by channel, so
+  an attachment inserted in between survives as an orphan. Use
+  `DELETE FROM attachments WHERE channel = ?` inside the transaction and take
+  counts from `rowcount`.
+- **The four `_prune_*` actions each reimplement** the before/`_vacuum`/after/
+  `vacuum_deferred` pattern. A fifth that forgets `else before` would report the
+  whole DB as reclaimed. Extract a context manager before that happens.
+- **Workspace SSE resolves its channel set once at connect time**, so a channel
+  created after a client connects is invisible until it reconnects. Pump threads
+  are also one-per-connection and are only cleaned up on the next failed write,
+  gated by the 20s heartbeat.
 
 ### De-root the hub services
 **Severity:** Medium (security) | **Since:** v8.0.2 War Council (2026-08-11)

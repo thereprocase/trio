@@ -98,6 +98,42 @@ check("hook: unknown session_id is a harmless no-op",
       turn_end("wi-sid-nobody") is None)
 
 
+# ── the turn hook's UPDATE must stay scoped to the live session ──────────────
+# nth_connect mints a fresh member_id per connect and never revokes the old row,
+# so one CLAUDE_CODE_SESSION_ID accumulates a sessions row per reconnect. An
+# UPDATE keyed on `fingerprint` alone stamps every one of them, resurrecting
+# long-dead members as "working" and corrupting effective_last_seen. The hook
+# scopes to the newest live row per channel; this guards that it stays scoped.
+# (nth_activity_hook.py carries the same scope, guarded in test-tool-activity.py.)
+_c = raw()
+try:
+    _c.execute(
+        "INSERT INTO sessions (session_token, member_id, channel, fingerprint,"
+        " connected_at, last_seen, role) VALUES (?,?,?,?,?,?,?)",
+        ("wi-stale-tok", "m-stale", CH, "wi-sid-1", iso(-9999), "", "member"))
+finally:
+    _c.close()
+
+fire_turn_hook("wi-sid-1", "Stop")
+
+_c = raw()
+try:
+    _stale = _c.execute(
+        "SELECT last_turn_end FROM sessions WHERE session_token=?",
+        ("wi-stale-tok",)).fetchone()
+    _live = _c.execute(
+        "SELECT last_turn_end FROM sessions WHERE fingerprint='wi-sid-1'"
+        " AND session_token != 'wi-stale-tok' ORDER BY connected_at DESC"
+        ).fetchone()
+finally:
+    _c.close()
+
+check("scoping: a stale reconnect row is NOT stamped by the turn hook",
+      _stale["last_turn_end"] is None)
+check("scoping: the newest live row IS stamped by the turn hook",
+      _live["last_turn_end"] is not None)
+
+
 # ── roster integration: status flips idle -> working on new activity ─────────
 hub = web.EventHub(srv.DB_PATH, CH)
 

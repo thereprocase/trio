@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en" data-theme="light-1">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>nth — chat with your agents</title>
+  <script>
+    /* Apply the saved theme/font BEFORE first paint, so a boot hiccup can never
+       leave the hardcoded default theme showing. Mirrors 40-preferences
+       readFromStorage()'s legacy mapping; preferences.mount() re-applies later. */
+    try {
+      var __p = JSON.parse(localStorage.getItem('trio.preferences.v1') || '{}');
+      var __t = __p.theme === 'dark' ? 'dark-3' : __p.theme === 'light' ? 'light-1' : __p.theme;
+      if (__t) document.documentElement.dataset.theme = __t;
+      if (__p.font) document.documentElement.dataset.font = __p.font;
+    } catch (e) {}
+  </script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600;9..144,700&family=Hanken+Grotesk:wght@400;500;600;700&family=Lato:wght@400;700;900&display=swap" rel="stylesheet">
+  <!--__TRIO_STYLES__-->
+</head>
+<body>
+  <div class="app" id="app">
+    <div class="scrim-nav" id="scrim-nav" hidden></div>
+    <aside class="sidebar" aria-label="Workspace navigation">
+      <header class="brand">
+        <!-- SVG Repo message-square-chat icon, CC BY 4.0; see Settings for attribution. -->
+        <div class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 9V7.2C18 6.0799 18 5.51984 17.782 5.09202C17.5903 4.71569 17.2843 4.40973 16.908 4.21799C16.4802 4 15.9201 4 14.8 4H7.2C6.0799 4 5.51984 4 5.09202 4.21799C4.71569 4.40973 4.40973 4.71569 4.21799 5.09202C4 5.51984 4 6.0799 4 7.2V18L8 16M20 20L17.8062 18.5374C17.5065 18.3377 17.3567 18.2378 17.1946 18.167C17.0507 18.1042 16.9 18.0586 16.7454 18.031C16.5713 18 16.3912 18 16.0311 18H11.2C10.0799 18 9.51984 18 9.09202 17.782C8.71569 17.5903 8.40973 17.2843 8.21799 16.908C8 16.4802 8 15.9201 8 14.8V12.2C8 11.0799 8 10.5198 8.21799 10.092C8.40973 9.71569 8.71569 9.40973 9.09202 9.21799C9.51984 9 10.0799 9 11.2 9H16.8C17.9201 9 18.4802 9 18.908 9.21799C19.2843 9.40973 19.5903 9.71569 19.782 10.092C20 10.5198 20 11.0799 20 12.2V20Z"/></svg></div>
+        <div><div class="brand-name">nth</div><div class="brand-sub">your agent workspace</div></div>
+        <button class="icon-btn sidebar-toggle" id="sidebar-toggle" type="button" aria-label="Collapse sidebar" title="Collapse sidebar" aria-expanded="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m11 9-3 3 3 3M17 9l-3 3 3 3"/></svg></button>
+      </header>
+      <nav class="nav-scroll" id="workspace-rail" aria-label="Channels">
+        <div class="rail-boot" aria-hidden="true">
+          <section class="nav-section"><div class="nav-head"><h3>Workspace</h3></div></section>
+          <section class="nav-section"><div class="nav-head"><h3>Channels</h3></div><div class="nav-loading">Loading channels…</div></section>
+          <section class="nav-section"><div class="nav-head"><h3>Direct Messages</h3><button class="add-btn" type="button" aria-label="Start direct message" title="Start direct message"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg></button></div></section>
+          <section class="nav-section"><div class="nav-head"><h3>Agent-to-Agent</h3></div></section>
+        </div>
+      </nav>
+      <footer class="side-foot" id="account"><div class="account-bar"><button class="account-trigger" id="account-trigger" type="button" aria-expanded="false" aria-controls="account-items" aria-label="Account menu" title="Account menu — preferences, archive, data"><span class="operator-avatar" id="operator-avatar" aria-hidden="true">?</span><div class="who"><div class="n" id="operator-name">Workspace</div><div class="s" id="operator-role">Live agent coordination</div></div><svg class="account-caret" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 15 6-6 6 6"/></svg></button><button id="theme-toggle" class="icon-btn" type="button" aria-label="Toggle theme" title="Toggle theme"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8Z"/></svg></button></div><div class="account-items" id="account-items" aria-hidden="true" inert></div></footer>
+      <button class="sidebar-resize" id="sidebar-resize" type="button" aria-label="Resize sidebar" aria-valuemin="56" aria-valuemax="480" aria-valuenow="300"><span aria-hidden="true"></span></button>
+    </aside>
+    <main class="conversation-shell">
+      <header class="conversation-header topbar"><button class="icon-btn nav-toggle hamb" id="nav-toggle" aria-label="Open navigation"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button><div class="tt"><h1 id="h-channel">nth</h1><p class="topic" id="h-meta">Connecting…</p></div><div class="topbar-actions"><span class="conn" id="h-conn" aria-live="polite"><span class="d"></span><span class="conn-label">connecting</span></span><div class="face-pile" id="face-pile" aria-label="Channel members"></div><button class="icon-btn" id="search-btn" type="button" aria-label="Search messages" title="Search (Ctrl/Cmd+K)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.2-3.2"/></svg></button><button class="icon-btn" id="details-btn" type="button" aria-label="Conversation details" title="Conversation details"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M13 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-7"/><path d="M9 9h5M9 13h6M9 17h4"/></svg></button><button class="icon-btn" id="channel-more-btn" type="button" aria-label="More channel actions" title="More channel actions" aria-haspopup="menu" aria-expanded="false"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg></button></div></header>
+      <div class="private-banner hidden" id="private-banner"><span>Private conversation</span></div>
+      <section class="messages msgs" id="messages" tabindex="0" aria-live="polite" aria-label="Messages"></section>
+      <section class="composer-shell composer-wrap"><button class="jump-latest hidden" id="jump-latest" type="button">Jump to latest</button><div class="composer-inner"><div id="target-bar" class="target-row"></div><div id="attachment-strip"></div><div id="input" class="composer-input" contenteditable="true" role="textbox" aria-multiline="true" aria-label="Message" data-placeholder="Message the room…"></div><div class="composer-actions comp-bar"><button id="attach-btn" class="icon-btn comp-tool" type="button" aria-label="Attach image" title="Attach image"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m21 11.5-8.5 8.5a5 5 0 0 1-7-7L14 4.5a3.3 3.3 0 0 1 4.7 4.7L10 17a1.6 1.6 0 0 1-2.3-2.3l7.6-7.6"/></svg></button><span class="dictate-wrap"><button id="dictate-btn" class="icon-btn comp-tool" type="button" aria-label="Dictate" title="Dictate" aria-pressed="false"><svg class="mic-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M6 11a6 6 0 0 0 12 0M12 17v4"/></svg><svg class="stop-icon" viewBox="0 0 24 24" fill="currentColor" hidden><rect x="6" y="6" width="12" height="12" rx="2"/></svg></button><span id="dictate-meter" class="dictate-meter" hidden aria-hidden="true"><span class="bar"></span><span class="bar"></span><span class="bar"></span><span class="bar"></span><span class="bar"></span></span><span id="dictate-status" class="dictate-status" hidden></span></span><span class="comp-spacer"></span><span class="comp-hint">Enter to send</span><button id="send" class="send-btn" type="button"><span>Send</span><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 14-7-3 14-4-5-7-2Z"/><path d="m12 14 7-9"/></svg></button></div></div></section>
+    </main>
+    <aside class="channel-drawer" id="channel-drawer" role="dialog" aria-labelledby="channel-drawer-title" aria-hidden="true">
+      <button class="channel-drawer-resize" id="channel-drawer-resize" type="button" aria-label="Resize channel details sidebar" aria-valuemin="320" aria-valuemax="560" aria-valuenow="380"><span aria-hidden="true"></span></button>
+      <header class="channel-drawer-head"><h2 id="channel-drawer-title">Channel details</h2><button class="icon-btn" id="channel-drawer-close" type="button" aria-label="Close channel details" title="Close"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="m6 6 12 12M18 6 6 18"/></svg></button></header>
+      <div class="channel-drawer-body" id="channel-drawer-body"></div>
+    </aside>
+  </div>
+  <div class="sr-only" id="trio-aria-live" aria-live="polite" aria-atomic="true"></div>
+  <div class="toast-wrap" id="trio-toasts" popover="manual"></div>
+  <div class="channel-menu" id="channel-menu" role="menu" aria-label="Channel actions" hidden></div>
+  <aside class="agent-drawer" id="trio-agents" hidden></aside>
+  <dialog id="trio-control-modal"></dialog>
+  <dialog id="trio-archives"></dialog>
+  <!--__TRIO_SCRIPTS__-->
+</body>
+</html>

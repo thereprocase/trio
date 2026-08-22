@@ -21,6 +21,21 @@ cd "$(dirname "${BASH_SOURCE[0]}")" || exit 1
 PY="${PY:-python3}"
 TIMEOUT="${TIMEOUT:-60}"
 
+# timeout(1) is GNU coreutils and is NOT on a stock macOS, where this suite is
+# developed. Without this shim every test "failed" with `timeout: command not
+# found` — a fully red suite that says nothing at all about the code, which is
+# worse than no suite, because it trains you to ignore it. Homebrew's coreutils
+# installs the same binary as `gtimeout`. With neither, run the test directly
+# and lose only the per-test time limit.
+if command -v timeout >/dev/null 2>&1; then
+    run_test() { timeout "$TIMEOUT" "$@"; }
+elif command -v gtimeout >/dev/null 2>&1; then
+    run_test() { gtimeout "$TIMEOUT" "$@"; }
+else
+    run_test() { "$@"; }
+    printf '  \033[90mnote\033[0m  no timeout(1) on PATH — running without a per-test limit\n'
+fi
+
 SOAK="test-agent-restart-loop.py test-heartbeat-theory.py
       test-timeout-battery.py test-timeout-ceiling.py
       test-timeout-unfakeable.py test-restart-arch.py"
@@ -38,7 +53,7 @@ for f in test-*.py; do
         printf '  \033[90mSOAK\033[0m  %s (long-running; run by hand)\n' "$f"
         skip=$((skip+1)); continue
     fi
-    out="$(timeout "$TIMEOUT" "$PY" "$f" 2>&1)"; rc=$?
+    out="$(run_test "$PY" "$f" 2>&1)"; rc=$?
     if [ $rc -eq 0 ]; then
         printf '  \033[32mPASS\033[0m  %s\n' "$f"; pass=$((pass+1))
     elif printf '%s' "$out" | grep -q "No module named 'mcp'"; then
@@ -53,6 +68,29 @@ for f in test-*.py; do
         fail=$((fail+1)); failed_names="$failed_names $f"
     fi
 done
+
+# The Node DOM tests. These exercise the browser client against a fake DOM and
+# were previously run only by hand, so nothing noticed when a change to the
+# client's location broke all four of them at once. A test nobody runs is not
+# a test. Node is stdlib-only here (no npm), so this adds no dependency.
+if command -v node >/dev/null 2>&1; then
+    for f in test-*.js; do
+        [ -e "$f" ] || continue
+        out="$(run_test node "$f" 2>&1)"; rc=$?
+        if [ $rc -eq 0 ]; then
+            printf '  \033[32mPASS\033[0m  %s\n' "$f"; pass=$((pass+1))
+        else
+            printf '  \033[31mFAIL\033[0m  %s\n' "$f"
+            printf '%s\n' "$out" | tail -20 | sed 's/^/        /'
+            fail=$((fail+1)); failed_names="$failed_names $f"
+        fi
+    done
+else
+    for f in test-*.js; do
+        [ -e "$f" ] || continue
+        printf '  \033[90mSKIP\033[0m  %s (needs node)\n' "$f"; skip=$((skip+1))
+    done
+fi
 
 echo ""
 echo "  $pass passed, $fail failed, $skip skipped"

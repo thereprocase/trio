@@ -56,12 +56,24 @@ if [ "${1:-}" = "hub-service" ] || [ "${1:-}" = "upgrade" ]; then
     echo "Deploying server files: repo -> $HUB_DIR (backups: *.bak-$STAMP)"
     for f in nth_server.py nth_monitor.py nth_spoke_monitor.py nth_console.py \
              nth_dashboard.py nth_web.py nth_stt_worker.py quartet_server.py \
-             nth_constants.py nth_doctor.py codex_context_publisher.py; do
+             nth_constants.py nth_doctor.py codex_context_publisher.py \
+             nth_supervisor.py nth_request_log.py \
+             nth_agent_manager.py \
+             nth_codex_runtime.py \
+             nth_usage.py nth_conversation.py nth_ask_client.js; do
         if [ -f "$HUB_DIR/$f" ] && ! cmp -s "$SCRIPT_DIR/server/$f" "$HUB_DIR/$f"; then
             cp "$HUB_DIR/$f" "$HUB_DIR/$f.bak-$STAMP"
         fi
         cp "$SCRIPT_DIR/server/$f" "$HUB_DIR/$f"
     done
+
+    # The browser bundle. nth_web.py composes its page from these files at
+    # IMPORT time, so without them the dashboard does not start at all — it
+    # raises before it can serve or log a thing. Copied as a DIRECTORY rather
+    # than as named files so that adding a CSS layer never requires an edit
+    # here; a named list is exactly what drifted for the Python modules above.
+    rm -rf "${HUB_DIR:?}/web"
+    cp -R "$SCRIPT_DIR/server/web" "$HUB_DIR/web"
 
     # Dedicated venv — same rationale and pin as spoke mode (mcp 2.0 removed
     # FastMCP; OS python upgrades orphan site-packages). Wheels only.
@@ -396,9 +408,33 @@ cp "$SCRIPT_DIR/server/nth_web.py" "$SERVER_DIR/nth_web.py"
 cp "$SCRIPT_DIR/server/nth_stt_worker.py" "$SERVER_DIR/nth_stt_worker.py"
 cp "$SCRIPT_DIR/server/quartet_server.py" "$SERVER_DIR/quartet_server.py"
 cp "$SCRIPT_DIR/server/nth_constants.py" "$SERVER_DIR/nth_constants.py"
+# The agent supervisor and its per-request token log. nth_web imports both at
+# module scope, so omitting them stops the dashboard importing at all — and
+# only on an installed copy, never from the repo, where every sibling is
+# present. tests/test-install-manifest.py enforces this against BOTH lists.
+cp "$SCRIPT_DIR/server/nth_supervisor.py" "$SERVER_DIR/nth_supervisor.py"
+cp "$SCRIPT_DIR/server/nth_request_log.py" "$SERVER_DIR/nth_request_log.py"
+cp "$SCRIPT_DIR/server/nth_codex_runtime.py" "$SERVER_DIR/nth_codex_runtime.py"
+cp "$SCRIPT_DIR/server/nth_agent_manager.py" "$SERVER_DIR/nth_agent_manager.py"
+# Quota-burn series + the arithmetic over it.
+cp "$SCRIPT_DIR/server/nth_usage.py" "$SERVER_DIR/nth_usage.py"
+# Conversation identity (canonical DM thread keys). nth_web imports it at
+# module scope.
+cp "$SCRIPT_DIR/server/nth_conversation.py" "$SERVER_DIR/nth_conversation.py"
+# The ask-picker helpers. Not a Python import but read at IMPORT time all the
+# same — nth_web inlines this file into the page — so an install missing it
+# raises before the dashboard can serve anything, exactly like a missing
+# module. It lives outside server/web/ so Node can require() it in tests.
+cp "$SCRIPT_DIR/server/nth_ask_client.js" "$SERVER_DIR/nth_ask_client.js"
 cp "$SCRIPT_DIR/server/nth_doctor.py" "$SERVER_DIR/nth_doctor.py"
 cp "$SCRIPT_DIR/server/nth_spoke_monitor.py" "$SERVER_DIR/nth_spoke_monitor.py"
 cp "$SCRIPT_DIR/server/codex_context_publisher.py" "$SERVER_DIR/codex_context_publisher.py"
+# The browser bundle — index.html plus the ordered CSS/JS layers. nth_web.py
+# reads these at IMPORT time to compose the served page, so an install without
+# them cannot start the dashboard at all. Copied as a DIRECTORY so a new asset
+# never needs an edit here. See tests/test-install-manifest.py.
+rm -rf "${SERVER_DIR:?}/web"
+cp -R "$SCRIPT_DIR/server/web" "$SERVER_DIR/web"
 
 # nth-doctor launcher: stdlib-only health check, callable from anywhere.
 if [ "$PLATFORM" != "windows" ]; then
@@ -412,6 +448,7 @@ LAUNCHER
 fi
 cp "$SCRIPT_DIR/server/nth_turn_hook.py" "$SERVER_DIR/nth_turn_hook.py"
 cp "$SCRIPT_DIR/server/nth_activity_hook.py" "$SERVER_DIR/nth_activity_hook.py"
+cp "$SCRIPT_DIR/server/nth_stall_hook.py" "$SERVER_DIR/nth_stall_hook.py"
 
 # Clean up deprecated files from earlier Haiku-subagent design
 rm -f "$SERVER_DIR/nth_sentinel.py" \
@@ -592,6 +629,7 @@ native_path() {  # native_path <posix-path>
 }
 TURN_NATIVE=$(native_path "$SERVER_DIR/nth_turn_hook.py")
 ACTIVITY_NATIVE=$(native_path "$SERVER_DIR/nth_activity_hook.py")
+STALL_NATIVE=$(native_path "$SERVER_DIR/nth_stall_hook.py")
 
 "$PYTHON_CMD" -c "
 import json, os, tempfile
@@ -601,8 +639,10 @@ settings_path = r'''$SETTINGS_JSON'''
 py = r'''$PYTHON_CMD'''
 turn  = r'''$TURN_NATIVE'''
 activity = r'''$ACTIVITY_NATIVE'''
+stall = r'''$STALL_NATIVE'''
 turn_cmd  = f'{py} \"{turn}\"'
 activity_cmd = f'{py} \"{activity}\"'
+stall_cmd = f'{py} \"{stall}\"'
 
 # Match every StopFailure error type (not just the transient ones): the watchdog
 settings = {}
@@ -645,6 +685,15 @@ changed |= register('StopFailure', 'nth_turn_hook.py',  turn_cmd)
 # activity, regardless of kind.
 changed |= register('PreToolUse',       'nth_activity_hook.py', activity_cmd)
 changed |= register('UserPromptSubmit', 'nth_activity_hook.py', activity_cmd)
+# PostToolUse too: it is what clears blocked_since when the human answers an
+# AskUserQuestion/ExitPlanMode. Without it a session stays flagged blocked until
+# the turn ends, which is most of the window the flag is supposed to cover.
+changed |= register('PostToolUse',      'nth_activity_hook.py', activity_cmd)
+# Records a turn that died to an API error, so a frozen session shows STALLED
+# on the roster instead of looking healthy. Matcher-less on every StopFailure
+# error type: a matcher would drop an unrecognised error before anyone saw it,
+# and the badge's whole job is to make the unnoticed visible.
+changed |= register('StopFailure', 'nth_stall_hook.py', stall_cmd)
 
 if not changed:
     print('trio hooks: already registered')

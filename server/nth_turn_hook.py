@@ -78,7 +78,14 @@ def main() -> int:
                                isolation_level=None)
         conn.execute("PRAGMA busy_timeout=50")
         conn.execute(
-                "UPDATE sessions SET last_turn_end = ? "
+                # blocked_since is cleared here as well as stamped: it marks a
+                # session frozen on an interactive prompt (nth_activity_hook),
+                # and a prompt the user aborts with Esc fires no PostToolUse, so
+                # nothing else would clear it. A turn end always happens, and by
+                # definition nothing is waiting on a human once the turn is
+                # over — so this bounds a stale flag to the turn that set it,
+                # which is exactly the idle stretch where the indicator matters.
+                "UPDATE sessions SET last_turn_end = ?, blocked_since = NULL "
                 " WHERE fingerprint = ? AND revoked_at IS NULL"
                 # Scope to the NEWEST live session per channel for this fingerprint.
                 # A CLAUDE_CODE_SESSION_ID is not unique to a member: nth_connect

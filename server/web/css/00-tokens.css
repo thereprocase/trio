@@ -1,0 +1,293 @@
+/* ============================================================
+   nth — design tokens
+   ============================================================ */
+:root {
+  /* type */
+  --font-display: "Fraunces", Georgia, serif;
+  --font-body: "Hanken Grotesk", system-ui, -apple-system, sans-serif;
+  --avatar-svg-filter: none;
+
+  /* radii */
+  --r-xs: 8px;
+  --r-sm: 12px;
+  --r-md: 16px;
+  --r-lg: 22px;
+  --r-xl: 30px;
+  --r-full: 999px;
+
+  /* spacing rhythm */
+  --sp-1: 4px;  --sp-2: 8px;  --sp-3: 12px; --sp-4: 16px;
+  --sp-5: 24px; --sp-6: 32px; --sp-7: 48px;
+
+  /* motion */
+  --ease: cubic-bezier(.22,.61,.36,1);
+  --ease-soft: cubic-bezier(.34,1.2,.64,1);
+  --dur: .28s;
+  /* Status-dot ripple rates. Rhythm carries urgency, so these are a ratio
+     before they are durations: blocked travels in half the time busy does,
+     and that 2x is the only cue left once hue collapses under deuteranopia. */
+  --pulse-busy: 1.2s;
+  --pulse-blocked: .7s;
+
+  /* ---- LIGHT THEME: light-1 (warm off-white paper, default) ---- */
+  --bg: #ece7e1;                 /* room */
+  --bg-sink: #e3ddd5;            /* recessed */
+  --surface: #f7f4ef;           /* raised cards */
+  --surface-2: #fbf9f6;         /* highest */
+  --surface-hover: #f0ebe4;
+  --sidebar: #efe9e2;
+  --sidebar-hover: #f5f1ec;
+  --line: #ddd4c9;              /* hairlines */
+  --line-soft: #e6ded4;
+
+  --ink: #2c2723;               /* primary text */
+  --ink-2: #5c554d;             /* secondary */
+  --ink-3: #8b8378;             /* muted */
+  --ink-inv: #f7f4ef;
+
+  --bubble-me: var(--accent);
+  --bubble-me-ink: #ffffff;
+  --bubble-agent: #ffffff;
+  --bubble-agent-ink: var(--ink);
+
+  --shadow-sm: 0 1px 2px rgba(58,48,38,.06), 0 1px 3px rgba(58,48,38,.05);
+  --shadow-md: 0 4px 14px rgba(58,48,38,.09), 0 2px 6px rgba(58,48,38,.05);
+  --shadow-lg: 0 18px 50px rgba(48,38,28,.18), 0 6px 18px rgba(48,38,28,.10);
+  --shadow-pop: 0 12px 40px rgba(48,38,28,.22);
+
+  --code-bg: #efe9e1;
+  --code-ink: #6b4f66;
+
+  --accent: #3d7a63;
+  --accent-strong: #316451;
+  --accent-tint: #e3ede7;
+
+  --focus: color-mix(in oklab, var(--accent) 55%, transparent);
+
+  /* warm secondary accent (apricot) shared by both themes, tuned per theme */
+  --warm: #d98a5b;
+  --warm-soft: color-mix(in oklab, var(--warm) 18%, var(--surface));
+
+  /* status */
+  --st-online: #5b9a6f;
+  --st-thinking: #c98a3c;
+  --st-idle: #b0a99d;
+  --st-offline: #b9b1a6;
+
+  /* z-index scale */
+  --z-base: 1;
+  --z-rail: 10;
+  --z-sidebar: 60;
+  --z-scrim: 80;
+  --z-search: 85;
+  --z-drawer: 70;
+  --z-menu: 90;
+  --z-dialog: 100;
+  --z-toast: 110;
+}
+/* Explicit light-1 selector so the theme-picker swatch (which carries
+   data-theme="light-1") resolves to its own tokens instead of inheriting
+   the currently-active theme. Mirrors the :root color block above. */
+[data-theme="light-1"] {
+  --bg:#ece7e1; --bg-sink:#e3ddd5; --surface:#f7f4ef; --surface-2:#fbf9f6; --surface-hover:#f0ebe4;
+  --sidebar:#efe9e2; --sidebar-hover:#f5f1ec; --line:#ddd4c9; --line-soft:#e6ded4;
+  --ink:#2c2723; --ink-2:#5c554d; --ink-3:#8b8378; --ink-inv:#f7f4ef;
+  --bubble-agent:#ffffff; --code-bg:#efe9e1; --code-ink:#6b4f66;
+  --accent:#3d7a63; --accent-strong:#316451; --accent-tint:#e3ede7;
+  --warm:#d98a5b; --warm-soft:color-mix(in oklab,#d98a5b 18%, #f7f4ef);
+  --st-online:#5b9a6f; --st-thinking:#c98a3c; --st-idle:#b0a99d; --st-offline:#b9b1a6;
+}
+
+/* ---- other LIGHT presets ----
+   Same near-white/off-white surface treatment as light-1 — only the undertone
+   (warm/cool/neutral) and the accent change. Color lives in the accent, not
+   in a full-page tint. */
+[data-theme="light-3"] {
+  /* cool neutral gray, slate blue accent */
+  --bg:#eef0f3; --bg-sink:#e4e7ec; --surface:#f9fafb; --surface-2:#fdfdfe; --surface-hover:#eef1f4;
+  --sidebar:#eef1f4; --sidebar-hover:#f4f6f8; --line:#d8dde3; --line-soft:#e4e8ec;
+  --ink:#20242b; --ink-2:#525a65; --ink-3:#838c97; --bubble-agent:#ffffff; --code-bg:#eef1f5; --code-ink:#4a6580;
+  --accent:#607d9b; --accent-strong:#4a6580; --accent-tint:#e2e7ec;
+}
+[data-theme="light-5"] {
+  /* true neutral off-white, terracotta accent */
+  --bg:#f2f0ec; --bg-sink:#e8e5df; --surface:#fbfaf8; --surface-2:#fdfdfc; --surface-hover:#f4f2ee;
+  --sidebar:#f4f2ee; --sidebar-hover:#f8f6f3; --line:#ded9d0; --line-soft:#e9e6e0;
+  --ink:#262320; --ink-2:#58524a; --ink-3:#8a8378; --bubble-agent:#ffffff; --code-bg:#f2eee7; --code-ink:#8a5a2e;
+  --accent:#b0632f; --accent-strong:#93501f; --accent-tint:#f3e4d5;
+}
+[data-theme="light-6"] {
+  /* warm sand whisper, plum accent */
+  --bg:#f2ede2; --bg-sink:#e8e1d2; --surface:#fbf9f3; --surface-2:#fdfcf9; --surface-hover:#f5f1e7;
+  --sidebar:#f5f1e7; --sidebar-hover:#f9f6ee; --line:#ded4bf; --line-soft:#ebe5d5;
+  --ink:#2c2619; --ink-2:#5c5340; --ink-3:#8c8168; --bubble-agent:#ffffff; --code-bg:#f2ecd9; --code-ink:#7d5c8a;
+  --accent:#8a4f78; --accent-strong:#743f64; --accent-tint:#f1e6ee;
+}
+[data-theme="light-4"] {
+  /* near-white, barely warm, coral accent */
+  --bg:#f6f5f3; --bg-sink:#ededeb; --surface:#fcfbf9; --surface-2:#fefefd; --surface-hover:#f0efed;
+  --sidebar:#f0efed; --sidebar-hover:#f6f5f3; --line:#e0ddd9; --line-soft:#ebe9e5;
+  --ink:#24211c; --ink-2:#544e46; --ink-3:#847d72; --bubble-agent:#ffffff; --code-bg:#f2f0ec; --code-ink:#b85544;
+  --accent:#d65a4a; --accent-strong:#bf4839; --accent-tint:#f6e0db;
+}
+[data-theme="light-2"] {
+  /* near-white, barely cool, sky blue accent — lighter than light-3 */
+  --bg:#f5f7f9; --bg-sink:#ebeef2; --surface:#fcfdfe; --surface-2:#fefefe; --surface-hover:#eff2f5;
+  --sidebar:#eff2f5; --sidebar-hover:#f5f7f9; --line:#dde3e9; --line-soft:#e8edf2;
+  --ink:#1a222b; --ink-2:#4a5662; --ink-3:#7a8692; --bubble-agent:#ffffff; --code-bg:#eff3f6; --code-ink:#2c7ab8;
+  --accent:#2c8fd6; --accent-strong:#1f74b8; --accent-tint:#dcebf7;
+}
+
+/* ---- INSPIRED interfaces ----
+   These palettes are deliberately small and period-correct. The component
+   vocabulary lives in 35-historic.css, where each preset gets native-feeling
+   window chrome and controls rather than merely inheriting modern cards. */
+[data-theme="historic-win98"] {
+  --font-display:"MS Sans Serif",Tahoma,Geneva,sans-serif;
+  --font-body:"MS Sans Serif",Tahoma,Geneva,sans-serif;
+  --bg:#008080; --bg-sink:#808080; --surface:#c0c0c0; --surface-2:#ffffff; --surface-hover:#d4d0c8;
+  --sidebar:#c0c0c0; --sidebar-hover:#000080; --line:#808080; --line-soft:#a0a0a0;
+  --ink:#000000; --ink-2:#202020; --ink-3:#505050; --ink-inv:#ffffff;
+  --bubble-agent:#ffffff; --bubble-me:#000080; --bubble-me-ink:#ffffff;
+  --code-bg:#ffffff; --code-ink:#000080;
+  --accent:#000080; --accent-strong:#000080; --accent-tint:#d4d0c8;
+  --warm:#800000; --warm-soft:#e0e0e0; --focus:#000000;
+  --st-online:#008000; --st-thinking:#808000; --st-idle:#808080; --st-offline:#808080;
+  --r-xs:0; --r-sm:0; --r-md:0; --r-lg:0; --r-xl:0; --r-full:0;
+  --shadow-sm:none; --shadow-md:2px 2px 0 #000; --shadow-lg:4px 4px 0 rgba(0,0,0,.72); --shadow-pop:3px 3px 0 #000;
+}
+[data-theme="historic-gameboy"] {
+  --font-display:"Courier New",ui-monospace,monospace;
+  --font-body:"Courier New",ui-monospace,monospace;
+  --bg:#8b956d; --bg-sink:#4b5136; --surface:#9ca66f; --surface-2:#c4cfa1; --surface-hover:#6f7751;
+  --sidebar:#4b5136; --sidebar-hover:#8b956d; --line:#303623; --line-soft:#59613e;
+  --ink:#20251a; --ink-2:#303623; --ink-3:#4b5136; --ink-inv:#c4cfa1;
+  --bubble-agent:#c4cfa1; --bubble-me:#303623; --bubble-me-ink:#c4cfa1;
+  --code-bg:#8b956d; --code-ink:#20251a;
+  --accent:#303623; --accent-strong:#20251a; --accent-tint:#a8b17d;
+  --warm:#4b5136; --warm-soft:#a8b17d; --focus:#20251a;
+  --st-online:#303623; --st-thinking:#4b5136; --st-idle:#6f7751; --st-offline:#8b956d;
+  --r-xs:0; --r-sm:0; --r-md:0; --r-lg:0; --r-xl:0; --r-full:0;
+  --shadow-sm:3px 3px 0 #303623; --shadow-md:5px 5px 0 #303623; --shadow-lg:8px 8px 0 #20251a; --shadow-pop:6px 6px 0 #20251a;
+}
+[data-theme="historic-geocities"] {
+  --font-display:"Comic Sans MS","Comic Sans",cursive;
+  --font-body:"Times New Roman",Times,serif;
+  --bg:#000033; --bg-sink:#000000; --surface:#000066; --surface-2:#000000; --surface-hover:#330066;
+  --sidebar:#000000; --sidebar-hover:#0000aa; --line:#00ffff; --line-soft:#ff00ff;
+  --ink:#ffffff; --ink-2:#ffff00; --ink-3:#00ffff; --ink-inv:#000000;
+  --bubble-agent:#000066; --bubble-me:#660066; --bubble-me-ink:#ffffff;
+  --code-bg:#000000; --code-ink:#00ff00;
+  --accent:#ff00ff; --accent-strong:#00ffff; --accent-tint:#330066;
+  --warm:#ffff00; --warm-soft:#660000; --focus:#ffff00;
+  --st-online:#00ff00; --st-thinking:#ffff00; --st-idle:#00ffff; --st-offline:#808080;
+  --r-xs:0; --r-sm:0; --r-md:0; --r-lg:0; --r-xl:0; --r-full:0;
+  --shadow-sm:3px 3px 0 #00ffff; --shadow-md:5px 5px 0 #ff00ff; --shadow-lg:8px 8px 0 #000; --shadow-pop:5px 5px 0 #ffff00;
+  --avatar-svg-filter:invert(1);
+}
+[data-theme="inspired-ipod"] {
+  --font-display:"Helvetica Neue",Helvetica,Arial,sans-serif;
+  --font-body:"Helvetica Neue",Helvetica,Arial,sans-serif;
+  --bg:#d8d8d8; --bg-sink:#b8b8b8; --surface:#f7f7f7; --surface-2:#ffffff; --surface-hover:#e9e9e9;
+  --sidebar:#eeeeee; --sidebar-hover:#d8e8f8; --line:#a9a9a9; --line-soft:#d3d3d3;
+  --ink:#111111; --ink-2:#3d3d3d; --ink-3:#707070; --ink-inv:#ffffff;
+  --bubble-agent:#ffffff; --bubble-me:#2879c5; --bubble-me-ink:#ffffff;
+  --code-bg:#ececec; --code-ink:#174c7c;
+  --accent:#2879c5; --accent-strong:#125eaa; --accent-tint:#d9eaf9;
+  --warm:#e26b20; --warm-soft:#f8e5d8; --focus:#2879c5;
+  --st-online:#4d9200; --st-thinking:#d48b00; --st-idle:#888888; --st-offline:#aaaaaa;
+  --r-xs:3px; --r-sm:5px; --r-md:8px; --r-lg:12px; --r-xl:18px; --r-full:999px;
+  --shadow-sm:0 1px 2px rgba(0,0,0,.28); --shadow-md:0 4px 12px rgba(0,0,0,.28); --shadow-lg:0 12px 32px rgba(0,0,0,.35); --shadow-pop:0 8px 24px rgba(0,0,0,.4);
+}
+[data-theme="inspired-messenger"] {
+  --font-display:Helvetica,Arial,sans-serif;
+  --font-body:Helvetica,Arial,sans-serif;
+  --bg:#1e1e1f; --bg-sink:#262628; --surface:#2d2d2f; --surface-2:#353537; --surface-hover:#3b3b3e;
+  --sidebar:#29292b; --sidebar-hover:#3a3a3d; --line:#48484a; --line-soft:#39393c;
+  --ink:#f5f5f7; --ink-2:#c6c6c8; --ink-3:#8d8d92; --ink-inv:#fff;
+  --bubble-agent:#3a3a3c; --bubble-me:#0a84ff; --bubble-me-ink:#fff;
+  --code-bg:#29292b; --code-ink:#a9d4ff;
+  --accent:#0a84ff; --accent-strong:#409cff; --accent-tint:#173d67;
+  --warm:#ff9f0a; --warm-soft:#4a3514; --focus:#0a84ff;
+  --st-online:#30d158; --st-thinking:#ff9f0a; --st-idle:#8e8e93; --st-offline:#636366;
+  --r-xs:4px; --r-sm:8px; --r-md:12px; --r-lg:16px; --r-xl:20px; --r-full:999px;
+  --shadow-sm:0 1px 2px rgba(0,0,0,.35); --shadow-md:0 5px 14px rgba(0,0,0,.35); --shadow-lg:0 15px 36px rgba(0,0,0,.45); --shadow-pop:0 8px 24px rgba(0,0,0,.5);
+}
+[data-theme="inspired-slack"] {
+  --font-display:"Lato","Helvetica Neue",Arial,sans-serif;
+  --font-body:"Lato","Helvetica Neue",Arial,sans-serif;
+  --bg:#ffffff; --bg-sink:#e8e8e8; --surface:#ffffff; --surface-2:#ffffff; --surface-hover:#f8f8f8;
+  --sidebar:#3f0e40; --sidebar-hover:#350d36; --line:#dddddd; --line-soft:#eeeeee;
+  --ink:#1d1c1d; --ink-2:#616061; --ink-3:#868686; --ink-inv:#ffffff;
+  --bubble-agent:#ffffff; --bubble-me:#ffffff; --bubble-me-ink:#1d1c1d;
+  --code-bg:#f8f8f8; --code-ink:#1264a3;
+  --accent:#1264a3; --accent-strong:#0b4c7a; --accent-tint:#e8f5fa;
+  --warm:#e8912d; --warm-soft:#fff2df; --focus:#2bac76;
+  --st-online:#2bac76; --st-thinking:#e8912d; --st-idle:#9a9a9a; --st-offline:#777777;
+  --r-xs:3px; --r-sm:4px; --r-md:6px; --r-lg:8px; --r-xl:10px; --r-full:999px;
+  --shadow-sm:0 1px 1px rgba(0,0,0,.1); --shadow-md:0 4px 12px rgba(0,0,0,.15); --shadow-lg:0 12px 32px rgba(0,0,0,.2); --shadow-pop:0 8px 28px rgba(0,0,0,.25);
+}
+
+/* ---- DARK presets ----
+   Shared mechanical tokens (shadows, inverse ink, the secondary "warm" chip
+   color) live once here; each named preset below only overrides its own
+   identity — bg family, ink, and accent. */
+[data-theme^="dark-"] {
+  --avatar-svg-filter: invert(1);
+  --ink-inv: #1a1714;
+  --bubble-me-ink: #ffffff;
+  --bubble-agent-ink: var(--ink);
+
+  --shadow-sm: 0 1px 2px rgba(0,0,0,.35);
+  --shadow-md: 0 6px 18px rgba(0,0,0,.42);
+  --shadow-lg: 0 22px 60px rgba(0,0,0,.6), 0 8px 22px rgba(0,0,0,.45);
+  --shadow-pop: 0 14px 46px rgba(0,0,0,.6);
+
+  --warm: #e09a6b;
+  --warm-soft: color-mix(in oklab, var(--warm) 16%, var(--surface));
+
+  --st-idle: #6f685d;
+  --st-offline: #58524a;
+}
+[data-theme="dark-3"] {
+  /* true neutral dark gray/black, indigo accent (default) */
+  --bg:#19191b; --bg-sink:#131315; --surface:#242426; --surface-2:#2d2d30; --surface-hover:#333336;
+  --sidebar:#1e1e20; --sidebar-hover:#333336; --line:#39393c; --line-soft:#2e2e31;
+  --ink:#eeeeef; --ink-2:#b8b8bb; --ink-3:#87878b; --bubble-agent:#2d2d30; --code-bg:#1c1c1e; --code-ink:#9aa4e8;
+  --accent:#8e94e6; --accent-strong:#a4a9ef; --accent-tint:#2a2c44;
+}
+[data-theme="dark-6"] {
+  /* deep blue-black, amber accent */
+  --bg:#151a26; --bg-sink:#10141e; --surface:#202838; --surface-2:#293247; --surface-hover:#303a51;
+  --sidebar:#1a2230; --sidebar-hover:#303b50; --line:#3a465d; --line-soft:#2e394e;
+  --ink:#e8edf7; --ink-2:#b5c0d2; --ink-3:#8290a7; --bubble-agent:#293247; --code-bg:#1b2332; --code-ink:#e0a165;
+  --accent:#dd944f; --accent-strong:#e8ab72; --accent-tint:#3a2c1e;
+}
+[data-theme="dark-4"] {
+  /* cool blue-gray, teal accent */
+  --bg:#181d22; --bg-sink:#11161a; --surface:#252d34; --surface-2:#2e3841; --surface-hover:#37434d;
+  --sidebar:#1e252b; --sidebar-hover:#36424b; --line:#3c4a54; --line-soft:#313e47;
+  --ink:#e9eff2; --ink-2:#b9c7cd; --ink-3:#85959d; --bubble-agent:#2e3841; --code-bg:#1e252b; --code-ink:#7fd0c9;
+  --accent:#4fb3ac; --accent-strong:#6ec4bd; --accent-tint:#1f322f;
+}
+[data-theme="dark-1"] {
+  /* true near-black, clean blue accent (GitHub Dark / VS Code family) */
+  --bg:#0d0d0f; --bg-sink:#08080a; --surface:#161618; --surface-2:#1d1d20; --surface-hover:#242427;
+  --sidebar:#111113; --sidebar-hover:#242427; --line:#2a2a2e; --line-soft:#202024;
+  --ink:#e8e8ec; --ink-2:#b0b0b6; --ink-3:#76767c; --bubble-agent:#1d1d20; --code-bg:#131315; --code-ink:#79b8ff;
+  --accent:#4493f8; --accent-strong:#5ba3ff; --accent-tint:#162033;
+}
+[data-theme="dark-2"] {
+  /* true black, vivid green accent (terminal-style) */
+  --bg:#000000; --bg-sink:#000000; --surface:#0a0a0a; --surface-2:#141414; --surface-hover:#1c1c1c;
+  --sidebar:#050505; --sidebar-hover:#1c1c1c; --line:#262626; --line-soft:#1a1a1a;
+  --ink:#e0e0e0; --ink-2:#a8a8a8; --ink-3:#6e6e6e; --bubble-agent:#141414; --code-bg:#080808; --code-ink:#5fff8a;
+  --accent:#3fd66a; --accent-strong:#5fe888; --accent-tint:#0d2818;
+}
+[data-theme="dark-5"] {
+  /* near-black, barely cool, cyan accent */
+  --bg:#111316; --bg-sink:#0c0e10; --surface:#1a1d22; --surface-2:#22262c; --surface-hover:#292d34;
+  --sidebar:#15171a; --sidebar-hover:#292d34; --line:#2e333a; --line-soft:#232830;
+  --ink:#e8eaee; --ink-2:#b0b6c0; --ink-3:#767d88; --bubble-agent:#22262c; --code-bg:#16191d; --code-ink:#56d4e0;
+  --accent:#3dd0e0; --accent-strong:#5fdcec; --accent-tint:#103038;
+}
