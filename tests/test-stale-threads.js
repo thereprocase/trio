@@ -129,6 +129,21 @@ check('the spread is 3/7/14/30 plus Never',
 check('the default is one of the offered values',
       offered.includes(Number(Trio.preferences.read().staleThreadDays ?? 7)));
 
+// Saving the preference emits preferences:changed. The workspace must consume
+// that signal or the persisted selection and visible sidebar disagree until
+// the next 15-second refresh.
+setup({ days: 0, channels: [{ code: 'quiet', last_at: ago(90), unread: 0 }] });
+Trio.workspace.render();
+const rail = cx.document.getElementById('workspace-rail');
+check('quiet channel starts visible while old-thread filtering is disabled',
+      [...rail.querySelectorAll('.nav-label')].some(el => el.textContent === 'quiet'));
+Trio.workspace.mount();
+Trio.preferences.save({ staleThreadDays: 14 });
+check('saving Hide old threads repaints the sidebar immediately',
+      ![...rail.querySelectorAll('.nav-label')].some(el => el.textContent === 'quiet')
+      && rail.querySelector('.nav-stale-toggle')?.textContent === 'Show 1 older channel');
+Trio.workspace.unmount();
+
 // ── archived is a separate axis ─────────────────────────────────────────────
 setup({ days: 14, channels: [
   { code: 'arch', last_at: ago(90), archived: true },
