@@ -16,7 +16,30 @@
   let lifecycleInstalled = false;
   let sawHidden = false;
   let lastLifecycleRestartAt = 0;
+  // Last painted pill text/tone. Held so a publish can describe the pill and
+  // the machine state together — see publish().
+  let pillText = 'connecting';
+  let pillFailed = true;
+  // An outage in progress. `recovering` is deliberately NOT cleared by a
+  // socket opening: a replacement stream's onopen proves only that a
+  // connection exists, never that data is flowing. Only receipt proof on every
+  // required feed clears it (clearRecoveryOnProof), so the strip cannot flash
+  // "recovered" at a user whose feed is still silent.
+  let staleSince = null;
+  let recovering = false;
+  // States that mean "we have lost proof and are trying to get it back".
+  const RECOVERY_STATES = new Set([
+    'reconnecting', 'workspace:reconnecting', 'stale', 'workspace:stale',
+  ]);
+  const RECOVERING_COPY = 'Not receiving updates — reconnecting…';
   function setConnection(text, failed = false) {
+    // Paints the header pill and records what it says. Publishing is a
+    // separate step: this used to write the store too, using the module
+    // `state` that its own caller was about to change on the very next line,
+    // so every consumer received the PREVIOUS state alongside the NEW text and
+    // 'live' was never published at all.
+    pillText = text;
+    pillFailed = failed;
     const el = document.getElementById('h-conn');
     const cls = failed ? (text === 'offline' ? 'offline' : 'reconnect') : 'live';
     if (el) {
@@ -25,11 +48,56 @@
       if (label) label.textContent = text;
       else el.textContent = text;
     }
-    if (Trio.store) Trio.store.set('connection', { text, failed, state });
-    if (failed) Trio.ui?.setLive?.('Connection ' + text);
+  }
+  function onConversationRoute() {
+    // Read the route off the state the router already maintains: showView()
+    // clears both when it leaves for a workspace page, and openChannel/openDm
+    // set one before starting a feed. Deliberately NOT a DOM query — the
+    // '.conversation-shell.workspace-page' class would say the same thing, but
+    // it lives in another module's markup contract and document-level
+    // querySelector is one of the things the DOM harness cannot exercise, so a
+    // route bug there would be invisible to every test we could write.
+    const routed = Trio.state || {};
+    return !!(routed.channel || routed.dmKey);
+  }
+  function freshnessSnapshot() {
+    return { text: pillText, failed: pillFailed, state, staleSince, recovering };
+  }
+  function renderFreshness() {
+    const el = document.getElementById('chat-freshness');
+    if (!el) return false;
+    const show = recovering && onConversationRoute();
+    el.hidden = !show;
+    // Rewriting identical text inside a live region re-announces it. Only
+    // touch the node when the message actually changes.
+    const next = show ? RECOVERING_COPY : '';
+    if (el.textContent !== next) el.textContent = next;
+    return show;
+  }
+  // One publish point. Store, strip and announcer are written from a single
+  // snapshot so they cannot describe different transitions.
+  function publish() {
+    const announced = renderFreshness();
+    if (Trio.store) Trio.store.set('connection', freshnessSnapshot());
+    // The strip is the polite live region wherever it is on screen. Fall back
+    // to the shared announcer only where it is not, so a transition is never
+    // announced twice.
+    if (!announced && pillFailed) Trio.ui?.setLive?.('Connection ' + pillText);
+  }
+  function trackRecovery(nextState) {
+    if (RECOVERY_STATES.has(nextState)) {
+      if (staleSince == null) staleSince = Date.now();
+      recovering = true;
+    } else if (nextState === 'offline' || nextState === 'workspace:offline') {
+      // Deliberately stopping a feed is not an outage to recover from.
+      if (!stream && !workspaceStream) { staleSince = null; recovering = false; }
+    }
+    // connecting/connected/live do not clear — see the `recovering` note above.
   }
   function notify(newState, detail = {}) {
     state = newState;
+    trackRecovery(newState);
+    publish();
     events.dispatchEvent(new CustomEvent('connection', { detail: { state, ...detail } }));
   }
   function dispatch(payload) {
@@ -66,24 +134,35 @@
   // it so the per-channel paths below don't clobber the pill back to offline.
   let workspaceLive = false;
   let channelLive = false;
-  function showLiveWhenAllRequiredFeedsAreFresh() {
+  function allRequiredFeedsFresh() {
     const workspaceReady = !workspaceStream || workspaceLive;
     const channelReady = !stream || channelLive;
-    if (workspaceReady && channelReady && (workspaceStream || stream)) setConnection('live');
+    return workspaceReady && channelReady && !!(workspaceStream || stream);
+  }
+  function showLiveWhenAllRequiredFeedsAreFresh() {
+    if (allRequiredFeedsFresh()) setConnection('live');
+  }
+  function clearRecoveryOnProof() {
+    if (allRequiredFeedsFresh()) { staleSince = null; recovering = false; }
   }
   function markChannelFresh() {
     channelLastReceivedAt = Date.now();
     const wasLive = channelLive;
     channelLive = true;
     showLiveWhenAllRequiredFeedsAreFresh();
-    if (!wasLive) notify('live');
+    clearRecoveryOnProof();
+    // Exactly one publish either way: notify() publishes, so the bare publish()
+    // is only for the case where the state is unchanged but the pill and the
+    // recovery flags are not.
+    if (!wasLive) notify('live'); else publish();
   }
   function markWorkspaceFresh() {
     workspaceLastReceivedAt = Date.now();
     const wasLive = workspaceLive;
     workspaceLive = true;
     showLiveWhenAllRequiredFeedsAreFresh();
-    if (!wasLive) notify('workspace:live');
+    clearRecoveryOnProof();
+    if (!wasLive) notify('workspace:live'); else publish();
   }
   function ensureWatchdog() {
     if (!watchdog) {
@@ -216,7 +295,7 @@
   function stopWorkspaceEvents() {
     workspaceStream?.close(); workspaceStream = null; workspaceLive = false;
     workspaceStartedAt = 0; workspaceLastReceivedAt = 0;
-    notify('workspace:offline'); setConnection('offline', true); maybeStopWatchdog();
+    setConnection('offline', true); notify('workspace:offline'); maybeStopWatchdog();
   }
   function stopEvents() {
     stream?.close(); stream = null; currentChannel = null; channelLive = false;
@@ -231,6 +310,11 @@
   Trio.stopWorkspaceEvents = stopWorkspaceEvents;
   Trio.events = events;
   Trio.checkEventFreshness = checkEventFreshness;
+  // Read-only view of what the strip, the store and the pill were last told.
+  Trio.freshnessSnapshot = freshnessSnapshot;
+  // Re-render the strip without a connection transition — the router calls this
+  // when the route changes, since the strip is conversation-only.
+  Trio.renderFreshness = () => { renderFreshness(); };
   // Exposed for testability — the DOM test harness has no real EventSource,
   // so this is the entry point tests use to simulate an SSE payload arriving
   // (from either stream; dispatch() itself doesn't know which one a given
