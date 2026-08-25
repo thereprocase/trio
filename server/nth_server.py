@@ -1297,6 +1297,12 @@ def nth_connect(
             reclaiming = False
             member_id = ""
 
+    # Set by the reclaim branch below, read at session-mint time — so it has to
+    # outlive the `if existing:` block it is decided in. A reclaim into a
+    # channel that does not exist yet cannot be re-attaching to anything, so
+    # False is the correct default for the create branch.
+    reclaimed_existing = False
+
     try:
         _reap_sessions(db)
         existing = _get_channel(db, channel)
@@ -1310,7 +1316,6 @@ def nth_connect(
             # the operator's member_id off the public roster and impersonate
             # them: mint a valid session token and read their DMs. Checked here,
             # before the capacity gate, because it is a refusal either way.
-            reclaimed_existing = False
             if reclaiming:
                 existing_row = db.execute(
                     "SELECT kind FROM members WHERE id = ? AND channel = ?",
@@ -1471,6 +1476,53 @@ def nth_connect(
         # so fingerprints were silently empty since v6.2.
         session_fingerprint = (os.environ.get("CLAUDE_CODE_SESSION_ID")
                                or os.environ.get("CLAUDE_SESSION_ID", ""))[:64]
+        # A successful reclaim DISPLACES the incumbent — it does not join it.
+        #
+        # Rotating reclaim_secret on every spawn guards the door: a secret from
+        # an old process cannot get in. It does nothing about whoever is already
+        # inside, because a session token, once minted, stays valid until
+        # _reap_sessions() expires it after a WEEK of silence. Nothing else in
+        # the send/poll path asks whether the holder is still the current
+        # occupant of the identity — only whether the token exists and is
+        # unrevoked.
+        #
+        # So two supervisors sharing one DB could each rotate the secret and
+        # spawn the same agent seconds apart, and BOTH ended up holding live
+        # primary sessions for one member_id. Observed: one agent answered every
+        # @mention twice for 18 hours, from two processes, under one name. The
+        # loser of the rotation race had already banked its token before the
+        # winner's UPDATE landed, and nothing ever took it away.
+        #
+        # Scoped to (member_id, channel) because that is what a session IS: an
+        # agent holding sessions in #room and in the agent inbox reclaims each
+        # separately, and re-attaching to one must not sever the other. Scoped
+        # to reclaims because an ordinary connect mints a brand-new member_id
+        # via _register_agent_identity() and so has no incumbent to displace.
+        # Scoped to primary because read_only tokens carry no authority to
+        # duplicate, and supervisor telemetry anchors use role='anchor'. The
+        # displaced session's next call gets "Invalid or revoked session_token"
+        # and the stale twin stops rather than lingering.
+        #
+        # Gated on `reclaiming` ALONE, deliberately — NOT on reclaimed_existing.
+        # That flag means "a members row exists", and the invariant defended
+        # here is about SESSIONS rows. They come apart: nth_web's
+        # _remove_from_channel deletes the members row but revokes sessions only
+        # when no presence remains ANYWHERE, so a multi-channel agent removed
+        # from one room keeps a live primary token for it. Reclaiming back in
+        # then found no members row, skipped the revoke, and left two live
+        # tokens on one identity — the very state this exists to prevent, still
+        # reachable from a dashboard button. (nth_purge is a second instance: it
+        # drops members and channels rows and never touches sessions.) By this
+        # line the caller has already passed the reclaim_secret check above, so
+        # whether a members row happens to exist is irrelevant to whether the
+        # incumbent capability should die.
+        if reclaiming:
+            db.execute(
+                "UPDATE sessions SET revoked_at = ? "
+                "WHERE member_id = ? AND channel = ? AND role = 'primary' "
+                "AND revoked_at IS NULL",
+                (now, member_id, channel),
+            )
         session_token = _mint_session_token(
             db, member_id, channel,
             role="primary", fingerprint=session_fingerprint, pid=session_pid,
@@ -1481,19 +1533,32 @@ def nth_connect(
         )
         db.commit()
 
-        # v7.3 fleet check-in: this process's own row, plus the caller's
-        # declared host when it names a different machine (an SSE spoke).
-        _checkin_self_node(db, force=True)
-        if node_host:
-            import socket
-            nh = node_host.strip()[:64]
-            if nh and nh != socket.gethostname():
-                try:
-                    upsert_node(db, nh, "spoke",
-                                nth_version=node_version.strip()[:32])
-                    db.commit()
-                except sqlite3.Error:
-                    pass
+        # PAST THE POINT OF NO RETURN. The commit above made the displacement
+        # durable: the incumbent's token is dead and its monitor is on its way
+        # out. Everything below is enrichment — fleet check-in, the objective,
+        # the inbox placement — and none of it is worth losing the token the
+        # caller just paid for. A busy-timeout OperationalError raised down here
+        # used to propagate out of the tool call, leaving the identity with the
+        # incumbent revoked, the replacement never told its token, and one live
+        # row nobody holds. Recoverable (the caller still has its
+        # reclaim_secret) but backwards, so the tail degrades instead of
+        # throwing.
+        try:
+            # v7.3 fleet check-in: this process's own row, plus the caller's
+            # declared host when it names a different machine (an SSE spoke).
+            _checkin_self_node(db, force=True)
+            if node_host:
+                import socket
+                nh = node_host.strip()[:64]
+                if nh and nh != socket.gethostname():
+                    try:
+                        upsert_node(db, nh, "spoke",
+                                    nth_version=node_version.strip()[:32])
+                        db.commit()
+                    except sqlite3.Error:
+                        pass
+        except sqlite3.Error:
+            pass
 
         # Fetch objective (pinned message) if any
         ch_row = _get_channel(db, channel)
@@ -1510,13 +1575,21 @@ def nth_connect(
         # guess hub-vs-spoke from filesystem heuristics (a box can be a trio
         # hub and a quartet spoke at once — hub-ness is per-server).
         is_sse = TOOL_PREFIX == "quartet"
+        # --session-token is what lets the monitor notice this session has been
+        # displaced by a later reclaim of the same identity, and exit — instead
+        # of waking a muted process forever. It does put the token on a command
+        # line, readable from `ps` by any local user: the same exposure the
+        # spawn preamble already accepts for reclaim_secret, on the same local
+        # trust model. The spoke monitor is left alone — it talks over SSE and
+        # never reads the sessions table, so the flag would be inert there.
         monitor_hint = (
             f"python3 ~/.claude/skills/nth/server/nth_spoke_monitor.py "
             f"{channel} {member_id} --filter about "
             f"--url <mcpServers.nth-qweb.url from ~/.claude.json>"
             if is_sse else
             f"python3 ~/.claude/skills/nth/server/nth_monitor.py "
-            f"{channel} {member_id} --filter about"
+            f"{channel} {member_id} --filter about "
+            f"--session-token {session_token}"
         )
         # Give every member presence in the hidden DM transport. DMs are
         # channel-less: you can be addressed by anyone who can see you in a
@@ -1525,19 +1598,25 @@ def nth_connect(
         # authorises reading a DM addressed to you, so it cannot be created
         # lazily on first receipt without a window where the message exists and
         # its recipient cannot read it.
-        db.execute(
-            "INSERT OR IGNORE INTO channels (code, status, created_at, updated_at) "
-            "VALUES (?, 'active', ?, ?)", (AGENT_INBOX_CHANNEL, now, now))
-        db.execute(
-            "INSERT OR IGNORE INTO members "
-            "(id, channel, name, summary, skills, last_seen, last_read, joined_at, active) "
-            "VALUES (?,?,?,?,'',?,0,?,1)",
-            (member_id, AGENT_INBOX_CHANNEL, name, summary, now, now))
-        db.execute(
-            "UPDATE members SET name = ?, summary = ?, last_seen = ?, active = 1 "
-            "WHERE id = ? AND channel = ?",
-            (name, summary, now, member_id, AGENT_INBOX_CHANNEL))
-        db.commit()
+        # Same degrade-don't-throw rule as the fleet check-in above: the token
+        # is already minted and the incumbent already revoked, so a late lock
+        # must not cost the caller its session.
+        try:
+            db.execute(
+                "INSERT OR IGNORE INTO channels (code, status, created_at, updated_at) "
+                "VALUES (?, 'active', ?, ?)", (AGENT_INBOX_CHANNEL, now, now))
+            db.execute(
+                "INSERT OR IGNORE INTO members "
+                "(id, channel, name, summary, skills, last_seen, last_read, joined_at, active) "
+                "VALUES (?,?,?,?,'',?,0,?,1)",
+                (member_id, AGENT_INBOX_CHANNEL, name, summary, now, now))
+            db.execute(
+                "UPDATE members SET name = ?, summary = ?, last_seen = ?, active = 1 "
+                "WHERE id = ? AND channel = ?",
+                (name, summary, now, member_id, AGENT_INBOX_CHANNEL))
+            db.commit()
+        except sqlite3.Error:
+            pass
 
         # Keep the GLOBAL identity in step with the channel presence, on EVERY
         # reclaim path. `agents.name` is otherwise frozen at whatever the

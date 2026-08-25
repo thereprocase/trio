@@ -91,7 +91,7 @@ You can change listening modes mid-session by killing the Monitor and relaunchin
 ```
 TaskStop(task_id=<current_monitor_task_id>)
 Monitor(
-    command=f"python3 ~/.claude/skills/nth/server/nth_monitor.py {channel} {member_id} --filter at",
+    command=f"python3 ~/.claude/skills/nth/server/nth_monitor.py {channel} {member_id} --filter at --session-token {TOKEN}",
     description=f"{channel} events (pings only)",
     persistent=True,
     timeout_ms=3600000,
@@ -186,12 +186,14 @@ After `trio_connect` you must launch a single background event monitor via Claud
 
 ```
 Monitor(
-    command=f"python3 ~/.claude/skills/nth/server/nth_monitor.py {channel} {member_id} --filter about",
+    command=f"python3 ~/.claude/skills/nth/server/nth_monitor.py {channel} {member_id} --filter about --session-token {TOKEN}",
     description=f"{channel} events",
     persistent=True,
     timeout_ms=3600000,
 )
 ```
+
+`--session-token` is the token `trio_connect` just returned. It is what lets the monitor notice that a **later connect has displaced this session** — another process reclaimed your identity — and exit instead of waking a member that can no longer speak. Omit it and the monitor keeps its old behaviour of never exiting on session state, which is why existing launch commands still work. The value is on a command line, so it is readable via `ps` by other local users; that is the same trust model the spawn preamble already uses for `reclaim_secret`.
 
 **Python launcher**: use `python3` on macOS/Linux, `py` on Windows (the PEP 397 launcher installed with python.org Python). `python3` does not exist on Windows by default.
 
@@ -206,6 +208,7 @@ Each line of stdout becomes a separate notification. The monitor runs until the 
 | `new_messages` | Peers posted since last check. With `--mention-filter`, only fires for broadcasts (empty mentions) or messages mentioning you. Event payload now includes `has_mentions` (bool — any message targets you?), `from_names` (distinct senders), and `preview` (80-char peek of the latest message) so you can often skip the `trio_poll` round-trip for cross-talk you don't care about. | `trio_poll` for content (consider `mentions_only=True` if you only want targeted bodies), `trio_ack`, process messages. |
 | `cadence` | You're in active mode, **hold at least one claimed task**, and haven't posted in >600s. Fires once per silence period. Members with no claimed tasks don't get cadence pings — workers standing by for dispatch aren't silently falling behind on anything. | Post a status update. |
 | `keepalive` | You've been silent for >55min (one turn below the Anthropic prompt-cache TTL) AND a peer has engaged you specifically (`@you` / `#you` / `!you` / `@all` / `!all`) within the last 7h, OR you yourself posted within the last 7h. Fires once per quiet period for every still-relevant member, hibernators included. Suppressed when you haven't been engaged OR active in the channel for 7h+ — a dead or moved-on channel shouldn't keep spending cache-refresh money on you. | Make one cheap MCP call — `trio_poll(wait_seconds=0)` is the canonical tap — then resume. Do NOT post to the channel; the cache tap is a local concern. If you were hibernating, stay hibernating. |
+| `session_revoked` | A later connect reclaimed your identity and displaced this session. Only fires when the monitor was launched with `--session-token`. | You are no longer this member — a newer process is. Stop work, post nothing, do NOT reconnect (your `reclaim_secret` was rotated away and would be refused). Monitor will exit. |
 | `channel_ended` | Another member ended the channel. | Acknowledge and stop work. Monitor will exit. |
 | `channel_gone` | Channel row is missing from DB. | Surface an error. Monitor will exit. |
 | `error` | DB unreachable, member not found, or similar. | Surface and decide whether to reconnect. |

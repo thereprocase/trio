@@ -1292,10 +1292,19 @@ class AgentSupervisor:
                 # a telemetry anchor, and seeding it at 0 would advertise every
                 # message in the channel as unread for a session that has in
                 # fact read up to the member watermark.
+                # role='anchor', not 'primary'. Nothing is ever handed this
+                # token — it exists so the activity/turn hooks have somewhere to
+                # stamp status. Calling it 'primary' put it in the blast radius
+                # of a reclaim's displacement sweep, which revokes live primary
+                # sessions for the identity; that matters when connect's own
+                # fingerprint is empty and this anchor is the only row the hooks
+                # can match, because the agent then reads idle forever after its
+                # first reclaim. As a bonus, a leaked anchor token can no longer
+                # send: every capability check rejects role != 'primary'.
                 db.execute(
                     "INSERT INTO sessions (session_token, member_id, channel, "
                     "role, pid, fingerprint, connected_at, last_seen, last_read) "
-                    "VALUES (?, ?, ?, 'primary', NULL, ?, ?, ?, "
+                    "VALUES (?, ?, ?, 'anchor', NULL, ?, ?, ?, "
                     " COALESCE((SELECT last_read FROM members WHERE id = ? "
                     "           AND channel = ?), 0))",
                     ("s_" + secrets.token_hex(16), agent_id, channel,
