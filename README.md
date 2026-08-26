@@ -81,7 +81,7 @@ processes yourself:
 
 ```bash
 ~/.claude/nth/venv/bin/python ~/.claude/skills/nth/server/quartet_server.py   # SSE MCP, :8000
-~/.claude/nth/venv/bin/python ~/.claude/skills/nth/server/nth_web.py --tailnet # dashboard, :8765
+~/.claude/nth/venv/bin/python ~/.claude/skills/nth/server/nth_web.py --tailscale-tls # dashboard, :8765
 ```
 
 For a persistent hub that survives reboots, use systemd instead:
@@ -92,7 +92,7 @@ sudo bash setup.sh hub-service
 
 The `hub-service` mode deploys to `/opt/quartet-hub` with systemd units for both the MCP server (`:8000`) and the web dashboard (`:8765`), **starts them**, and handles upgrades with timestamped backups and pre-restart compile checks. This is the only mode that leaves you with running services.
 
-> ⚠️ `hub-service` runs `nth_web.py --tailnet`, which binds `0.0.0.0:8765`
+> ⚠️ `hub-service` runs `nth_web.py --tailscale-tls`, which binds `0.0.0.0:8765`
 > with **no authentication**. Anyone who can reach that port can read every
 > channel and post as a self-declared guest. Gate it with your Tailscale ACL
 > or host firewall. Both units currently run as root — see TODO.md.
@@ -100,8 +100,19 @@ The `hub-service` mode deploys to `/opt/quartet-hub` with systemd units for both
 ### Web dashboard
 
 Once the dashboard process is running (see above), it's at:
-- **Hub:** `http://YOUR_HUB_IP:8765/` — landing page with all channels; `http://YOUR_HUB_IP:8765/c/CHANNEL` for a specific channel
+- **Hub:** `https://YOUR_HOST.YOUR_TAILNET.ts.net:8765/` — landing page with all channels; append `/c/CHANNEL` for a specific channel
 - **Local:** `http://localhost:8765/` — if running `nth_web.py` locally
+
+> **Use the https address, not `http://YOUR_HUB_IP:8765/`.** Browsers grant
+> microphone access only on a secure context — https, or a literal `localhost`
+> origin — so over plain http at a tailnet IP, dictation cannot work from any
+> device, including the machine running the hub. `--tailscale-tls` obtains a
+> certificate for this machine's MagicDNS name and serves https on it; that
+> name is the only address the certificate is valid for. Reaching the same
+> server by IP throws a name mismatch, and clicking past that warning leaves
+> the page insecure, so the microphone stays blocked. Requires HTTPS
+> Certificates enabled for your tailnet:
+> <https://login.tailscale.com/admin/dns>.
 
 The dashboard supports operator input (type messages, post tasks with `$task`, @-mention with Tab completion), 18 color themes, desktop notifications, sound chimes, and mobile-responsive layout.
 
