@@ -2185,6 +2185,18 @@ class EventHub:
                 # "Remove from channel" button the server will then refuse.
                 "kind": (r["kind"] if "kind" in keys else None) or "agent",
                 "status_text": r["status_text"] or "",
+                # NOT live in an already-connected client. last_seen is in
+                # _ROSTER_VOLATILE, so it does not by itself trigger a
+                # re-broadcast: what a browser holds is whatever this field
+                # was on the last tick that changed something else, which on
+                # a quiet channel can be minutes old. Do NOT render it as a
+                # relative time ("last seen 2m ago") — it would sit at "just
+                # now" on an agent that has since died, which is the exact
+                # bug _ROSTER_VOLATILE exists to prevent. Paint `status`
+                # below instead: it is recomputed from a fresh clock every
+                # tick and IS in the change key, so transitions push
+                # immediately. Kept in the payload for first paint and for
+                # non-display consumers.
                 "last_seen": effective_last_seen,
                 "last_read": effective_last_read,
                 "filter_mode": fm or "all",
@@ -2337,7 +2349,7 @@ class EventHub:
                     self._change_scan = scan_now
 
                     members = self._fetch_roster(db)
-                    snapshot = json.dumps(members, sort_keys=True)
+                    snapshot = _roster_change_key(members)
                     if snapshot != self._last_roster_snapshot:
                         self._last_roster_snapshot = snapshot
                         # Stamped with the channel for the same reason as the
@@ -2448,6 +2460,73 @@ def _ctx_change_key(sessions: List[Dict[str, Any]]) -> str:
         [{k: v for k, v in s.items() if k not in _CTX_VOLATILE} for s in sessions],
         sort_keys=True,
     )
+
+
+# Same problem as _CTX_VOLATILE, one broadcast over: the roster carries
+# timestamps that advance on their own, with nothing about the room having
+# changed. nth_monitor.py rewrites last_seen (and the two heartbeats it is
+# reconciled from) every 10s FOR EVERY MEMBER, so in a 50-member room the
+# raw snapshot differs every second or two, forever, on an idle channel.
+# Measured on this repo's own hub: the 52-member agent-inbox re-broadcast a
+# 23KB roster 10x in 45s, and diffing consecutive emits showed exactly one
+# changed field — one member's last_seen.
+#
+# Dropping it from the COMPARISON costs no fidelity, because the payload
+# still carries it and no client reads it: what the UI paints is `status`,
+# the coarse member_status() bucket (dead/stale/blocked/idle/working/active),
+# which is recomputed from the fresh timestamp on every 0.5s tick and is
+# itself part of the key. So an agent crossing STALE_SECONDS or DEAD_SECONDS
+# still flips the digest and still pushes immediately — the transition is
+# what matters, not the tick that leads to it.
+#
+# Deliberately NOT volatile: last_read (a real watermark move), last_tool_at
+# / blocked_since / stalled (real activity), context_pct. Those change only
+# when something actually happened, which is exactly when a broadcast is
+# warranted.
+_ROSTER_VOLATILE = ("last_seen",)
+
+# Under `context["harness"]`, a subtree that drifts with wall-clock rather
+# than with anything the room did. rate_limits is a ROLLING window
+# ({five_hour: {used_percentage: N}}, nth_constants.py:159) whose percentage
+# slides on its own as the window advances, so it churns exactly like an age
+# field — just two levels down, where a shallow scrub cannot see it. It is
+# not in _CTX_VOLATILE because that tuple also governs the context-ring
+# broadcast, where the percentage is the payload and moving it IS the news.
+# Here it is not: nothing renders quota off the roster (the usage meters in
+# 20-workspace.js read /api/usage, a separate poll), so on this path it is
+# pure churn.
+_ROSTER_CTX_VOLATILE_SUBTREES = ("rate_limits",)
+
+
+def _roster_change_key(members: List[Dict[str, Any]]) -> str:
+    """Stable digest of a roster, ignoring fields that tick on their own.
+
+    Nested `context` gets the same treatment via _CTX_VOLATILE: it is the
+    statusline publisher's payload embedded per member, carrying the very
+    `_age_s` / `_relayed_at` fields _ctx_change_key already excludes. Left
+    in, they would re-introduce the churn one level down and this whole
+    exercise would be a no-op for any member with a live context ring.
+
+    The strip is RECURSIVE, because that payload is not flat: project_context
+    keeps `harness.context_window` and `harness.rate_limits`
+    (nth_constants.py:134), so a depth-1 scrub leaves self-ticking values
+    sitting two levels down and the churn comes straight back for exactly the
+    members a live ring makes most expensive to broadcast.
+    """
+    def scrub_ctx(value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        return {k: scrub_ctx(v) for k, v in value.items()
+                if k not in _CTX_VOLATILE
+                and k not in _ROSTER_CTX_VOLATILE_SUBTREES}
+
+    def scrub(member: Dict[str, Any]) -> Dict[str, Any]:
+        out = {k: v for k, v in member.items() if k not in _ROSTER_VOLATILE}
+        if isinstance(out.get("context"), dict):
+            out["context"] = scrub_ctx(out["context"])
+        return out
+
+    return json.dumps([scrub(m) for m in members], sort_keys=True)
 
 
 def _read_context_usage() -> Dict[str, Dict[str, Any]]:
