@@ -1,0 +1,28 @@
+/* Project identities share Gridline controls; color never changes what is clickable. */
+[data-project]{--project-field:#E8E8E8;--project-ink:#101010;--project-rule:#666666}
+[data-project="trio"]{--project-field:#008EA1;--project-ink:#101010;--project-rule:#000078}
+[data-project="lord-of-the-code"]{--project-field:#101010;--project-ink:#FFFFFF;--project-rule:#B87900}
+[data-project="peg"]{--project-field:#FFF4DC;--project-rule:#B87900}
+[data-project="dell-5560-wall-mount"]{--project-field:#000078;--project-ink:#FFFFFF;--project-rule:#008EA1}
+[data-project="5680-dock"]{--project-field:#101010;--project-ink:#FFFFFF;--project-rule:#B87900}
+[data-project="onshape-reference-align"]{--project-field:#FFFFFF;--project-rule:#008EA1}
+[data-project="claude-statusline"]{--project-field:#101010;--project-ink:#FFFFFF;--project-rule:#008EA1}
+[data-project="claude-usage"]{--project-field:#101010;--project-ink:#FFFFFF;--project-rule:#666666}
+[data-project="homekit-preview"]{--project-field:#008EA1;--project-ink:#101010;--project-rule:#000078}
+[data-project] .gl-project-detail .gl-introduction{background:var(--project-field);color:var(--project-ink);border-left:8px solid var(--project-rule)}
+[data-project] .gl-project-detail .gl-introduction :is(h1,p){color:inherit}
+.gl-project-identity{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:16px;padding:20px clamp(16px,3vw,64px);background:var(--project-field);color:var(--project-ink);border-bottom:1px solid #666666;border-left:8px solid var(--project-rule)}
+body.gridline .gl-project-identity :is(p,strong,span){color:inherit;font-family:var(--gl-font)}
+body.gridline .gl-project-identity p{font-size:14px;line-height:1.5;margin:4px 0 0;max-width:75ch}
+.gl-project-identity strong{display:block;font:600 18px/1.4 var(--gl-font)}
+.gl-project-identity .gl-identity-type{display:block;font:12px/1.5 var(--gl-mono);margin-bottom:8px;text-transform:uppercase}
+.gl-identity-actions{display:flex;flex-wrap:wrap;gap:8px}
+body.gridline .gl-project-identity .gl-button{background:white;color:#0000A8!important;border:1px solid #666666;min-height:40px;text-decoration:none!important}
+body.gridline[data-project="onshape-reference-align"]>main>section[aria-label="Workspace preview"]{border-top:8px solid #008EA1;background:white}
+body.gridline[data-project="5680-dock"] .model-section{border-top:8px solid #101010!important}
+body.gridline[data-project="dell-5560-wall-mount"] :is(.m1-feature,.cfd-section){border-top:8px solid #008EA1!important}
+body.gridline[data-project="claude-usage"] .terminal{border:8px solid #101010!important}
+body.gridline[data-project="claude-usage"] .terminal-body{white-space:normal}
+body.gridline.embedded .gl-project-identity{display:none!important}
+@media(max-width:640px){.gl-project-identity{grid-template-columns:minmax(0,1fr);padding:16px 12px}.gl-identity-actions a{flex:1;justify-content:center}}
+@media print{.gl-project-identity,[data-project] .gl-project-detail .gl-introduction{background:#E8E8E8;color:#101010}}

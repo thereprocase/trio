@@ -1,0 +1,6 @@
+:root{
+--sp-1:4px;--sp-2:8px;--sp-3:12px;--sp-4:16px;--sp-5:20px;--sp-6:24px;--sp-8:32px;
+--row-h:26px;--row-h-dense:24px;--strip-h:32px;--titlebar-h:30px;--statusbar-h:24px;--toolbar-h:34px;
+--radius:0px;
+--dur-fast:120ms;/* @kind other */--dur:160ms;/* @kind other */--ease:cubic-bezier(.2,0,.2,1);/* @kind other */
+}

@@ -1,0 +1,16 @@
+:root{
+/* base */
+--gl-blue:#0000A8;--gl-blue-deep:#000078;--gl-blue-hover:#1414B8;
+--gl-gray:#C6C6C6;--gl-gray-light:#E8E8E8;--gl-gray-lighter:#F2F2F2;
+--gl-white:#FFFFFF;--gl-ink:#101010;--gl-rule:#666666;--gl-rule-light:#9A9A9A;
+--gl-cyan:#008EA1;--gl-green:#18743A;--gl-yellow:#B87900;--gl-yellow-bg:#FFF4DC;--gl-red:#B3261E;--gl-red-bg:#FBEAE9;
+/* relief */
+--bevel-light:#FFFFFF;--bevel-mid:#DFDFDF;--bevel-dark:#8A8A8A;--bevel-darker:#4A4A4A;
+/* semantic */
+--surface:var(--gl-gray);--surface-2:var(--gl-gray-light);--field:var(--gl-white);
+--text-body:var(--gl-ink);--text-secondary:#3D3D3D;--text-disabled:#7A7A7A;--text-on-blue:#FFFFFF;
+--active:var(--gl-blue);--selection-bg:var(--gl-blue);--selection-fg:#FFFFFF;
+--live:var(--gl-cyan);--positive:var(--gl-green);--attention:var(--gl-yellow);--danger:var(--gl-red);
+--border-strong:var(--gl-ink);--border:var(--gl-rule);--border-light:var(--gl-rule-light);
+--focus-ring:1px dotted var(--gl-ink);
+}

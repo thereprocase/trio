@@ -1,0 +1,10 @@
+:root{
+/* raised control (button face) */
+--relief-raised:inset 1px 1px 0 var(--bevel-light),inset -1px -1px 0 var(--bevel-dark);
+/* pressed control */
+--relief-pressed:inset 1px 1px 0 var(--bevel-dark),inset -1px -1px 0 var(--bevel-light);
+/* inset editable field */
+--relief-inset:inset 1px 1px 0 var(--bevel-dark),inset -1px -1px 0 var(--bevel-light);
+/* pane frame */
+--frame:1px solid var(--border);--frame-strong:1px solid var(--border-strong);
+}

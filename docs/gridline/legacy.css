@@ -1,0 +1,173 @@
+/* Adapter for published CAD viewers, guides and CFD reports. Keep their hooks and media. */
+html:has(body.gridline){background:var(--gl-gray);font-family:var(--gl-font);scroll-padding-top:16px}
+body.gridline{--ink:#101010;--text:#101010;--muted:#555555;--line:#9A9A9A;--border:#666666;--accent:#0000A8;--teal:#0000A8;--teal-light:#FFFFFF;--bone:#C6C6C6;--paper:#FFFFFF;--bg:#C6C6C6;--surface:#FFFFFF;--dark:#E8E8E8;--dark-line:#666666;--gutter:24px;margin:0;background:var(--gl-gray)!important;color:var(--gl-ink)!important;font:16px/1.6 var(--gl-font)!important;min-width:0}
+body.gridline *,body.gridline *::before,body.gridline *::after{border-radius:0!important;box-shadow:none!important;text-shadow:none!important}
+body.gridline :where(h1,h2,h3,h4,p,a,span,li,dt,dd,figcaption,label,button,input,select){font-family:var(--gl-font)}
+body.gridline :where(h1,h2,h3){letter-spacing:0!important;color:var(--gl-ink);font-weight:600}
+body.gridline h1{font-size:24px!important;line-height:1.3!important;margin:12px 0 16px!important;max-width:none}
+body.gridline h1 em,body.gridline h2 em{font:inherit!important;color:inherit!important}
+body.gridline h2{font-size:18px!important;line-height:1.4!important;margin:20px 0 12px}
+body.gridline h3{font-size:18px!important;line-height:1.4!important}
+body.gridline p{color:var(--gl-ink);margin:12px 0;max-width:100%;font-size:16px;line-height:1.6}
+body.gridline a{color:var(--gl-blue);text-underline-offset:3px}
+body.gridline a:hover{color:var(--gl-deep)}
+body.gridline :focus-visible{outline:1px dotted var(--gl-ink)!important;outline-offset:3px!important}
+body.gridline button,body.gridline input,body.gridline select{font:13px/1.5 var(--gl-font)!important;min-height:30px;border-color:var(--gl-rule)!important;accent-color:var(--gl-blue)}
+body.gridline button,body.gridline .button,body.gridline .download-main{background:var(--gl-gray);color:var(--gl-ink);padding:6px 12px;min-height:34px;border:1px solid var(--gl-rule);font:500 13px/1.5 var(--gl-font);transform:none!important;text-decoration:none;transition:background 120ms}
+body.gridline button:hover,body.gridline .button:hover{background:var(--gl-light);color:var(--gl-ink)}
+body.gridline button.active,body.gridline button[aria-pressed=true],body.gridline .button-primary,body.gridline .primary,body.gridline .download-main{background:var(--gl-blue);color:white}
+body.gridline button:disabled{opacity:.6;cursor:not-allowed}
+body.gridline input:not([type=checkbox]):not([type=range]),body.gridline select{background:white;color:var(--gl-ink);max-width:100%}
+body.gridline>main{max-width:1320px;margin:0 auto!important;padding:24px!important;background:#F2F2F2;border-left:1px solid var(--gl-rule);border-right:1px solid var(--gl-rule);min-width:0}
+body.gridline>header:not(.gl-global-header){display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:12px;padding:12px 24px!important;min-height:0;border-bottom:1px solid var(--gl-rule);background:var(--gl-light);color:var(--gl-ink);font-size:13px;letter-spacing:0}
+body.gridline>header nav{display:flex;flex-wrap:wrap;gap:8px 20px;margin:0;font-size:13px}
+body.gridline>header a{font-size:13px;color:var(--gl-ink)}
+body.gridline .brand,body.gridline .wordmark,body.gridline .logo{font:600 18px/1.4 var(--gl-font);letter-spacing:0;color:var(--gl-ink)}
+body.gridline .brand-symbol{display:none}
+body.gridline .private,body.gridline .header-edition{font:12px/1.5 var(--gl-mono);color:var(--gl-ink);padding:4px 8px;border:1px solid var(--gl-rule);background:var(--gl-attention);margin:0}
+body.gridline main>nav:not(.gl-outline){font-size:13px;margin:0 0 20px;padding:8px 12px;border:1px solid var(--gl-rule);background:var(--gl-light)}
+body.gridline .intro,body.gridline .m1-intro{padding:12px 0 24px!important;margin:0!important;gap:24px}
+body.gridline .intro-copy{gap:24px;max-width:100%}
+body.gridline .intro-copy p,body.gridline .hero-detail,body.gridline .hero-description{font-size:16px;color:var(--gl-ink);max-width:640px;line-height:1.6}
+body.gridline .eyebrow,body.gridline .label,body.gridline .detail-number,body.gridline .small,body.gridline .muted{font:13px/1.5 var(--gl-mono);letter-spacing:0;color:#555555}
+body.gridline .eyebrow{margin-bottom:8px}
+body.gridline .lede{font-size:16px;color:var(--gl-ink)}
+body.gridline section:not(.stage):not(.intro):not(.design-section):not(.model-section):not(.making-section){margin-top:20px;margin-bottom:20px}
+body.gridline :where(.model-section,.print-section,.exploded-section,.cfd-section,.fix,.m1-details,.m1-evidence,.native,.download-band,.evidence){margin:24px 0!important;padding:20px!important;border:1px solid var(--gl-rule);background:white!important;color:var(--gl-ink)!important}
+body.gridline :where(.section-top,.section-title,.section-heading){background:var(--gl-blue);color:white;padding:8px 12px;margin:-20px -20px 20px!important;gap:16px;align-items:center;flex-wrap:wrap}
+body.gridline :where(.section-top,.section-title,.section-heading) h2{font:600 13px/1.5 var(--gl-mono)!important;color:white;margin:0!important;text-transform:uppercase}
+body.gridline :where(.section-top,.section-title,.section-heading) .eyebrow{color:white;margin:0;font-size:12px}
+body.gridline :where(.section-top,.section-title,.section-heading) p{color:white;font-size:13px;line-height:1.5}
+body.gridline :where(.section-top,.section-title,.section-heading) a{color:white}
+body.gridline .section-title{font:600 13px/1.5 var(--gl-mono);text-transform:uppercase}
+body.gridline .cfd-section .section-title,body.gridline .cfd-section .section-top{background:var(--gl-cyan);color:var(--gl-ink)}
+body.gridline :where(.notice,.prototype-banner,.qualification,.cfd-limit,.proof-note,.service-note,.note){background:var(--gl-attention)!important;border:1px solid var(--gl-soft-rule)!important;border-left:4px solid var(--gl-amber)!important;color:var(--gl-ink)!important;padding:12px 16px!important;font-size:14px!important;line-height:1.6!important;margin:16px 0}
+body.gridline :where(.notice,.prototype-banner,.qualification,.cfd-limit,.proof-note,.service-note,.note) a{color:var(--gl-blue)}
+body.gridline :where(.badge,.live-badge,.cfd-status,.cfd-status span,.cfd-stats span,.live-badge span,.download-status){font:12px/1.5 var(--gl-mono)!important;color:var(--gl-ink)!important;letter-spacing:0;text-transform:uppercase}
+body.gridline .badge{display:inline-block;white-space:normal;background:var(--gl-light);border:1px solid var(--gl-rule);padding:4px 8px}
+body.gridline .live-badge{background:var(--gl-cyan)!important;padding:4px 8px}
+body.gridline .status-dot{width:6px;height:6px;background:var(--gl-blue)}
+body.gridline :where(.viewer-top,.viewer-bottom,.model-toolbar,.native-caption,.m1-sequence-status,.viewer-top span,.viewer-bottom>span){background:var(--gl-gray);color:var(--gl-ink);font:12px/1.5 var(--gl-mono)!important;border-color:var(--gl-rule);letter-spacing:0}
+body.gridline :where(.controls,.workspace aside,.cfd-display aside){background:var(--gl-light);color:var(--gl-ink);padding:16px}
+body.gridline .controls label{font-size:13px;color:var(--gl-ink)}
+body.gridline :where(.cfd-display p,.cfd-display a,.cfd-intro p,.cfd-stats strong,.parts-key span,.model-footnote,.model-intro p,.model-footnote a){color:var(--gl-ink)}
+body.gridline .cfd-intro{gap:24px;align-items:start}
+body.gridline .cfd-intro h2{margin:12px 0!important}
+body.gridline :where(.cfd-tabs button,.viewer-bottom button,.viewbar button){background:var(--gl-gray);color:var(--gl-ink);border:1px solid var(--gl-rule);padding:6px 12px}
+body.gridline :where(.cfd-tabs button.active,.viewer-bottom button.active,.viewbar button.active){background:var(--gl-blue);color:white}
+body.gridline .viewport,body.gridline .workspace,body.gridline .model-frame{border:1px solid var(--gl-rule)}
+body.gridline .exploded-layout{background:var(--gl-light);color:var(--gl-ink)}
+body.gridline .parts-key li:before{background:var(--gl-gray);color:var(--gl-ink);border:1px solid var(--gl-rule)}
+body.gridline :where(.metrics,.build-numbers,.design-line,.making-details,.notes,.proof-grid,.fix-grid,.guide-grid,.m1-detail-grid){gap:0!important;border:1px solid var(--gl-rule);margin:20px 0;background:white}
+body.gridline :where(.metrics,.build-numbers,.design-line,.making-details,.notes,.proof-grid,.guide-grid,.m1-detail-grid)>*{padding:16px;border-right:1px solid var(--gl-soft-rule);border-bottom:1px solid var(--gl-soft-rule);background:white;color:var(--gl-ink);min-width:0}
+body.gridline .metrics .metric{margin:0;border-top:0;border-left:0}
+body.gridline :where(.metrics strong,.metrics dd,.build-numbers dd,.load-targets dd){font:500 28px/1.4 var(--gl-mono)!important;color:var(--gl-ink);letter-spacing:0}
+body.gridline :where(.metrics span,.build-numbers dt,.load-targets dt){font:13px/1.5 var(--gl-mono);color:#555555}
+body.gridline :where(.metrics p,.build-numbers p,.design-line p,.making-details p,.notes p,.proof-grid p){font-size:14px;color:var(--gl-ink)}
+body.gridline table{width:100%;border-collapse:collapse;background:white;font-size:14px}
+body.gridline th,body.gridline td{border:1px solid var(--gl-soft-rule);padding:8px 12px;text-align:left;vertical-align:top;overflow-wrap:anywhere}
+body.gridline th{background:var(--gl-gray);color:var(--gl-ink);font:600 12px/1.5 var(--gl-mono);text-transform:uppercase;letter-spacing:0}
+body.gridline tbody tr:hover{background:var(--gl-light)}
+body.gridline .table-wrap{max-width:100%;overflow-x:auto}
+body.gridline figure{min-width:0;margin:20px 0;border:1px solid var(--gl-rule);background:white;padding:0}
+body.gridline figure img{max-width:100%;height:auto;mix-blend-mode:normal}
+body.gridline figure video{width:100%;height:auto;background:white}
+body.gridline figcaption{display:block;padding:12px!important;margin:0!important;background:var(--gl-light);border-top:1px solid var(--gl-soft-rule);font:13px/1.6 var(--gl-font)!important;color:var(--gl-ink);letter-spacing:0}
+body.gridline figcaption span{display:inline-block;font:12px/1.5 var(--gl-mono);margin-right:12px}
+body.gridline .hero{grid-template-columns:minmax(260px,.7fr) minmax(0,1.3fr);gap:24px;padding:0 0 24px;align-items:stretch}
+body.gridline .hero-copy{padding:20px;border:1px solid var(--gl-rule);background:white;align-self:center}
+body.gridline .hero-copy .eyebrow{margin-bottom:12px}
+body.gridline .hero-description{margin-top:16px}
+body.gridline .hero-actions{margin-top:20px;gap:12px}
+body.gridline .hero-figure{margin:0!important;align-self:stretch;display:flex;flex-direction:column;justify-content:center}
+body.gridline .hero-figure img{flex:1;min-height:0}
+body.gridline .design-section,body.gridline .making-section{padding:0;max-width:none}
+body.gridline .making-section{padding:20px!important}
+body.gridline .section-heading .model-intro{max-width:440px}
+body.gridline .mechanism{gap:24px}
+body.gridline .mechanism-copy h3{font-size:18px}
+body.gridline .model-frame iframe{color-scheme:light}
+body.gridline .download-actions{gap:12px}
+body.gridline .download-band h2{margin:0 0 16px}
+body.gridline .download-band p{color:var(--gl-ink)}
+body.gridline .guide{max-width:1200px}
+body.gridline .guide>section,body.gridline.gl-reference main>section{padding:20px;background:white;border:1px solid var(--gl-rule)}
+body.gridline .guide>section>h2,body.gridline.gl-reference main>section>h2{margin:-20px -20px 16px!important;padding:8px 12px;background:var(--gl-blue);color:white;font:600 13px/1.5 var(--gl-mono)!important}
+body.gridline.gl-cfd main>h2,body.gridline.gl-cfd main>section>h2{margin:24px 0 16px!important;padding:8px 12px;background:var(--gl-blue);color:white;font:600 13px/1.5 var(--gl-mono)!important}
+body.gridline.gl-cfd h2 a{color:inherit}
+body.gridline.gl-cfd main>section{padding:0!important;border:0}
+body.gridline.gl-cfd :where(h2:has(+figure video),h2:has(+figure #flow-video-tracers)){background:var(--gl-cyan);color:var(--gl-ink)}
+body.gridline.gl-cfd .metric strong{font-size:28px}
+body.gridline.gl-cfd .links{font-size:14px}
+body.gridline.gl-reference main{max-width:1040px}
+body.gridline.gl-reference main>header{margin:0 0 24px}
+body.gridline.gl-reference code{background:var(--gl-light);font-family:var(--gl-mono);padding:2px 4px}
+body.gridline.gl-reference section[aria-label='Workspace preview']{padding:0}
+body.gridline.gl-reference section[aria-label='Workspace preview'] img{width:100%}
+body.gridline.gl-usage>header{display:block;text-align:left;max-width:1320px;margin:auto;border:1px solid var(--gl-rule)}
+body.gridline.gl-usage .container{max-width:1200px;padding:0 20px}
+body.gridline.gl-usage>section{max-width:1320px;margin:0 auto!important;padding:24px 0;border:1px solid var(--gl-rule);border-top:0;background:#F2F2F2}
+body.gridline.gl-usage .badges{justify-content:flex-start;margin-top:12px}
+body.gridline.gl-usage .logo{font-size:24px}
+body.gridline.gl-usage .tagline{font-size:16px;color:var(--gl-ink)}
+body.gridline.gl-usage .terminal{background:#101010;color:#FFFFFF;margin:0;border-color:var(--gl-rule);font:13px/1.5 var(--gl-mono)}
+body.gridline.gl-usage .terminal *{font-family:var(--gl-mono)}
+body.gridline.gl-usage .terminal-titlebar{background:var(--gl-blue);color:white;min-height:30px;padding:6px 12px}
+body.gridline.gl-usage .terminal-titlebar span{color:white;font-size:12px;margin:0}
+body.gridline.gl-usage .terminal-titlebar .dot,body.gridline.gl-usage .feature-icon{display:none}
+body.gridline.gl-usage .terminal-body{padding:16px;overflow-x:auto}
+body.gridline.gl-usage .features{display:block;border:1px solid var(--gl-rule);background:white}
+body.gridline.gl-usage .feature{display:grid;grid-template-columns:220px minmax(0,1fr);gap:20px;padding:12px 16px;border:0;border-bottom:1px solid var(--gl-soft-rule);background:white}
+body.gridline.gl-usage .feature:last-child{border:0}
+body.gridline.gl-usage .feature h3{font-size:16px!important}
+body.gridline.gl-usage .feature p{font-size:14px;color:var(--gl-ink)}
+body.gridline.gl-usage .tab-btn{margin:0;border-bottom:0}
+body.gridline.gl-usage .tab-btn.active{background:var(--gl-blue);color:white}
+body.gridline.gl-usage .tab-panel{background:white;padding:16px}
+body.gridline.gl-usage .tab-panel pre,body.gridline.gl-usage .tab-panel .comment{color:var(--gl-ink);font:13px/1.6 var(--gl-mono)}
+body.gridline.gl-usage .install-tabs{flex-wrap:wrap;gap:0}
+body.gridline.gl-usage .check{font:12px var(--gl-mono);color:#18743A}
+body.gridline.gl-usage .cross{font:12px var(--gl-mono);color:#B3261E}
+body.gridline footer:not(.gl-statusbar){font-size:13px;color:#555555;padding:16px 0}
+body.gridline>.gl-global-header{display:flex!important;align-items:center;flex-wrap:wrap;gap:16px;background:var(--gl-blue)!important;color:white!important;min-height:36px;padding:6px 16px!important;border-bottom:1px solid var(--gl-rule);font:600 13px/1.5 var(--gl-font)!important}
+body.gridline>.gl-global-header a{display:inline-flex;align-items:center;gap:8px;color:white!important;font:600 13px/1.5 var(--gl-font);text-decoration:none}
+body.gridline>.gl-global-header a:focus-visible{outline-color:white!important}
+body.gridline>.gl-global-header img{display:inline-block;width:20px;height:20px;border:0}
+body.gridline>.gl-global-header span{font:12px/1.5 var(--gl-mono);color:white}
+body.gridline>.gl-global-menu{display:flex;flex-wrap:wrap;gap:0;margin:0!important;padding:4px 8px!important;background:var(--gl-gray);border-bottom:1px solid var(--gl-rule);font:13px/1.5 var(--gl-font)}
+body.gridline>.gl-global-menu a{padding:4px 12px;color:var(--gl-ink);text-decoration:none;font-size:13px}
+body.gridline>.gl-global-menu a:hover{background:var(--gl-light)}
+body.gridline>.gl-global-menu a[aria-current]{background:var(--gl-blue);color:white}
+body.gridline .gl-outline{display:flex;flex-wrap:wrap;gap:0;margin:0 auto!important;max-width:1320px;background:var(--gl-light);border:1px solid var(--gl-rule);border-top:0;padding:4px 8px;font-size:13px}
+body.gridline .gl-outline a{padding:6px 12px;font-size:13px}
+body.gridline .gl-outline span{padding:6px 12px;font:12px/1.6 var(--gl-mono);color:var(--gl-rule)}
+body.gridline .gl-global-footer{display:flex;flex-wrap:wrap;gap:0;padding:0;background:var(--gl-gray);border-top:1px solid var(--gl-rule);font:12px/1.5 var(--gl-mono)}
+body.gridline .gl-global-footer>*{padding:6px 16px;border-right:1px solid var(--gl-rule);font:12px/1.5 var(--gl-mono)}
+html.embed body.gridline>.gl-global-header,html.embed body.gridline>.gl-global-menu,html.embed body.gridline>.gl-outline,html.embed body.gridline>.gl-global-footer,body.embed.gridline>.gl-global-header,body.embed.gridline>.gl-global-menu,body.embed.gridline>.gl-outline,body.embed.gridline>.gl-global-footer{display:none!important}
+body.gridline .gl-journal-render{display:grid;grid-template-columns:1.3fr 1fr;align-items:center;background:white;border:1px solid var(--gl-rule);margin:0 0 24px}
+body.gridline .gl-journal-render img{display:block;width:100%;height:auto;max-height:420px;object-fit:contain}
+body.gridline .gl-journal-render figcaption{align-self:stretch;display:flex;flex-direction:column;justify-content:center;gap:12px;border-top:0;border-left:1px solid var(--gl-rule);padding:20px!important}
+body.gridline .gl-journal-render figcaption strong{font:600 13px/1.5 var(--gl-mono)}
+@media(max-width:900px){body.gridline>main{padding:16px!important}.gridline .metrics{grid-template-columns:1fr!important}.gridline .hero{grid-template-columns:1fr!important}.gridline .section-heading{display:block}.gridline .section-heading .model-intro{margin-top:12px}.gridline .intro{display:block}.gridline .mechanism{grid-template-columns:1fr}.gridline .gl-journal-render{grid-template-columns:1fr!important}.gridline .gl-journal-render figcaption{border-left:0!important;border-top:1px solid var(--gl-rule)!important}.gridline.gl-usage .feature{grid-template-columns:1fr;gap:8px}}
+@media(max-width:600px){body.gridline>main{padding:12px!important}.gridline .design-line,.gridline .making-details,.gridline .build-numbers{grid-template-columns:1fr!important}.gridline :where(.model-section,.print-section,.exploded-section,.cfd-section,.fix,.m1-details,.m1-evidence,.native,.download-band,.evidence){padding:16px!important}.gridline :where(.section-top,.section-title,.section-heading){margin:-16px -16px 16px!important}.gridline .workspace{grid-template-columns:1fr!important}.gridline .stage{min-height:460px}.gridline .caption{font-size:12px}.gridline.gl-cfd table{display:block;overflow-x:auto}.gridline .cfd-intro,.gridline .cfd-display{grid-template-columns:1fr}.gridline .hero-copy{padding:16px}.gridline .header-edition{white-space:normal}.gridline .gl-outline{gap:0}.gridline .gl-outline a{padding:6px 8px}.gridline .gl-global-header span{display:none}.gridline .viewer-grid{grid-template-columns:1fr}.gridline.gl-usage .container{padding:0 12px}.gridline .badges{gap:4px}}
+@media print{body.gridline>.gl-global-menu,body.gridline>.gl-outline{display:none}.gridline>main{border:0!important}.gridline .gl-global-header{background:white!important;color:black!important}}
+
+/* Keep the viewer's full-height embedded mode and readable inherited captions. */
+body.gridline.embedded>header,body.gridline.embedded>.gl-global-header,body.gridline.embedded>.gl-global-menu,body.gridline.embedded>.gl-outline,body.gridline.embedded>.gl-global-footer{display:none!important}
+body.gridline.embedded>main{padding:0!important;max-width:none;border:0}
+body.gridline.embedded .workspace{margin:0;height:100dvh}
+body.gridline.embedded .stage{min-height:0}
+body.gridline .m1-sequence-status strong,body.gridline .m1-hint,body.gridline .checks label,body.gridline .frozen{color:var(--gl-ink)}
+body.gridline .frozen{background:var(--gl-attention);border:1px solid var(--gl-soft-rule);padding:12px}
+body.gridline .frozen span{color:var(--gl-ink);font:12px/1.5 var(--gl-mono)}
+body.gridline .fix-image span{background:var(--gl-gray);color:var(--gl-ink);font:12px/1.5 var(--gl-mono);letter-spacing:0}
+body.gridline .native-visual,body.gridline .native-visual img{background:white}
+body.gridline .native-visual{border:1px solid var(--gl-rule)}
+body.gridline footer:not(.gl-statusbar){background:var(--gl-gray);color:var(--gl-ink);padding:16px}
+body.gridline .guide li,body.gridline .guide p,body.gridline .guide code{color:var(--gl-ink)}
+body.gridline.gl-usage main>section{margin:0!important;padding:24px 0;border-bottom:1px solid var(--gl-rule)}
+body.gridline.gl-usage main>section:first-child{padding-top:0}
+body.gridline.gl-usage .terminal p{color:white}
+@media(max-width:800px){body.gridline.embedded .workspace{height:auto}body.gridline.embedded .stage{height:560px;min-height:560px}}
+
+body.gridline.gl-usage main>section .container>h2{margin:0 0 16px!important;padding:8px 12px;background:var(--gl-blue);color:white;font:600 13px/1.5 var(--gl-mono)!important;text-transform:uppercase}
