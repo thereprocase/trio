@@ -264,3 +264,9 @@ See [CHANGELOG.md](CHANGELOG.md) for full history.
 ## License
 
 MIT
+
+## Project website
+
+[Open the Trio / nth site](https://thereprocase.github.io/trio/) for previews, setup and project resources. [Browse all project groups](https://thereprocase.github.io/).
+
+The static site lives in `docs/` and uses the shared [Gridline design system](https://github.com/thereprocase/thereprocase.github.io/blob/main/GRIDLINE.md). Edit `docs/index.html` and `docs/site.js`; shared styles live in `docs/gridline/`. GitHub Pages serves `main:/docs`.

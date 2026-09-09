@@ -1,0 +1,9 @@
+:root{
+--fs-dense:12px;--fs-ui:13px;--fs-caption:13px;--fs-heading:18px;--fs-title:24px;--fs-measure:28px;
+--lh-dense:1.35;/* @kind other */--lh-ui:1.4;/* @kind other */
+--caption-case:uppercase;/* @kind other */--caption-tracking:0.04em;--caption-weight:600;
+--num:tabular-nums;/* @kind other */
+}
+body{font-family:var(--font-ui);font-size:var(--fs-ui);line-height:var(--lh-ui);color:var(--text-body)}
+a{color:var(--gl-blue);text-decoration:underline}
+a:hover{color:var(--gl-blue-hover)}
