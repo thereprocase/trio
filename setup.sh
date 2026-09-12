@@ -143,11 +143,18 @@ After=network-online.target quartet-hub.service
 Type=simple
 Environment=HOME=${HUB_HOME}
 WorkingDirectory=${HUB_DIR}
-ExecStart=${HUB_VENV}/bin/python ${HUB_DIR}/nth_web.py --tailnet --port 8765
+ExecStart=${HUB_VENV}/bin/python ${HUB_DIR}/nth_web.py --tailscale-tls --port 8765
 Restart=on-failure
 RestartSec=3
-# See quartet-hub.service: still root, hardened. --tailnet binds 0.0.0.0
+# See quartet-hub.service: still root, hardened. --tailscale-tls binds 0.0.0.0
 # with no authentication — the host firewall / Tailscale ACL is the gate.
+# It serves https rather than plain http because browsers grant microphone
+# access only on a secure context: under --tailnet this unit shipped a hub
+# whose dictation could never work from any device, and said so only in a
+# service log. Needs HTTPS Certificates enabled for the tailnet
+# (https://login.tailscale.com/admin/dns); the server falls back to an
+# existing certificate if a renewal fails, and refuses to start only when it
+# has none — deliberately, since silently serving http would restore the bug.
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=full
@@ -764,5 +771,9 @@ echo ""
 echo "Web dashboard for browser access over Tailscale (stdlib only):"
 echo "  python3 $SERVER_DIR/nth_web.py MYCHAN           # loopback only (http://127.0.0.1:8765/)"
 echo "  python3 $SERVER_DIR/nth_web.py MYCHAN --tailnet # reachable from tailnet peers"
+echo "  python3 $SERVER_DIR/nth_web.py MYCHAN --tailscale-tls  # https — REQUIRED for dictation"
+echo "     (browsers only grant microphone access on https or localhost, so over"
+echo "      plain http at a tailnet IP dictation cannot work from any device."
+echo "      Needs HTTPS Certificates enabled: https://login.tailscale.com/admin/dns)"
 echo ""
 echo "  (Windows: substitute 'py' for 'python3')"
