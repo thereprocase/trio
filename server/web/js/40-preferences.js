@@ -150,7 +150,15 @@
   }
   function diagnostics() { const note = typeof Notification !== 'undefined' ? Notification.permission : 'unavailable'; return { online: navigator.onLine ? 'yes' : 'no', channel: (Trio.store ? Trio.store.get('session.channel') : Trio.state.channel) || '', theme: readFromStorage().theme, agents: ((Trio.store ? Trio.store.get('agents.list') : Trio.state.agents) || []).length, notifications: note, stt: Trio.state.sttHealth || 'checking' }; }
   async function checkStt() {
-    try { const h = await Trio.api.get('/api/stt/health'); Trio.state.sttHealth = h && h.ok ? 'ready' : 'unavailable'; }
+    // secure_url rides on this response: on an insecure origin the mic is
+    // unavailable and the only useful thing to tell the operator is the
+    // address that WOULD work, which the browser cannot know and the server
+    // can. The composer reads it from state when explaining a dead mic button.
+    try {
+      const h = await Trio.api.get('/api/stt/health');
+      Trio.state.sttHealth = h && h.ok ? 'ready' : 'unavailable';
+      Trio.state.secureUrl = (h && h.secure_url) || '';
+    }
     catch { Trio.state.sttHealth = 'unavailable'; }
   }
   function renderPage(panel) {
