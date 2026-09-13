@@ -59,7 +59,7 @@ if [ "${1:-}" = "hub-service" ] || [ "${1:-}" = "upgrade" ]; then
              nth_constants.py nth_doctor.py codex_context_publisher.py \
              nth_supervisor.py nth_request_log.py \
              nth_agent_manager.py \
-             nth_codex_runtime.py \
+             nth_codex_runtime.py nth_codex_socket.py nth_codex_relay.py \
              nth_usage.py nth_conversation.py nth_ask_client.js; do
         if [ -f "$HUB_DIR/$f" ] && ! cmp -s "$SCRIPT_DIR/server/$f" "$HUB_DIR/$f"; then
             cp "$HUB_DIR/$f" "$HUB_DIR/$f.bak-$STAMP"
@@ -422,6 +422,8 @@ cp "$SCRIPT_DIR/server/nth_constants.py" "$SERVER_DIR/nth_constants.py"
 cp "$SCRIPT_DIR/server/nth_supervisor.py" "$SERVER_DIR/nth_supervisor.py"
 cp "$SCRIPT_DIR/server/nth_request_log.py" "$SERVER_DIR/nth_request_log.py"
 cp "$SCRIPT_DIR/server/nth_codex_runtime.py" "$SERVER_DIR/nth_codex_runtime.py"
+cp "$SCRIPT_DIR/server/nth_codex_socket.py" "$SERVER_DIR/nth_codex_socket.py"
+cp "$SCRIPT_DIR/server/nth_codex_relay.py" "$SERVER_DIR/nth_codex_relay.py"
 cp "$SCRIPT_DIR/server/nth_agent_manager.py" "$SERVER_DIR/nth_agent_manager.py"
 # Quota-burn series + the arithmetic over it.
 cp "$SCRIPT_DIR/server/nth_usage.py" "$SERVER_DIR/nth_usage.py"
