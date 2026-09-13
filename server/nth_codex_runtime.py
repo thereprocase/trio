@@ -223,8 +223,12 @@ class CodexAppServerClient:
         proc = self.proc
         if proc is None or proc.stdout is None:
             return
+        self._read_messages(proc.stdout)
+
+    def _read_messages(self, messages) -> None:
+        """Correlate JSON-RPC messages independently of the wire transport."""
         try:
-            for raw in proc.stdout:
+            for raw in messages:
                 raw = raw.strip()
                 if not raw:
                     continue
