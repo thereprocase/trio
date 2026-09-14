@@ -60,6 +60,8 @@ if [ "${1:-}" = "hub-service" ] || [ "${1:-}" = "upgrade" ]; then
              nth_supervisor.py nth_request_log.py \
              nth_agent_manager.py \
              nth_codex_runtime.py nth_codex_socket.py nth_codex_relay.py \
+             nth_event_sources.py nth_event_service.py nth_event_access.py \
+             nth_cli.py nth_quartet_proxy.py nth_watch.py \
              nth_usage.py nth_conversation.py nth_ask_client.js; do
         if [ -f "$HUB_DIR/$f" ] && ! cmp -s "$SCRIPT_DIR/server/$f" "$HUB_DIR/$f"; then
             cp "$HUB_DIR/$f" "$HUB_DIR/$f.bak-$STAMP"
@@ -424,6 +426,12 @@ cp "$SCRIPT_DIR/server/nth_request_log.py" "$SERVER_DIR/nth_request_log.py"
 cp "$SCRIPT_DIR/server/nth_codex_runtime.py" "$SERVER_DIR/nth_codex_runtime.py"
 cp "$SCRIPT_DIR/server/nth_codex_socket.py" "$SERVER_DIR/nth_codex_socket.py"
 cp "$SCRIPT_DIR/server/nth_codex_relay.py" "$SERVER_DIR/nth_codex_relay.py"
+cp "$SCRIPT_DIR/server/nth_event_sources.py" "$SERVER_DIR/nth_event_sources.py"
+cp "$SCRIPT_DIR/server/nth_event_service.py" "$SERVER_DIR/nth_event_service.py"
+cp "$SCRIPT_DIR/server/nth_event_access.py" "$SERVER_DIR/nth_event_access.py"
+cp "$SCRIPT_DIR/server/nth_cli.py" "$SERVER_DIR/nth_cli.py"
+cp "$SCRIPT_DIR/server/nth_quartet_proxy.py" "$SERVER_DIR/nth_quartet_proxy.py"
+cp "$SCRIPT_DIR/server/nth_watch.py" "$SERVER_DIR/nth_watch.py"
 cp "$SCRIPT_DIR/server/nth_agent_manager.py" "$SERVER_DIR/nth_agent_manager.py"
 # Quota-burn series + the arithmetic over it.
 cp "$SCRIPT_DIR/server/nth_usage.py" "$SERVER_DIR/nth_usage.py"

@@ -34,7 +34,7 @@ from nth_constants import (SLEEPING_KEYWORDS, NTH_VERSION, project_context,
 
 from mcp.server.fastmcp import FastMCP, Image
 
-DB_DIR = Path.home() / ".claude" / "nth"
+DB_DIR = Path(os.environ.get("NTH_HOME", str(Path.home() / ".claude" / "nth")))
 DB_PATH = DB_DIR / "nth.db"
 # Set once the buddy-icon uniqueness index has been reported as unavailable,
 # so a database with pre-existing duplicates warns once rather than per request.
@@ -1711,6 +1711,9 @@ def nth_connect(
             _console("♻️", channel, f"{name} re-attached", 90)
         else:
             _console("👋", channel, f"{name} joined ({len(members)} members)", 32)
+        if os.environ.get("TRIO_NATIVE_CLIENT"):
+            from nth_event_access import native_connect_response
+            resp = native_connect_response(resp)
         return json.dumps(resp)
 
     finally:
@@ -5005,6 +5008,21 @@ def nth_cleanup(channel: str = "", all_ended: bool = False) -> str:
         return json.dumps({"ok": True, "deleted": deleted})
     finally:
         db.close()
+
+
+@mcp.tool(name=f"{TOOL_PREFIX}_delivery_status")
+def nth_delivery_status(channel: str, member_id: str, session_token: str) -> str:
+    """Check this session's local Codex listener without exposing credentials."""
+    from nth_event_access import delivery_status
+    return json.dumps(delivery_status(channel, member_id, session_token))
+
+
+@mcp.tool(name=f"{TOOL_PREFIX}_listen")
+def nth_listen(channel: str, member_id: str, session_token: str,
+               filter_mode: str = "about", enabled: bool = True) -> str:
+    """Change or stop this session's Codex listener; preserve read watermarks."""
+    from nth_event_access import listen
+    return json.dumps(listen(channel, member_id, session_token, filter_mode, enabled))
 
 
 if __name__ == "__main__":

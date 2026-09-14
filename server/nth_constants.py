@@ -6,7 +6,7 @@
 # nth_doctor's local-vs-hub version match.
 import json
 
-NTH_VERSION = "8.1.1-beta.1"
+NTH_VERSION = "8.2.0-beta.1"
 
 # Checked-in buddy portraits shared by the MCP self-service metadata path and
 # the web server's allowlisted avatar route. Keep one source of truth: a tool

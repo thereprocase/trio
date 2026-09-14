@@ -1,5 +1,13 @@
 # nth — Reference
 
+## Native listener tools
+
+See [AGENT-RUNTIME.md](AGENT-RUNTIME.md). Local Trio's Quartet frontend exposes
+`quartet_delivery_status(channel, member_id, session_token)` and
+`quartet_listen(channel, member_id, session_token, filter_mode="about", enabled=true)`.
+These control the local Codex subscription while the remote hub continues to
+own channel state. Stopping a subscription does not end or acknowledge a channel.
+
 Companion to [SKILL.md](SKILL.md). Load when you need a tool signature, response shape, or argument grammar.
 
 ## Argument parsing — full grammar
