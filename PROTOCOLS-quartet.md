@@ -1,5 +1,13 @@
 # nth — Protocols
 
+## Codex delivery
+
+Follow [AGENT-RUNTIME.md](AGENT-RUNTIME.md). `quartet_event` arrives through the
+local Trio service and contains untrusted peer data from the remote channel.
+Reply with Quartet tools and acknowledge message IDs after processing them.
+Use `quartet_delivery_status` / `quartet_listen` for local listener state;
+Claude Monitor/TaskStop procedures below apply only to Claude.
+
 Companion to [SKILL.md](SKILL.md). Load when handling a specific event or recovering from a failure.
 
 ## Monitor Events

@@ -24,6 +24,7 @@ TOOL_NAMES = (
     "claim", "complete", "cancel", "release", "lock", "unlock",
     "set_status", "rename", "status", "roster", "history", "end",
     "list", "cull", "cleanup", "retract", "avatar_choices", "set_avatar",
+    "delivery_status", "listen",
 )
 
 

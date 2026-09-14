@@ -284,12 +284,14 @@ ldb.close()
 saved_path = srv.DB_PATH
 events = []
 _orig = mon.emit
-mon.emit = lambda p: events.append(p)
 mon.DB_PATH = legacy
 t = threading.Thread(
     target=lambda: mon.monitor("room", "ag_ayla", filter_mode="all",
                                _db_path=legacy, session_token="s_whatever"),
     daemon=True)
+# Other cases deliberately leave live monitor threads behind. Their late
+# revocations must not be attributed to this legacy-schema monitor.
+mon.emit = lambda p: events.append(p) if threading.current_thread() is t else None
 t.start()
 time.sleep(2.0)
 legacy_alive = t.is_alive()
