@@ -34,10 +34,22 @@ into the local Trio service, provider-aware tools, installer and launchers.
 
 ## Limits and operator context
 
-The WSL Claude live model/Monitor test could not authenticate: its OAuth
-session expired and refresh failed. The installer and provider-aware Monitor
+Both Windows and WSL Claude live model/Monitor tests could not authenticate:
+their OAuth sessions expired and refresh failed. The installer and provider-aware Monitor
 command are covered by tests; do not represent the live Claude session as
 verified until login is refreshed and that probe passes.
+
+The installed Windows and WSL Codex copies matched the merged Python modules
+and skill files byte for byte. Each joined the live PVE channel, accepted an
+addressed event and posted `INSTALLED_RECEIVED` with its platform's test marker
+back into that channel. The installed Windows desktop process connected to
+the installed server; stock Codex and Claude were launched in separate windows
+of the `trio-native` WSL tmux session.
+
+A direct Windows Git Bash probe caught native backslashes being interpreted
+as shell escapes in Claude's Monitor command. The command now uses forward-slash
+paths and POSIX quoting, including paths with spaces; direct invocation of the
+generated command is checked independently of Claude authentication.
 
 The remote test channel is `trio-native-20260913`. The receiver is an external
 WSL participant, not a hub-managed agent. Its place in the PVE UI is the channel
