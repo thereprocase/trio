@@ -3,6 +3,7 @@ import contextlib
 import importlib.util
 import json
 import os
+import shlex
 from pathlib import Path
 import sqlite3
 import sys
@@ -110,6 +111,9 @@ class NativeTests(unittest.TestCase):
             result = native_connect_response(dict(identity))
         self.assertNotIn('private-token', result['monitor_hint'])
         self.assertNotIn('private-reclaim', result['monitor_hint'])
+        argv = shlex.split(result['monitor_hint'])
+        self.assertEqual(argv[0], sys.executable.replace('\\', '/') if os.name == 'nt' else sys.executable)
+        self.assertEqual(Path(argv[argv.index('--identity') + 1]), Path(result['identity_file']))
         path = Path(result['identity_file'])
         self.assertEqual(json.loads(path.read_text())['session_token'], 'private-token')
         if os.name != 'nt': self.assertEqual(path.stat().st_mode & 0o077, 0)
