@@ -40,7 +40,7 @@ function roster(names) {
 function selected() { return [...state.selectedTargets].sort().join(','); }
 function order() { return C.targetOrder().join(','); }
 
-state.operator = { id: 'op', name: 'jdsareault' };
+state.operator = { id: 'op', name: 'exampleuser' };
 state.channel = 'picker';
 state.dmKey = '';
 state.dmTargetId = '';
@@ -50,7 +50,7 @@ state.drafts = {};
 
 // Deliberately inserted out of alphabetical order, so a roster-order
 // implementation and a name-order one disagree.
-roster([['z9', 'Zed'], ['a1', 'Ada'], ['m5', 'Mo'], ['op', 'jdsareault']]);
+roster([['z9', 'Zed'], ['a1', 'Ada'], ['m5', 'Mo'], ['op', 'exampleuser']]);
 
 check('the numbered order is by NAME, so a digit keeps meaning the same agent', () => {
   assert.strictEqual(order(), 'a1,m5,z9');
@@ -62,7 +62,7 @@ check('the operator is not addressable — you cannot direct a message at yourse
 
 check('a member joining does not renumber the ones already there', () => {
   const before = C.targetOrder().join(',').split(',');
-  roster([['z9', 'Zed'], ['a1', 'Ada'], ['m5', 'Mo'], ['op', 'jdsareault'],
+  roster([['z9', 'Zed'], ['a1', 'Ada'], ['m5', 'Mo'], ['op', 'exampleuser'],
           ['w1', 'Wren']]);
   const after = C.targetOrder().join(',').split(',');
   // Wren sorts between Mo and Zed, so Zed's digit legitimately moves — but
@@ -71,7 +71,7 @@ check('a member joining does not renumber the ones already there', () => {
   assert.strictEqual(after.slice(0, 2).join(','), before.slice(0, 2).join(','));
 });
 
-roster([['z9', 'Zed'], ['a1', 'Ada'], ['m5', 'Mo'], ['op', 'jdsareault']]);
+roster([['z9', 'Zed'], ['a1', 'Ada'], ['m5', 'Mo'], ['op', 'exampleuser']]);
 
 check('toggling adds, then removes, the same target', () => {
   state.selectedTargets = new Set();

@@ -149,7 +149,7 @@ The message sentinel (`messenger-foreground.py`) showed the same failure mode bu
 
 ### Evidence
 
-- Agent-completion transcripts from this session at `C:\Users\repro\AppData\Local\Temp\claude\F--Claude-projects-RAMwatch\<session-uuid>\tasks\*.output`. Specifically the bail messages from agents `a1db7ca97dbf68a96`, `acbc1907850b76fa2`, `ad228d4c401b5e516`, and `aaa5d85a9aad67bcb`.
+- Agent-completion transcripts from this session at `<local-temp>\claude\<project>\<session-uuid>\tasks\*.output`. Specifically the bail messages from agents `a1db7ca97dbf68a96`, `acbc1907850b76fa2`, `ad228d4c401b5e516`, and `aaa5d85a9aad67bcb`.
 - Server-side `watchdog_heartbeat` column in `members` table for `xbpz9z` shows long gaps during these periods.
 - Peer session's `peer_dead` events on `jrjmc7` (RAMBurn-Lead) observed at the heartbeat-gap threshold, correlating with the watchdog deaths.
 
@@ -185,4 +185,4 @@ None were reliable. Haiku's reasoning-drift failure mode is not prompt-addressab
 
 **Reporter (primary):** RAMBurn-Lead session on channel `ramburn-upgrade`
 **Reporter (secondary failure mode):** RAMWatch session on channel `ramburn-upgrade` (parent member_id `xbpz9z`)
-**Evidence location:** `~/.claude/nth/nth.db`, `messages` table, channel `ramburn-upgrade`, rogue message IDs listed in §Observed behaviour; agent transcript output files at `C:\Users\repro\AppData\Local\Temp\claude\F--Claude-projects-RAMwatch\*\tasks\*.output` for the watchdog-refusal evidence.
+**Evidence location:** `~/.claude/nth/nth.db`, `messages` table, channel `ramburn-upgrade`, rogue message IDs listed in §Observed behaviour; agent transcript output files at `<local-temp>\claude\<project>\*\tasks\*.output` for the watchdog-refusal evidence.

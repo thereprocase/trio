@@ -15,7 +15,7 @@ mismatch, nonstandard DB path via de-rooted HOME).
 
 - Repo is source of truth; every phase ends with a commit. Deploys go
   repo → install locations, never hand-edits on the target.
-- Hub deploys: `/opt/quartet-hub/` on PVE (`root@pve.home.arpa`), backup as
+- Hub deploys: `/opt/quartet-hub/` on PVE (`root@YOUR_HUB`), backup as
   `<file>.bak-YYYYMMDD` before overwrite, `py_compile` on target before restart.
 - Spoke deploys: `~/.claude/skills/{nth,trio,quartet}/` locally.
 - Supply-chain: the ONLY new install is `mcp` (+deps) and `uvicorn` from PyPI

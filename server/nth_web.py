@@ -909,7 +909,7 @@ TLS_HANDSHAKE_TIMEOUT = 20
 
 
 def tailscale_dns_name() -> Optional[str]:
-    """This host's MagicDNS name (e.g. "macbook.tail0abc.ts.net"), or None.
+    """This host's MagicDNS name (e.g. "host.example.ts.net"), or None.
 
     That name — not the tailnet IP — is what a Tailscale-issued certificate
     is valid for, so it is also the URL that has to be used in the browser.

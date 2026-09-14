@@ -100,7 +100,7 @@ check('every sigil class is in the path walker\'s skip list', () => {
 // worked perfectly. querySelector/closest read the property and are accurate.
 check('both decorators applied in paintBody order: mention AND path survive', () => {
   withMember('m1', 'alice', () => {
-    const { body } = paint('hey @alice look at /home/repro/code/trio/README.md today',
+    const { body } = paint('hey @alice look at /home/example/project/README.md today',
       { mentions: ['m1'] });
     linkifyAll(body);
 
@@ -114,7 +114,7 @@ check('both decorators applied in paintBody order: mention AND path survive', ()
 
 check('running the path decorator twice adds no duplicate wrappers', () => {
   withMember('m1', 'alice', () => {
-    const { body } = paint('hey @alice see /home/repro/notes.md', { mentions: ['m1'] });
+    const { body } = paint('hey @alice see /home/example/notes.md', { mentions: ['m1'] });
     linkifyAll(body);
     const once = body.innerHTML;
     const linksOnce = body.querySelectorAll('.file-link').length;
@@ -133,7 +133,7 @@ for (const cls of ['inline-mention', 'inline-ref', 'inline-bang']) {
     const body = new FakeElement('div');
     const span = new FakeElement('span');
     span.className = 'sigil ' + cls;
-    span.textContent = '@alice /home/repro/secret/path.md';
+    span.textContent = '@alice /home/example/secret/path.md';
     body.appendChild(span);
 
     linkifyAll(body);
@@ -170,19 +170,19 @@ check('decorateSigils does NOT descend into an anchor (file-link is an <a>)', ()
 // could split the text node mid-path before the path scanner ever sees it.
 check('a path containing an @ is not shredded by the sigil decorator', () => {
   withMember('m1', 'alice', () => {
-    const { body } = paint('@alice check /home/repro/mail@archive/x.txt please',
+    const { body } = paint('@alice check /home/example/mail@archive/x.txt please',
       { mentions: ['m1'] });
     linkifyAll(body);
 
     assert.ok(body.querySelector('.inline-mention'), 'the real mention was lost');
-    assert.ok(/\/home\/repro\/mail@archive\/x\.txt/.test(body.textContent),
+    assert.ok(/\/home\/example\/mail@archive\/x\.txt/.test(body.textContent),
       'the path text was broken up: ' + body.textContent);
   });
 });
 
 check('an @ inside a path is not itself decorated as a mention', () => {
   withMember('m1', 'archive', () => {
-    const { body } = paint('see /home/repro/mail@archive/x.txt', { mentions: ['m1'] });
+    const { body } = paint('see /home/example/mail@archive/x.txt', { mentions: ['m1'] });
     // "@archive" here is part of a filesystem path, not an address. A member
     // named "archive" must not turn the middle of a path into a mention chip.
     assert.ok(!body.querySelector('.inline-mention'),
@@ -192,8 +192,8 @@ check('an @ inside a path is not itself decorated as a mention', () => {
 
 // ── the detector is unchanged by neighbouring decoration ────────────────────
 check('path detection is unaffected by an adjacent mention in the same text', () => {
-  const withMention = Trio.fileLinks.detectFilePathCandidates('@alice /home/repro/a/b.md');
-  const without = Trio.fileLinks.detectFilePathCandidates('/home/repro/a/b.md');
+  const withMention = Trio.fileLinks.detectFilePathCandidates('@alice /home/example/a/b.md');
+  const without = Trio.fileLinks.detectFilePathCandidates('/home/example/a/b.md');
   assert.strictEqual(withMention.length, without.length,
     'an adjacent @mention changed how many paths were detected');
   assert.ok(withMention.length >= 1, 'expected the path to be detected at all');

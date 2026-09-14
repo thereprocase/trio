@@ -160,7 +160,7 @@ else:
 
 # ───────── 3. tailscale_dns_name ─────────
 # `tailscale status --json` reports Self.DNSName as a FQDN with a trailing
-# dot. Leaving it on produces "macbook.tail0abc.ts.net.:8765" in the banner
+# dot. Leaving it on produces "host.example.ts.net.:8765" in the banner
 # and in the cert request -- a name no browser will match.
 class _FakeCompleted:
     def __init__(self, stdout=b"", stderr=b"", returncode=0):
@@ -187,10 +187,10 @@ def with_fake_tailscale(check_output=None, run=None, candidates=("tailscale",)):
     return _Restore()
 
 
-status_json = json.dumps({"Self": {"DNSName": "macbook.tail63b486.ts.net."}}).encode()
+status_json = json.dumps({"Self": {"DNSName": "host.example.ts.net."}}).encode()
 with with_fake_tailscale(check_output=lambda *a, **k: status_json):
     check("tailscale_dns_name reads Self.DNSName and strips the trailing dot",
-          web.tailscale_dns_name() == "macbook.tail63b486.ts.net")
+          web.tailscale_dns_name() == "host.example.ts.net")
 
 with with_fake_tailscale(check_output=lambda *a, **k: json.dumps({"Self": {}}).encode()):
     check("tailscale_dns_name returns None when DNSName is absent",
@@ -221,7 +221,7 @@ def _cert_fail(*a, **k):
 
 with with_fake_tailscale(run=_cert_fail):
     try:
-        web.ensure_tailscale_cert("macbook.tail63b486.ts.net", _tmp / "tls")
+        web.ensure_tailscale_cert("host.example.ts.net", _tmp / "tls")
         check("a failing `tailscale cert` raises", False)
     except RuntimeError as exc:
         check("a failing `tailscale cert` raises", True)
@@ -240,7 +240,7 @@ def _cert_ok(cmd, **k):
 
 with with_fake_tailscale(run=_cert_ok):
     cert_dir = _tmp / "tlsdir"
-    got_cert, got_key = web.ensure_tailscale_cert("macbook.tail63b486.ts.net", cert_dir)
+    got_cert, got_key = web.ensure_tailscale_cert("host.example.ts.net", cert_dir)
     check("ensure_tailscale_cert creates its directory", cert_dir.is_dir())
     check("ensure_tailscale_cert returns the written pair",
           got_cert.exists() and got_key.exists())
@@ -262,7 +262,7 @@ if not openssl:
 else:
     fallback_dir = _tmp / "fallback"
     fallback_dir.mkdir()
-    name = "macbook.tail63b486.ts.net"
+    name = "host.example.ts.net"
     # A pre-existing, loadable pair under the exact names the code looks for.
     shutil.copy(real_cert, fallback_dir / f"{name}.crt")
     shutil.copy(real_key, fallback_dir / f"{name}.key")
@@ -332,7 +332,7 @@ def _late_status(*a, **k):
     calls["n"] += 1
     if calls["n"] < 3:
         raise FileNotFoundError("tailscaled not up yet")
-    return json.dumps({"Self": {"DNSName": "macbook.tail63b486.ts.net."}}).encode()
+    return json.dumps({"Self": {"DNSName": "host.example.ts.net."}}).encode()
 
 
 saved_interval = web.TAILSCALE_DNS_RETRY_INTERVAL_S
@@ -340,7 +340,7 @@ web.TAILSCALE_DNS_RETRY_INTERVAL_S = 0.01
 try:
     with with_fake_tailscale(check_output=_late_status):
         check("the DNS name is picked up once tailscaled comes up",
-              web.tailscale_dns_name_blocking(timeout_s=2) == "macbook.tail63b486.ts.net")
+              web.tailscale_dns_name_blocking(timeout_s=2) == "host.example.ts.net")
         check("it retried rather than giving up on the first miss", calls["n"] >= 3)
     with with_fake_tailscale(check_output=_boom):
         check("it still gives up eventually rather than hanging forever",

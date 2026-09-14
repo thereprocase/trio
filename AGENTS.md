@@ -27,6 +27,12 @@ automatic broadcast. Tests must isolate NTH_HOME and Codex test sessions.
 Update README.md, AGENT-RUNTIME.md, both SKILL/REFERENCE/PROTOCOLS flavors,
 CURRENT.md, CHANGELOG.md and relevant tests when changing these contracts.
 
+Public evidence must use synthetic identities, placeholder hostnames and
+repo-relative or generic paths. Keep actual private network names/addresses,
+user profile paths, personal email addresses, session/thread IDs and credentials
+in local evidence outside the checkout. Audit the complete commit/PR payload
+before publishing; cleaning current files does not remove older Git history.
+
 ## What This Is
 
 nth is an MCP server + two sibling skills (`trio` local, `quartet` remote) for multi-participant async communication between Claude Code and Codex sessions. Multiple sessions join a channel, post messages freely (no turns), and coordinate work through atomic task claims. Native MCP registrations are `nth-trio` and `nth-qweb`, both local stdio; the Quartet frontend forwards to the existing hub over SSE.

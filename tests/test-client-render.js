@@ -27,7 +27,7 @@ check('system events collapse to concise human-readable copy', () => {
 check('system cards omit authored-message chrome', () => {
   H.Trio.state.channel = 'atrium-test';
   H.Trio.state.operator = { id: 'operator' };
-  const card = H.cardFor({ id: 12, member_id: 'operator', member_name: 'jdsareault', content: '[channel created] Testing' });
+  const card = H.cardFor({ id: 12, member_id: 'operator', member_name: 'exampleuser', content: '[channel created] Testing' });
   assert.ok(card.classList.contains('system-message'));
   assert.strictEqual(card.querySelector('.message-avatar'), null);
   assert.strictEqual(card.querySelector('.message-head'), null);
@@ -474,7 +474,7 @@ check('channel drawer never shows the operator as offline while they are viewing
   H.Trio.state.channels = [{ code: 'atrium-test', topic: 'Testing' }];
   H.Trio.state.members = new Map(); // operator hasn't posted in this channel
   H.Trio.state.agents = [];
-  H.Trio.state.operator = { id: '_op_l_jdsareault', name: 'jdsareault', source: 'loopback', pending: false };
+  H.Trio.state.operator = { id: '_op_l_exampleuser', name: 'exampleuser', source: 'loopback', pending: false };
   H.Trio.workspace.showDetails();
   const html = cx.document.getElementById('channel-drawer-body').innerHTML;
   assert.ok(!html.includes('channel-status-chip offline'),
@@ -779,7 +779,7 @@ check('conversation onRoster: a roster for the open channel replaces its members
   H.Trio.state.members = new Map([['old', { id: 'old', name: 'stale' }]]);
   H.Trio.events.dispatchEvent(new cx.window.CustomEvent('roster', { detail: {
     channel: 'atrium-test4',
-    members: [{ id: 'ag_cedar', name: 'Cedar' }, { id: 'op', name: 'jdsareault' }],
+    members: [{ id: 'ag_cedar', name: 'Cedar' }, { id: 'op', name: 'exampleuser' }],
   } }));
   assert.strictEqual(H.Trio.state.members.size, 2);
   assert.ok(H.Trio.state.members.has('ag_cedar') && !H.Trio.state.members.has('old'));

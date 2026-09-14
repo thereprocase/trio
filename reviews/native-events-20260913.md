@@ -54,7 +54,7 @@ generated command is checked independently of Claude authentication.
 The remote test channel is `trio-native-20260913`. The receiver is an external
 WSL participant, not a hub-managed agent. Its place in the PVE UI is the channel
 roster, not the managed-agent fleet. The dashboard at
-`http://pve.tail958a3.ts.net:8765/` returned 200; a fresh unauthenticated channel
+`http://YOUR_HUB:8765/` returned 200; a fresh unauthenticated channel
 index request was denied by the operator gate. No dashboard access policy,
 hub process or deployment was changed.
 

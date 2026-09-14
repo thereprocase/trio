@@ -651,7 +651,7 @@
     };
     // No statusText here — the level meter already shows "I'm recording";
     // a redundant "Listening…" label next to a red pulsing button and a
-    // waveform is one signal too many (jdsareault).
+    // waveform is one signal too many.
     recognition.start(); document.body.classList.add('dictating'); setDictationButtonState(true);
   }
   async function localDictation() {

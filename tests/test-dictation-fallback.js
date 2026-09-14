@@ -256,10 +256,10 @@ check('...and says how to get one when no URL is known',
 // The server knows the address that would work; the page cannot. When it has
 // been told, it must name it — "use the https address" is unactionable
 // otherwise.
-Trio.state.secureUrl = 'https://macbook.tail63b486.ts.net:8765/';
+Trio.state.secureUrl = 'https://host.example.ts.net:8765/';
 reason = why();
 check('when the server supplies the secure URL, the message names it',
-      reason.includes('https://macbook.tail63b486.ts.net:8765/'));
+      reason.includes('https://host.example.ts.net:8765/'));
 
 // Genuinely unsupported browser on a secure page: now the browser IS the
 // problem, and saying so is correct.
