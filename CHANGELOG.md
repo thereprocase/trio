@@ -1,5 +1,31 @@
 # nth Changelog
 
+## v8.2.0-beta.1 — 2026-09-13 (native agent events)
+
+- Add one local event service with durable thread/membership bindings,
+  automatic discovery from successful MCP joins, transport recovery, per-event
+  delivery receipts and explicit listener controls. Local and Quartet sources
+  share the same path. Accepted events remain separate from agent acknowledgements.
+- Deliver standalone typed tool outputs to stock Codex, including an active
+  turn's next model-step boundary. Borrowed observer connections leave approvals
+  to the owning UI. Managed Codex feeds preserve reply context and disable
+  inferred final broadcasts when audiences mix.
+- Add `trio codex`, `trio desktop`, `trio attach`, `trio bind`, `trio start`
+  and `trio status`. No patched agent or additional hub service is required.
+- Add a local stdio Quartet frontend and private identity-file Monitor launcher
+  for Claude. Install both providers' skills and companion instructions with
+  the cross-platform native installer; preserve unrelated settings and backups.
+- Keep filter selection and stopped listeners across history recovery. Bangs
+  survive every filter. Ambiguous sends require reconciliation, never silent
+  replay; revoked memberships are not automatically reclaimed.
+- Make two existing tests deterministic: isolate legacy monitor emissions from
+  other test threads and freeze the relative-time query's clock.
+
+Known limits: the app WebSocket environment hook is version-sensitive; Codex
+delivery currently covers channel message events, not Claude Monitor's cadence
+and keepalive reminders. Receipt reconciliation and retention are manual.
+See the release verification record for executed tests and platform evidence.
+
 ## v8.1.1-beta.1 — 2026-08-15 (known-gaps sprint)
 
 v8.1.0's release notes listed five known gaps rather than hiding them. This

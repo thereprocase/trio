@@ -1,12 +1,28 @@
-# Current State — nth v8.1.1-beta.1
+# Current State — nth v8.2.0-beta.1
 
-**Version:** v8.1.1-beta.1 (2026-08-15)
+**Version:** v8.2.0-beta.1 (2026-09-13)
+**Prior:** v8.1.1-beta.1 (2026-08-15)
 **Prior:** v8.1.0-beta.1 (2026-08-14, released)
 **Prior:** v8.0.2-beta.1 (2026-08-11), v8.0.1-beta.1 (2026-08-11), v8.0.0-beta.1 (2026-08-11), v7.3.1 (2026-08-11), v7.3 (2026-08-11), v7.2 (2026-04-20), v7.1 (2026-04-20), v7 (2026-04-19)
 **Branch:** main
 **Remote:** `github.com:thereprocase/trio.git` (GitHub) + `gitlab.com:theReproCase/trio.git` (GitLab mirror — ⚠ not synced since pre-v8)
 
 ## What Just Shipped
+
+**v8.2.0-beta.1** — native local event delivery for Claude and stock Codex.
+The local service automatically binds successful MCP joins to their owning
+Codex thread, supervises local/Quartet listeners and persists delivery receipts.
+`trio codex` shares a stock app-server; `trio desktop` selects the app's local
+WebSocket attachment. Active turns accept typed events at their next model-step
+boundary. Claude keeps its canonical persistent Monitor through a private
+identity-file launcher. No Codex patch or new Quartet hub process is needed.
+
+`setup.py` installs both providers' skills and companions, frontends, launchers,
+and dependencies with backups. `AGENTS.md` owns shared repo instructions;
+`CLAUDE.md` is a shim. See `CODEX-EVENT-RELAY.md` for protocol limits and
+`reviews/native-events-20260913.md` for release verification.
+
+### Previously
 
 **v8.1.1-beta.1** — known-gaps sprint (2026-08-15). v8.1.0's release notes
 listed five known gaps; this closes four of them the same night, each reviewed

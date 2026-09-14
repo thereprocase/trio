@@ -1,184 +1,108 @@
-# Quartet events in stock Codex
+# Native Trio event delivery
 
-Prototype implemented and live-tested on 2026-09-13 against **stock WSL Codex
-0.154.0** and the existing PVE Quartet 8.1.1-beta.1 server. No Codex source or
-binary patch, PVE service deployment, terminal keystroke injection, or new broker
-was needed. Branch: `feat/codex-event-relay`.
+Trio 8.2.0-beta.1 supplies local supervision and delivery for stock Codex.
+Quartet remains the remote channel authority. No Codex source/binary patch,
+history database editing, terminal typing, new broker or PVE sidecar is needed.
 
 ```text
-Existing PVE Quartet
-    | quartet_poll over its existing MCP/SSE connection
-    v
-Local nth_codex_relay.py -> SQLite delivery ledger
-    | turn/start { input: [], toolOutput: ... }
-    v
-Existing Codex app-server <---- Codex CLI / desktop UI
-    | idle: starts a turn; active: enters the existing turn
-    v
-Same bound Codex thread
+Local Trio database / existing Quartet MCP hub
+                   |
+          nth_event_service.py
+          registry + per-binding SQLite ledger
+                   | standalone tool output
+          owning stock Codex app-server <--- CLI or app
+                   |
+             exact joined thread
 ```
 
-The protocol calls this a **standalone tool output**. The overall feature is
-asynchronous event delivery and agent wake-up. Each event is a new delivery
-request from a long-lived producer; it is not multiple JSON-RPC responses to
-one request. The model handles accepted events at its next processing boundary.
-Admission does not interrupt a shell command or prove the model has read it.
+The protocol calls this a **standalone tool output**: `turn/start` with
+`input: []` and `toolOutput: {name, namespace: null, output}`. Each event is a
+new JSON-RPC request from a long-lived producer, not repeated responses to one
+request. An idle thread starts a turn. An active thread consumes accepted input
+at its next model-step boundary, typically after the current tool/batch finishes.
+Acceptance neither interrupts that tool nor proves the model has read the event.
 
-## Live evidence
+## Installation and launch
 
-The isolated PVE channel is `codex-relay-proof-20260913`. Test identity
-credentials remain in private local files and are excluded from this checkout.
+Use `python setup.py install --quartet-url http://YOUR_HUB:8000/sse`.
+Select providers with `--clients claude,codex` and a stock binary with
+`--codex-binary PATH`. See README for platform commands. The installer preserves
+unrelated registrations/settings and makes timestamped backups before replacing
+files. It installs both skills and all their companion instructions.
 
-| Probe | Observed result |
+`trio codex` starts/reuses the local stock server and launches the stock TUI
+with `--remote`. POSIX uses a Unix WebSocket; Windows uses loopback WebSocket.
+`trio desktop --app PATH --isolated` launches the Windows app in a separate UI
+profile with `CODEX_APP_SERVER_WS_URL` scoped to that process. This installed
+app hook is version-sensitive, not a stable public API. Other existing app
+windows continue using their original connection. Windows and WSL retain
+separate Codex homes, authentication and databases.
+
+For an already exposed **owning** endpoint use `trio attach --endpoint ...`.
+Never start a second server to manipulate an active thread owned elsewhere.
+Existing stdio-only sessions need a new launch through Trio. `trio bind` is
+explicit recovery from the private `identity_file` returned by connect and the
+known thread ID; normal operation needs neither manual binding nor thread IDs.
+
+## Automatic membership and controls
+
+The service watches only locally configured endpoints. It subscribes to their
+loaded threads and accepts only successful `nth-trio/trio_connect` or
+`nth-qweb/quartet_connect` MCP completions. Connect history catches joins that
+finish before subscription. Remote content cannot choose an endpoint or source
+URL. Replay of the same successful connect preserves the current filter and
+stopped-listener state. No agent tokens appear in status output or process argv.
+
+Use `*_delivery_status` and `*_listen` with your membership credentials to
+inspect, change filters or stop a subscription. `trio status` reports all local
+listeners. `all`, `about` and `at` use per-message targeting; bangs pass every
+filter, including `@someone_else !me`. Delivery never acknowledges messages on
+the agent's behalf: acknowledge only through the highest message ID processed.
+
+One local service supervises multiple bindings and retries transport failures
+with bounded backoff. Successful receipts survive reconnects and restarts.
+Revoked membership or ended channels stop the binding without auto-reclaim.
+Service helpers detach from the launcher, so closing the TUI is not a request
+to stop listening: use `*_listen(enabled=false)` before leaving a subscription.
+The service resumes enabled bindings when next started after a reboot; the
+installer does not add system boot jobs.
+
+## Delivery ledger and recovery
+
+State lives under `NTH_HOME/events`, default `~/.claude/nth/events`.
+`registry.sqlite` holds private membership bindings; one ledger per binding
+records `pending -> sending -> accepted` and the returned turn ID. Each ledger
+has one process owner. Filter changes retain receipt history. An observer
+leaves approval requests to the owning UI and never kills its borrowed server.
+
+If a send loses its response, the listener reports `attention` with
+`unconfirmed_delivery` and retains `sending`. Automatic replay stops because
+the server may already have accepted it. Stop the subscription, inspect that
+exact thread and ledger, then reconcile the row as accepted with the observed
+turn ID, or as pending only when non-delivery is established. Back up the ledger
+before editing it, and explicitly re-enable the listener afterward. There is
+no automated reconciliation command or end-to-end exactly-once claim. Accepted
+events are not automatically replayed after a Codex crash. Retention is manual.
+
+## Provider behavior and integration seams
+
+| Component | Responsibility |
 |---|---|
-| Standalone idle event | `RECEIVED STOCK_IDLE_EVENT_1` |
-| First PVE event | `RECEIVED PVE_IDLE_EVENT_1` |
-| Second PVE event, same thread | `RECEIVED PVE_IDLE_EVENT_2` |
-| Restart the relay and poll the same messages | No additional turn |
-| PVE event while `sleep 15` runs | Receipt returns the **same active turn ID**, `01a09d12-23b5-7c32-9537-cd9d681695d3` |
-| Model response after command completion | `Sleep completed. RECEIVED PVE_ACTIVE_EVENT_3` |
-| Continuous relay with stock TUI attached | `RECEIVED PVE_CLI_EVENT_4` appears live in tmux |
-| `@other !receiver` targeting | `RECEIVED PVE_BANG_EVENT_5` appears live with the final filter code |
+| `nth_event_service.py` | Host registry, thread observation, lifecycle and retry supervision |
+| `nth_codex_relay.py` / `nth_codex_socket.py` | Source polling, receipt ledger, typed input, borrowed transport |
+| `nth_event_sources.py` | Canonical local poll/status or existing remote MCP connection |
+| `nth_quartet_proxy.py` | Local stdio frontend, unmodified remote tool results, local delivery controls |
+| `nth_event_access.py` / `nth_watch.py` | Private identity persistence and provider-specific startup |
+| `nth_codex_runtime.py` | Managed agent feeds into active turns; preserve reply audience |
+| `nth_cli.py` / `setup.py` | Native launch, attach, inspection and installation |
+| `AGENT-RUNTIME.md`, both skill/reference/protocol flavors | Agent workflow and acknowledgement rules |
 
-The active-command probe used a separate test thread because the initial idle
-probe deliberately prohibited all tools. Both probes used the same isolated
-Quartet channel. Model replies above were verified **inside Codex**; the relay
-does not automatically post final answers back into Quartet.
+Claude uses its existing persistent Monitor, with its exact command returned
+by connect. This preserves canonical message, cadence and keepalive events.
+Codex currently receives channel messages; cadence/keepalive reminder parity
+and a general subprocess/JSONL source adapter remain follow-up work. Managed
+feeds do not infer a final broadcast destination after mixing audiences.
 
-## Run it
-
-Install the optional dependency in the Python environment running the relay:
-
-```sh
-python -m pip install -r requirements-codex-relay.txt
-```
-
-Use an existing shared app-server endpoint. For an isolated WSL proof, create
-a private directory and start the stock server and UI against the same socket:
-
-```sh
-mkdir -m 700 -p /tmp/my-codex-relay
-codex app-server --listen unix:///tmp/my-codex-relay/codex.sock
-# In another terminal, start or resume the target thread on that server:
-codex --remote unix:///tmp/my-codex-relay/codex.sock resume THREAD_ID
-```
-
-Use a thread ID that exists on that server. Do not start a second app-server
-against a live thread and assume it owns the UI's conversation. The relay checks
-the existing thread and calls `thread/resume` without configuration overrides:
-this subscribes to the same live thread, or reloads that exact thread after its
-last client disconnected. It never creates or forks a thread.
-
-Create a private binding file using the member and session token returned by
-Quartet connect. Tokens are file contents, not command-line arguments:
-
-```json
-{
-  "endpoint": "unix:///tmp/my-codex-relay/codex.sock",
-  "thread_id": "EXISTING_THREAD_ID",
-  "url": "http://YOUR_QUARTET_HOST:8000/sse",
-  "channel": "your-channel",
-  "member_id": "YOUR_MEMBER_ID",
-  "session_token": "YOUR_SESSION_TOKEN",
-  "filter": "at"
-}
-```
-
-```sh
-chmod 600 binding.json
-python server/nth_codex_relay.py --binding binding.json --spool events.sqlite
-```
-
-Use `--once` for a single poll/drain. Filters are `at` (mentions/bangs), `about`
-(also references), and `all`. Filtering uses each message's flags, retaining
-unfilterable bangs even when the same message mentions someone else. The relay sends full message data as
-tool output, preserving message IDs and source channel. It retains the
-monitor's `auto_ack=false` behavior; the agent owns Quartet acknowledgements.
-Configure the existing Quartet MCP tools separately for send, poll, ack, task
-claims and other participation. The relay handles inbound delivery only.
-
-Codex's Unix sockets carry **WebSocket frames**. `codex app-server proxy --sock`
-is a raw byte proxy; piping newline JSON into it is not a protocol conversion.
-The optional `websockets` package supplies the correct framing. Local endpoints
-bypass HTTP proxy settings. The relay also accepts loopback `ws://`/`wss://`.
-
-## Desktop app route
-
-Read-only inspection of installed Windows Codex app **26.908.4834.0** found:
-
-- The currently running local server uses **stdio**, with no shared listener.
-- The bundled transport selector reads `CODEX_APP_SERVER_WS_URL`, falling back
-  to a host's `websocket_url`. `CODEX_APP_SERVER_FORCE_CLI=1` disables this path.
-- `CODEX_CLI_PATH` is an executable override, an alternative wrapper hook.
-- The automatic `CODEX_APP_SERVER_USE_LOCAL_DAEMON=1` branch explicitly excludes
-  Windows in this build. Do not prescribe that switch for this Windows app.
-
-**Best app approach:** launch a stock native app-server on a private/local
-endpoint and attach both the app and relay to it using the WebSocket route.
-For Windows this would normally be a loopback WebSocket listener and a native
-Windows relay. A launch-scoped `CODEX_APP_SERVER_WS_URL` is a candidate for a
-single-host proof; check its effect on every configured host before adopting
-it in a multi-host installation. Keep Windows and WSL authentication, homes,
-and databases independent.
-
-This desktop path is **source-verified, not live-enabled or UI-tested**. It
-requires a controlled relaunch after saving ongoing work. The installed
-environment hook is an implementation detail, not a promised stable public
-API. No desktop settings, app package, or running desktop server were changed.
-
-Fallback: a launcher selected through `CODEX_CLI_PATH` could bridge the app's
-stdio JSON transport to a shared stock WebSocket server. It must actually frame
-WebSockets and preserve request/response routing, capabilities and approvals.
-Avoid building this extra adapter while direct WebSocket attachment works.
-
-## Changes and next integration points
-
-| Place | Current change / next work |
-|---|---|
-| `server/nth_codex_runtime.py` | Extracted wire-independent JSON-RPC reader; managed lifecycle remains intact. Its existing `feed` still queues busy-agent messages. |
-| `server/nth_codex_socket.py` | Borrowed local WebSocket client. Never terminates the owning server. Observer ignores approval requests so the owning UI can answer. |
-| `server/nth_codex_relay.py` | Explicit binding, Quartet polling, SQLite spool, typed event delivery. One process per binding for this prototype. |
-| `server/nth_web.py` / `AgentRouter` | Future managed-agent event ingress and durable queue integration; avoid a second competing route for the same membership. |
-| `server/nth_agent_manager.py` | Future common delivery interface across providers, preserving supervisor ownership. |
-| `server/nth_server.py` / connect response | Future provider-aware monitor hints and automatic binding. Existing Claude `Monitor` hint is unchanged. |
-| `server/nth_monitor.py`, `server/nth_spoke_monitor.py` | Keep event production and targeting here. Reuses the spoke SSE client; cadence and keepalive remain to be integrated. |
-| `SKILL-trio.md`, `SKILL-quartet.md` | Future provider-aware startup instructions after binding automation is ready. |
-| `setup.sh` | Both explicit install manifests include the new modules. Optional dependency remains opt-in. |
-| `tests/test-codex-relay.py` | Delivery order, typed payload, restart dedup, ambiguous send, binding identity, single owner, approval noninterference and revoked membership checks. |
-
-Do not patch Codex's model loop, synthesize user text, edit its history database,
-or drive tmux keystrokes to deliver events. MCP progress notifications alone are
-not the demonstrated wake-up path. App-server typed input is the useful seam.
-
-## Delivery semantics and remaining work
-
-The SQLite transaction records `pending -> sending -> accepted`, with the
-returned Codex turn ID. A per-spool process lock prevents concurrent owners of
-that ledger. The binding fingerprint prevents accidental reuse for a different
-thread/member/channel. Use a single configured spool per binding; independent
-spool paths cannot prevent an operator from starting duplicate subscriptions.
-
-If a process dies or times out after sending but before recording its receipt,
-the event stays `sending` and automatic replay stops. Inspect the thread and
-reconcile that event before retrying. There is no end-to-end exactly-once
-claim. Accepted events are not automatically replayed after a server crash.
-The prototype does not implement an automated reconciliation command, retention
-policy, daemon installer, cross-spool registry or general reconnect supervisor.
-An invalid/revoked session stops delivery; no automatic identity reclaim occurs.
-
-The next production work is automatic thread/member binding, one host service
-with multiple subscriptions, event batching and retention, connection recovery,
-private-inbox and full monitor parity, then managed-agent integration preserving
-approval and reply context. A generic subprocess/JSONL event source can follow
-behind the same delivery interface. **No additional PVE sidecar is required.**
-
-The isolated running proof is accessible with:
-
-```sh
-wsl.exe -e tmux attach -t trio-relay-proof-20260913
-```
-
-Its windows are `app-server`, `cli`, and `relay`. The private binding, ledger,
-virtualenv and raw proof logs live under
-`/tmp/trio-codex-relay-proof-20260913`; these are temporary, not a deployed service.
-Only that named test session should be stopped when retiring the proof.
+Verification is recorded in [the release record](reviews/native-events-20260913.md).
+The earlier explicit-binding proof and active-turn/CLI evidence remain in
+[the prototype record](reviews/codex-relay-proof-20260913.md).

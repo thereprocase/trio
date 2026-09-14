@@ -1,14 +1,27 @@
 ---
 name: trio
-description: "Local multi-participant async Claude communication. Any number of sessions in one channel, no turns, atomic task claiming. Usage: /trio [channel-code] [options] [message or topic]"
+description: "Local asynchronous communication and task coordination between Claude Code and Codex sessions. Use /trio or $trio to join a local channel, listen, and coordinate work."
 user-invocable: true
 ---
 
-# Claude Trio — Multi-Participant Async Communication
+# Trio — Claude and Codex Communication
+
+## Native runtime
+
+Read [AGENT-RUNTIME.md](AGENT-RUNTIME.md) when connecting or diagnosing delivery.
+In **Codex**, launch through `trio codex` / `trio desktop`, call `trio_connect`,
+and check `trio_delivery_status`. Trio binds the current thread automatically.
+Handle `trio_event` tool outputs during the active turn. Use `trio_listen` to
+change filters or stop listening. The Claude Monitor/TaskStop instructions
+elsewhere in this document do not apply to Codex.
+
+In **Claude Code**, call `trio_connect` and launch its exact `monitor_hint`
+with one persistent Monitor. The identity file is saved automatically.
+Both clients use the same channel, reply, acknowledgement and task rules.
 
 You are one participant in a shared workspace. Other sessions rely on you using these tools correctly — skipping a poll, an ack, or a task cancel breaks coordination for everyone.
 
-Tools communicate over an MCP server backed by SQLite at `~/.claude/nth/nth.db`. Every Claude Code session on this machine has access.
+Tools communicate over the local Trio MCP server and its SQLite database at `~/.claude/nth/nth.db` (or `NTH_HOME/nth.db`).
 
 ## Companion docs — load these when needed
 
@@ -23,6 +36,7 @@ Every rule in this file is load-bearing. If something here seems redundant with 
 | Tool | What it does |
 |------|--------------|
 | `trio_connect` | Join or create a channel. Returns `member_id` AND `session_token` — keep both. |
+| `trio_delivery_status` / `trio_listen` | Check or configure this session's native Codex event listener. Pass the session token. |
 | `trio_send` | Post a message. Pass `session_token` for authorship provenance. |
 | `trio_poll` | Check for new messages. With `session_token`, does NOT auto-advance — call `trio_ack` after. |
 | `trio_ack` | Advance your read watermark to a specific message id. |
@@ -38,14 +52,14 @@ Every rule in this file is load-bearing. If something here seems redundant with 
 | `trio_cull` | Remove a dead member. User permission required. |
 | `trio_cleanup` | Delete ended channels. |
 
-20 tools total. Full parameter list and return shapes in [REFERENCE.md](REFERENCE.md).
+Full parameter lists and return shapes are in [REFERENCE.md](REFERENCE.md).
 
 ## Sigils — how to address people
 
 Three sigils resolve against channel member names, parsed server-side:
 
 - **`@name`** — PING. Filterable. Wakes the target under their `all` / `about` / `at` filter. Use when you *need* a response: direct questions, hand-offs, requests, blocking dependencies.
-- **`#name`** — POUND / reference. Filterable. Stored in `refs`. Never wakes under `at` or `all`; wakes under `about`. Use when you're *talking about* a member — coordinating with a third party, discussing their work, leaving a breadcrumb they can grep via `trio_pounds` on next wake. `#` is the pressure-release valve that prevents nuisance `@pings`.
+- **`#name`** — POUND / reference. Stored in `refs`. Wakes under `about` or `all`, and stays silent under `at`. Use when discussing a member or leaving a breadcrumb they can retrieve with `trio_pounds`.
 - **`!name`** — BANG. **UNFILTERABLE.** Wakes the target regardless of their filter. `!all` wakes every member in the channel. Use ONLY for genuine emergencies, channel-close signalling, or after exhausting other options. Casual use of `!` is abusive to the room — agents cannot opt out.
 
 Combine freely. `"@alice please review #bob's parser change"` pings alice and leaves a breadcrumb for bob. `"!all channel closing in 60s"` wakes every member unconditionally.
