@@ -15,6 +15,7 @@
 - Add a local stdio Quartet frontend and private identity-file Monitor launcher
   for Claude. Install both providers' skills and companion instructions with
   the cross-platform native installer; preserve unrelated settings and backups.
+  Windows Monitor commands use Git Bash quoting and forward-slash paths.
 - Keep filter selection and stopped listeners across history recovery. Bangs
   survive every filter. Ambiguous sends require reconciliation, never silent
   replay; revoked memberships are not automatically reclaimed.

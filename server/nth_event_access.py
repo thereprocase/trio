@@ -4,7 +4,6 @@ import json
 import os
 from pathlib import Path
 import shlex
-import subprocess
 import sys
 
 
@@ -47,7 +46,13 @@ def native_connect_response(response, *, source='local', url=''):
     else:
         command = [sys.executable, str(Path(__file__).with_name('nth_watch.py')),
                    '--identity', str(path), '--filter', 'about']
-        response['monitor_hint'] = subprocess.list2cmdline(command) if os.name == 'nt' else shlex.join(command)
+        # Claude's command tools run in a POSIX shell (Git Bash on Windows).
+        # Native backslashes outside quotes would be consumed as shell escapes.
+        # Forward-slash Windows paths work for both Git Bash and Python; shlex
+        # also protects spaces and shell metacharacters in a user profile path.
+        if os.name == 'nt':
+            command = [part.replace('\\', '/') for part in command]
+        response['monitor_hint'] = shlex.join(command)
         response['instructions'] = (
             'Use the installed /' + prefix + ' skill. Start one persistent Monitor with monitor_hint. '
             'The identity_file is already saved; its credentials must stay private. '
