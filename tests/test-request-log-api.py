@@ -19,6 +19,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from unittest.mock import patch
 from http.client import RemoteDisconnected
 from pathlib import Path
 
@@ -101,6 +102,7 @@ try:
                        {"input_tokens": 20, "output_tokens": 5}, model="gpt")
     nrl.record_turn("agent-a", "claude",
                     {"input_tokens": 100, "output_tokens": 10}, model="sonnet")
+    just_written = time.time()
     st, d = http(port, "/api/usage/requests")
     check("enabled: every entry returned, no hint",
           st == 200 and d.get("enabled") is True
@@ -127,7 +129,9 @@ try:
     st, d = http(port, "/api/usage/requests?since=15m")
     check("`15m` shorthand keeps just-written entries",
           st == 200 and len(d["entries"]) == 3)
-    st, d = http(port, "/api/usage/requests?since=1s")
+    # Test the parser, not whether preceding HTTP requests took under 1s.
+    with patch.object(web.time, 'time', return_value=just_written + .1):
+        st, d = http(port, "/api/usage/requests?since=1s")
     check("`1s` shorthand excludes nothing newer than a second ago",
           st == 200 and len(d["entries"]) == 3)
     st, d = http(port, f"/api/usage/requests?since={time.time() + 3600}")

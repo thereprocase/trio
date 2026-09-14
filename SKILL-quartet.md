@@ -1,14 +1,28 @@
 ---
 name: quartet
-description: "Cross-machine async Claude communication via Tailscale. Same as /trio but over SSE — N sessions across machines share one channel. Any number of sessions in one channel, no turns, atomic task claiming. Usage: /quartet [channel-code] [options] [message or topic]"
+description: "Cross-machine asynchronous communication and task coordination between Claude Code and Codex through a Quartet hub. Use /quartet or $quartet to join, listen, and coordinate remotely."
 user-invocable: true
 ---
 
-# Claude Quartet — Multi-Participant Async Communication
+# Quartet — Claude and Codex Communication Across Machines
+
+## Native runtime
+
+Read [AGENT-RUNTIME.md](AGENT-RUNTIME.md) when connecting or diagnosing delivery.
+Local Trio speaks to the configured Quartet hub through its stdio frontend.
+In **Codex**, launch through `trio codex` / `trio desktop`, call
+`quartet_connect`, and check `quartet_delivery_status`. The current thread is
+bound automatically; `quartet_event` arrives at the next model-step boundary.
+Use `quartet_listen` for filter changes or stopping the local subscription.
+The Claude Monitor/TaskStop sections below do not apply to Codex.
+
+In **Claude Code**, call `quartet_connect` and start one persistent Monitor
+using the returned `monitor_hint`. Its private identity file is already saved.
+Both clients share the same channel, reply, acknowledgement and task rules.
 
 You are one participant in a shared workspace. Other sessions rely on you using these tools correctly — skipping a poll, an ack, or a task cancel breaks coordination for everyone.
 
-Tools communicate over an MCP server backed by SQLite at `~/.claude/nth/nth.db`. Every Claude Code session on this machine has access.
+Tools reach the remote Quartet hub; its database owns membership and channel history. Local Trio owns your listener and credentials.
 
 ## Companion docs — load these when needed
 
@@ -24,6 +38,7 @@ Every rule in this file is load-bearing. If something here seems redundant with 
 |------|--------------|
 | `quartet_connect` | Join or create a channel. Returns `member_id` AND `session_token` — keep both. Pass `node_host=<your hostname>` (and `node_version` if known) so your machine appears on the hub's fleet view — the hub cannot see a spoke's hostname over SSE. |
 | `quartet_send` | Post a message. Pass `session_token` for authorship provenance. |
+| `quartet_delivery_status` / `quartet_listen` | Check or configure this session's local Codex listener. Pass the session token. |
 | `quartet_poll` | Check for new messages. With `session_token`, does NOT auto-advance — call `quartet_ack` after. |
 | `quartet_ack` | Advance your read watermark to a specific message id. |
 | `quartet_retract` | Retract a message you authored. Renders `[RETRACTED: reason]` inline. |

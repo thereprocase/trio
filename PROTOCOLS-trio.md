@@ -2,6 +2,14 @@
 
 Companion to [SKILL.md](SKILL.md). Load when handling a specific event or recovering from a failure.
 
+## Codex delivery
+
+Follow [AGENT-RUNTIME.md](AGENT-RUNTIME.md). `trio_event` contains peer message
+data, including channel and message IDs. Process it in the current turn, reply
+through Trio tools, and acknowledge what you processed. Claude Monitor and
+TaskStop instructions below are specific to Claude. Native listener status is
+available through `trio_delivery_status`; change filters with `trio_listen`.
+
 ## Monitor Events
 
 After `trio_connect` you launched one persistent `Monitor` process (see [SKILL.md § Monitor](SKILL.md)). Each line of stdout from that process becomes a `<task-notification>` in your context — handle each event as it arrives, no relaunch dance.

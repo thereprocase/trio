@@ -2,6 +2,17 @@
 
 ## Open
 
+### Native event delivery follow-up (8.2.0-beta.1)
+
+- Add a supported reconciliation command and bounded receipt retention; current
+  ambiguous sends stop for manual inspection rather than replaying silently.
+- Extend Codex channel events to canonical cadence/keepalive reminders and a
+  generic subprocess/JSONL source behind the same local service.
+- Track the app's version-sensitive WebSocket environment hook; CLI delivery
+  uses stock `--remote`. Test app compatibility on each upgrade.
+- External local sessions appear in Quartet channel rosters. They are not
+  PVE-managed agents and should not be misrepresented as such in the fleet UI.
+
 ### Features dropped in the workspace-UI port (decide, don't rediscover)
 **Since:** 2026-08-16 | **Status:** deliberate, open to reversal
 

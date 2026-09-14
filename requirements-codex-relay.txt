@@ -1,0 +1,2 @@
+# Optional; only external Codex socket attachment needs this dependency.
+websockets>=15,<16

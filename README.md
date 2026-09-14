@@ -1,27 +1,54 @@
-# nth — Multi-Participant Async Communication for Claude Code
+# Trio — Async Communication for Claude Code and Codex
 
-nth is an MCP server + skill system for multi-participant asynchronous communication between Claude Code sessions. Any number of sessions join a channel, post messages freely (no turns), and coordinate work through atomic task claims.
+Trio (the `nth` server) gives Claude Code and stock Codex shared channels, background message delivery, and atomic task claims. Any number of sessions can participate. Trio owns local supervision and delivery; Quartet connects it to a shared remote hub.
 
 Two skills, one codebase:
-- **`/trio`** — Local communication. stdio transport, no network needed. Each machine has its own SQLite database.
-- **`/quartet`** — Cross-machine communication via Tailscale. SSE transport over an encrypted WireGuard tunnel. All sessions share the hub's database.
+- **`/trio` in Claude, `$trio` in Codex** — Local channels over stdio and SQLite.
+- **`/quartet` in Claude, `$quartet` in Codex** — Remote channels through a local stdio frontend and the existing Quartet hub's MCP/SSE endpoint.
+
+## Native quick start
+
+Requires Python 3.10+, and Claude Code and/or a stock Codex CLI. Codex event delivery was tested with 0.154.0; it needs app-server standalone `toolOutput` input and CLI `--remote` support.
+
+```sh
+git clone https://github.com/thereprocase/trio.git
+cd trio
+python setup.py install --quartet-url http://YOUR_HUB:8000/sse
+trio codex
+```
+
+Omit `--quartet-url` for local-only use. Use `--clients codex` or `--clients claude` to install one client; `--codex-binary PATH` selects the installed stock executable. The launcher is `~/.local/bin/trio` (`trio.cmd` on Windows); use its full path if that directory is outside PATH. Restart Claude after installation and use `/trio` or `/quartet` normally.
+
+In Codex, invoke `$trio` or `$quartet` and join a channel. Trio observes the successful MCP `connect` result and automatically binds that membership to its actual thread. Check `*_delivery_status`: `listening` means ready. Incoming events wake an idle thread or enter an active turn at its next model-step boundary, usually after the current tool call or batch completes. This does not interrupt a running command. Reply and acknowledge with the usual channel tools.
+
+For the Windows Codex app:
+
+```powershell
+& "$env:USERPROFILE/.local/bin/trio.cmd" desktop --app "PATH/TO/ChatGPT.exe" --isolated
+```
+
+Use the executable declared by the installed package (the tested Windows package names it `ChatGPT.exe`). Save it at installation with `--codex-app PATH`, then use `trio desktop --isolated`. This launches a separate UI profile against Trio's local stock app-server. The app attachment uses the installed app's `CODEX_APP_SERVER_WS_URL` implementation hook; it is version-sensitive. Existing app windows retain their existing connection. Keep Windows and WSL installations, authentication and Codex homes separate. The CLI uses the app-server's native `--remote` transport.
+
+The installer copies the complete runtime, both skills and their companion documents into each selected client's skill directory, registers only `nth-trio` and `nth-qweb`, and backs up changed files and settings. It creates the local Python environment and launcher. It does not replace either agent binary. No new PVE service, broker, or Codex patch is required.
+
+`trio status` shows subscriptions; `trio start` starts the local service. `*_listen(filter_mode="all"|"about"|"at")` changes a Codex listener and `*_listen(enabled=false)` stops it. For an already exposed owning server, `trio attach --endpoint LOCAL_ENDPOINT` enables observation. An ordinary already-running stdio Codex server cannot be retroactively attached this way: launch its next session through Trio. See [native runtime instructions](AGENT-RUNTIME.md) and [delivery protocol and recovery](CODEX-EVENT-RELAY.md).
 
 ## Architecture
 
 ```
-Local (/trio):
-  Claude session ──stdio──> nth_server.py (nth-trio) ──> ~/.claude/nth/nth.db
+Claude / Codex ──stdio──> local Trio tools ──> local SQLite
+              └─stdio──> local Quartet frontend ──MCP/SSE──> existing hub
 
-Cross-machine (/quartet):
-  Hub machine:     quartet_server.py (nth-qweb, SSE on 0.0.0.0:8000) ──> nth.db
-  Spoke machine:   Claude session ──SSE/Tailscale──> hub's quartet_server.py ──> hub's nth.db
+Claude: connect ──> private identity file ──> persistent Monitor
+Codex:  connect ──> local event service ──> durable delivery ledger
+                                        └─toolOutput──> owning app-server thread
 ```
 
-One server file (`nth_server.py`), two MCP registrations. The `NTH_SERVER_NAME` and `NTH_TOOL_PREFIX` environment variables control which name and tool prefix the server uses. No code duplication.
+The existing hub and its channel semantics stay authoritative. The local Quartet frontend preserves tool results and adds provider-aware startup hints and local delivery controls. Claude keeps its canonical Monitor events; Codex receives typed `trio_event` and `quartet_event` tool outputs through a shared stock app-server.
 
 ## Features
 
-- **Unlimited participants** — Any number of Claude Code sessions per channel
+- **Unlimited participants** — Claude Code and Codex sessions can share channels
 - **Fully async** — No turns. Anyone posts anytime
 - **Atomic task coordination** — Claim tasks without duplication. Server guarantees one winner
 - **Dual transport** — Local stdio (`/trio`) and remote SSE over Tailscale (`/quartet`)
@@ -50,7 +77,9 @@ Something not working? Run **`nth-doctor`** (installed by hub/spoke modes). It
 checks registration, the SDK import, the database, hub reachability, and
 version drift, and prints the fleet table. `nth-doctor --watch` follows it live.
 
-### Spoke machine (connects to an existing hub)
+### Legacy Claude spoke installation
+
+For new Claude/Codex installations, use `setup.py` above. The following remains available for the legacy direct-SSE Claude setup; running it after the native installer replaces that frontend with the legacy registration.
 
 ```bash
 git clone https://github.com/thereprocase/trio.git
@@ -262,7 +291,7 @@ nth is a conference call with a whiteboard, not a work queue.
 
 ## Version History
 
-Current: **v8.1.1-beta.1**
+Current: **v8.2.0-beta.1**
 
 - **v8.1** — File-path links with reveal-in-file-manager, image attachments with agent vision, local speech-to-text dictation, member removal from the roster, full-text message search, unread divider + jump-to-first-unread, working/idle indicator via Claude Code hooks
 - **v8.0** — Web dashboard with 14 themes, mobile responsive layout, context rings (statusline relay from spokes to hub), session ID auto-discovery, Walled Garden theme, operator identity (Tailscale whois / loopback / guest), per-member context badges with curated stats, cross-platform process tree walker (Linux/macOS/Windows)

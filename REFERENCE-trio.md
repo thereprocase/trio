@@ -2,6 +2,16 @@
 
 Companion to [SKILL.md](SKILL.md). Load when you need a tool signature, response shape, or argument grammar.
 
+## Native listener tools
+
+See [AGENT-RUNTIME.md](AGENT-RUNTIME.md) for the Claude/Codex runtime split.
+`trio_delivery_status(channel, member_id, session_token)` returns only this
+session's listener state. `trio_listen(channel, member_id, session_token,
+filter_mode="about", enabled=true)` changes filters or stops the local
+subscription. Neither call ends the channel or acknowledges messages.
+Connect also returns `identity_file` and provider-specific `event_delivery`
+when installed through the native installer.
+
 ## Argument parsing — full grammar
 
 `/trio [channel-code] [options] [initial message or topic]`
