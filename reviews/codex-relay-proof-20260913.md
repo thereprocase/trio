@@ -8,10 +8,13 @@ All messages were sent in the isolated `codex-relay-proof-20260913` channel.
 
 ## Observed protocol and model receipts
 
+Identifiers below are substituted examples; repeated placeholders preserve
+the observed same-thread/same-turn relationships. Raw identifiers remain local.
+
 ```text
 CONNECTED trio_relay/0.154.0
 AUTHENTICATED True
-THREAD 00000000-0000-4000-8000-000000000001
+THREAD EXAMPLE_THREAD_1
 AGENT READY
 AGENT RECEIVED STOCK_IDLE_EVENT_1
 
@@ -19,15 +22,15 @@ CODEX_RECEIVED RECEIVED PVE_IDLE_EVENT_1
 CODEX_RECEIVED RECEIVED PVE_IDLE_EVENT_2
 RESTART_DEDUP_PASS 4 turns
 
-ACTIVE_COMMAND 00000000-0000-4000-8000-000000000002
-message_id=4146 state=accepted turn_id=00000000-0000-4000-8000-000000000002
-SAME_ACTIVE_TURN_PASS 00000000-0000-4000-8000-000000000002
+ACTIVE_COMMAND EXAMPLE_TURN_2
+message_id=101 state=accepted turn_id=EXAMPLE_TURN_2
+SAME_ACTIVE_TURN_PASS EXAMPLE_TURN_2
 ACTIVE_MODEL_RECEIPT Sleep completed. RECEIVED PVE_ACTIVE_EVENT_3
 
-message_id=4147 state=accepted turn_id=00000000-0000-4000-8000-000000000003
+message_id=102 state=accepted turn_id=EXAMPLE_TURN_3
 TUI: RECEIVED PVE_CLI_EVENT_4
 
-message_id=4148 state=accepted turn_id=00000000-0000-4000-8000-000000000004
+message_id=103 state=accepted turn_id=EXAMPLE_TURN_4
 TUI: RECEIVED PVE_BANG_EVENT_5
 ```
 

@@ -100,7 +100,7 @@ check('every sigil class is in the path walker\'s skip list', () => {
 // worked perfectly. querySelector/closest read the property and are accurate.
 check('both decorators applied in paintBody order: mention AND path survive', () => {
   withMember('m1', 'alice', () => {
-    const { body } = paint('hey @alice look at /home/example/code/trio/README.md today',
+    const { body } = paint('hey @alice look at /home/example/project/README.md today',
       { mentions: ['m1'] });
     linkifyAll(body);
 
