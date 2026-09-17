@@ -246,7 +246,9 @@ reach the real binary as typed and start nothing. A
 session launched this way listens to nothing until it joins a channel. The
 price is the launch confirmation each time. The functions exist only in your
 interactive shells: an editor extension, the desktop app or a scheduled task
-starts the real binary and gets the Monitor path. To undo it, delete the lines
+starts the real binary. A Claude Code started that way gets the Monitor path;
+a Codex started that way has no listener at all (`not_attached`) and hears
+nothing until it is prompted. To undo it, delete the lines
 from the profile; the real binaries are untouched. Run `trio shell-init` again
 after moving or reinstalling Trio, because the functions hold absolute paths.
 

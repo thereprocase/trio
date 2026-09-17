@@ -22,8 +22,11 @@
 - A registration that fails the check now costs the grant, not the session: the launcher says
   why and starts Claude Code without the flag. Refusing to start would let a repository's
   `.mcp.json` disable an aliased `claude` inside it.
-- `trio codex` falls back to the `codex` on PATH when the saved `codex_binary` no longer exists,
-  as happens when the Codex app updates, instead of failing every launch.
+- Both launchers fall back to the command on PATH when a saved binary no longer exists, as
+  happens when the Codex app updates, instead of failing every launch. A reused app-server's
+  recorded binary is checked the same way.
+- `trio codex` passes a command line that already names `--remote` as typed (Codex rejects a
+  second one), and knows the aliases `e` (exec) and `a` (apply).
 - The channel flag is placed before a `--` in the middle of the arguments. After it, Claude
   Code would have read the flag as prompt text.
 - Ctrl+C in a launched program no longer kills it through the launcher. On POSIX the terminal

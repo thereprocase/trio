@@ -88,8 +88,11 @@ They call the interpreter and the launcher by path. On Windows that avoids
   so the options that take a value are known to the launcher: `codex -C app`
   changes directory and is not read as `codex app`.
 - The functions exist only in your interactive shells. An editor extension, the
-  desktop app or a scheduled task starts the real binary and gets the Monitor
-  path with its 30-minute lease, as before.
+  desktop app or a scheduled task starts the real binary, as before. A Claude
+  Code started that way gets the Monitor path with its 30-minute lease. A Codex
+  started that way has no listener at all: it reports `not_attached` and hears
+  nothing until it is prompted. `trio desktop` is the way to start the Codex app
+  with delivery.
 
 The subcommand lists are the ones Claude Code 2.1.274 and codex-cli 0.154.0
 print. A subcommand added by a later release is not known to the launcher: a
@@ -117,9 +120,16 @@ in that case, and report it.
   honestly reports the Monitor path. Raised in review of the fix above. With the shell functions the launcher runs in every
   directory, so this mattered more for this release than for the last. Servers from an
   enterprise `managed-mcp.json` are not examined.
-- **A stale saved Codex path no longer ends every launch.** The Codex app keeps its CLI in a
-  versioned directory that an update removes. `trio codex` now falls back to the `codex` on
-  PATH and says how to save the new path.
+- **A stale saved binary no longer ends every launch.** The Codex app keeps its CLI in a
+  versioned directory that an update removes, and a `--claude-binary` can point into one too.
+  Both launchers now fall back to the command on PATH, say that it may be a different version,
+  and say how to save the new path. This holds for a reused, still running app-server as well,
+  whose recorded binary was used unchecked.
+- **`trio codex` added a second `--remote` to a command line that already had one**, which
+  Codex rejects. An app-server the user names is theirs, and the command is passed as typed.
+  The aliases Codex documents, `e` for `exec` and `a` for `apply`, were treated as prompts and
+  started the shared server. Both found by an independent Codex review on Linux and confirmed
+  by a second one on Windows.
 - **The channel flag was placed after a `--` in the middle of the arguments**,
   where Claude Code reads everything as prompt text. It now goes before the
   separator.
@@ -180,7 +190,8 @@ failure is `test-supervisor.py`, the timing-dependent test described in the
 beta.1 notes, which passed in two of three runs alone and fails at the same
 rate on unchanged `main`.
 
-**Not verified:** an interactive session started through the shell functions
+**Not verified:** a push delivered under a real Claude Code host on Linux (the WSL
+installation is not logged in); an interactive session started through the shell functions
 under a real host. The functions were run for real, and `trio claude` was
 verified under a real host in beta.1, but not the two together. `--bg` is
 passed through untested rather than given a flag nobody could confirm. The
@@ -204,6 +215,12 @@ Those of beta.1 stand, with these changes:
   is a session with the debug filter `mcp`, because `--debug` takes the next
   word. When a launch that looks like a session finds no terminal, the
   launcher says so in one line on stderr.
+- Two `trio codex` launches that both find no running app-server can each start one; one of
+  them then fails with "Codex server exited". Start the first session, then the second. This
+  has been so since v8.1; it was reproduced in review of this release and is not fixed in it.
+- `trio desktop` still fails after a Microsoft Store update of the Codex app: the saved
+  `codex_app` path contains the package version. Re-run `python setup.py install --codex-app
+  PATH` after such an update. Found in review of this release; not fixed in it.
 - The launch confirmation still recurs and cannot be pre-accepted. Claude Code
   documents an administrator allowlist for channel plugins on Team and
   Enterprise plans that may remove it; that route is untested here.

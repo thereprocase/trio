@@ -250,6 +250,32 @@ class NativeTests(unittest.TestCase):
         self.assertEqual(launched(['archive', 'thread-id'], terminal=False),
                          (['codex', '--remote', 'unix:///tmp/test.sock', 'archive', 'thread-id'], True))
         self.assertEqual(launched(['--', 'exec', 'a prompt']), (['codex', 'exec', 'a prompt'], False))
+        # The aliases Codex documents for exec and apply.
+        for arguments in (['e', 'a prompt'], ['a'], ['-m', 'chosen-model', 'e', 'a prompt']):
+            with self.subTest(alias=arguments):
+                self.assertEqual(launched(arguments), (['codex', *arguments], False))
+        # An app-server the user named is theirs: Codex rejects a second --remote.
+        for arguments in (['--remote', 'ws://127.0.0.1:1'], ['--remote=ws://127.0.0.1:1', 'resume', 'thread-id'],
+                          ['-m', 'chosen-model', '--remote', 'unix:///tmp/own.sock', 'a prompt']):
+            with self.subTest(own_server=arguments):
+                command, started = launched(arguments)
+                self.assertEqual((command, started), (['codex', *arguments], False))
+                self.assertEqual(sum(part == '--remote' or part.startswith('--remote=') for part in command), 1)
+        # After the separator it is the prompt, not an option.
+        self.assertEqual(launched(['-m', 'chosen-model', '--', '--remote'])[0],
+                         ['codex', '--remote', 'unix:///tmp/test.sock', '-m', 'chosen-model', '--', '--remote'])
+
+    def test_a_reused_codex_server_does_not_pin_a_client_binary_that_is_gone(self):
+        import io
+        import nth_cli
+        record = service.state_dir() / 'codex-server.json'
+        record.write_text(json.dumps({'endpoint': 'unix:///tmp/live.sock',
+                                      'binary': str(self.root / 'removed-by-an-update' / 'codex'), 'pid': 1}))
+        with patch.object(nth_cli, 'connectable', return_value=True), \
+             patch.object(nth_cli, 'add_endpoint'), patch.object(nth_cli, 'ensure_service'), \
+             patch.object(nth_cli.shutil, 'which', side_effect=lambda name: '/usr/bin/codex' if name == 'codex' else None), \
+             patch('sys.stderr', new_callable=io.StringIO):
+            self.assertEqual(nth_cli.ensure_codex(), ('unix:///tmp/live.sock', '/usr/bin/codex'))
 
     def test_a_stale_saved_codex_binary_falls_back_to_the_one_on_path(self):
         import io

@@ -69,13 +69,31 @@ def run_foreground(command, **options):
         signal.signal(signal.SIGINT, previous)
 
 
+def startable(saved):
+    """True when a saved binary can still be started. A bare command name is for PATH
+    to decide; a path is a file that exists, with or without a Windows extension."""
+    saved = str(saved)
+    if not os.path.dirname(saved):
+        return bool(shutil.which(saved))
+    extensions = [''] + (os.environ.get('PATHEXT', '').split(os.pathsep) if os.name == 'nt' else [])
+    return any(Path(saved + extension).is_file() for extension in extensions)
+
+
 def resolve_binary(name, saved_key, label, install_flag, override=None):
     saved = override or settings().get(saved_key)
     if saved:
-        if not (shutil.which(str(saved)) or Path(str(saved)).exists()):
+        if startable(saved):
+            return str(saved)
+        # A saved path inside a versioned directory disappears with the next update.
+        # With the command aliased to this launcher, that must not end every launch.
+        found = shutil.which(name)
+        if not found:
             raise RuntimeError(f'The saved {saved_key} {saved!r} does not exist. Re-run: '
                                f'python setup.py install {install_flag} /full/path/to/{name}')
-        return str(saved)
+        print(f'[trio] the saved {saved_key} {saved!r} no longer exists; using {found}, which may be a '
+              f'different version. Save the new one: python setup.py install {install_flag} PATH',
+              file=sys.stderr)
+        return found
     found = shutil.which(name)
     if not found:
         raise RuntimeError(f'{label} was not found on PATH and no {saved_key} is saved. Install it, or '
@@ -86,13 +104,14 @@ def resolve_binary(name, saved_key, label, install_flag, override=None):
 
 def codex_binary(override=None):
     saved = override or settings().get('codex_binary')
-    if saved and not (shutil.which(str(saved)) or Path(str(saved)).exists()):
+    if saved and not startable(saved):
         # The Codex app keeps its CLI in a versioned directory that an update removes.
         # With `codex` aliased to this launcher, a stale path must not end every launch.
         found = shutil.which('codex')
         if found:
-            print(f'[trio] the saved codex_binary {saved!r} no longer exists; using {found}. '
-                  'Save the new one: python setup.py install --codex-binary PATH', file=sys.stderr)
+            print(f'[trio] the saved codex_binary {saved!r} no longer exists; using {found}, which may '
+                  'be a different version. Save the new one: python setup.py install --codex-binary PATH',
+                  file=sys.stderr)
         saved = found
     executable = saved or shutil.which('codex')
     if not executable:
@@ -143,7 +162,8 @@ MSYS_TERMINAL_PIPE = re.compile(r'\\(msys|cygwin)-[0-9a-f]+-pty\d+-(from|to)-mas
 CODEX_SUBCOMMANDS = frozenset((
     'agents', 'exec', 'review', 'login', 'logout', 'mcp', 'plugin', 'app-server', 'remote-control', 'app',
     'completion', 'update', 'doctor', 'sandbox', 'debug', 'apply', 'resume', 'queue', 'archive', 'delete',
-    'migrate-rollouts', 'unarchive', 'fork', 'cloud', 'exec-server', 'features', 'help'))
+    'migrate-rollouts', 'unarchive', 'fork', 'cloud', 'exec-server', 'features', 'help',
+    'e', 'a'))                                  # documented aliases of exec and apply
 CODEX_REMOTE_SUBCOMMANDS = frozenset(('agents', 'resume', 'queue', 'archive', 'delete', 'unarchive', 'fork'))
 CODEX_VALUE_OPTIONS = frozenset((
     '-c', '--config', '--enable', '--disable', '--remote', '--remote-auth-token-env', '-i', '--image',
@@ -438,6 +458,9 @@ def codex_session_wanted(arguments, terminal=True):
     options = arguments[:arguments.index('--')] if '--' in arguments else arguments
     if any(argument in CODEX_ONE_SHOT_FLAGS for argument in options):
         return False
+    if any(argument == '--remote' or argument.startswith('--remote=') for argument in options):
+        # The user chose an app-server of their own. Codex rejects a second --remote.
+        return False
     subcommand = codex_subcommand(arguments)
     if subcommand:
         return subcommand in CODEX_REMOTE_SUBCOMMANDS
@@ -528,7 +551,9 @@ def ensure_codex(binary=None):
         if connectable(existing['endpoint']):
             add_endpoint(existing['endpoint'], settings().get('quartet_url', ''))
             ensure_service()
-            return existing['endpoint'], existing['binary']
+            # The server still runs, but an update may have removed the file it was
+            # started from: the client is resolved afresh, with the same fallback.
+            return existing['endpoint'], codex_binary(existing['binary'])
     except (OSError, ValueError, KeyError):
         pass
     binary = codex_binary(binary)

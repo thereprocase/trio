@@ -224,6 +224,16 @@ class LauncherTests(unittest.TestCase):
         self.configure(claude_binary=str(saved))
         self.assertEqual(self.launch().args[0][0], str(saved))
         self.configure(claude_binary=str(self.home / 'moved-away'))
+        # Gone, but Claude Code is on PATH: use that one and say so. An update that removed a
+        # versioned directory must not turn an aliased `claude` into a dead command.
+        with patch.object(nth_cli.shutil, 'which',
+                          side_effect=lambda name: 'claude-on-path' if name == 'claude' else None), \
+             patch.object(nth_cli.subprocess, 'call', return_value=0) as call, \
+             patch('sys.stderr', new_callable=io.StringIO) as stderr:
+            self.assertEqual(nth_cli.main(['claude']), 0)
+        self.assertEqual(call.call_args.args[0][0], 'claude-on-path')
+        self.assertIn('no longer exists', stderr.getvalue())
+        self.assertIn('--claude-binary', stderr.getvalue())
         with patch.object(nth_cli.shutil, 'which', return_value=None):
             with self.assertRaisesRegex(RuntimeError, 'does not exist.*--claude-binary'):
                 nth_cli.main(['claude'])
