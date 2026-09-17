@@ -4,7 +4,9 @@ import argparse
 import json
 import os
 from pathlib import Path
+import shlex
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -48,6 +50,24 @@ def guard_command_shim(executable, arguments, platform=None):
                 '(python setup.py install --claude-binary PATH / --codex-binary PATH).')
 
 
+def run_foreground(command, **options):
+    """Run the program the user asked for as if they had started it themselves.
+
+    Ctrl+C belongs to that program: it shares this terminal and receives the
+    interrupt itself. Left alone, Python would raise KeyboardInterrupt here and
+    subprocess.call would then kill a session that only meant to cancel a prompt.
+    A handler, not SIG_IGN: an ignored signal would be inherited by the program.
+    """
+    try:
+        previous = signal.signal(signal.SIGINT, lambda *_: None)
+    except ValueError:                      # not the main thread: nothing to guard
+        return subprocess.call(command, **options)
+    try:
+        return subprocess.call(command, **options)
+    finally:
+        signal.signal(signal.SIGINT, previous)
+
+
 def resolve_binary(name, saved_key, label, install_flag, override=None):
     saved = override or settings().get(saved_key)
     if saved:
@@ -72,6 +92,36 @@ def codex_binary(override=None):
 
 CHANNEL_FLAG = '--dangerously-load-development-channels'
 CHANNEL_SERVERS = (('nth-trio', 'nth_server.py'), ('nth-qweb', 'nth_quartet_proxy.py'))
+# Claude Code invocations that open no interactive session (2.1.274). With `claude`
+# aliased to `trio claude` these must reach the real binary exactly as typed: the
+# channel flag means nothing to them, and its confirmation would stall a script.
+# A subcommand added by a later release is not known here and gets the flag; if
+# Claude refuses it, run the real binary by its path and add the name to this set.
+CLAUDE_SUBCOMMANDS = frozenset((
+    'agents', 'attach', 'auth', 'auto-mode', 'doctor', 'gateway', 'import', 'install', 'logs', 'mcp',
+    'plugin', 'plugins', 'project', 'respawn', 'rm', 'setup-token', 'stop', 'kill', 'ultrareview',
+    'update', 'upgrade'))
+# --bg detaches at once: nobody is there to answer the flag's confirmation. Untested
+# with channels, so it is left exactly as plain Claude Code runs it.
+CLAUDE_ONE_SHOT_FLAGS = frozenset(('-p', '--print', '-h', '--help', '-v', '--version',
+                                   '--bg', '--background'))
+
+
+# The same for Codex (codex-cli 0.154.0). Only the subcommands whose own --help lists
+# --remote can use Trio's shared app-server; the rest must reach the real binary as
+# typed, and must not start that server. Codex accepts options before a subcommand
+# (`codex -C app resume`), so the options that take a value are listed: their
+# values are never read as a subcommand. `-p` is --profile here, not --print.
+CODEX_SUBCOMMANDS = frozenset((
+    'agents', 'exec', 'review', 'login', 'logout', 'mcp', 'plugin', 'app-server', 'remote-control', 'app',
+    'completion', 'update', 'doctor', 'sandbox', 'debug', 'apply', 'resume', 'queue', 'archive', 'delete',
+    'migrate-rollouts', 'unarchive', 'fork', 'cloud', 'exec-server', 'features', 'help'))
+CODEX_REMOTE_SUBCOMMANDS = frozenset(('agents', 'resume', 'queue', 'archive', 'delete', 'unarchive', 'fork'))
+CODEX_VALUE_OPTIONS = frozenset((
+    '-c', '--config', '--enable', '--disable', '--remote', '--remote-auth-token-env', '-i', '--image',
+    '-m', '--model', '--local-provider', '-p', '--profile', '-s', '--sandbox', '-C', '--cd', '--add-dir',
+    '-a', '--ask-for-approval'))
+CODEX_ONE_SHOT_FLAGS = frozenset(('-h', '--help', '-V', '--version'))
 
 
 def claude_binary(override=None):
@@ -164,6 +214,11 @@ def claude_command(arguments, binary=None):
         # so Trio's servers join that list rather than repeating the flag.
         at = arguments.index(CHANNEL_FLAG) + 1
         return [executable, *arguments[:at], *servers, *arguments[at:]]
+    if '--' in arguments:
+        # Everything after a bare `--` is the prompt: a flag placed there would be
+        # read as text. The separator also ends the flag's list.
+        at = arguments.index('--')
+        return [executable, *arguments[:at], CHANNEL_FLAG, *servers, *arguments[at:]]
     # The flag goes last so that its list cannot swallow the user's own prompt.
     return [executable, *arguments, CHANNEL_FLAG, *servers]
 
@@ -174,6 +229,110 @@ def claude_environment():
     # servers it spawns. Child processes inherit it too: a nested session must be
     # started with `trio claude` as well, or it would expect events it cannot get.
     return dict(os.environ, TRIO_CLAUDE_CHANNEL='1')
+
+
+def terminal_attached():
+    """True when a person is at both ends. An interactive session needs a terminal."""
+    try:
+        return sys.stdin.isatty() and sys.stdout.isatty()
+    except (AttributeError, ValueError):
+        return False
+
+
+def claude_session_wanted(arguments, terminal=True):
+    """False for an invocation that opens no interactive session: a subcommand, a
+    one-shot flag, or no terminal to hold one."""
+    arguments = list(arguments)
+    if arguments[:1] == ['--']:
+        arguments = arguments[1:]
+    if not terminal or arguments[:1] and arguments[0] in CLAUDE_SUBCOMMANDS:
+        return False
+    # Options end at a bare `--`: what follows is the prompt, whatever it looks like.
+    options = arguments[:arguments.index('--')] if '--' in arguments else arguments
+    return not any(argument in CLAUDE_ONE_SHOT_FLAGS for argument in options)
+
+
+def claude_passthrough(arguments, binary=None):
+    """Claude Code's argv exactly as typed, for an invocation that is not a session.
+
+    Claude's MCP configuration is not checked here: `claude mcp ...` is how a
+    broken registration gets repaired.
+    """
+    arguments = list(arguments)
+    if arguments[:1] == ['--']:
+        arguments = arguments[1:]
+    executable = claude_binary(binary)
+    guard_command_shim(executable, arguments)
+    return [executable, *arguments]
+
+
+def codex_subcommand(arguments):
+    """The subcommand a Codex argv names, or '' for the interactive form."""
+    skip = False
+    for argument in arguments:
+        if skip:
+            skip = False
+        elif argument == '--':
+            break
+        elif argument in CODEX_VALUE_OPTIONS:
+            skip = True
+        elif not argument.startswith('-'):
+            # The first word that is no option's value: a subcommand, or the prompt.
+            return argument if argument in CODEX_SUBCOMMANDS else ''
+    return ''
+
+
+def codex_session_wanted(arguments, terminal=True):
+    """True when this argv should run against Trio's shared app-server."""
+    arguments = list(arguments)
+    options = arguments[:arguments.index('--')] if '--' in arguments else arguments
+    if any(argument in CODEX_ONE_SHOT_FLAGS for argument in options):
+        return False
+    subcommand = codex_subcommand(arguments)
+    if subcommand:
+        return subcommand in CODEX_REMOTE_SUBCOMMANDS
+    # The interactive form needs a person at a terminal.
+    return terminal
+
+
+def launch_codex(arguments):
+    arguments = list(arguments)
+    if arguments[:1] == ['--']:
+        arguments = arguments[1:]
+    if not codex_session_wanted(arguments, terminal_attached()):
+        binary = codex_binary()
+        guard_command_shim(binary, arguments)
+        return run_foreground([binary, *arguments])
+    endpoint, binary = ensure_codex()
+    guard_command_shim(binary, arguments)
+    return run_foreground([binary, '--remote', endpoint, *arguments])
+
+
+def plain_environment():
+    # Inside a `trio claude` session the variable is inherited. A one-shot child
+    # gets no channel from its host, and its frontends must not believe otherwise.
+    return {name: value for name, value in os.environ.items() if name != 'TRIO_CLAUDE_CHANNEL'}
+
+
+def shell_init(shell):
+    """Shell functions that make the plain commands start Trio's launchers.
+
+    Printed, never installed: a shell profile is the user's to edit. The functions
+    call this interpreter and this file by path. On Windows that bypasses the
+    `trio.cmd` launcher, through which cmd.exe would reinterpret the arguments.
+    """
+    python, cli = sys.executable, str(Path(__file__).resolve())
+    lines = []
+    for name in ('claude', 'codex'):
+        if shell == 'powershell':
+            call = '& ' + ' '.join("'" + part.replace("'", "''") + "'" for part in (python, cli, name)) + ' @args'
+            # A function receives piped input in $input; a native command does not
+            # see it unless it is passed on.
+            lines.append(f'function {name} {{ if ($MyInvocation.ExpectingInput) {{ $input | {call} }} '
+                         f'else {{ {call} }} }}')
+        else:
+            lines.append(f'{name}() {{ {shlex.join([python, cli, name])} "$@"; }}')
+    return '\n'.join(lines)
 
 
 def mcp_overrides(endpoint):
@@ -250,17 +409,14 @@ def main(argv=None):
     # Forward Codex's complete argv unchanged, including flags with values.
     if argv[:1] == ['codex']:
         os.umask(0o077)
-        endpoint, binary = ensure_codex()
-        arguments = argv[1:]
-        if arguments[:1] == ['--']:
-            arguments = arguments[1:]
-        guard_command_shim(binary, arguments)
-        return subprocess.call([binary, '--remote', endpoint, *arguments])
+        return launch_codex(argv[1:])
     # Likewise for Claude Code. Channel delivery runs inside Claude's own MCP
     # frontends, so no Codex server or event service is started here.
     if argv[:1] == ['claude']:
         os.umask(0o077)
-        return subprocess.call(claude_command(argv[1:]), env=claude_environment())
+        if not claude_session_wanted(argv[1:], terminal_attached()):
+            return run_foreground(claude_passthrough(argv[1:]), env=plain_environment())
+        return run_foreground(claude_command(argv[1:]), env=claude_environment())
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest='command', required=True)
     sub.add_parser('start', help='Start the local event service')
@@ -281,6 +437,9 @@ def main(argv=None):
     sub.add_parser('claude', help='Launch Claude Code with Trio/Quartet events pushed into the session. '
                                   'Claude Code asks you to confirm a development-channels flag at every '
                                   'launch: see AGENT-RUNTIME.md')
+    init = sub.add_parser('shell-init', help='Print shell functions that make plain `claude` and `codex` '
+                                             'start through Trio. Add the output to your shell profile')
+    init.add_argument('shell', choices=['powershell', 'bash', 'zsh'])
     desktop = sub.add_parser('desktop', help='Launch the Codex app against Trio\'s shared server')
     desktop.add_argument('--app', help='Installed app executable (or saved codex_app in native.json)')
     desktop.add_argument('--isolated', action='store_true', help='Use a separate app UI profile')
@@ -292,6 +451,8 @@ def main(argv=None):
         print(json.dumps({'listeners': public_status(),
                           'claude_channels': 'not shown here: a channel listener lives inside the Claude '
                                              'session, so ask the agent to call *_delivery_status'}, indent=2))
+    elif args.command == 'shell-init':
+        print(shell_init(args.shell))
     elif args.command == 'start':
         print(json.dumps(ensure_service()))
     elif args.command == 'attach':
@@ -309,12 +470,7 @@ def main(argv=None):
         print(json.dumps({'binding_id': register(identity, replace=True)}))
         ensure_service()
     elif args.command == 'codex':
-        endpoint, binary = ensure_codex()
-        arguments = extra + args.arguments
-        if arguments[:1] == ['--']:
-            arguments = arguments[1:]
-        guard_command_shim(binary, arguments)
-        return subprocess.call([binary, '--remote', endpoint, *arguments])
+        return launch_codex(extra + args.arguments)
     elif args.command == 'desktop':
         app = args.app or settings().get('codex_app')
         if not app:

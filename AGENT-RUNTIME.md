@@ -198,8 +198,44 @@ Costs and limits:
   `channel_unavailable`. Codex and a plainly launched Claude never load the
   channel module at all. A failure inside the MCP library after startup is not
   covered by that fallback.
-- `trio claude -p` and other headless uses have not been verified: the launch
-  confirmation may have nobody to answer it. Use plain `claude` there.
+- Only an interactive session gets the flag. `trio claude mcp ...`, `update`,
+  `doctor` and the other subcommands, `-p/--print`, `--help`, `--version`,
+  `--bg`, and any launch without a terminal on stdin and stdout go to the real
+  binary exactly as typed, with `TRIO_CLAUDE_CHANNEL` removed and without the
+  registration check. Such a run has nobody to answer the launch confirmation
+  and no open session to push into. The subcommand list is the one Claude Code
+  2.1.274 prints; a subcommand added later is not known to the launcher and
+  gets the flag, which Claude Code may refuse. Run the real binary by its path
+  in that case.
+
+### Making plain `claude` and `codex` start through Trio
+
+A session can only receive pushes if it was launched for them, so the way to
+make every session attachable is to make the launcher the normal way in.
+`trio shell-init powershell` (or `bash`, `zsh`) prints two shell functions,
+`claude` and `codex`, that call this installation's interpreter and launcher by
+path. Add the output to your shell profile yourself: Trio never edits a
+profile. For example:
+
+```
+trio shell-init powershell >> $PROFILE          # PowerShell
+trio shell-init bash >> ~/.bashrc               # bash
+```
+
+After that `claude` anywhere is `trio claude`, including its arguments and
+piped input, and the non-session uses above behave as they always did.
+`codex` is `trio codex` in the same way: the interactive form, and the
+subcommands that Codex itself lets run against an app-server (`resume`, `fork`,
+`agents`, `queue`, `archive`, `delete`, `unarchive` in codex-cli 0.154.0), use
+Trio's shared server; `exec`, `login`, `mcp`, `update` and every other
+subcommand, `--help`, `--version`, and an interactive form without a terminal
+reach the real binary as typed and start nothing. A
+session launched this way listens to nothing until it joins a channel. The
+price is the launch confirmation each time. The functions exist only in your
+interactive shells: an editor extension, the desktop app or a scheduled task
+starts the real binary and gets the Monitor path. To undo it, delete the lines
+from the profile; the real binaries are untouched. Run `trio shell-init` again
+after moving or reinstalling Trio, because the functions hold absolute paths.
 
 ### Monitor mode: plain `claude`
 

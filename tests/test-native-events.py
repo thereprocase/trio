@@ -221,6 +221,36 @@ class NativeTests(unittest.TestCase):
             nth_cli.main(['codex', '--model', 'chosen-model', 'resume', 'thread-id'])
         self.assertEqual(call.call_args.args[0], ['codex', '--remote', 'unix:///tmp/test.sock',
                                                 '--model', 'chosen-model', 'resume', 'thread-id'])
+    def test_launcher_leaves_codex_invocations_that_open_no_session_alone(self):
+        import nth_cli
+
+        def launched(arguments, terminal=True):
+            with patch.object(nth_cli, 'ensure_codex', return_value=('unix:///tmp/test.sock', 'codex')) as server, \
+                 patch.object(nth_cli, 'codex_binary', return_value='codex'), \
+                 patch.object(nth_cli, 'terminal_attached', return_value=terminal), \
+                 patch.object(nth_cli.subprocess, 'call', return_value=0) as call:
+                nth_cli.main(['codex', *arguments])
+            return call.call_args.args[0], server.called
+
+        # With `codex` aliased to `trio codex`, these must behave as they always did:
+        # typed argv, and no shared app-server started on their account.
+        for arguments in (['exec', 'a prompt'], ['login'], ['mcp', 'list'], ['--version'], ['resume', '--help'],
+                          ['-C', 'app', 'exec', 'a prompt'], ['-m', 'chosen-model', 'review'], ['help']):
+            with self.subTest(plain=arguments):
+                self.assertEqual(launched(arguments), (['codex', *arguments], False))
+        # A session, or session management the shared server owns. `-p` is --profile
+        # and `-C` is --cd: their values are not subcommands.
+        for arguments in ([], ['a prompt'], ['-C', 'app'], ['-p', 'exec'], ['fork', 'thread-id'],
+                          ['-m', 'chosen-model', '--', 'exec']):
+            with self.subTest(session=arguments):
+                self.assertEqual(launched(arguments),
+                                 (['codex', '--remote', 'unix:///tmp/test.sock', *arguments], True))
+        # No terminal: the interactive form is left alone, session management is not.
+        self.assertEqual(launched(['a prompt'], terminal=False), (['codex', 'a prompt'], False))
+        self.assertEqual(launched(['archive', 'thread-id'], terminal=False),
+                         (['codex', '--remote', 'unix:///tmp/test.sock', 'archive', 'thread-id'], True))
+        self.assertEqual(launched(['--', 'exec', 'a prompt']), (['codex', 'exec', 'a prompt'], False))
+
     def test_native_connect_keeps_tokens_out_of_launch_command(self):
         identity = {'channel': 'room', 'member_id': 'member-1', 'session_token': 'private-token', 'reclaim_secret': 'private-reclaim'}
         with patch.dict(os.environ, {'TRIO_NATIVE_CLIENT': 'claude'}):

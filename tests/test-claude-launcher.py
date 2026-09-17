@@ -3,6 +3,10 @@ import io
 import json
 import os
 from pathlib import Path
+import shlex
+import shutil
+import signal
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -29,9 +33,13 @@ class LauncherTests(unittest.TestCase):
         # The launcher accepts only its own installation's frontends.
         self.installation = patch.object(nth_cli, 'frontend_root', return_value=self.scripts)
         self.installation.start()
+        # A test runner has no terminal; a person starting a session does.
+        self.terminal = patch.object(nth_cli, 'terminal_attached', return_value=True)
+        self.terminal.start()
         self.register()
 
     def tearDown(self):
+        self.terminal.stop()
         self.installation.stop()
         self.environment.stop()
         self.temp.cleanup()
@@ -176,6 +184,116 @@ class LauncherTests(unittest.TestCase):
         if os.name == 'nt':
             self.assertIn('.cmd launcher', self.refused('fix a&b', executable='C:/npm/claude.cmd', error=ValueError))
         self.assertEqual(self.launch('fix a&b', executable='claude').args[0][1], 'fix a&b')
+
+    def test_an_invocation_that_opens_no_session_reaches_claude_as_typed(self):
+        self.configure(quartet_url='http://hub.example/sse')
+        # `claude mcp ...` is how a broken registration gets repaired: never preflighted.
+        (self.home / '.claude.json').write_text('{not json', encoding='utf-8')
+        for arguments in (['mcp', 'list'], ['update'], ['doctor'], ['plugins', 'list'], ['-p', 'summarize this'],
+                          ['--model', 'chosen-model', '--print', 'a prompt'], ['--version'], ['-h'],
+                          ['--bg', 'a prompt'], ['--', 'mcp', 'list']):
+            with self.subTest(arguments=arguments), patch.dict(os.environ, {'TRIO_CLAUDE_CHANNEL': '1',
+                                                                            'UNRELATED_SETTING': 'kept'}):
+                launched = self.launch(*arguments)
+                typed = arguments[1:] if arguments[0] == '--' else arguments
+                self.assertEqual(launched.args[0], ['claude', *typed])
+                # Its host gives it no channel, so its frontends must not expect one,
+                # even when this launcher runs inside a session that has one.
+                self.assertNotIn('TRIO_CLAUDE_CHANNEL', launched.kwargs['env'])
+                self.assertEqual(launched.kwargs['env']['UNRELATED_SETTING'], 'kept')
+
+    def test_without_a_terminal_nothing_is_added(self):
+        self.configure()
+        self.terminal.stop()
+        try:
+            with patch.object(nth_cli, 'terminal_attached', return_value=False):
+                self.assertEqual(self.launch('--continue').args[0], ['claude', '--continue'])
+        finally:
+            self.terminal.start()
+
+    def test_a_prompt_after_the_separator_is_never_read_as_an_option(self):
+        self.configure()
+        command = self.launch('--model', 'chosen-model', '--', '-p').args[0]
+        # `-p` here is the prompt. The flag sits before the separator, where Claude
+        # still reads options, and the separator ends the flag's list.
+        self.assertEqual(command, ['claude', '--model', 'chosen-model', FLAG, 'server:nth-trio', '--', '-p'])
+        self.assertTrue(nth_cli.claude_session_wanted(['--model', 'chosen-model', '--', 'mcp']))
+        self.assertFalse(nth_cli.claude_session_wanted(['mcp', 'list']))
+
+    def test_shell_init_prints_functions_that_call_this_installation_by_path(self):
+        with patch.object(nth_cli.sys, 'executable', "/opt/o'brien/python"), \
+             patch.object(nth_cli, '__file__', str(self.scripts / 'nth_cli.py')):
+            cli = str((self.scripts / 'nth_cli.py').resolve())
+            posix = nth_cli.shell_init('bash')
+            windows = nth_cli.shell_init('powershell')
+            with patch('sys.stdout', new_callable=io.StringIO) as printed:
+                nth_cli.main(['shell-init', 'zsh'])
+        self.assertEqual(printed.getvalue().strip(), posix)
+        self.assertEqual(posix.splitlines()[0],
+                         'claude() { ' + shlex.join(["/opt/o'brien/python", cli, 'claude']) + ' "$@"; }')
+        self.assertIn('codex() { ', posix.splitlines()[1])
+        quoted = "& '/opt/o''brien/python' '" + cli.replace("'", "''") + "' 'claude' @args"
+        self.assertEqual(windows.splitlines()[0],
+                         'function claude { if ($MyInvocation.ExpectingInput) { $input | ' + quoted
+                         + ' } else { ' + quoted + ' } }')
+        self.assertTrue(windows.splitlines()[1].startswith('function codex {'))
+
+    def test_the_printed_functions_pass_arguments_and_piped_input_through_a_real_shell(self):
+        stub = self.home / 'stub_cli.py'
+        stub.write_text('import json, sys\n'
+                        'print(json.dumps({"argv": sys.argv[1:], "stdin": sys.stdin.read()}))\n')
+        awkward = ['-p', 'two words', 'a&b', '$HOME', 'it\'s']
+        shells = []
+        if os.name != 'nt' and shutil.which('bash'):
+            shells.append(('bash', [shutil.which('bash'), '-c'],
+                           "printf piped | claude -p 'two words' 'a&b' '$HOME' \"it's\""))
+        if shutil.which('pwsh'):
+            shells.append(('powershell', [shutil.which('pwsh'), '-NoProfile', '-NonInteractive', '-Command'],
+                           "'piped' | claude -p 'two words' 'a&b' '$HOME' 'it''s'"))
+        if not shells:
+            self.skipTest('no bash (POSIX) or pwsh on this machine')
+        for shell, prefix, line in shells:
+            with self.subTest(shell=shell), patch.object(nth_cli, '__file__', str(stub)):
+                script = nth_cli.shell_init(shell) + '\n' + line
+                done = subprocess.run([*prefix, script], capture_output=True, text=True, timeout=60)
+                self.assertEqual(done.returncode, 0, done.stderr[-400:])
+                seen = json.loads(done.stdout)
+                self.assertEqual(seen['argv'], ['claude', *awkward])
+                self.assertEqual(seen['stdin'].strip(), 'piped')
+
+    @unittest.skipIf(os.name == 'nt', 'needs POSIX process groups to deliver a terminal interrupt')
+    def test_an_interrupt_reaches_the_program_and_never_kills_it_through_the_launcher(self):
+        # Ctrl+C in a session cancels a prompt. The terminal sends it to the launcher
+        # too, and subprocess.call kills its child when the launcher is interrupted.
+        stub = self.home / 'claude-stub'
+        stub.write_text('#!' + sys.executable + '\n'
+                        'import signal, sys, time\n'
+                        'seen = []\n'
+                        'signal.signal(signal.SIGINT, lambda *_: seen.append(1))\n'
+                        'print("ready", flush=True)\n'
+                        'deadline = time.monotonic() + 20\n'
+                        'while not seen and time.monotonic() < deadline:\n'
+                        '    time.sleep(.05)\n'
+                        # Longer than subprocess.call waits before it kills an interrupted child.
+                        'time.sleep(1)\n'
+                        'print("survived" if seen else "never interrupted", flush=True)\n'
+                        'sys.exit(7)\n')
+        stub.chmod(0o755)
+        self.configure(claude_binary=str(stub))
+        cli = Path(__file__).resolve().parents[1] / 'server' / 'nth_cli.py'
+        launcher = subprocess.Popen([sys.executable, str(cli), 'claude', '-p', 'a prompt'],
+                                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                    text=True, start_new_session=True)
+        try:
+            self.assertEqual(launcher.stdout.readline().strip(), 'ready')
+            os.killpg(launcher.pid, signal.SIGINT)      # what a terminal does on Ctrl+C
+            output, errors = launcher.communicate(timeout=30)
+        finally:
+            if launcher.poll() is None:
+                os.killpg(launcher.pid, signal.SIGKILL)
+                launcher.wait()
+        self.assertEqual((output.strip(), launcher.returncode), ('survived', 7), errors[-400:])
+        self.assertNotIn('KeyboardInterrupt', errors)
 
     def test_it_never_bypasses_permission_prompts(self):
         self.configure(quartet_url='http://hub.example/sse')

@@ -17,7 +17,7 @@ python setup.py install --quartet-url http://YOUR_HUB:8000/sse
 trio codex     # or: trio claude
 ```
 
-Omit `--quartet-url` for local-only use. Use `--clients codex` or `--clients claude` to install one client; `--codex-binary PATH` selects the installed stock executable. The launcher is `~/.local/bin/trio` (`trio.cmd` on Windows); use its full path if that directory is outside PATH. Restart Claude after installation, launch it with `trio claude`, and use `/trio` or `/quartet` normally. `--claude-binary PATH` selects a Claude Code executable that is not on PATH.
+Omit `--quartet-url` for local-only use. Use `--clients codex` or `--clients claude` to install one client; `--codex-binary PATH` selects the installed stock executable. The launcher is `~/.local/bin/trio` (`trio.cmd` on Windows); use its full path if that directory is outside PATH. Restart Claude after installation, launch it with `trio claude`, and use `/trio` or `/quartet` normally. `--claude-binary PATH` selects a Claude Code executable that is not on PATH. To make plain `claude` and `codex` start through Trio in every terminal, add the output of `trio shell-init powershell` (or `bash`, `zsh`) to your shell profile; see [AGENT-RUNTIME.md](AGENT-RUNTIME.md).
 
 In Codex, invoke `$trio` or `$quartet` and join a channel. Trio observes the successful MCP `connect` result and automatically binds that membership to its actual thread. Check `*_delivery_status`: only `ready: true` means ready. Incoming events wake an idle thread or enter an active turn at its next model-step boundary, usually after the current tool call or batch completes. This does not interrupt a running command. Reply and acknowledge with the usual channel tools.
 
