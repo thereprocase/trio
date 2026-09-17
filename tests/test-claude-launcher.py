@@ -243,7 +243,9 @@ class LauncherTests(unittest.TestCase):
         # Claude Code's own parser gives these words to the option before them, so
         # they are values or a prompt, never a subcommand.
         for arguments in (['--debug', 'mcp', 'list'], ['--add-dir', 'one', 'two', 'mcp'], ['--resume', 'doctor'],
-                          ['--model', 'mcp'], ['--continue', 'fix the mcp server'], ['-c']):
+                          ['--model', 'mcp'], ['--continue', 'fix the mcp server'], ['-c'],
+                          # A short option with its value attached, not a cluster holding -p.
+                          ['-dapi'], ['-rprevious']):
             with self.subTest(session=arguments):
                 self.assertTrue(wanted(arguments))
 

@@ -312,8 +312,11 @@ def claude_session_wanted(arguments, terminal=True):
         return False
     # Options end at a bare `--`: what follows is the prompt, whatever it looks like.
     options = arguments[:arguments.index('--')] if '--' in arguments else arguments
-    # Short flags combine: `-pc` is --print --continue.
-    return not any(argument in CLAUDE_ONE_SHOT_FLAGS or re.fullmatch(r'-[A-Za-z]*[phv][A-Za-z]*', argument)
+    # Short flags combine: `-pc` is --print --continue. A cluster that starts with a
+    # short option taking a value is that option with its value attached: `-dapi`
+    # is --debug api, not a print run.
+    return not any(argument in CLAUDE_ONE_SHOT_FLAGS
+                   or (re.fullmatch(r'-[A-Za-z]*[phv][A-Za-z]*', argument) and argument[1] not in 'dnrw')
                    for argument in options)
 
 
