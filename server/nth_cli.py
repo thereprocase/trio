@@ -688,6 +688,8 @@ def main(argv=None):
     desktop = sub.add_parser('desktop', help='Launch the Codex app against Trio\'s shared server')
     desktop.add_argument('--app', help='Installed app executable (or saved codex_app in native.json)')
     desktop.add_argument('--isolated', action='store_true', help='Use a separate app UI profile')
+    sub.add_parser('hooks-uninstall', help='Remove Trio\'s delivery hooks from Claude\'s user settings '
+                                           '(the asyncRewake push path); leaves other hooks untouched')
     args, extra = parser.parse_known_args(argv)
     if extra and args.command != 'codex':
         parser.error('unrecognized arguments: ' + ' '.join(extra))
@@ -701,6 +703,17 @@ def main(argv=None):
         if not clients or any(client not in ('claude', 'codex') for client in clients):
             parser.error('--clients must contain claude and/or codex')
         print(shell_init(args.shell, clients))
+    elif args.command == 'hooks-uninstall':
+        directory = os.environ.get('CLAUDE_CONFIG_DIR')
+        path = ((Path(directory) / 'settings.json') if directory else None)
+        if not path or not path.exists():
+            path = Path.home() / '.claude' / 'settings.json'
+        import nth_claude_hook
+        data = json.loads(path.read_text(encoding='utf-8-sig')) if path.exists() else {}
+        removed = nth_claude_hook.uninstall_hooks(data)
+        if removed:
+            nth_claude_hook.write_json(path, data)
+        print(json.dumps({'removed': removed, 'settings': str(path)}))
     elif args.command == 'start':
         print(json.dumps(ensure_service()))
     elif args.command == 'attach':

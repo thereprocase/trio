@@ -62,6 +62,58 @@ def name(value, limit=64):
     return re.sub(r'[^A-Za-z0-9_.-]', '_', str(value))[:limit] or '_'
 
 
+# ---- registration in Claude's user settings --------------------------------------
+
+# Marks a hook group as Trio's own, so re-installing replaces it and an uninstall
+# finds it, without disturbing hooks the user or another tool registered.
+HOOK_TAG = 'nth-trio-delivery'
+HOOK_EVENTS = (('PostToolUse', 'tool', r'mcp__nth-(trio|qweb)__(trio|quartet)_(connect|listen|ack)'),
+               ('Stop', 'stop', None), ('SessionEnd', 'end', None))
+
+
+def install_hooks(settings, python, script, runtime):
+    """Register the asyncRewake delivery hooks in a Claude settings dict, idempotently.
+
+    A plainly launched Claude has no channel listener. These hooks give it one:
+    after a Trio connect and after every turn, a background waiter polls this
+    session's memberships and, on a message, exits 2 so Claude Code wakes the
+    model. A session that never joins Trio spawns a short-lived process per turn
+    that returns at once; a `trio claude` session ignores the hooks entirely.
+    """
+    hooks = settings.setdefault('hooks', {})
+    for event, action, matcher in HOOK_EVENTS:
+        groups = [group for group in hooks.get(event, [])
+                  if not (isinstance(group, dict) and group.get(HOOK_TAG))]
+        entry = {'type': 'command', 'command': str(python),
+                 'args': [str(script), '--home', str(runtime), action]}
+        if action != 'end':                          # SessionEnd only records; it never wakes
+            entry['asyncRewake'] = True
+        group = {HOOK_TAG: True, 'hooks': [entry]}
+        if matcher:
+            group['matcher'] = matcher
+        hooks[event] = groups + [group]
+
+
+def uninstall_hooks(settings):
+    """Remove Trio's own delivery hooks; leave every other hook untouched. Returns
+    the number removed."""
+    removed = 0
+    hooks = settings.get('hooks')
+    if not isinstance(hooks, dict):
+        return 0
+    for event in list(hooks):
+        kept = [group for group in hooks[event]
+                if not (isinstance(group, dict) and group.get(HOOK_TAG))]
+        removed += len(hooks[event]) - len(kept)
+        if kept:
+            hooks[event] = kept
+        else:
+            del hooks[event]
+    if not hooks:
+        settings.pop('hooks', None)
+    return removed
+
+
 def hooks_dir():
     from nth_event_service import state_dir
     path = state_dir() / 'hooks'

@@ -109,6 +109,9 @@ def install(target_home, *, quartet_url='', clients=('claude', 'codex'),
                 permission = f'mcp__{name}__{prefix}_{operation}'
                 if permission not in allow:
                     allow.append(permission)
+        sys.path.insert(0, str(ROOT / 'server'))
+        import nth_claude_hook
+        nth_claude_hook.install_hooks(settings, python, server / 'nth_claude_hook.py', runtime)
         write_json(settings_path, settings)
     if 'codex' in clients and register_codex:
         executable = codex_binary or shutil.which('codex')

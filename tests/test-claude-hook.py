@@ -235,5 +235,40 @@ class HookTests(unittest.TestCase):
         self.assertTrue(hook.load_session(SESSION)['ended'])
 
 
-if __name__ == '__main__':
+class RegistrationTests(unittest.TestCase):
+    def install(self, settings):
+        hook.install_hooks(settings, 'C:/venv/python.exe',
+                           'C:/nth/server/nth_claude_hook.py', 'C:/nth')
+        return settings
+
+    def test_install_is_idempotent_and_keeps_foreign_hooks(self):
+        foreign = {'hooks': {'Stop': [{'hooks': [{'type': 'command', 'command': 'other.sh'}]}],
+                             'PreToolUse': [{'matcher': 'Bash', 'hooks': [{'type': 'command', 'command': 'x'}]}]}}
+        self.install(foreign)
+        self.install(foreign)                        # twice: no duplicate group
+        stop = foreign['hooks']['Stop']
+        self.assertEqual(len(stop), 2)               # the foreign one, plus exactly one of ours
+        self.assertEqual(sum(1 for g in stop if g.get(hook.HOOK_TAG)), 1)
+        self.assertIn('PreToolUse', foreign['hooks'])   # untouched
+        tool = [g for g in foreign['hooks']['PostToolUse'] if g.get(hook.HOOK_TAG)][0]
+        self.assertTrue(tool['hooks'][0]['asyncRewake'])
+        self.assertNotIn('asyncRewake', [g for g in foreign['hooks']['SessionEnd']
+                                         if g.get(hook.HOOK_TAG)][0]['hooks'][0])
+        self.assertEqual(tool['hooks'][0]['args'], ['C:/nth/server/nth_claude_hook.py', '--home', 'C:/nth', 'tool'])
+
+    def test_uninstall_removes_only_trios_hooks(self):
+        settings = self.install({'hooks': {'Stop': [{'hooks': [{'type': 'command', 'command': 'other.sh'}]}]}})
+        removed = hook.uninstall_hooks(settings)
+        self.assertEqual(removed, 3)
+        self.assertEqual(settings['hooks']['Stop'], [{'hooks': [{'type': 'command', 'command': 'other.sh'}]}])
+        self.assertNotIn('PostToolUse', settings['hooks'])
+        # Nothing of ours left: a second uninstall removes nothing.
+        self.assertEqual(hook.uninstall_hooks(settings), 0)
+
+    def test_uninstall_of_a_clean_settings_is_a_no_op(self):
+        self.assertEqual(hook.uninstall_hooks({}), 0)
+        self.assertEqual(hook.uninstall_hooks({'permissions': {'allow': []}}), 0)
+
+
+if __name__ == "__main__":
     unittest.main()
