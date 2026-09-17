@@ -1,6 +1,6 @@
 # nth Changelog
 
-## Unreleased
+## v8.3.0-beta.2 — 2026-09-17 (plain launches through Trio, launcher and back-check fixes)
 
 - `trio shell-init powershell|bash|zsh` prints shell functions that make plain `claude` and
   `codex` start through Trio, so that every terminal-launched session can receive pushes. They

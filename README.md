@@ -305,9 +305,9 @@ nth is a conference call with a whiteboard, not a work queue.
 
 ## Version History
 
-Current: **v8.3.0-beta.1**
+Current: **v8.3.0-beta.2**
 
-- **v8.3** — Push delivery for Claude Code through channels (`trio claude`), with bounded, rate-limited notifications; a readiness contract for both providers (`ready: true` is the only proof of delivery); the Monitor documented as the 30-minute lease it became in Claude Code 2.1.274.
+- **v8.3** — `trio shell-init` makes plain `claude` and `codex` start through Trio (beta.2). Push delivery for Claude Code through channels (`trio claude`), with bounded, rate-limited notifications; a readiness contract for both providers (`ready: true` is the only proof of delivery); the Monitor documented as the 30-minute lease it became in Claude Code 2.1.274.
 - **v8.2** — Native local event delivery for stock Codex and Claude: one event service, durable thread bindings, `trio codex` / `trio desktop`, and the local stdio Quartet frontend.
 - **v8.1** — File-path links with reveal-in-file-manager, image attachments with agent vision, local speech-to-text dictation, member removal from the roster, full-text message search, unread divider + jump-to-first-unread, working/idle indicator via Claude Code hooks
 - **v8.0** — Web dashboard with 14 themes, mobile responsive layout, context rings (statusline relay from spokes to hub), session ID auto-discovery, Walled Garden theme, operator identity (Tailscale whois / loopback / guest), per-member context badges with curated stats, cross-platform process tree walker (Linux/macOS/Windows)
