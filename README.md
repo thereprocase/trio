@@ -1,5 +1,50 @@
 # Trio — Async Communication for Claude Code and Codex
 
+## How delivery works now — and what changed in Claude Code
+
+**Start with `trio codex` or `trio claude`.** Both let collaborators send messages
+that wake an idle agent or reach a working agent at its next model-step boundary,
+after the running tool call or batch finishes. Neither interrupts a running
+command. Local Trio and remote Quartet use the same delivery path on each client.
+
+**Codex: a shared app-server and native tool output.** `trio codex` starts or
+reuses a stock Codex app-server and connects the CLI with `--remote`. Trio's local
+event service binds channel membership to the actual owning thread and delivers
+messages as `trio_event` / `quartet_event` tool output through its socket. Codex's
+[app-server API](https://learn.chatgpt.com/docs/app-server#start-a-turn) can start
+an idle turn with tool output or queue it into an active turn. Concurrent launches
+share one server; no Codex binary patch or model-driven polling loop is needed.
+
+**What Anthropic broke for our old Claude path:** Trio previously relied on a
+`persistent` Monitor lasting for the session. In our tests on Claude Code
+**2.1.274**, it instead expired after **30 minutes**, even with `persistent=true`;
+`timeout_ms` above `3600000` was rejected. Each expiry wakes Claude, so repeatedly
+re-arming it spends model turns on an otherwise quiet channel. Without re-arming,
+automatic delivery stops. Anthropic's [current Monitor documentation](https://code.claude.com/docs/en/tools-reference#monitor-tool)
+now specifies the 30-minute maximum and an expiry notice. This is an observed
+compatibility break, not a claim about which release first introduced it; an
+[upstream report](https://github.com/anthropics/claude-code/issues/94393) also
+reproduces it on 2.1.270.
+
+**Claude now: native MCP channel events.** `trio claude` enables Trio's local MCP
+servers as [Claude Code channels](https://code.claude.com/docs/en/channels-reference).
+Their listeners wait for messages outside the model and push `<channel>` events
+into the session. This removes the Monitor lease and its periodic renewal turns:
+a quiet channel causes no model turns. Claude still asks you to confirm the
+`--dangerously-load-development-channels` flag at launch; it names only
+`server:nth-trio` and, when
+configured, `server:nth-qweb`. It does not bypass tool permissions. A settings-hook
+delivery path is being investigated separately; it is not the shipped default.
+
+**What to do:** follow the [quick start](#native-quick-start), launch through Trio,
+join your channel, and check `*_delivery_status` for **`ready: true`**. To route
+plain `codex` and `claude` commands through these launchers, add `trio shell-init`
+output to your shell profile as described [below](#native-quick-start). A Claude
+session launched without channel support can use the leased Monitor while you
+are present. Manual polling remains available on both clients, but cannot wake
+an idle agent. App and IDE launch paths have separate limits; see
+[the runtime guide](AGENT-RUNTIME.md).
+
 Trio (the `nth` server) gives Claude Code and stock Codex shared channels, background message delivery, and atomic task claims. Any number of sessions can participate. Trio owns local supervision and delivery; Quartet connects it to a shared remote hub.
 
 Two skills, one codebase:
