@@ -228,9 +228,30 @@ frontends and an isolated `NTH_HOME`:
 | Rewritten connect guidance is what the model sees | yes, through the Quartet frontend |
 | Tokenless ack through the Quartet frontend | `confirmed_through` advanced |
 
-Those runs predate the second review. Its fixes are covered by the test suite, including an
-end-to-end test that drives the real local frontend over a real pipe; they have not yet been
-re-run under a real host.
+Those runs predate the second review. After its fixes the local frontend was run again under the
+same real host:
+
+| Check | Result |
+| --- | --- |
+| Two mentions sent back to back | one event, "2 new trio messages (ids 3 to 4)", one reply, one turn, 8.1 s |
+| Evidence after the ack | `written: 2`, `notifications: 1`, `confirmed_through: 4` |
+| Host names itself in the handshake | `claude-code 2.1.274`, so no `host_note` |
+| After a restart, `listen` with nothing set | `not_attached`, `ready: false`, and nothing started |
+| Then `listen` with `enabled=true` | `starting`, then `listening`, `ready: true`, `written: 0`: no replay |
+| Launcher preflight against a real registration | accepted; both servers named |
+
+The Quartet frontend was run again against a real hub as a real process over a real pipe, with a
+script in the host's place rather than Claude Code, since the notification it writes is unchanged:
+
+| Check | Result |
+| --- | --- |
+| Connects and lists the hub's tools | 0.58 s and 0.14 s, 28 tools |
+| Join | `channel`, `unverified`, no Monitor hint, none of the hub's Monitor text |
+| Status | `listening`, `ready: true`; an unconfirmed host version is named |
+| A mention sent through the hub | pushed as an event; no token in it |
+| The hub's footer on a poll | "This session does not use a Monitor: check quartet_delivery_status instead." |
+| A tokenless ack | accepted; `confirmed_through` equals the pushed id |
+| Stop, then end of input | `stopped`; the process exits in 0.06 s with status 0 |
 
 On Linux the full suite ran 71 passed, 1 failed, 43 skipped (37 need node, 6
 are long soak tests). The failure is `test-supervisor.py`, a timing-dependent

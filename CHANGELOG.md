@@ -1,6 +1,6 @@
 # nth Changelog
 
-## Unreleased
+## v8.3.0-beta.1 — 2026-09-17 (Claude channel delivery)
 
 - Add push delivery for Claude Code. `trio claude` launches Claude with the
   development-channels flag naming Trio's two local MCP servers. Each stdio
