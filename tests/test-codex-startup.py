@@ -1,4 +1,5 @@
 """Concurrent launcher processes must share one server. No models or live state."""
+import errno
 import json
 import os
 from pathlib import Path
@@ -153,8 +154,9 @@ class StartupTests(unittest.TestCase):
                 for marker in root.glob('spawn-*'):
                     try:
                         os.kill(int(marker.read_text()), signal.SIGTERM)
-                    except ProcessLookupError:
-                        pass
+                    except OSError as error:
+                        if error.errno != errno.ESRCH and getattr(error, 'winerror', None) != 87:
+                            raise
                 # Windows closes the fixture's redirected log asynchronously.
                 time.sleep(.2)
 
