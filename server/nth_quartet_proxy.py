@@ -91,6 +91,16 @@ def create_server(url):
                             except Exception as exc:  # noqa: BLE001
                                 body['event_delivery']['listener'] = {'status': 'failed', 'error': type(exc).__name__}
                         block['text'] = json.dumps(body)
+                        # The hub also returns the body as structured content, and a
+                        # host may show the model that form. Left as it was, it would
+                        # carry the hub's own monitor guidance past this rewrite.
+                        structured = response.get('structuredContent')
+                        if isinstance(structured, dict):
+                            if isinstance(structured.get('result'), str):
+                                structured['result'] = block['text']
+                            else:
+                                response['structuredContent'] = body
+                        break
         return types.CallToolResult.model_validate(response)
 
     return server, client, hub
