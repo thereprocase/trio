@@ -190,27 +190,97 @@ def registration_problem(name, script, registered):
     return ''
 
 
+def launch_directory():
+    return Path.cwd()
+
+
+def _same_directory(left, right):
+    return os.path.normcase(os.path.normpath(str(left))) == os.path.normcase(os.path.normpath(str(right)))
+
+
+def shadowing_registrations(name, config, directory):
+    """Registrations of `name` that outrank the user-scoped one for a session started
+    in `directory`, as (where, registration) pairs.
+
+    Claude Code resolves a server name by scope: local, then project, then user.
+    Local scope is this same file's `projects[DIRECTORY].mcpServers`; project scope
+    is a `.mcp.json`. The channel flag names a server by name only, so whichever
+    of them Claude picks receives the grant. The directory and every ancestor are
+    searched rather than modelling which one Claude treats as the project.
+    A registration of None stands for one that could not be read: what cannot be
+    validated is not trusted.
+    """
+    directories = [directory, *directory.parents]
+    try:
+        resolved = directory.resolve()
+        directories += [d for d in (resolved, *resolved.parents)
+                        if not any(_same_directory(d, known) for known in directories)]
+    except OSError:
+        pass
+    found = []
+    projects = config.get('projects') if isinstance(config, dict) else None
+    for key, project in (projects.items() if isinstance(projects, dict) else ()):
+        servers = project.get('mcpServers') if isinstance(project, dict) else None
+        if isinstance(servers, dict) and name in servers and any(_same_directory(key, d) for d in directories):
+            found.append((f'local scope for {key}', servers[name]))
+    for candidate in directories:
+        project_file = candidate / '.mcp.json'
+        try:
+            raw = project_file.read_text(encoding='utf-8-sig')
+        except OSError:
+            continue
+        try:
+            servers = json.loads(raw).get('mcpServers')
+        except (ValueError, AttributeError):
+            servers = None
+            if name in raw:
+                found.append((str(project_file), None))
+        if isinstance(servers, dict) and name in servers:
+            found.append((str(project_file), servers[name]))
+    return found
+
+
+def shadow_problem(name, script, config, directory):
+    """Why a higher-precedence registration of `name` forbids naming it, or ''."""
+    for where, registered in shadowing_registrations(name, config, directory):
+        problem = (registration_problem(name, script, registered) if registered is not None
+                   else 'could not be read, so it cannot be checked')
+        if problem:
+            return (f'is also registered in {where}, which outranks the installed one, and that '
+                    f'registration {problem}. Remove it (claude mcp remove --scope local {name}, or delete '
+                    f'the entry from .mcp.json) or start the session from another directory')
+    return ''
+
+
 def channel_servers():
     """The `server:NAME` entries that may be named, after checking each registration."""
     path = claude_config_path()
     try:
-        registered = json.loads(path.read_text(encoding='utf-8-sig')).get('mcpServers') or {}
+        config = json.loads(path.read_text(encoding='utf-8-sig'))
+        registered = config.get('mcpServers') or {}
     except (OSError, ValueError, AttributeError):
         raise RuntimeError(f'Could not read Claude\'s MCP configuration at {path}. '
                            'Run: python setup.py install') from None
     wanted = [entry for entry in CHANNEL_SERVERS if entry[0] == 'nth-trio' or settings().get('quartet_url')]
     named = []
+    directory = launch_directory()
     for name, script in wanted:
+        # The installed registration, and every same-name one that outranks it from
+        # here: the flag grants by name, and Claude decides which registration that is.
         problem = registration_problem(name, script, registered.get(name))
+        remedy = ('Re-run: python setup.py install' + (' --quartet-url URL' if name == 'nth-qweb' else '')
+                  + '   (setup.sh does not register it for channel delivery).')
+        if not problem:
+            # Reinstalling does not remove a registration in another scope.
+            problem, remedy = shadow_problem(name, script, config, directory), ''
         if not problem:
             named.append('server:' + name)
         elif name == 'nth-trio':
-            raise RuntimeError(f'{name} {problem}. `trio claude` will not name it as a channel. '
-                               'Re-run: python setup.py install   (setup.sh does not register it for '
-                               'channel delivery). Plain `claude` still works, through the Monitor.')
+            raise RuntimeError(f'{name} {problem}. `trio claude` will not name it as a channel. {remedy} '
+                               'Plain `claude` still works, through the Monitor.')
         else:
             print(f'[trio] {name} {problem}: Quartet messages will NOT be pushed into this session. '
-                  'Re-run: python setup.py install --quartet-url URL', file=sys.stderr)
+                  + remedy, file=sys.stderr)
     return named
 
 

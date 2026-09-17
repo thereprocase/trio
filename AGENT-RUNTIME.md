@@ -114,7 +114,11 @@ is only acceptable for a local program, the launcher reads that configuration
 first. It names a server only if it is a stdio entry, marked for Claude, whose
 command is a Python interpreter and whose first argument is this installation's
 own frontend file. That is a check of the registration, not of the file's
-contents. It refuses to start when `nth-trio` is not, and it
+contents. Claude Code resolves a server name by scope (local, then the
+project's `.mcp.json`, then user), and the flag grants by name, so the launcher
+applies the same check to every same-name registration in a higher scope for
+the directory the session starts in and for each directory above it. Servers
+from an enterprise `managed-mcp.json` are not examined. It refuses to start when `nth-trio` is not, and it
 leaves out, with a warning, a `nth-qweb` that is registered as a remote server,
 which is what the legacy `setup.sh spoke` leaves behind.
 

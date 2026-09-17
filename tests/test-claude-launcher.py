@@ -36,9 +36,15 @@ class LauncherTests(unittest.TestCase):
         # A test runner has no terminal; a person starting a session does.
         self.terminal = patch.object(nth_cli, 'terminal_attached', return_value=True)
         self.terminal.start()
+        # The directory the session is started from, with nothing registered in or above it.
+        self.project = self.home / 'projects' / 'checkout'
+        (self.project / 'nested' / 'deeper').mkdir(parents=True)
+        self.directory = patch.object(nth_cli, 'launch_directory', return_value=self.project)
+        self.directory.start()
         self.register()
 
     def tearDown(self):
+        self.directory.stop()
         self.terminal.stop()
         self.installation.stop()
         self.environment.stop()
@@ -57,15 +63,18 @@ class LauncherTests(unittest.TestCase):
         return {'type': 'stdio', 'command': sys.executable, 'args': [str(self.scripts / script)],
                 'env': dict({'TRIO_NATIVE_CLIENT': 'claude'}, **env)}
 
-    def register(self, **servers):
-        """Claude's own MCP configuration, as setup.py writes it unless overridden."""
+    def register(self, projects=None, **servers):
+        """Claude's own MCP configuration, as setup.py writes it unless overridden.
+        `projects` is its local scope: {directory: {server name: registration}}."""
         registered = {'nth-trio': self.stdio('nth_server.py'),
                       'nth-qweb': dict(self.stdio('nth_quartet_proxy.py'),
                                        args=[str(self.scripts / 'nth_quartet_proxy.py'), '--url',
                                              'http://hub.example/sse'])}
         registered.update(servers)
         registered = {name: value for name, value in registered.items() if value is not None}
-        (self.home / '.claude.json').write_text(json.dumps({'mcpServers': registered}), encoding='utf-8')
+        config = {'mcpServers': registered,
+                  'projects': {str(directory): {'mcpServers': local} for directory, local in (projects or {}).items()}}
+        (self.home / '.claude.json').write_text(json.dumps(config), encoding='utf-8')
 
     def launch(self, *arguments, executable='claude'):
         with patch.object(nth_cli.shutil, 'which', return_value=executable), \
@@ -149,6 +158,56 @@ class LauncherTests(unittest.TestCase):
                 self.assertIn('python setup.py install', message)
         (self.home / '.claude.json').write_text('{not json', encoding='utf-8')
         self.assertIn('Could not read Claude\'s MCP configuration', self.refused())
+
+    def test_a_same_name_registration_in_a_higher_scope_is_checked_too(self):
+        # The flag grants by name, and Claude Code resolves a name local scope first,
+        # then the project's .mcp.json, then user scope. Checking only the installed,
+        # user-scoped entry would hand the grant to whatever shadows it.
+        self.configure(quartet_url='http://hub.example/sse')
+        remote = {'type': 'http', 'url': 'http://hub.example/mcp'}
+        as_claude_writes_it = self.project.as_posix()
+        for label, projects in (('local scope', {as_claude_writes_it: {'nth-trio': remote}}),
+                                ('local scope of an ancestor', {str(self.project.parent): {'nth-trio': remote}})):
+            with self.subTest(shadow=label):
+                self.register(projects=projects)
+                message = self.refused()
+                self.assertIn('is also registered in local scope for', message)
+                self.assertIn('remote (http) server', message)
+                self.assertIn('claude mcp remove --scope local nth-trio', message)
+                # Reinstalling does not remove it, so that advice would mislead.
+                self.assertNotIn('setup.py install', message)
+        self.register()
+        self.assertEqual(self.launch().args[0][-2:], ['server:nth-trio', 'server:nth-qweb'])
+        for label, holder in (('the directory', self.project), ('an ancestor', self.project.parent)):
+            with self.subTest(project_file=label):
+                (holder / '.mcp.json').write_text(json.dumps({'mcpServers': {'nth-trio': remote}}), encoding='utf-8')
+                with patch.object(nth_cli, 'launch_directory', return_value=self.project / 'nested' / 'deeper'):
+                    message = self.refused()
+                self.assertIn(str(holder / '.mcp.json'), message)
+                self.assertIn('remote (http) server', message)
+                (holder / '.mcp.json').unlink()
+        # A project file that cannot be parsed but names the server cannot be checked.
+        (self.project / '.mcp.json').write_text('{"mcpServers": {"nth-trio": {broken', encoding='utf-8')
+        self.assertIn('could not be read', self.refused())
+        (self.project / '.mcp.json').write_text('{"mcpServers": {"other": {broken', encoding='utf-8')
+        self.assertEqual(self.launch().args[0][-2:], ['server:nth-trio', 'server:nth-qweb'])
+        (self.project / '.mcp.json').unlink()
+
+    def test_a_shadow_that_is_harmless_or_elsewhere_changes_nothing(self):
+        self.configure(quartet_url='http://hub.example/sse')
+        remote = {'type': 'http', 'url': 'http://hub.example/mcp'}
+        # Another project's local scope, and a same-name entry that IS this installation's frontend.
+        self.register(projects={str(self.home / 'projects' / 'another'): {'nth-trio': remote},
+                                str(self.project): {'nth-trio': self.stdio('nth_server.py')}})
+        (self.project / '.mcp.json').write_text(json.dumps({'mcpServers': {'unrelated': remote}}), encoding='utf-8')
+        self.assertEqual(self.launch().args[0][-2:], ['server:nth-trio', 'server:nth-qweb'])
+        # A shadowed Quartet frontend costs Quartet delivery, not the session.
+        self.register(projects={str(self.project): {'nth-qweb': remote}})
+        with patch('sys.stderr', new_callable=io.StringIO) as stderr:
+            command = self.launch().args[0]
+        self.assertEqual(command, ['claude', FLAG, 'server:nth-trio'])
+        self.assertIn('nth-qweb is also registered in local scope', stderr.getvalue())
+        self.assertIn('will NOT be pushed', stderr.getvalue())
 
     def test_saved_binary_wins_and_a_missing_or_stale_one_is_explained(self):
         saved = self.home / 'claude-cli'

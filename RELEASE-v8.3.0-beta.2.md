@@ -101,6 +101,17 @@ in that case, and report it.
 
 ## Fixed in the launchers
 
+- **The launcher validated a different registration from the one Claude Code selects.**
+  `trio claude` names a server only after checking that its registration is this installation's
+  own local frontend. It checked the installed, user-scoped entry. Claude Code resolves a server
+  name by scope, local first, then the project's `.mcp.json`, then user, and the flag grants by
+  name: a same-name entry in a higher scope, such as a `.mcp.json` in a cloned repository,
+  would have received the grant unchecked. Found by an independent reviewer, who reproduced it
+  against the real CLI on beta.1. Every same-name registration in a higher scope is now held to
+  the same rules, for the directory the session starts in and each directory above it, and one
+  that cannot be read is refused. With the shell functions the launcher runs in every
+  directory, so this mattered more for this release than for the last. Servers from an
+  enterprise `managed-mcp.json` are not examined.
 - **The channel flag was placed after a `--` in the middle of the arguments**,
   where Claude Code reads everything as prompt text. It now goes before the
   separator.
@@ -152,6 +163,7 @@ can cause them. Each has a test that fails on the code before the fix.
 | `claude --version`, `claude mcp list` through the launcher, real Claude Code 2.1.274 | real output, no flag added |
 | `codex --version`, `codex mcp list` through the launcher, real codex-cli 0.154.0 | real output, no `--remote`, no server started |
 | Terminal detection in a real Git Bash (mintty) window, Windows | with a pseudo console `isatty` is true; with `MSYS=disable_pcon` it is false, the pipes are named `\msys-…-pty0-from-master-nat`, and the launcher still finds a terminal |
+| A same-name `nth-trio` added at local scope with the real `claude mcp add`, isolated config | before: Claude Code selects the local HTTP entry while the launcher grants `server:nth-trio`; after: the launcher refuses, from the project and from a subdirectory |
 | Reclaim race and legacy `ended` reply | reproduced by the reviewer on the unfixed commit, gone after the fix |
 
 Test files touched by this release pass on Windows and on Linux. The full

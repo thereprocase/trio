@@ -13,6 +13,12 @@
 - `trio codex` uses the shared app-server only for the interactive form and for the subcommands
   that accept `--remote`. `exec`, `login`, `mcp` and the rest reach the real binary as typed
   and no longer start the server.
+- The launcher check now covers every registration Claude Code could select. It validated
+  the installed, user-scoped `nth-trio`, but the flag grants by name and Claude Code resolves a
+  name local scope first, then the project's `.mcp.json`. A same-name entry there, for instance
+  in a cloned repository, would have received the grant unchecked. Such an entry is now held to
+  the same rules, for the launch directory and every directory above it. Found by an independent
+  back-check, with a reproduction against the real CLI.
 - The channel flag is placed before a `--` in the middle of the arguments. After it, Claude
   Code would have read the flag as prompt text.
 - Ctrl+C in a launched program no longer kills it through the launcher. On POSIX the terminal
