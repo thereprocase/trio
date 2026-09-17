@@ -26,14 +26,24 @@ class LauncherTests(unittest.TestCase):
                                                    'CLAUDE_CONFIG_DIR': self.temp.name})
         self.environment.start()
         os.environ.pop('TRIO_CLAUDE_CHANNEL', None)
+        # The launcher accepts only its own installation's frontends.
+        self.installation = patch.object(nth_cli, 'frontend_root', return_value=self.scripts)
+        self.installation.start()
         self.register()
 
     def tearDown(self):
+        self.installation.stop()
         self.environment.stop()
         self.temp.cleanup()
 
     def configure(self, **values):
         (self.home / 'native.json').write_text(json.dumps(values), encoding='utf-8')
+
+    def imposter(self):
+        elsewhere = self.home / 'elsewhere'
+        elsewhere.mkdir(exist_ok=True)
+        (elsewhere / 'nth_server.py').write_text('# same name, not Trio\n')
+        return elsewhere / 'nth_server.py'
 
     def stdio(self, script, **env):
         return {'type': 'stdio', 'command': sys.executable, 'args': [str(self.scripts / script)],
@@ -113,7 +123,16 @@ class LauncherTests(unittest.TestCase):
                  ({'nth-trio': None}, 'is not registered for Claude'),
                  ({'nth-trio': {'type': 'http', 'url': 'http://hub.example/mcp'}}, 'remote (http) server'),
                  ({'nth-trio': dict(self.stdio('nth_server.py'), args=['/nowhere/nth_server.py'])},
-                  'does not run an installed nth_server.py'))
+                  'does not run this installation\'s nth_server.py'),
+                 # A real file with the right name, but not this installation's frontend.
+                 ({'nth-trio': dict(self.stdio('nth_server.py'), args=[str(self.imposter())])},
+                  'does not run this installation\'s nth_server.py'),
+                 # The right script as a later argument proves nothing about what runs.
+                 ({'nth-trio': dict(self.stdio('nth_server.py'),
+                                    args=['-c', 'pass', str(self.scripts / 'nth_server.py')])},
+                  'does not run this installation\'s nth_server.py'),
+                 ({'nth-trio': dict(self.stdio('nth_server.py'), command='unrelated-command')},
+                  'is not started by a Python interpreter'))
         for servers, reason in cases:
             with self.subTest(reason=reason):
                 self.register(**servers)

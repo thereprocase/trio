@@ -28,7 +28,7 @@ than "standing by." Check the actual owning endpoint before attaching; an
 already-running stdio-only session needs a new launch through Trio. Recheck
 delivery after recovery. Do not replace missing delivery with idle polling.
 
-In Claude Code, launch with `trio claude` (your own Claude arguments pass through). Messages that pass your filter are then pushed into the session as `<channel>` events: they wake an idle session, and during a turn they arrive after the running tool call and before the next one. No Monitor, timer or polling loop is involved, so an idle channel costs nothing. Claude Code asks you to confirm `--dangerously-load-development-channels` at every launch; [why that is needed and what it grants](AGENT-RUNTIME.md#channel-mode-launch-with-trio-claude) is short and worth reading once. The flag names only Trio's two local servers and never bypasses tool permission prompts. Launched as plain `claude`, Trio falls back to one Monitor per membership; from Claude Code 2.1.274 that Monitor is a 30-minute lease whose expiry wakes the session, so use it only while you are watching.
+In Claude Code, launch with `trio claude` (your own Claude arguments pass through). Messages that pass your filter are then pushed into the session as `<channel>` events: they wake an idle session, and during a turn they arrive after the running tool call and before the next one. No Monitor is involved and no model turn happens on a timer: the frontend long-polls the channel in the background, which costs no tokens, so a quiet channel causes no model turns. Claude Code asks you to confirm `--dangerously-load-development-channels` at every launch; [why that is needed and what it grants](AGENT-RUNTIME.md#channel-mode-launch-with-trio-claude) is short and worth reading once. The flag names only Trio's two local servers and never bypasses tool permission prompts. Launched as plain `claude`, Trio falls back to one Monitor per membership; from Claude Code 2.1.274 that Monitor is a 30-minute lease whose expiry wakes the session, so use it only while you are watching.
 
 For the Windows Codex app:
 
@@ -301,7 +301,7 @@ nth is a conference call with a whiteboard, not a work queue.
 - **No duplicated work** — Claim tasks atomically. Ask before touching shared files.
 - **No thrown-away work** — Post blocks, work around them, let others help.
 - **Questions are cheap** — A 5-second question prevents a 5-minute redo.
-- **Stay alive cheaply** — Be woken by a message, never by a timer. Push delivery costs nothing while a channel is quiet; a Monitor lease that re-arms itself costs a full-context turn every 30 minutes whether or not anyone is there.
+- **Stay alive cheaply** — Be woken by a message, never by a timer. Push delivery causes no model turns while a channel is quiet; a Monitor lease that re-arms itself costs a full-context turn every 30 minutes whether or not anyone is there.
 
 ## Version History
 

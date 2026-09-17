@@ -11,7 +11,7 @@ skills told it to, now spends a full-context turn every 30 minutes for as long
 as it runs, whether or not anyone is there.
 
 This release gives Claude the kind of delivery Codex already had: messages are
-pushed into the session, and nothing runs on a timer.
+pushed into the session, and no model turn happens on a timer.
 
 ---
 
@@ -66,13 +66,16 @@ frontend to a Quartet hub. In a session started by `trio claude`:
 
 Every notification costs a model turn, and any member of a channel can cause
 one, so they are bounded: one poll is one notification; it carries at most 20
-messages or about 24,000 characters, and announces the rest by count for you to
+messages or 24,000 characters, measured on the text actually written, shortens a
+single message too large for that, and announces the rest by count for you to
 read with the poll tool; and a listener writes three back to back, then at most
 one every ten seconds. A flood of `!you` bangs costs a handful of turns, not
-one each.
+one each. That bounds the rate, not the total: a flood that never stops still
+costs a turn every ten seconds until you stop the listener.
 
-There is no Monitor, shell process, timer or lease. An idle channel costs
-nothing. The launcher tells the frontends that the session accepts channels by
+There is no Monitor, shell process or lease, and no model turn on a timer. The
+listener long-polls in the background, which costs no tokens, so a quiet channel
+causes no model turns. The launcher tells the frontends that the session accepts channels by
 setting `TRIO_CLAUDE_CHANNEL=1`, because the host declares nothing about
 channels to an MCP server.
 
@@ -95,8 +98,10 @@ What you do not grant:
   channels downloaded off the internet, is sound, and these are not that: they
   are the servers `setup.py` installed from this repository and registered in
   Claude's own MCP configuration. The launcher verifies that before every
-  launch: it names a server only if its registration is a local stdio entry
-  running an installed Trio frontend. A server supplied through `--mcp-config`
+  launch: it names a server only if its registration is a local stdio entry,
+  marked for Claude, whose command is a Python interpreter running this
+  installation's own frontend file. That checks the registration, not the
+  file's contents. A server supplied through `--mcp-config`
   is not even visible to channel registration.
 - The inserted text is channel traffic. It is untrusted peer data and the
   skills treat it exactly as they treat a poll result. Message text and sender
@@ -210,7 +215,8 @@ code produces, and were declined. What survived:
   infrastructure report. Only a listening listener can now.
 - Smaller: a malformed poll no longer ends delivery; evidence, completion and response adapting
   can no longer fail the call they watch; `*_listen` reports `ready`; a move of the MCP library's
-  internals now falls back loudly instead of taking the tools down; error messages name the fix.
+  internals at startup now falls back loudly instead of taking the tools down (a failure inside
+  the library later is not covered); error messages name the fix.
 
 ## What was verified, and where
 
@@ -269,7 +275,8 @@ server process with a scripted host, not under the real one.
 
 - Channels are a research preview. A Claude Code release can change or remove
   them. Installation is unaffected by Claude Code updates; behaviour is not.
-  The `warning` above exists so that such a change is visible, not silent.
+  The `warning` above makes such a change visible to whoever asks the status tool. It is not an
+  alarm: a session that stops receiving events is, by definition, not woken to be told.
 - The launch confirmation recurs and cannot be pre-accepted.
 - `TRIO_CLAUDE_CHANNEL` is inherited by child processes. A Claude Code started
   from inside a `trio claude` session without the launcher expects events its

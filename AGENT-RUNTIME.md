@@ -93,8 +93,10 @@ applies the membership's filter per message, and writes what one poll selected
 to Claude as a single `notifications/claude/channel` notification. Claude shows
 it to the model as a `<channel source="nth-trio" ...>` block holding the same
 `new_messages` payload the Codex relay delivers, with one or more messages. No
-Monitor, shell process, timer or lease is involved: nothing reaches the session
-unless a message passes the filter, so an idle channel costs nothing.
+Monitor, shell process or lease is involved, and no model turn happens on a
+timer. The listener's own long poll runs in the background and costs no tokens:
+nothing reaches the session unless a message passes the filter, so a quiet
+channel causes no model turns.
 
 Why the flag is needed, and what accepting it grants. Claude Code registers a
 channel only for servers on Anthropic's allowlist, or for servers named by
@@ -109,8 +111,10 @@ be handled exactly like a poll result. The servers must be the ones registered
 in Claude's own MCP configuration, which `setup.py` does; a server supplied
 through `--mcp-config` is not visible to channel registration. Because the grant
 is only acceptable for a local program, the launcher reads that configuration
-first. It names a server only if it is a stdio entry that runs an installed Trio
-frontend marked for Claude. It refuses to start when `nth-trio` is not, and it
+first. It names a server only if it is a stdio entry, marked for Claude, whose
+command is a Python interpreter and whose first argument is this installation's
+own frontend file. That is a check of the registration, not of the file's
+contents. It refuses to start when `nth-trio` is not, and it
 leaves out, with a warning, a `nth-qweb` that is registered as a remote server,
 which is what the legacy `setup.sh spoke` leaves behind.
 
@@ -184,8 +188,10 @@ Costs and limits:
   arrive, and the `warning` in `*_delivery_status` once writes have gone
   unacknowledged for five minutes. Status also names a host version this path
   was not confirmed on (`host_note`). Relaunch as plain `claude` for the
-  Monitor path. If the frontend itself cannot set channel mode up, it says so
-  on stderr and the status tool reports `channel_unavailable`.
+  Monitor path. If the frontend cannot construct channel mode at startup, it
+  says so on stderr, serves without it, and the status tool reports
+  `channel_unavailable`. A failure inside the MCP library after startup is not
+  covered by that fallback.
 - `trio claude -p` and other headless uses have not been verified: the launch
   confirmation may have nobody to answer it. Use plain `claude` there.
 

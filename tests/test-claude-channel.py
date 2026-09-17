@@ -239,6 +239,37 @@ class ChannelTests(unittest.TestCase):
         self.assertEqual(self.pushed_ids(), [1, 2])
         self.assertEqual(self.writer.sent[0].params['meta']['more_unread'], '3')
 
+    def test_the_size_cap_holds_for_the_text_actually_written_after_escaping(self):
+        # Escaping turns each '<' into six characters. Measured before embedding, five
+        # legal 4,000-character messages produced a 120,000-character notification.
+        hostile = [dict(mention(i), content='<' * 4000) for i in range(1, 6)]
+        hub = self.hub([{'event': 'new_messages', 'messages': hostile}])
+        hub.start('test', 'receiver', TOKEN, 'at')
+        self.assertTrue(wait_until(lambda: self.writer.sent))
+        time.sleep(.2)
+        self.assertEqual(len(self.writer.sent), 1)
+        note = self.writer.sent[0].params
+        self.assertLessEqual(len(note['content']), channel_module.MAX_BATCH_CHARS)
+        # One message is too large on its own: it is shortened and flagged, the rest
+        # are announced by count, and the agent is told to read before it acknowledges.
+        self.assertEqual((note['meta']['count'], note['meta']['more_unread'], note['meta']['truncated']),
+                         ('1', '4', 'true'))
+        lead, body = note['content'].split('\n', 1)
+        self.assertIn('Message 1 was too long and is shortened here: read it in full with quartet_poll '
+                      'before you acknowledge it', lead)
+        shortened = json.loads(body)['messages'][0]
+        self.assertTrue(shortened['truncated'])
+        self.assertLess(len(shortened['content']), 4000)
+        # Ordinary text of the same length is not shortened, and several fit together.
+        self.writer.sent.clear()
+        plain = [dict(mention(i), content='x' * 4000) for i in range(11, 16)]
+        other = self.hub([{'event': 'new_messages', 'messages': plain}])
+        other.start('test', 'receiver', TOKEN, 'at')
+        self.assertTrue(wait_until(lambda: self.writer.sent))
+        note = self.writer.sent[0].params
+        self.assertLessEqual(len(note['content']), channel_module.MAX_BATCH_CHARS)
+        self.assertEqual((note['meta']['count'], note['meta']['truncated']), ('5', 'false'))
+
     def test_notifications_are_rate_limited_and_the_held_ones_arrive_together(self):
         hub = self.hub([{'event': 'new_messages', 'messages': [mention(2)]}])
         self.source.idle = {'event': 'new_messages', 'messages': [mention(i) for i in (2, 4, 5, 6)]}

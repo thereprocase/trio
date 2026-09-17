@@ -7,7 +7,7 @@
   frontend then runs one listener per membership and writes messages that pass
   the filter into the open session as `notifications/claude/channel` events.
   An event wakes an idle session and, during a turn, arrives at the next
-  model-step boundary. No Monitor, timer or polling loop is involved. Launched
+  model-step boundary. No Monitor is involved and no model turn happens on a timer; the frontend long-polls in the background. Launched
   as plain `claude`, delivery falls back to the Monitor.
 - Document the Monitor as a lease. From Claude Code 2.1.274 a `persistent`
   Monitor expires after 30 minutes, `timeout_ms` above 3600000 is rejected, and

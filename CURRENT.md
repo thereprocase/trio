@@ -14,7 +14,7 @@
 
 `trio claude` gives Claude Code push delivery through Claude Code channels, a
 research preview: a listener inside each stdio frontend writes filtered messages
-into the open session, with no Monitor, timer or lease. Verified on Claude Code
+into the open session, with no Monitor or lease and no model turn on a timer. Verified on Claude Code
 2.1.274 under a real host on Windows, local and Quartet: idle wake with reply and
 ack in about five seconds, mid-turn arrival between two tool calls, restart then
 listen from saved credentials with nothing replayed. On Linux only the host

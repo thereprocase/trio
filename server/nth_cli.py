@@ -84,6 +84,11 @@ def claude_config_path():
     return next((path for path in candidates if path.exists()), candidates[-1])
 
 
+def frontend_root():
+    """The directory this launcher's own frontends live in: the installed server directory."""
+    return Path(__file__).resolve().parent
+
+
 def registration_problem(name, script, registered):
     """Why this registered MCP server must not be named as a channel, or ''.
 
@@ -97,9 +102,20 @@ def registration_problem(name, script, registered):
         return 'is not registered for Claude'
     if registered.get('type', 'stdio') != 'stdio' or 'command' not in registered:
         return 'is registered as a remote (' + str(registered.get('type')) + ') server, not a local stdio one'
+    # What is checked is what the registration executes: a Python interpreter whose
+    # first argument is THIS installation's frontend. A file that merely shares the
+    # script's name, anywhere else on disk, is not Trio.
+    expected = frontend_root() / script
     arguments = [str(argument) for argument in (registered.get('args') or [])]
-    if not any(Path(argument).name == script and Path(argument).exists() for argument in arguments):
-        return 'does not run an installed ' + script
+    try:
+        runs_ours = (bool(arguments) and expected.exists() and
+                     os.path.normcase(str(Path(arguments[0]).resolve())) == os.path.normcase(str(expected.resolve())))
+    except OSError:
+        runs_ours = False
+    if not runs_ours:
+        return 'does not run this installation\'s ' + script + ' (' + str(expected) + ')'
+    if not Path(str(registered.get('command') or '')).stem.lower().startswith('python'):
+        return 'is not started by a Python interpreter'
     if (registered.get('env') or {}).get('TRIO_NATIVE_CLIENT') != 'claude':
         return 'lacks TRIO_NATIVE_CLIENT=claude, so it would never push'
     return ''

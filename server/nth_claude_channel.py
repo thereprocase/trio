@@ -11,8 +11,9 @@ session, and during a turn it lands at the next model-step boundary.
 A channel notification has no receipt. Status therefore says written, never
 accepted; the agent's own ack is the only confirmation that it was read.
 
-There is no timer in this path. Nothing reaches the session unless a message
-passes the membership's filter, so there is no idle wake-up to lease or re-arm.
+No model turn happens on a timer. The listener long-polls in the background,
+which costs no tokens, and nothing reaches the session unless a message passes
+the membership's filter: there is no idle wake-up to lease or re-arm.
 
 Every notification makes the host run a model turn over the session's whole
 context, and any channel peer can cause one. The listener therefore writes at
@@ -113,6 +114,10 @@ def format_event(prefix, channel, member_id, messages, more_unread=0):
     else:
         lead += (f'Then call {prefix}_ack with member_id "{_attribute(member_id)}" and '
                  f'through_id {last}. ')
+    shortened = [str(message['id']) for message in messages if message.get('truncated')]
+    if shortened:
+        lead += (f'Message {", ".join(shortened)} was too long and is shortened here: read it in full '
+                 f'with {prefix}_poll before you acknowledge it. ')
     lead += ('Include your session_token if you have it; this frontend supplies it for the ack '
              'when you leave it out.')
     senders = []
@@ -124,7 +129,7 @@ def format_event(prefix, channel, member_id, messages, more_unread=0):
     meta = {'channel': _attribute(channel), 'member_id': _attribute(member_id),
             'message_id': str(last), 'first_message_id': str(first), 'count': str(count),
             'more_unread': str(more_unread), 'event_id': _attribute(event_id),
-            'sender': ','.join(senders)[:200]}
+            'sender': ','.join(senders)[:200], 'truncated': str(bool(shortened)).lower()}
     for flag in ('mentioned', 'banged', 'referenced'):
         meta[flag] = str(any(bool(message.get(flag)) for message in messages)).lower()
     return lead + '\n' + _embed(payload), meta
@@ -266,15 +271,27 @@ class Listener:
     def _deliver(self, fresh, selected):
         """Write one notification for this poll. False when delivery is over."""
         b = self.binding
-        batch, size = [], 0
-        for message in selected:
-            length = len(json.dumps(message))
-            if batch and (len(batch) >= MAX_BATCH_MESSAGES or size + length > MAX_BATCH_CHARS):
+
+        def render(messages):
+            return format_event(self.hub.prefix, b['channel'], b['member_id'],
+                                messages, len(selected) - len(messages))
+
+        # The cap is on what is actually written. Escaping can multiply peer text
+        # sixfold, so every candidate is measured as the final content, lead
+        # included, and never from the message's size before it is embedded.
+        batch = [selected[0]]
+        for message in selected[1:MAX_BATCH_MESSAGES]:
+            if len(render(batch + [message])[0]) > MAX_BATCH_CHARS:
                 break
             batch.append(message)
-            size += length
-        content, meta = format_event(self.hub.prefix, b['channel'], b['member_id'],
-                                     batch, len(selected) - len(batch))
+        content, meta = render(batch)
+        text = batch[0].get('content')
+        while len(content) > MAX_BATCH_CHARS and isinstance(text, str) and text:
+            # One message too large on its own. It is shortened and flagged, and the
+            # lead tells the agent to read it in full before acknowledging it.
+            text = text[:len(text) * 3 // 4]
+            batch = [dict(batch[0], content=text, truncated=True)]
+            content, meta = render(batch)
         if not self.hub.push(content, meta, cancelled=self._stop.is_set):
             if not self._stop.is_set():
                 self.status, self.error = 'ended', 'transport closed'
