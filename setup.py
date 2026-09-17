@@ -138,6 +138,33 @@ def install(target_home, *, quartet_url='', clients=('claude', 'codex'),
             'runtime': str(runtime), 'clients': list(clients)}
 
 
+def next_steps(result, platform=None):
+    """What the user still has to do by hand. The installer never edits a shell profile."""
+    launcher = result['launcher']
+    if (platform or os.name) == 'nt':
+        # Add-Content keeps an existing profile's encoding; `>>` in Windows
+        # PowerShell 5.1 would append UTF-16 to a UTF-8 file.
+        profile = ['     New-Item -ItemType Directory -Force (Split-Path $PROFILE) | Out-Null',
+                   f'     & "{launcher}" shell-init powershell | Add-Content -Path $PROFILE']
+    else:
+        profile = [f'     {shlex.quote(launcher)} shell-init bash >> ~/.bashrc     (zsh: shell-init zsh >> ~/.zshrc)']
+    return '\n'.join([
+        '',
+        'Next steps',
+        '1. Restart Claude Code and Codex so that they load the installed servers.',
+        '2. A session can receive pushed messages only if it was started through Trio. To make',
+        '   plain `claude` and `codex` do that in every terminal, add two shell functions to your',
+        '   profile (run once; re-run after moving or reinstalling Trio):',
+        *profile,
+        '   Then open a new terminal. Commands that open no session (claude mcp, claude -p,',
+        '   codex exec, ...) behave exactly as before. Claude Code asks you to confirm a',
+        '   development-channels flag at each launch: accept it. AGENT-RUNTIME.md explains what',
+        '   that grants. To undo, delete the two functions from the profile.',
+        '   Without this step, start sessions with `trio claude` and `trio codex`; a plainly',
+        '   started Claude falls back to a Monitor that expires every 30 minutes.',
+    ])
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('command', choices=['install'])
@@ -154,10 +181,13 @@ def main():
     if not clients or any(c not in ('claude', 'codex') for c in clients):
         parser.error('--clients must contain claude and/or codex')
     os.umask(0o077)
-    print(json.dumps(install(args.home, quartet_url=args.quartet_url, clients=clients,
+    result = install(args.home, quartet_url=args.quartet_url, clients=clients,
         skip_dependencies=args.skip_dependencies, register_codex=not args.no_register_codex,
         codex_binary=args.codex_binary, codex_app=args.codex_app,
-        claude_binary=args.claude_binary), indent=2))
+        claude_binary=args.claude_binary)
+    print(json.dumps(result, indent=2))
+    # On stderr: stdout stays the machine-readable result.
+    print(next_steps(result), file=sys.stderr)
 
 
 if __name__ == '__main__':

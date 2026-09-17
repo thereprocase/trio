@@ -290,6 +290,15 @@ class NativeTests(unittest.TestCase):
                                      (ROOT / source_name).read_bytes())
         self.assertTrue(Path(result['server'], 'nth_event_service.py').exists())
         self.assertTrue(list(profile.glob('.claude.json.bak-*')))
+        # The installer tells the user how to make plain launches go through Trio,
+        # and leaves the profile to them.
+        windows, posix = setup.next_steps(result, platform='nt'), setup.next_steps(result, platform='posix')
+        self.assertIn(f'& "{result["launcher"]}" shell-init powershell | Add-Content -Path $PROFILE', windows)
+        self.assertIn('shell-init bash >> ~/.bashrc', posix)
+        for text in (windows, posix):
+            self.assertIn('Restart Claude Code and Codex', text)
+            self.assertIn('To undo, delete the two functions', text)
+        self.assertFalse(list(profile.glob('**/*profile*.ps1')) + list(profile.glob('.bashrc')))
     def test_managed_event_steers_active_turn_and_preserves_private_routing(self):
         db_path = self.root / 'managed.sqlite'
         with contextlib.closing(sqlite3.connect(db_path)) as db:

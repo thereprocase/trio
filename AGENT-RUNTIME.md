@@ -218,9 +218,15 @@ path. Add the output to your shell profile yourself: Trio never edits a
 profile. For example:
 
 ```
-trio shell-init powershell >> $PROFILE          # PowerShell
-trio shell-init bash >> ~/.bashrc               # bash
+trio shell-init powershell | Add-Content -Path $PROFILE     # PowerShell
+trio shell-init bash >> ~/.bashrc                           # bash (zsh: ~/.zshrc)
 ```
+
+In PowerShell use `Add-Content`, which keeps the profile's encoding; `>>` in
+Windows PowerShell 5.1 appends UTF-16 to a UTF-8 file. If the profile's folder
+does not exist yet, create it first:
+`New-Item -ItemType Directory -Force (Split-Path $PROFILE)`. The installer
+prints these lines with the launcher's full path when it finishes.
 
 After that `claude` anywhere is `trio claude`, including its arguments and
 piped input, and the non-session uses above behave as they always did.
