@@ -98,7 +98,8 @@ class ChannelTests(unittest.TestCase):
         self.hubs = []
         # Production waits are seconds long. The loop reads them at run time.
         self.timing = patch.multiple(channel_module, MIN_POLL_GAP_SECONDS=.02, STUCK_BACKLOG_WAITS=(.05,),
-                                     STUCK_BACKLOG_DUTY=0, REPLACE_JOIN_SECONDS=.5)
+                                     STUCK_BACKLOG_DUTY=0, REPLACE_JOIN_SECONDS=.5,
+                                     REFUSAL_GRACE_SECONDS=.05)
         self.timing.start()
 
     def tearDown(self):
@@ -394,10 +395,41 @@ class ChannelTests(unittest.TestCase):
         self.assertIn('Never reconnect or reclaim it on your own', notice['content'])
         self.assertTrue(wait_until(lambda: self.source.closed))
 
+    def test_a_reclaim_by_this_session_is_not_reported_as_a_refusal(self):
+        from nth_event_access import delivery_status
+        # The hub revokes the old token before its connect response reaches this
+        # frontend, so the old listener can be refused a moment before it is replaced.
+        hub = self.hub([{'error': 'Invalid or revoked session_token.'}])
+        with patch.object(channel_module, 'REFUSAL_GRACE_SECONDS', .6):
+            hub.start('test', 'receiver', TOKEN)
+            self.assertTrue(wait_until(lambda: self.state(hub)['error'] == 'membership refused'))
+            # Refused and waiting to be replaced: not ready, and nothing said yet.
+            status = delivery_status('test', 'receiver', TOKEN, hub=hub)
+            self.assertEqual((status['state'], status['ready']), ('reconnecting', False))
+            self.assertEqual(self.writer.sent, [])
+            hub.start('test', 'receiver', 'rotated-capability')     # the connect response arrives
+            self.assertTrue(wait_until(
+                lambda: hub.status('test', 'receiver', 'rotated-capability')[0]['status'] == 'listening'))
+            time.sleep(.8)
+        # "No further events will arrive" would have been false: the session is listening.
+        self.assertEqual(self.writer.sent, [])
+        self.assertEqual(hub.status('test', 'receiver', 'rotated-capability')[0]['status'], 'listening')
+
     def test_channel_end_stops_the_listener(self):
         hub = self.hub([{'event': 'ended', 'ended_by': 'peer'}])
         hub.start('test', 'receiver', TOKEN)
         self.assertTrue(wait_until(lambda: self.state(hub)['error'] == 'channel ended'))
+
+    def test_an_older_hub_that_reports_ended_without_an_event_still_ends(self):
+        # Before the hub named its events, an ended channel was {'ended': true}. The
+        # guard against a reply that is no poll result must not take it for one.
+        hub = self.hub([{'ended': True}])
+        hub.start('test', 'receiver', TOKEN)
+        self.assertTrue(wait_until(lambda: self.state(hub)['status'] == 'ended'))
+        self.assertEqual(self.state(hub)['error'], 'channel ended')
+        self.assertTrue(wait_until(lambda: self.writer.sent))
+        self.assertEqual(self.writer.sent[0].params['meta']['reason'], 'channel ended')
+        self.assertEqual(len(self.source.calls), 1)
 
     def test_transport_errors_reconnect_without_leaking_details(self):
         hub = self.hub([RuntimeError('token=' + TOKEN), {'event': 'new_messages', 'messages': [MESSAGES[1]]}])

@@ -92,9 +92,7 @@ def channel_hub(url):
         return None
     try:
         import nth_claude_channel as channel
-        hub = channel.ChannelHub('quartet', 'quartet', url, channel.quartet_poll_factory)
-        hub.call_succeeded, hub.run_stdio = channel.call_succeeded, channel.run_stdio
-        return hub
+        return channel.ChannelHub('quartet', 'quartet', url, channel.quartet_poll_factory)
     except Exception as exc:  # noqa: BLE001
         print(f'[nth] channel delivery is unavailable ({type(exc).__name__}: {exc}); '
               'serving without it', file=sys.stderr)
@@ -198,7 +196,7 @@ async def main():
     server, client, hub = create_server(args.url)
     try:
         if hub is not None:
-            await hub.run_stdio(server, hub)
+            await hub.run_stdio(server)
         else:
             # Codex and a plainly launched Claude need nothing from the channel module.
             async with stdio_server() as (reader, writer):

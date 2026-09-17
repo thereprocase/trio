@@ -8,12 +8,16 @@ channel peer can cause them.
 - A hub that failed every poll with an error text was reported as `listening` and ready: the SSE
   client hands such a reply over as `{'_raw': ...}`, and the listener read it as an empty poll.
   A reply with no `event` and no `error` is now a failed poll: `reconnecting`, with backoff.
+  The `{'ended': true}` of a hub older than the `event` field is still an ending.
 - The notification size cap shrank only a message's text. A message whose bulk sat in another
   field was written oversize. It is now replaced by a stub carrying its id and flags.
 - A listener that ended said nothing. An idle agent on push delivery was never told its channel
   had ended or its membership was refused, which the Monitor path did report. A listener now
   writes one `delivery_ended` event when it ends, with the reason and what to do. A stop the
-  user asked for is not an ending and writes nothing.
+  user asked for is not an ending and writes nothing. A refusal is reported after a three-second
+  wait, and not at all if the listener is replaced meanwhile: when a session reclaims its own
+  membership the hub revokes the old token before the new listener exists, and that moment must
+  not be announced as the end of delivery.
 - The Quartet frontend imported the channel module at import time. If a release of the mcp
   library moved what that module needs, the frontend would have stopped starting for every
   client, including Codex and a Claude that keeps its Monitor. It is now loaded only for a

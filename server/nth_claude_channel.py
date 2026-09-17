@@ -64,6 +64,8 @@ PUSH_BURST = 3
 PUSH_REFILL_SECONDS = 10.0
 PUSH_WAIT_SLICE_SECONDS = .2
 REPLACE_JOIN_SECONDS = 1.0
+# How long a refused listener waits to be replaced before it reports the refusal.
+REFUSAL_GRACE_SECONDS = 3.0
 
 
 def channel_mode():
@@ -366,11 +368,13 @@ class Listener:
             elapsed = time.monotonic() - started
             if self._stop.is_set():
                 return
-            if isinstance(poll, dict) and not poll.get('error') and 'event' not in poll:
+            if (isinstance(poll, dict) and not poll.get('error') and not poll.get('ended')
+                    and 'event' not in poll):
                 # Not a poll result. A hub that fails the call hands back an error
                 # text, which the SSE client passes on as {'_raw': ...}. Reading that
                 # as an empty poll reported `listening` and ready while every poll
-                # failed: deaf, and saying otherwise. Every real result names its event.
+                # failed: deaf, and saying otherwise. Every real result names its
+                # event, except the {'ended': true} of a hub older than that field.
                 failures += 1
                 self.status, self.error = 'reconnecting', 'no poll result'
                 self._stop.wait(min(RETRY_STEP_SECONDS * failures, RETRY_MAX_SECONDS))
@@ -379,6 +383,14 @@ class Listener:
             first = False
             if not isinstance(poll, dict) or poll.get('error'):
                 # Refused: revoked or displaced membership. Never auto-reclaim.
+                # A reclaim by this same session looks identical for a moment: the hub
+                # revokes the old token before its connect response gets here, and only
+                # that response replaces this listener. Replacing stops it, so wait
+                # that moment out rather than tell a session that is about to be
+                # listening again that nothing will reach it. Not ready meanwhile.
+                self.status, self.error = 'reconnecting', 'membership refused'
+                if self._stop.wait(REFUSAL_GRACE_SECONDS):
+                    return
                 self._end('membership refused',
                           'The hub refused this membership: it was revoked or displaced. Tell the user. '
                           'Never reconnect or reclaim it on your own.')
@@ -610,6 +622,14 @@ class ChannelHub:
         for listener in listeners:
             if listener.thread.is_alive():
                 listener.thread.join(REPLACE_JOIN_SECONDS)
+
+    # The Quartet frontend loads this module only when a channel was asked for, and
+    # then holds nothing of it but this hub: what it needs is reachable from here.
+    def call_succeeded(self, result):
+        return call_succeeded(result)
+
+    async def run_stdio(self, server):
+        await run_stdio(server, self)
 
 
 def call_succeeded(result):
