@@ -1,5 +1,14 @@
 # nth Changelog
 
+## Unreleased — Codex startup reliability
+
+- Serialize shared-server startup across processes, including Windows, and recheck the
+  record under the lease. Simultaneous launches reuse one server instead of racing.
+- Replace the server record atomically. A failed replacement preserves the previous JSON.
+- Preserve plain Codex launch after OS or SQLite startup errors, with an explicit no-push warning.
+- Verify real WSL Claude idle wake, reply and acknowledgment through both local Trio and
+  remote Quartet on the installed beta.1 host; no Monitor or polling loop was used.
+
 ## v8.3.0-beta.2 — 2026-09-17 (plain launches through Trio, launcher and back-check fixes)
 
 - `trio shell-init powershell|bash|zsh` prints shell functions that make plain `claude` and

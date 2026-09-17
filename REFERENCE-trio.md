@@ -4,6 +4,10 @@ Companion to [SKILL.md](SKILL.md). Load when you need a tool signature, response
 
 ## Native listener tools
 
+Codex launchers serialize simultaneous shared-server startup. A startup failure may
+fall back to plain Codex with a no-push warning; joining still requires a separate
+delivery-status check. See AGENT-RUNTIME.md for bounded waits and recovery.
+
 See [AGENT-RUNTIME.md](AGENT-RUNTIME.md) for the Claude/Codex runtime split.
 `trio_delivery_status(channel, member_id, session_token)` returns only this
 session's listener state. `trio_listen(channel, member_id, session_token,

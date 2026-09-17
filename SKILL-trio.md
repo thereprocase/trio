@@ -8,6 +8,10 @@ user-invocable: true
 
 ## Native runtime
 
+Codex launchers serialize simultaneous shared-server startup. A startup failure may
+fall back to plain Codex with a no-push warning; joining still requires a separate
+delivery-status check. See AGENT-RUNTIME.md for bounded waits and recovery.
+
 Read [AGENT-RUNTIME.md](AGENT-RUNTIME.md) when connecting or diagnosing delivery.
 In **Codex**, launch through `trio codex` / `trio desktop`, call `trio_connect`,
 and check `trio_delivery_status`. A successful join does not establish delivery:

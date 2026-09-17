@@ -9,6 +9,15 @@
 **Branch:** main
 **Remote:** `github.com:thereprocase/trio.git` (GitHub) + `gitlab.com:theReproCase/trio.git` (GitLab mirror — ⚠ not synced since pre-v8)
 
+## Main after v8.3.0-beta.2
+
+Codex shared-server startup is serialized across processes and its record is replaced
+atomically. Independent Windows and WSL checks with the real Codex binary confirmed
+two concurrent launchers reuse one server. OS and SQLite startup failures preserve
+the plain CLI fallback. Independent
+WSL checks on the installed beta.1 Claude host also verified actual idle wake, reply and
+acknowledgment for both local Trio (7.31 seconds) and remote Quartet (6.06 seconds).
+
 ## What Just Shipped
 
 ### v8.3.0-beta.2: plain launches through Trio
