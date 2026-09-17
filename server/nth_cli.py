@@ -17,12 +17,50 @@ from nth_event_service import (home, state_dir, ensure_service, add_endpoint,
 
 def settings():
     path = home() / 'native.json'
-    return json.loads(path.read_text(encoding='utf-8')) if path.exists() else {}
+    # utf-8-sig, as setup.py reads it: a hand edit on Windows can add a byte-order mark.
+    return json.loads(path.read_text(encoding='utf-8-sig')) if path.exists() else {}
 
 
 def background_options():
     return ({'creationflags': subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP}
             if os.name == 'nt' else {'start_new_session': True})
+
+
+# Characters cmd.exe interprets even inside an argument list.
+CMD_METACHARACTERS = '&|<>^%!"\r\n'
+
+
+def guard_command_shim(executable, arguments, platform=None):
+    """Refuse arguments that a Windows .cmd/.bat launcher would reinterpret.
+
+    An npm-installed CLI resolves to a .cmd shim. Windows runs it through cmd.exe,
+    which parses the command line again: an argument `a&b` runs `a` and then
+    executes `b`. A list passed to subprocess does not protect against that.
+    """
+    if (platform or os.name) != 'nt' or not str(executable).lower().endswith(('.cmd', '.bat')):
+        return
+    for argument in arguments:
+        if any(character in argument for character in CMD_METACHARACTERS):
+            raise ValueError(
+                str(executable) + ' is a .cmd launcher, and cmd.exe would reinterpret characters such as '
+                '& | < > ^ % ! " in the argument ' + repr(argument[:60]) + '. Start without that argument '
+                'and type it inside the session, or point Trio at a native executable '
+                '(python setup.py install --claude-binary PATH / --codex-binary PATH).')
+
+
+def resolve_binary(name, saved_key, label, install_flag, override=None):
+    saved = override or settings().get(saved_key)
+    if saved:
+        if not (shutil.which(str(saved)) or Path(str(saved)).exists()):
+            raise RuntimeError(f'The saved {saved_key} {saved!r} does not exist. Re-run: '
+                               f'python setup.py install {install_flag} /full/path/to/{name}')
+        return str(saved)
+    found = shutil.which(name)
+    if not found:
+        raise RuntimeError(f'{label} was not found on PATH and no {saved_key} is saved. Install it, or '
+                           f'point Trio at an existing one: python setup.py install {install_flag} '
+                           f'/full/path/to/{name}')
+    return found
 
 
 def codex_binary(override=None):
@@ -33,13 +71,62 @@ def codex_binary(override=None):
 
 
 CHANNEL_FLAG = '--dangerously-load-development-channels'
+CHANNEL_SERVERS = (('nth-trio', 'nth_server.py'), ('nth-qweb', 'nth_quartet_proxy.py'))
 
 
 def claude_binary(override=None):
-    executable = override or settings().get('claude_binary') or shutil.which('claude')
-    if not executable:
-        raise RuntimeError('Claude Code is not installed; install the Claude Code CLI first')
-    return executable
+    return resolve_binary('claude', 'claude_binary', 'Claude Code', '--claude-binary', override)
+
+
+def claude_config_path():
+    directory = os.environ.get('CLAUDE_CONFIG_DIR')
+    candidates = ([Path(directory) / '.claude.json'] if directory else []) + [Path.home() / '.claude.json']
+    return next((path for path in candidates if path.exists()), candidates[-1])
+
+
+def registration_problem(name, script, registered):
+    """Why this registered MCP server must not be named as a channel, or ''.
+
+    The development-channels flag lets the named server insert text into the
+    session unasked. That grant is only acceptable for Trio's own local stdio
+    frontends. `setup.sh` registers nth-qweb as a remote SSE server and nth-trio
+    without the client marker: naming those would hand the grant to a network
+    server, or to a frontend that never pushes.
+    """
+    if not isinstance(registered, dict):
+        return 'is not registered for Claude'
+    if registered.get('type', 'stdio') != 'stdio' or 'command' not in registered:
+        return 'is registered as a remote (' + str(registered.get('type')) + ') server, not a local stdio one'
+    arguments = [str(argument) for argument in (registered.get('args') or [])]
+    if not any(Path(argument).name == script and Path(argument).exists() for argument in arguments):
+        return 'does not run an installed ' + script
+    if (registered.get('env') or {}).get('TRIO_NATIVE_CLIENT') != 'claude':
+        return 'lacks TRIO_NATIVE_CLIENT=claude, so it would never push'
+    return ''
+
+
+def channel_servers():
+    """The `server:NAME` entries that may be named, after checking each registration."""
+    path = claude_config_path()
+    try:
+        registered = json.loads(path.read_text(encoding='utf-8-sig')).get('mcpServers') or {}
+    except (OSError, ValueError, AttributeError):
+        raise RuntimeError(f'Could not read Claude\'s MCP configuration at {path}. '
+                           'Run: python setup.py install') from None
+    wanted = [entry for entry in CHANNEL_SERVERS if entry[0] == 'nth-trio' or settings().get('quartet_url')]
+    named = []
+    for name, script in wanted:
+        problem = registration_problem(name, script, registered.get(name))
+        if not problem:
+            named.append('server:' + name)
+        elif name == 'nth-trio':
+            raise RuntimeError(f'{name} {problem}. `trio claude` will not name it as a channel. '
+                               'Re-run: python setup.py install   (setup.sh does not register it for '
+                               'channel delivery). Plain `claude` still works, through the Monitor.')
+        else:
+            print(f'[trio] {name} {problem}: Quartet messages will NOT be pushed into this session. '
+                  'Re-run: python setup.py install --quartet-url URL', file=sys.stderr)
+    return named
 
 
 def claude_command(arguments, binary=None):
@@ -53,12 +140,16 @@ def claude_command(arguments, binary=None):
     arguments = list(arguments)
     if arguments[:1] == ['--']:
         arguments = arguments[1:]
-    servers = ['server:nth-trio']
-    if settings().get('quartet_url'):
-        servers.append('server:nth-qweb')
-    # The flag takes a list of servers. It goes last so that it cannot swallow
-    # the user's own positional prompt.
-    return [claude_binary(binary), *arguments, CHANNEL_FLAG, *servers]
+    servers = channel_servers()
+    executable = claude_binary(binary)
+    guard_command_shim(executable, arguments)
+    if CHANNEL_FLAG in arguments:
+        # The user named development channels of their own. The flag takes a list,
+        # so Trio's servers join that list rather than repeating the flag.
+        at = arguments.index(CHANNEL_FLAG) + 1
+        return [executable, *arguments[:at], *servers, *arguments[at:]]
+    # The flag goes last so that its list cannot swallow the user's own prompt.
+    return [executable, *arguments, CHANNEL_FLAG, *servers]
 
 
 def claude_environment():
@@ -147,6 +238,7 @@ def main(argv=None):
         arguments = argv[1:]
         if arguments[:1] == ['--']:
             arguments = arguments[1:]
+        guard_command_shim(binary, arguments)
         return subprocess.call([binary, '--remote', endpoint, *arguments])
     # Likewise for Claude Code. Channel delivery runs inside Claude's own MCP
     # frontends, so no Codex server or event service is started here.
@@ -156,7 +248,9 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest='command', required=True)
     sub.add_parser('start', help='Start the local event service')
-    sub.add_parser('status', help='Show delivery health without credentials')
+    sub.add_parser('status', help='Show Codex delivery health without credentials (Claude channel '
+                                  'listeners live inside the Claude session: ask the agent to call '
+                                  '*_delivery_status)')
     attach = sub.add_parser('attach', help='Observe an existing owning Codex endpoint')
     attach.add_argument('--endpoint', required=True)
     attach.add_argument('--quartet-url', default='')
@@ -168,7 +262,9 @@ def main(argv=None):
     launch = sub.add_parser('codex', help='Launch stock Codex with native Trio/Quartet events')
     launch.add_argument('arguments', nargs=argparse.REMAINDER)
     # Listed for --help only: the argv check above handles every `trio claude`.
-    sub.add_parser('claude', help='Launch Claude Code with Trio/Quartet events pushed into the session')
+    sub.add_parser('claude', help='Launch Claude Code with Trio/Quartet events pushed into the session. '
+                                  'Claude Code asks you to confirm a development-channels flag at every '
+                                  'launch: see AGENT-RUNTIME.md')
     desktop = sub.add_parser('desktop', help='Launch the Codex app against Trio\'s shared server')
     desktop.add_argument('--app', help='Installed app executable (or saved codex_app in native.json)')
     desktop.add_argument('--isolated', action='store_true', help='Use a separate app UI profile')
@@ -177,7 +273,9 @@ def main(argv=None):
         parser.error('unrecognized arguments: ' + ' '.join(extra))
     os.umask(0o077)
     if args.command == 'status':
-        print(json.dumps({'listeners': public_status()}, indent=2))
+        print(json.dumps({'listeners': public_status(),
+                          'claude_channels': 'not shown here: a channel listener lives inside the Claude '
+                                             'session, so ask the agent to call *_delivery_status'}, indent=2))
     elif args.command == 'start':
         print(json.dumps(ensure_service()))
     elif args.command == 'attach':
@@ -199,6 +297,7 @@ def main(argv=None):
         arguments = extra + args.arguments
         if arguments[:1] == ['--']:
             arguments = arguments[1:]
+        guard_command_shim(binary, arguments)
         return subprocess.call([binary, '--remote', endpoint, *arguments])
     elif args.command == 'desktop':
         app = args.app or settings().get('codex_app')
@@ -220,6 +319,6 @@ def main(argv=None):
 if __name__ == '__main__':
     try:
         raise SystemExit(main())
-    except (RuntimeError, ValueError) as exc:
+    except (RuntimeError, ValueError, OSError) as exc:
         print(str(exc), file=sys.stderr)
         raise SystemExit(1)
