@@ -281,6 +281,14 @@ class ChannelTests(unittest.TestCase):
         self.assertEqual(self.writer.sent, [])             # nothing escaped after the stop
         self.assertFalse(hub.push('after stop', {'message_id': '10'}, cancelled=stopped.is_set))
 
+    def test_first_poll_is_immediate_so_status_leaves_starting_quickly(self):
+        hub = self.hub([])
+        hub.start('test', 'receiver', TOKEN)
+        self.assertTrue(wait_until(lambda: hub.status('test', 'receiver', TOKEN)[0]['status'] == 'listening', 2))
+        self.assertTrue(wait_until(lambda: len(self.source.calls) >= 2))
+        self.assertEqual([call['wait_seconds'] for call in self.source.calls[:2]],
+                         [0, channel_module.POLL_WAIT_SECONDS])
+
     def test_recovery_hints_never_prescribe_a_generic_restart(self):
         from nth_event_access import _recovery_hint, delivery_status
         stopped = _recovery_hint('quartet', 'stopped')
