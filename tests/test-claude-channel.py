@@ -288,6 +288,8 @@ class ChannelTests(unittest.TestCase):
         self.assertIn('only when the user asks', stopped)
         attention = _recovery_hint('trio', 'attention', 'unconfirmed_delivery')
         self.assertIn('Reconcile first', attention)
+        self.assertIn('owning thread', attention)
+        self.assertIn('durable delivery ledger', attention)
         self.assertIn('unconfirmed_delivery', attention)
         self.assertNotIn('enabled=true', attention)
         ended = _recovery_hint('quartet', 'ended', 'membership refused')

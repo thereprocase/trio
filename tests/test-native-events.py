@@ -89,6 +89,29 @@ class NativeTests(unittest.TestCase):
         self.assertIn('stays stopped', late['hint'])
         self.assertNotIn('recovers on its own', late['hint'])
         self.assertFalse(delivery_status('room', 'member-1', 'wrong-token')['ready'])
+    def test_codex_stop_and_terminal_states_come_before_service_health(self):
+        key = service.register(self.binding)
+        (service.state_dir() / 'service.json').unlink(missing_ok=True)   # no live service at all
+        service.configure_listener('room', 'member-1', 'private-token', enabled=False)
+        stopped = delivery_status('room', 'member-1', 'private-token')
+        # A listener stopped on purpose is not a service fault to repair.
+        self.assertEqual((stopped['state'], stopped['ready']), ('stopped', False))
+        self.assertIn('stays stopped', stopped['hint'])
+        self.assertNotIn('service', stopped['hint'].lower())
+        service.configure_listener('room', 'member-1', 'private-token', enabled=True)
+        for state, error, phrases in (
+                ('attention', 'unconfirmed_delivery', ('owning thread', 'durable delivery ledger', 'does not settle it')),
+                ('ended', 'membership_ended', ('not revived automatically', 'Never reconnect or reclaim'))):
+            with self.subTest(state=state):
+                service.set_status(key, state, error)
+                result = delivery_status('room', 'member-1', 'private-token')
+                self.assertEqual((result['state'], result['ready']), (state, False))
+                self.assertIn(error, result['hint'])
+                for phrase in phrases:
+                    self.assertIn(phrase, result['hint'])
+                # Restarting the service or the listener resolves neither.
+                self.assertNotIn('trio start', result['hint'])
+                self.assertNotIn('enabled=true', result['hint'])
     def test_codex_saved_listening_state_is_not_ready_without_a_fresh_service(self):
         key = service.register(self.binding)
         service.set_status(key, 'listening')

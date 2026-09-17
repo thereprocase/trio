@@ -100,10 +100,12 @@ def _recovery_hint(prefix, state, error=''):
                 're-enable it on your own; call ' + prefix + '_listen with enabled=true only when '
                 'the user asks for delivery again.' + POLL_ONLY)
     if state == 'attention':
+        # Poll and ack alone would leave the ledger's `sending` row unresolved.
         return ('Delivery needs attention: an event could not be confirmed (' + (error or 'unknown') +
-                '), so the listener paused rather than replay it. Reconcile first: read the channel '
-                'with ' + prefix + '_poll, acknowledge what you have processed, and tell the user. '
-                'Do not re-enable it as a retry.' + POLL_ONLY)
+                '), so the listener paused rather than replay it. Reconcile first: inspect the exact '
+                'owning thread for that event and the durable delivery ledger, as AGENT-RUNTIME.md '
+                'describes, and tell the user what you find. Reading the channel with ' + prefix +
+                '_poll does not settle it. Do not re-enable the listener as a retry.' + POLL_ONLY)
     if state == 'ended':
         return ('Delivery has ended (' + (error or 'no reason recorded') + ') and is not revived '
                 'automatically. Probe with ' + prefix + '_poll: if the membership is refused or the '
@@ -142,17 +144,24 @@ def delivery_status(channel, member_id, session_token, hub=None):
         return _status([], 'not_attached', 'Setup is incomplete: no listener is attached to this session, '
                        'so nothing reaches it on its own. Launch Codex through trio codex/trio desktop, or '
                        'attach its owning local endpoint with trio attach.' + POLL_ONLY)
-    if not service_alive():
+    state = listeners[0]['status']
+    prefix = 'trio' if listeners[0]['source'] == 'local' else 'quartet'
+    # Order matters. What a person decided, and what only a person can resolve,
+    # comes before service health: a listener stopped on purpose is not a service
+    # fault to repair, and restarting the service revives no ended membership.
+    if state in ('ended', 'attention'):
+        return _status(listeners, state, _recovery_hint(prefix, state, listeners[0]['error']))
+    alive = service_alive()
+    if not listeners[0]['enabled']:
+        # A worker's late status write can land after the user's stop. The stop
+        # wins, and with no live service there is no worker left to finish stopping.
+        settled = state == 'stopped' or not alive
+        return _status(listeners, 'stopped' if settled else 'stopping', _recovery_hint(prefix, 'stopped'))
+    if not alive:
         # The row is saved state: it still says 'listening' after its service died.
         return _status(listeners, 'service_unavailable', 'Setup is incomplete: the local Trio event service '
                        'is not running, so the saved listener delivers nothing. Run trio start, or relaunch '
                        'through trio codex/trio desktop, then check again.' + POLL_ONLY)
-    state = listeners[0]['status']
-    prefix = 'trio' if listeners[0]['source'] == 'local' else 'quartet'
-    if not listeners[0]['enabled'] and state not in ('stopped', 'ended', 'attention'):
-        # A worker's late status write can land after the user's stop. The stop
-        # wins: report it as stopping and never advise turning it back on.
-        return _status(listeners, 'stopping', _recovery_hint(prefix, 'stopped'))
     return _status(listeners, state, _recovery_hint(prefix, state, listeners[0]['error']))
 
 
