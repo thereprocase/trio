@@ -251,6 +251,20 @@ class NativeTests(unittest.TestCase):
                          (['codex', '--remote', 'unix:///tmp/test.sock', 'archive', 'thread-id'], True))
         self.assertEqual(launched(['--', 'exec', 'a prompt']), (['codex', 'exec', 'a prompt'], False))
 
+    def test_a_stale_saved_codex_binary_falls_back_to_the_one_on_path(self):
+        import io
+        import nth_cli
+        (self.root / 'native.json').write_text(json.dumps({'codex_binary': str(self.root / 'removed-by-an-update' / 'codex')}))
+        with patch.object(nth_cli.shutil, 'which', side_effect=lambda name: '/usr/bin/codex' if name == 'codex' else None), \
+             patch('sys.stderr', new_callable=io.StringIO) as stderr:
+            self.assertEqual(nth_cli.codex_binary(), '/usr/bin/codex')
+        self.assertIn('no longer exists', stderr.getvalue())
+        self.assertIn('--codex-binary', stderr.getvalue())
+        kept = self.root / 'codex-kept'
+        kept.write_text('placeholder')
+        (self.root / 'native.json').write_text(json.dumps({'codex_binary': str(kept)}))
+        self.assertEqual(nth_cli.codex_binary(), str(kept))
+
     def test_native_connect_keeps_tokens_out_of_launch_command(self):
         identity = {'channel': 'room', 'member_id': 'member-1', 'session_token': 'private-token', 'reclaim_secret': 'private-reclaim'}
         with patch.dict(os.environ, {'TRIO_NATIVE_CLIENT': 'claude'}):

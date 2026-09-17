@@ -85,7 +85,16 @@ def resolve_binary(name, saved_key, label, install_flag, override=None):
 
 
 def codex_binary(override=None):
-    executable = override or settings().get('codex_binary') or shutil.which('codex')
+    saved = override or settings().get('codex_binary')
+    if saved and not (shutil.which(str(saved)) or Path(str(saved)).exists()):
+        # The Codex app keeps its CLI in a versioned directory that an update removes.
+        # With `codex` aliased to this launcher, a stale path must not end every launch.
+        found = shutil.which('codex')
+        if found:
+            print(f'[trio] the saved codex_binary {saved!r} no longer exists; using {found}. '
+                  'Save the new one: python setup.py install --codex-binary PATH', file=sys.stderr)
+        saved = found
+    executable = saved or shutil.which('codex')
     if not executable:
         raise RuntimeError('Codex is not installed; install the stock Codex CLI first')
     return executable

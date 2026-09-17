@@ -117,6 +117,9 @@ in that case, and report it.
   honestly reports the Monitor path. Raised in review of the fix above. With the shell functions the launcher runs in every
   directory, so this mattered more for this release than for the last. Servers from an
   enterprise `managed-mcp.json` are not examined.
+- **A stale saved Codex path no longer ends every launch.** The Codex app keeps its CLI in a
+  versioned directory that an update removes. `trio codex` now falls back to the `codex` on
+  PATH and says how to save the new path.
 - **The channel flag was placed after a `--` in the middle of the arguments**,
   where Claude Code reads everything as prompt text. It now goes before the
   separator.
