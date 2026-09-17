@@ -82,6 +82,11 @@ class Listener:
         self.error = ''
         self.written = 0
         self.last_written = 0
+        # The only end-to-end evidence a channel offers: an ack that passed through
+        # this frontend and covers something it wrote.
+        self.first_written = 0
+        self.confirmed_through = 0
+        self.unconfirmed_since = None
         self._stop = threading.Event()
         self.thread = threading.Thread(target=self._run, name='claude-channel-listener', daemon=True)
 
@@ -103,7 +108,17 @@ class Listener:
                 'channel': b['channel'], 'member_id': b['member_id'], 'filter': b['filter'],
                 'enabled': not self._stop.is_set(), 'status': self.status, 'error': self.error,
                 'written': self.written, 'last_written_message_id': self.last_written,
+                'confirmed_through': self.confirmed_through,
+                'unconfirmed_seconds': int(time.time() - since) if (since := self.unconfirmed_since) else 0,
                 'delivery': UNCONFIRMED}
+
+    def acknowledged(self, through_id):
+        """The agent acked through this frontend. Only an ack covering a written id is evidence."""
+        if not self.first_written or through_id < self.first_written:
+            return
+        self.confirmed_through = max(self.confirmed_through, through_id)
+        if through_id >= self.last_written:
+            self.unconfirmed_since = None
 
     def _run(self):
         try:
@@ -169,6 +184,9 @@ class Listener:
                         return
                     self.written += 1
                     self.last_written = message['id']
+                    self.first_written = self.first_written or message['id']
+                    if self.unconfirmed_since is None:
+                        self.unconfirmed_since = time.time()
                 self.high_water = message['id']
             # A non-acking poll returns the same backlog immediately. Same guard
             # as the spoke monitor: a fast, empty-handed poll waits before retrying.
@@ -255,9 +273,45 @@ class ChannelHub:
                 inherited = previous.high_water
             poll, close = self.poll_factory(binding)
             listener = Listener(self, binding, poll, close, high_water=inherited)
+            if previous:
+                # Same membership, same process: its delivery evidence carries over.
+                for field in ('written', 'last_written', 'first_written',
+                              'confirmed_through', 'unconfirmed_since'):
+                    setattr(listener, field, getattr(previous, field))
             self.listeners[listener.key] = listener
             listener.start()
         return listener.public()
+
+    def complete(self, name, arguments, accepts_token):
+        """Supply the session token this frontend already holds when a call omits it.
+
+        A model woken by an event reliably leaves the token out of its reply and
+        its ack. A tokenless ack moves only the legacy per-member watermark, never
+        the session's, so the acknowledged backlog was written again after every
+        restart. The only client on this pipe is the session that presented the
+        token, so filling it in grants nothing new, and it never reaches the model.
+        The two credential-presenting tools are excluded: there the token is the
+        capability being checked.
+        """
+        arguments = arguments or {}
+        if (not accepts_token or arguments.get('session_token')
+                or name.endswith(('_delivery_status', '_listen'))):
+            return arguments
+        with self.lock:
+            listener = self.listeners.get((arguments.get('channel'), arguments.get('member_id')))
+        if listener is None or listener.status == 'ended':
+            return arguments
+        return dict(arguments, session_token=listener.binding['session_token'])
+
+    def observe(self, name, arguments, succeeded):
+        """Record an ack that passed through this frontend as delivery evidence."""
+        if not succeeded or not name.endswith('_ack'):
+            return
+        with self.lock:
+            listener = self.listeners.get((arguments.get('channel'), arguments.get('member_id')))
+        through_id = arguments.get('through_id')
+        if listener is not None and isinstance(through_id, int):
+            listener.acknowledged(through_id)
 
     def _owned(self, channel, member_id, session_token):
         with self.lock:
@@ -306,6 +360,49 @@ class ChannelHub:
             listeners = list(self.listeners.values())
         for listener in listeners:
             listener.stop()
+
+
+def call_succeeded(result):
+    """True when a tool result's first JSON text block reports ok.
+
+    The local frontend yields content blocks (or a tuple led by them); the Quartet
+    frontend yields the remote response dict.
+    """
+    if isinstance(result, tuple):
+        result = result[0]
+    if isinstance(result, dict):
+        if result.get('isError'):
+            return False
+        result = result.get('content', [])
+    for block in result if isinstance(result, (list, tuple)) else [result]:
+        text = block.get('text') if isinstance(block, dict) else getattr(block, 'text', None)
+        if not text:
+            continue
+        try:
+            body = json.loads(text)
+            if isinstance(body, dict) and isinstance(body.get('result'), str):
+                body = json.loads(body['result'])
+        except ValueError:
+            return False
+        return isinstance(body, dict) and bool(body.get('ok'))
+    return False
+
+
+def complete_local_calls(mcp, hub):
+    """Route the local frontend's tool calls through the hub (see ChannelHub.complete)."""
+    schemas = {}
+
+    async def call_tool(name, arguments):
+        if not schemas:
+            schemas.update({tool.name: tool.inputSchema for tool in await mcp.list_tools()})
+        accepts = 'session_token' in (schemas.get(name) or {}).get('properties', {})
+        arguments = hub.complete(name, arguments, accepts)
+        result = await mcp.call_tool(name, arguments)
+        hub.observe(name, arguments, call_succeeded(result))
+        return result
+
+    # Replaces the handler FastMCP registered for itself; same options as FastMCP uses.
+    mcp._mcp_server.call_tool(validate_input=False)(call_tool)
 
 
 def quartet_poll_factory(binding):

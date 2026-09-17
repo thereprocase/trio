@@ -281,6 +281,64 @@ class ChannelTests(unittest.TestCase):
         self.assertEqual(self.writer.sent, [])             # nothing escaped after the stop
         self.assertFalse(hub.push('after stop', {'message_id': '10'}, cancelled=stopped.is_set))
 
+    def test_a_missing_token_is_supplied_only_for_a_membership_this_frontend_holds(self):
+        hub = self.hub([])
+        hub.start('test', 'receiver', TOKEN)
+        call = {'channel': 'test', 'member_id': 'receiver', 'through_id': 2}
+        self.assertEqual(hub.complete('quartet_ack', call, True)['session_token'], TOKEN)
+        self.assertNotIn('session_token', call)                           # the caller's dict is untouched
+        self.assertEqual(hub.complete('quartet_send', dict(call, session_token=''), True)['session_token'], TOKEN)
+        unchanged = (
+            ('quartet_ack', call, False),                                  # the tool takes no token
+            ('quartet_ack', dict(call, session_token='given'), True),      # never overrides a given one
+            ('quartet_ack', dict(call, member_id='someone-else'), True),   # not a membership held here
+            ('quartet_listen', call, True),                                # there the token is the capability
+            ('quartet_delivery_status', call, True))
+        for name, arguments, accepts in unchanged:
+            self.assertEqual(hub.complete(name, arguments, accepts), arguments, name)
+        self.assertEqual(hub.complete('quartet_ack', None, True), {})
+        ended = self.hub([{'error': 'session revoked'}])
+        ended.start('test', 'receiver', TOKEN)
+        self.assertTrue(wait_until(lambda: ended.status('test', 'receiver', TOKEN)[0]['status'] == 'ended'))
+        self.assertEqual(ended.complete('quartet_ack', call, True), call)  # a refused token is not reused
+
+    def test_an_ack_through_this_frontend_is_the_only_delivery_evidence(self):
+        from nth_event_access import delivery_status
+        hub = self.hub([{'event': 'new_messages', 'messages': [MESSAGES[1]]}])
+        hub.start('test', 'receiver', TOKEN, 'about')
+        self.assertTrue(wait_until(lambda: self.writer.sent))
+        state = lambda: hub.status('test', 'receiver', TOKEN)[0]
+        self.assertEqual((state()['written'], state()['confirmed_through']), (1, 0))
+        call = {'channel': 'test', 'member_id': 'receiver'}
+        hub.observe('quartet_ack', dict(call, through_id=1), True)         # covers nothing that was written
+        hub.observe('quartet_ack', dict(call, through_id=2), False)        # the ack itself failed
+        hub.observe('quartet_send', dict(call, through_id=2), True)        # not an ack
+        self.assertEqual(state()['confirmed_through'], 0)
+        hub.listeners[('test', 'receiver')].unconfirmed_since = time.time() - 400
+        stale = delivery_status('test', 'receiver', TOKEN, hub=hub)
+        self.assertTrue(stale['ready'])                                    # evidence, never a gate
+        self.assertIn('trio claude', stale['warning'])
+        self.assertIn('Claude Code update', stale['warning'])
+        hub.observe('quartet_ack', dict(call, through_id=2), True)
+        self.assertEqual((state()['confirmed_through'], state()['unconfirmed_seconds']), (2, 0))
+        self.assertNotIn('warning', delivery_status('test', 'receiver', TOKEN, hub=hub))
+        # The evidence survives a filter change, like the high-water mark.
+        hub.configure('test', 'receiver', TOKEN, filter_mode='all')
+        self.assertEqual((state()['written'], state()['confirmed_through']), (1, 2))
+
+    def test_call_results_are_read_in_both_frontends_shapes(self):
+        from types import SimpleNamespace
+        ok, failed = json.dumps({'ok': True, 'watermark': 3}), json.dumps({'error': 'Invalid session'})
+        block = lambda text: SimpleNamespace(text=text)
+        self.assertTrue(channel_module.call_succeeded([block(ok)]))
+        self.assertTrue(channel_module.call_succeeded(([block(ok)], {'result': ok})))
+        self.assertTrue(channel_module.call_succeeded({'content': [{'type': 'text', 'text': ok}]}))
+        self.assertTrue(channel_module.call_succeeded({'content': [{'type': 'text', 'text': json.dumps({'result': ok})}]}))
+        for result in ([block(failed)], {'content': [{'type': 'text', 'text': failed}]},
+                       {'isError': True, 'content': [{'type': 'text', 'text': ok}]},
+                       [block('not json')], [], None):
+            self.assertFalse(channel_module.call_succeeded(result), result)
+
     def test_first_poll_is_immediate_so_status_leaves_starting_quickly(self):
         hub = self.hub([])
         hub.start('test', 'receiver', TOKEN)

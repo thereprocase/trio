@@ -13,7 +13,8 @@ from mcp.server import Server
 from mcp import types
 from nth_spoke_monitor import MCPSSEClient
 from nth_event_access import native_connect_response, delivery_status, listen
-from nth_claude_channel import ChannelHub, channel_mode, quartet_poll_factory, run_stdio
+from nth_claude_channel import (ChannelHub, call_succeeded, channel_mode,
+                                quartet_poll_factory, run_stdio)
 
 
 def create_server(url):
@@ -33,6 +34,8 @@ def create_server(url):
                 connected = True
         return await asyncio.to_thread(client.call, method, params, 60)
 
+    accepts_token = set()      # remote tools whose schema has a session_token
+
     local_schema = {'type': 'object', 'properties': {
         'channel': {'type': 'string'}, 'member_id': {'type': 'string'},
         'session_token': {'type': 'string'}}, 'required': ['channel', 'member_id', 'session_token']}
@@ -42,6 +45,8 @@ def create_server(url):
         listed, cursor = [], None
         while True:
             response = await remote('tools/list', {'cursor': cursor} if cursor else {})
+            accepts_token.update(t['name'] for t in response.get('tools', [])
+                                 if 'session_token' in (t.get('inputSchema') or {}).get('properties', {}))
             listed.extend(types.Tool.model_validate(t) for t in response.get('tools', [])
                           if t['name'] not in ('quartet_delivery_status', 'quartet_listen'))
             cursor = response.get('nextCursor')
@@ -61,7 +66,12 @@ def create_server(url):
             return [types.TextContent(type='text', text=json.dumps(result))]
         if not name.startswith('quartet_'):
             raise ValueError('Expected a Quartet tool')
+        if hub is not None:
+            # See ChannelHub.complete: a woken model omits the token this frontend holds.
+            arguments = hub.complete(name, arguments, name in accepts_token)
         response = await remote('tools/call', {'name': name, 'arguments': arguments})
+        if hub is not None:
+            hub.observe(name, arguments, call_succeeded(response))
         if name == 'quartet_connect' and not response.get('isError'):
             for block in response.get('content', []):
                 if block.get('type') == 'text':

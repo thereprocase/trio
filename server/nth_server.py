@@ -5063,8 +5063,9 @@ if __name__ == "__main__":
     if (os.environ.get("TRIO_NATIVE_CLIENT") == "claude"
             and os.environ.get("TRIO_CLAUDE_CHANNEL") == "1"):
         import asyncio
-        from nth_claude_channel import ChannelHub, run_stdio
+        from nth_claude_channel import ChannelHub, complete_local_calls, run_stdio
         _CHANNEL_HUB = ChannelHub(TOOL_PREFIX, "local", str(DB_PATH.resolve()), _local_poll_factory)
+        complete_local_calls(mcp, _CHANNEL_HUB)
         # FastMCP.run() hides the stdio write stream a channel needs.
         asyncio.run(run_stdio(mcp._mcp_server, _CHANNEL_HUB))
     else:

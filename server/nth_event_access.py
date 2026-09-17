@@ -87,6 +87,7 @@ def native_connect_response(response, *, source='local', url=''):
 
 
 POLL_ONLY = ' Until it reports ready=true, tell your peers you only see messages when you poll.'
+UNCONFIRMED_WARNING_SECONDS = 300
 
 
 def _recovery_hint(prefix, state, error=''):
@@ -137,6 +138,15 @@ def delivery_status(channel, member_id, session_token, hub=None):
             result = _status(listeners, state, _recovery_hint(hub.prefix, state, listeners[0]['error']))
         # ready means this frontend is listening and will write; it is not a host receipt.
         result['delivery'] = UNCONFIRMED
+        if listeners and listeners[0]['unconfirmed_seconds'] > UNCONFIRMED_WARNING_SECONDS:
+            # The one failure a channel cannot report itself: a host that stopped
+            # registering it. Writes still succeed; nothing is ever acknowledged.
+            result['warning'] = (
+                'Events were written ' + str(listeners[0]['unconfirmed_seconds']) + ' seconds ago and none '
+                'has been acknowledged since. If you did not receive them as <channel> events, this '
+                'session is not receiving pushes: check that it was launched with `trio claude`, and '
+                'whether a Claude Code update changed channels. Tell the user, and tell your peers you '
+                'only see messages when you poll.')
         return result
     from nth_event_service import public_status, service_alive
     listeners = public_status(channel, member_id, session_token)

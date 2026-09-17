@@ -164,6 +164,20 @@ class StdioChannelTests(unittest.TestCase):
         self.assertEqual((listener['transport'], listener['last_written_message_id']), ('channel', mention))
         self.assertIn('no receipt', listener['delivery'])
         self.assertNotIn('accepted', json.dumps(status))
+        self.assertEqual(listener['confirmed_through'], 0)
+
+        # A woken model leaves its token out. The frontend supplies the one it holds,
+        # so the ack moves the session's own watermark (a tokenless ack would move only
+        # the legacy per-member one, and the backlog would be written again after a
+        # restart) and counts as delivery evidence.
+        host.tool('trio_ack', channel='channel-test', member_id=receiver['member_id'], through_id=mention)
+        unread = host.tool('trio_poll', channel='channel-test', member_id=receiver['member_id'],
+                           session_token=receiver['session_token'], wait_seconds=0, auto_ack=False)
+        self.assertEqual(unread.get('messages', []), [])
+        status = host.tool('trio_delivery_status', channel='channel-test',
+                           member_id=receiver['member_id'], session_token=receiver['session_token'])
+        self.assertEqual(status['listeners'][0]['confirmed_through'], mention)
+        self.assertNotIn(receiver['session_token'], json.dumps(status))
 
         # Stop stays stopped.
         stopped = host.tool('trio_listen', channel='channel-test', member_id=receiver['member_id'],
