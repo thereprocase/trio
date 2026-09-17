@@ -5033,10 +5033,11 @@ def nth_delivery_status(channel: str, member_id: str, session_token: str) -> str
 
 @mcp.tool(name=f"{TOOL_PREFIX}_listen")
 def nth_listen(channel: str, member_id: str, session_token: str,
-               filter_mode: str = "about", enabled: bool = True) -> str:
+               filter_mode: str = "", enabled: bool | None = None) -> str:
     """Start, change or stop this session's event listener; preserve read
-    watermarks. enabled=true restarts it from these credentials after a
-    session restart."""
+    watermarks. An omitted filter_mode or enabled leaves that setting as it
+    is, so a filter change never re-enables a stopped listener. enabled=true
+    restarts it from these credentials after a session restart."""
     from nth_event_access import listen
     return json.dumps(listen(channel, member_id, session_token, filter_mode, enabled, hub=_CHANNEL_HUB))
 

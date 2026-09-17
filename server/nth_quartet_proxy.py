@@ -50,7 +50,7 @@ def create_server(url):
         listed.append(types.Tool(name='quartet_delivery_status', description='Check this session\'s event delivery: the Codex listener, or the Claude channel listener.', inputSchema=local_schema))
         schema = json.loads(json.dumps(local_schema))
         schema['properties'].update(filter_mode={'type': 'string', 'enum': ['all', 'about', 'at']}, enabled={'type': 'boolean'})
-        listed.append(types.Tool(name='quartet_listen', description='Start, change or stop this session\'s event listener. enabled=true restarts it from these credentials after a session restart.', inputSchema=schema))
+        listed.append(types.Tool(name='quartet_listen', description='Start, change or stop this session\'s event listener. An omitted filter_mode or enabled leaves that setting as it is. enabled=true restarts it from these credentials after a session restart.', inputSchema=schema))
         return listed
 
     @server.call_tool()

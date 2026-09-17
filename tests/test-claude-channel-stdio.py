@@ -123,6 +123,8 @@ class StdioChannelTests(unittest.TestCase):
         sender = self.join(host, 'sender')
         delivery = receiver['event_delivery']
         self.assertEqual((delivery['provider'], delivery['mode']), ('claude', 'channel'))
+        self.assertEqual(delivery['readiness'], 'unverified')
+        self.assertIn('A successful join is not readiness', receiver['instructions'])
         self.assertEqual(receiver['monitor_hint'], '')
         self.assertNotIn(receiver['session_token'], json.dumps(delivery))
         self.assertIn(delivery['listener']['status'], ('starting', 'listening'))
@@ -152,7 +154,12 @@ class StdioChannelTests(unittest.TestCase):
 
         status = host.tool('trio_delivery_status', channel='channel-test',
                            member_id=receiver['member_id'], session_token=receiver['session_token'])
-        self.assertEqual(status['state'], 'listening')
+        self.assertEqual((status['state'], status['ready'], status['hint']), ('listening', True, ''))
+        stranger = host.tool('trio_delivery_status', channel='channel-test',
+                             member_id=receiver['member_id'], session_token='not-the-token')
+        self.assertEqual((stranger['state'], stranger['ready'], stranger['listeners']), ('not_attached', False, []))
+        self.assertTrue(stranger['hint'].startswith('Setup is incomplete:'))
+        self.assertIn('tell your peers', stranger['hint'])
         listener = status['listeners'][0]
         self.assertEqual((listener['transport'], listener['last_written_message_id']), ('channel', mention))
         self.assertIn('no receipt', listener['delivery'])
@@ -162,6 +169,14 @@ class StdioChannelTests(unittest.TestCase):
         stopped = host.tool('trio_listen', channel='channel-test', member_id=receiver['member_id'],
                             session_token=receiver['session_token'], enabled=False)
         self.assertEqual(stopped['listeners'][0]['status'], 'stopped')
+        # A filter change with enabled omitted keeps the stop and remembers the filter.
+        changed = host.tool('trio_listen', channel='channel-test', member_id=receiver['member_id'],
+                            session_token=receiver['session_token'], filter_mode='all')
+        self.assertEqual((changed['listeners'][0]['status'], changed['listeners'][0]['filter']), ('stopped', 'all'))
+        status = host.tool('trio_delivery_status', channel='channel-test',
+                           member_id=receiver['member_id'], session_token=receiver['session_token'])
+        self.assertEqual((status['state'], status['ready']), ('stopped', False))
+        self.assertTrue(status['hint'].startswith('Setup is incomplete:'))
         silent = say('@receiver while you were stopped')
         host.drain(3)
         self.assertNotIn(silent, [int(e['meta']['message_id']) for e in receiver_events()])
@@ -189,6 +204,8 @@ class StdioChannelTests(unittest.TestCase):
         sender = self.join(host, 'sender')
         self.assertEqual(receiver['event_delivery']['mode'], 'monitor')
         self.assertTrue(receiver['monitor_hint'])
+        self.assertEqual(receiver['event_delivery']['readiness'], 'unverified')
+        self.assertIn('A successful join is not readiness', receiver['instructions'])
         self.assertIn('30-minute lease', receiver['instructions'])
         self.assertNotIn('listener', receiver['event_delivery'])
         host.tool('trio_send', channel='channel-test', member_id=sender['member_id'],
