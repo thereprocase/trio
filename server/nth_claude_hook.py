@@ -71,6 +71,31 @@ HOOK_EVENTS = (('PostToolUse', 'tool', r'mcp__nth-(trio|qweb)__(trio|quartet)_(c
                ('Stop', 'stop', None), ('SessionEnd', 'end', None))
 
 
+def settings_files():
+    """The Claude Code user settings file. CLAUDE_CONFIG_DIR overrides the default
+    location entirely, as Claude Code itself resolves it."""
+    directory = os.environ.get('CLAUDE_CONFIG_DIR')
+    if directory:
+        return [Path(directory) / 'settings.json']
+    return [Path.home() / '.claude' / 'settings.json']
+
+
+def delivery_hooks_installed():
+    """True when Trio's delivery hooks are registered for this Claude, so a plainly
+    launched session is woken by them and must not also run a Monitor."""
+    for path in settings_files():
+        try:
+            data = json.loads(path.read_text(encoding='utf-8-sig'))
+        except (OSError, ValueError):
+            continue
+        hooks = data.get('hooks') if isinstance(data, dict) else None
+        if isinstance(hooks, dict) and any(
+                isinstance(group, dict) and group.get(HOOK_TAG)
+                for groups in hooks.values() if isinstance(groups, list) for group in groups):
+            return True
+    return False
+
+
 def install_hooks(settings, python, script, runtime):
     """Register the asyncRewake delivery hooks in a Claude settings dict, idempotently.
 
