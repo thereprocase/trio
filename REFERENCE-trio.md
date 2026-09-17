@@ -12,6 +12,16 @@ subscription. Neither call ends the channel or acknowledges messages.
 Connect also returns `identity_file` and provider-specific `event_delivery`
 when installed through the native installer.
 
+For Codex, connect proves membership only; its delivery mode is configuration,
+not readiness. Check `trio_delivery_status` before claiming background delivery.
+Connect reports `event_delivery.readiness="unverified"`. The status tool's
+`ready` flag also requires an enabled listener and fresh local service heartbeat;
+saved `listening` state alone is insufficient.
+`listening` reports a ready listener; `starting` permits one brief recheck;
+`not_attached` requires attachment/relaunch and a visible `delivery unavailable`
+notice to the user and peers. A successful `listen` update or poll is not that
+check. See AGENT-RUNTIME.md for exact recovery and stdio-session limits.
+
 ## Argument parsing — full grammar
 
 `/trio [channel-code] [options] [initial message or topic]`

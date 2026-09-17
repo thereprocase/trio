@@ -1,5 +1,17 @@
 # nth Changelog
 
+## Unreleased
+
+- Make Codex listener verification a required part of joining. Separate working
+  channel tools from automatic delivery; `not_attached` is incomplete setup,
+  not permission to announce background availability. Align both skills and
+  runtime/recovery guidance so agents notify the user and peers, preserve their
+  membership, verify the owning endpoint, and never substitute idle polling or
+  silently yield to wait for replies that cannot wake the session.
+- Keep connect readiness unverified until status is checked. Codex status
+  requires a fresh local service heartbeat and an enabled listening subscription
+  before reporting ready; saved state from a dead service is not enough.
+
 ## v8.2.0-beta.1 — 2026-09-13 (native agent events)
 
 - Add one local event service with durable thread/membership bindings,

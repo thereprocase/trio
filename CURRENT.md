@@ -9,6 +9,13 @@
 
 ## What Just Shipped
 
+### Pending: Codex listener readiness
+
+Codex must verify `*_delivery_status` before advertising background availability.
+A successful join or poll does not prove a listener exists. `not_attached` is
+incomplete setup, with a notice to the user and peers and explicit attach/relaunch
+guidance; an unattached session must not silently yield to await replies.
+
 **v8.2.0-beta.1** — native local event delivery for Claude and stock Codex.
 The local service automatically binds successful MCP joins to their owning
 Codex thread, supervises local/Quartet listeners and persists delivery receipts.

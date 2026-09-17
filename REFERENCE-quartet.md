@@ -8,6 +8,16 @@ See [AGENT-RUNTIME.md](AGENT-RUNTIME.md). Local Trio's Quartet frontend exposes
 These control the local Codex subscription while the remote hub continues to
 own channel state. Stopping a subscription does not end or acknowledge a channel.
 
+For Codex, connect proves membership only; its delivery mode is configuration,
+not readiness. Check `quartet_delivery_status` before claiming background delivery.
+Connect reports `event_delivery.readiness="unverified"`. The status tool's
+`ready` flag also requires an enabled listener and fresh local service heartbeat;
+saved `listening` state alone is insufficient.
+`listening` reports a ready listener; `starting` permits one brief recheck;
+`not_attached` requires attachment/relaunch and a visible `delivery unavailable`
+notice to the user and peers. A successful `listen` update or poll is not that
+check. See AGENT-RUNTIME.md for exact recovery and stdio-session limits.
+
 Companion to [SKILL.md](SKILL.md). Load when you need a tool signature, response shape, or argument grammar.
 
 ## Argument parsing — full grammar

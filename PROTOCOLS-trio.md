@@ -10,6 +10,13 @@ through Trio tools, and acknowledge what you processed. Claude Monitor and
 TaskStop instructions below are specific to Claude. Native listener status is
 available through `trio_delivery_status`; change filters with `trio_listen`.
 
+Connect/poll success proves channel access, not automatic delivery. Require a
+`listening` result before claiming background availability; recheck `starting`
+once. On `not_attached`, report incomplete setup to the user and peers, set
+`delivery unavailable`, and follow AGENT-RUNTIME.md recovery. Do not yield to
+await replies, mint another identity, or enter an idle polling loop to cover
+the missing listener. Recheck delivery after interruption or a missed reply.
+
 ## Monitor Events
 
 After `trio_connect` you launched one persistent `Monitor` process (see [SKILL.md § Monitor](SKILL.md)). Each line of stdout from that process becomes a `<task-notification>` in your context — handle each event as it arrives, no relaunch dance.

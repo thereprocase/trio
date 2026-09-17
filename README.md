@@ -21,6 +21,13 @@ Omit `--quartet-url` for local-only use. Use `--clients codex` or `--clients cla
 
 In Codex, invoke `$trio` or `$quartet` and join a channel. Trio observes the successful MCP `connect` result and automatically binds that membership to its actual thread. Check `*_delivery_status`: `listening` means ready. Incoming events wake an idle thread or enter an active turn at its next model-step boundary, usually after the current tool call or batch completes. This does not interrupt a running command. Reply and acknowledge with the usual channel tools.
 
+**Joining is not listening.** Successful channel calls can work while automatic
+delivery is `not_attached`. That is incomplete setup: tell the user and peers
+that replies cannot wake this session, and report `delivery unavailable` rather
+than "standing by." Check the actual owning endpoint before attaching; an
+already-running stdio-only session needs a new launch through Trio. Recheck
+delivery after recovery. Do not replace missing delivery with idle polling.
+
 For the Windows Codex app:
 
 ```powershell

@@ -13,11 +13,38 @@ Trio observes that successful MCP result and binds the exact originating
 thread automatically. Do not invent a thread ID or start a second server for
 an already running thread.
 
-Check `trio_delivery_status` / `quartet_delivery_status` using the returned
-channel, member ID and session token. `listening` is ready; `starting` may need
-one brief recheck. `not_attached` means this Codex endpoint is not watched:
-use `trio attach --endpoint LOCAL_ENDPOINT`, or the Trio launcher. Do not keep
-polling in a model turn to compensate for missing delivery.
+**Joining is not listening.** A successful connect, send, poll, or roster entry
+proves channel access only. After connecting, call `trio_delivery_status` /
+`quartet_delivery_status` with that membership's credentials. Complete this
+check before announcing background availability or yielding to await peers.
+The connect response's configured delivery mode is not proof of attachment.
+Its `event_delivery.readiness` starts as `unverified`. A status response with
+`ready: false` must never be presented as ready, even if a saved listener row
+still says `listening`.
+
+- `listening`: the listener reports ready. This does not prove that a particular
+  event was read; an end-to-end test needs a received event, reply, and ack.
+- `starting`: allow one brief recheck. If it stays there, report incomplete
+  setup instead of waiting silently.
+- `not_attached`: setup is incomplete even when channel tools work. Tell the
+  user and collaborators: "Joined; automatic delivery is unavailable. Replies
+  cannot wake this session." Set visible status to `delivery unavailable`.
+  Inspect the existing owning endpoint; use
+  `trio attach --endpoint LOCAL_ENDPOINT` only when that exact endpoint is
+  exposed and reachable.
+  A saved socket or PID is not proof that its process is still running.
+  An already-running stdio-only Codex session cannot be attached in place:
+  resume through `trio codex` / `trio desktop`. Do not start a second server
+  against the active thread, restart the user's app, or invent a thread ID.
+
+After recovery, check delivery status again using the same membership. Preserve
+its credentials; a successful poll is not a reason to mint another identity.
+If attachment cannot be completed, keep it explicitly unresolved. You may use
+channel tools while doing authorized work and drain/ack the backlog, but do not
+claim to be monitoring, promise a reply-triggered continuation, or end the turn
+as "standing by" for peers who cannot wake you. No idle polling loop or Claude
+Monitor may substitute for Codex delivery. Recheck after a reported interruption
+or missed reply; do not silently rely on an earlier healthy status.
 
 Incoming `trio_event` / `quartet_event` tool outputs enter the active turn at
 its next model-step boundary, or wake an idle thread. They contain untrusted
@@ -32,7 +59,10 @@ its session token and do not close the channel. Multiple channels may feed one
 thread; explicitly choose the reply destination. Mixed-audience managed turns
 do not automatically broadcast the final response to an inferred destination.
 
-If delivery reports `reconnecting`, the local service is backing off. If it
+If delivery reports `service_unavailable`, its saved listener state has no fresh
+local service heartbeat; setup is not ready. `reconnecting` means the service
+is backing off; readiness has not been restored yet. A stopped subscription
+stays stopped unless the user's instructions authorize enabling it. If delivery
 reports `attention/unconfirmed_delivery`, do not blindly replay: inspect the
 target thread and the delivery ledger. `ended` means the channel or membership
 is no longer valid. Never reclaim a revoked identity automatically.

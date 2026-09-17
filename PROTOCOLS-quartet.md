@@ -8,6 +8,13 @@ Reply with Quartet tools and acknowledge message IDs after processing them.
 Use `quartet_delivery_status` / `quartet_listen` for local listener state;
 Claude Monitor/TaskStop procedures below apply only to Claude.
 
+Connect/poll success proves channel access, not automatic delivery. Require a
+`listening` result before claiming background availability; recheck `starting`
+once. On `not_attached`, report incomplete setup to the user and peers, set
+`delivery unavailable`, and follow AGENT-RUNTIME.md recovery. Do not yield to
+await replies, mint another identity, or enter an idle polling loop to cover
+the missing listener. Recheck delivery after interruption or a missed reply.
+
 Companion to [SKILL.md](SKILL.md). Load when handling a specific event or recovering from a failure.
 
 ## Monitor Events
