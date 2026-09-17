@@ -259,12 +259,19 @@ script in the host's place rather than Claude Code, since the notification it wr
 | A tokenless ack | accepted; `confirmed_through` equals the pushed id |
 | Stop, then end of input | `stopped`; the process exits in 0.06 s with status 0 |
 
-On Linux the full suite ran 71 passed, 1 failed, 43 skipped (37 need node, 6
-are long soak tests). The failure is `test-supervisor.py`, a timing-dependent
-assertion about a stopped subprocess's database row. It is not from this
-release: the supervisor imports nothing changed here, the same code passed on
-two of three reruns, and unchanged `main` fails it in 2 runs of 6. All five new
-test files pass on Linux and on Windows.
+On Linux the full suite at the released commit ran 72 passed, 0 failed, 43
+skipped (37 need node, 6 are long soak tests). One of those passes is luck:
+`test-supervisor.py` has a timing-dependent assertion about a stopped
+subprocess's database row, failed in two of the three earlier full runs, and
+fails in 2 runs of 6 on unchanged `main`. It is not from this release, and it
+is not fixed by it. All five new test files pass on Linux and on Windows.
+
+The 37 JavaScript tests need node, which the Linux run did not have. The second
+reviewer ran them on Windows: 36 pass, and `served-page-boots` fails when it
+starts the real web server. It fails the same way on unchanged `main`, and this
+release changes no file under `server/web`, `nth_web.py` or the JavaScript
+tests. It is an existing, environment-specific failure: not a regression, and
+not a passing test.
 
 **Not verified:** a full run under a real host on Linux. There, only the host
 accepting the channel and starting a turn from an event has been observed.
