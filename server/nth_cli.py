@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Trio's local runtime, Codex launchers, and event-service controls."""
+"""Trio's local runtime, Codex and Claude launchers, and event-service controls."""
 import argparse
 import json
 import os
@@ -30,6 +30,43 @@ def codex_binary(override=None):
     if not executable:
         raise RuntimeError('Codex is not installed; install the stock Codex CLI first')
     return executable
+
+
+CHANNEL_FLAG = '--dangerously-load-development-channels'
+
+
+def claude_binary(override=None):
+    executable = override or settings().get('claude_binary') or shutil.which('claude')
+    if not executable:
+        raise RuntimeError('Claude Code is not installed; install the Claude Code CLI first')
+    return executable
+
+
+def claude_command(arguments, binary=None):
+    """Claude Code's argv for a session that accepts Trio/Quartet channel events.
+
+    Channels are a research preview and these servers are not on Anthropic's
+    allowlist, so the host only registers them when the development flag names
+    them. The names are the ones setup.py registers in Claude's own MCP config;
+    a server supplied through --mcp-config is not visible to channel registration.
+    """
+    arguments = list(arguments)
+    if arguments[:1] == ['--']:
+        arguments = arguments[1:]
+    servers = ['server:nth-trio']
+    if settings().get('quartet_url'):
+        servers.append('server:nth-qweb')
+    # The flag takes a list of servers. It goes last so that it cannot swallow
+    # the user's own positional prompt.
+    return [claude_binary(binary), *arguments, CHANNEL_FLAG, *servers]
+
+
+def claude_environment():
+    # The host declares nothing about channels to an MCP server, so the launcher
+    # tells the frontends. Claude Code passes its environment on to the stdio
+    # servers it spawns. Child processes inherit it too: a nested session must be
+    # started with `trio claude` as well, or it would expect events it cannot get.
+    return dict(os.environ, TRIO_CLAUDE_CHANNEL='1')
 
 
 def mcp_overrides(endpoint):
@@ -111,6 +148,11 @@ def main(argv=None):
         if arguments[:1] == ['--']:
             arguments = arguments[1:]
         return subprocess.call([binary, '--remote', endpoint, *arguments])
+    # Likewise for Claude Code. Channel delivery runs inside Claude's own MCP
+    # frontends, so no Codex server or event service is started here.
+    if argv[:1] == ['claude']:
+        os.umask(0o077)
+        return subprocess.call(claude_command(argv[1:]), env=claude_environment())
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest='command', required=True)
     sub.add_parser('start', help='Start the local event service')
@@ -125,6 +167,8 @@ def main(argv=None):
     bind.add_argument('--filter', choices=['all', 'about', 'at'], default='about')
     launch = sub.add_parser('codex', help='Launch stock Codex with native Trio/Quartet events')
     launch.add_argument('arguments', nargs=argparse.REMAINDER)
+    # Listed for --help only: the argv check above handles every `trio claude`.
+    sub.add_parser('claude', help='Launch Claude Code with Trio/Quartet events pushed into the session')
     desktop = sub.add_parser('desktop', help='Launch the Codex app against Trio\'s shared server')
     desktop.add_argument('--app', help='Installed app executable (or saved codex_app in native.json)')
     desktop.add_argument('--isolated', action='store_true', help='Use a separate app UI profile')
