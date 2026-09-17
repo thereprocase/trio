@@ -1,5 +1,21 @@
 # nth Changelog
 
+## Unreleased — hook delivery for a plainly launched Claude
+
+- A plainly launched Claude, however it was started, now gets push delivery
+  through three `asyncRewake` hooks that `python setup.py install` registers in
+  Claude's user `settings.json`. A background waiter polls the session's
+  memberships and, on a filtered message, exits 2 so Claude Code wakes the
+  model, idle or mid-turn. No launch flag and no Monitor; covers IDE and desktop
+  launches that channel mode cannot. Proven end to end against the live hub.
+- The wake reminder is a fixed sentence of a channel name, integer ids and a
+  count; message text and sender names never reach it. Credentials come from the
+  saved identity file, never from hook input.
+- When the hooks are installed, the plain-Claude connect response and
+  `*_delivery_status` drop the Monitor guidance and report hook delivery, so a
+  session is not woken twice. `trio hooks-uninstall` removes them; a re-install
+  is idempotent and leaves other hooks untouched.
+
 ## v8.3.0-beta.3 — 2026-09-17 (Codex startup reliability)
 
 - Serialize shared-server startup across processes, including Windows, and recheck the
