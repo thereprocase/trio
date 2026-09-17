@@ -314,7 +314,7 @@ def plain_environment():
     return {name: value for name, value in os.environ.items() if name != 'TRIO_CLAUDE_CHANNEL'}
 
 
-def shell_init(shell):
+def shell_init(shell, clients=('claude', 'codex')):
     """Shell functions that make the plain commands start Trio's launchers.
 
     Printed, never installed: a shell profile is the user's to edit. The functions
@@ -323,7 +323,7 @@ def shell_init(shell):
     """
     python, cli = sys.executable, str(Path(__file__).resolve())
     lines = []
-    for name in ('claude', 'codex'):
+    for name in clients:
         if shell == 'powershell':
             call = '& ' + ' '.join("'" + part.replace("'", "''") + "'" for part in (python, cli, name)) + ' @args'
             # A function receives piped input in $input; a native command does not
@@ -440,6 +440,8 @@ def main(argv=None):
     init = sub.add_parser('shell-init', help='Print shell functions that make plain `claude` and `codex` '
                                              'start through Trio. Add the output to your shell profile')
     init.add_argument('shell', choices=['powershell', 'bash', 'zsh'])
+    init.add_argument('--clients', default='claude,codex',
+                      help='Which commands to wrap: claude, codex or claude,codex (default)')
     desktop = sub.add_parser('desktop', help='Launch the Codex app against Trio\'s shared server')
     desktop.add_argument('--app', help='Installed app executable (or saved codex_app in native.json)')
     desktop.add_argument('--isolated', action='store_true', help='Use a separate app UI profile')
@@ -452,7 +454,10 @@ def main(argv=None):
                           'claude_channels': 'not shown here: a channel listener lives inside the Claude '
                                              'session, so ask the agent to call *_delivery_status'}, indent=2))
     elif args.command == 'shell-init':
-        print(shell_init(args.shell))
+        clients = tuple(args.clients.split(','))
+        if not clients or any(client not in ('claude', 'codex') for client in clients):
+            parser.error('--clients must contain claude and/or codex')
+        print(shell_init(args.shell, clients))
     elif args.command == 'start':
         print(json.dumps(ensure_service()))
     elif args.command == 'attach':

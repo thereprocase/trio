@@ -237,6 +237,10 @@ class LauncherTests(unittest.TestCase):
                          'function claude { if ($MyInvocation.ExpectingInput) { $input | ' + quoted
                          + ' } else { ' + quoted + ' } }')
         self.assertTrue(windows.splitlines()[1].startswith('function codex {'))
+        # One client only, for a machine where the other is not run through Trio.
+        with patch('sys.stdout', new_callable=io.StringIO) as printed:
+            nth_cli.main(['shell-init', 'bash', '--clients', 'claude'])
+        self.assertEqual([line.split('(')[0] for line in printed.getvalue().splitlines()], ['claude'])
 
     def test_the_printed_functions_pass_arguments_and_piped_input_through_a_real_shell(self):
         stub = self.home / 'stub_cli.py'
