@@ -74,10 +74,10 @@ def create_server(url):
         if hub is not None:
             hub.observe(name, arguments, call_succeeded(response))
         if not response.get('isError'):
-            adapt(response, connected if name == 'quartet_connect' else guided)
+            adapt(response, joined if name == 'quartet_connect' else guided)
         return types.CallToolResult.model_validate(response)
 
-    def connected(body):
+    def joined(body):
         body = native_connect_response(body, source='quartet', url=url)
         if hub is not None and not body.get('error') and all(
                 body.get(k) for k in ('channel', 'member_id', 'session_token')):

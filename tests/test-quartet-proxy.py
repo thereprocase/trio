@@ -26,10 +26,11 @@ class FakeHub:
 
     def __init__(self, url):
         self.calls = []
+        self.connects = 0
         FakeHub.instances.append(self)
 
     def connect(self):
-        pass
+        self.connects += 1
 
     def close(self):
         pass
@@ -38,9 +39,14 @@ class FakeHub:
         pass
 
     def call_tool(self, name, arguments, timeout=60):
+        if not self.connects:
+            raise RuntimeError('Not connected (no SSE endpoint)')
         return {'event': 'no_new', 'messages': []}
 
     def call(self, method, params=None, timeout=60):
+        # Strict like the real client: a frontend that forgets to connect stalls there.
+        if not self.connects:
+            raise RuntimeError('Not connected (no SSE endpoint)')
         self.calls.append((method, params))
         if method == 'tools/list':
             return {'tools': [
@@ -124,6 +130,7 @@ class ProxyTests(unittest.TestCase):
         self.assertNotIn('session_token', remote.calls[-1][1]['arguments'])
         self.call(server, 'quartet_ack', channel='room', member_id='someone-else', through_id=4)
         self.assertNotIn('session_token', remote.calls[-1][1]['arguments'])
+        self.assertEqual(remote.connects, 1)      # the tool-call connection is opened once, and is opened
 
     def test_hub_monitor_footers_are_adapted_in_both_forms_and_peer_content_is_not(self):
         for environment in ({'TRIO_NATIVE_CLIENT': 'claude', 'TRIO_CLAUDE_CHANNEL': '1'},
