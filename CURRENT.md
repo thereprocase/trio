@@ -1,6 +1,7 @@
-# Current State — nth v8.3.0-beta.2
+# Current State — nth v8.3.0-beta.3
 
-**Version:** v8.3.0-beta.2 (2026-09-17)
+**Version:** v8.3.0-beta.3 (2026-09-17)
+**Prior:** v8.3.0-beta.2 (2026-09-17)
 **Prior:** v8.3.0-beta.1 (2026-09-17)
 **Prior:** v8.2.0-beta.1 (2026-09-13)
 **Prior:** v8.1.1-beta.1 (2026-08-15)
@@ -9,12 +10,13 @@
 **Branch:** main
 **Remote:** `github.com:thereprocase/trio.git` (GitHub) + `gitlab.com:theReproCase/trio.git` (GitLab mirror — ⚠ not synced since pre-v8)
 
-## Main after v8.3.0-beta.2
+## v8.3.0-beta.3: Codex startup reliability
 
 Runtime follow-up `dbedc23` (PR #58) is installed on Windows and WSL; 90 server
 files and 20 skill docs match on each. `7656390` (PR #59) adds the README overview.
-The version constant remains beta.2; use the commit/hash to distinguish the
-follow-up from tag `v8.3.0-beta.2` (`571e805`).
+Beta.3 now tags these fixes with a distinct version. See
+[release notes](RELEASE-v8.3.0-beta.3.md). The installed-runtime receipts below
+are for `dbedc23` before the beta.3 version bump; they are not new install receipts.
 
 Concurrent real Codex launchers reuse one server on both OSes. Final installed
 WSL Claude local and remote idle reply/ack tests passed in 3.17 s and 3.75 s,

@@ -6,6 +6,10 @@ receipts. Private transcripts, credentials, machine paths and raw session identi
 remain outside the repository. Historical release notes describe their release-time
 state; this report supplies the later evidence.
 
+**Release follow-up:** `v8.3.0-beta.3` now publishes the startup fix with a distinct
+version. The pre-release install/test receipts below retain their original commit
+scope; see [beta.3 notes](../RELEASE-v8.3.0-beta.3.md).
+
 ## Published and installed
 
 - Beta.1: PR #55 introduced Claude channel delivery and Codex readiness checks.
@@ -21,7 +25,7 @@ state; this report supplies the later evidence.
 - PowerShell 7 and Bash profile functions point at the installed launchers;
   profile backups were retained. New terminal sessions load these functions.
 - `NTH_VERSION` still says beta.2. Identify this follow-up by commit/hash; the
-  beta.2 tag does not include PR #58. No beta.3 was published in this work.
+  beta.2 tag does not include PR #58. This was the state at handoff; beta.3 was subsequently published as noted above.
 
 ## What was verified
 
