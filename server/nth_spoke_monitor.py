@@ -50,6 +50,7 @@ import http.client
 import json
 import os
 import queue
+import socket
 import ssl
 import subprocess
 import sys
@@ -351,6 +352,28 @@ class MCPSSEClient:
         its normal reconnect path. Safe to call from any thread."""
         conn = self._active_conn
         if conn is not None:
+            # Shut the socket down first; close() alone does not unblock the
+            # reader. For a chunked stream it needs the buffered reader's lock,
+            # which the reader thread holds while blocked in recv: on Windows
+            # close() then never returns, and a frontend that closes its client on
+            # exit is left behind as an orphan process. For a close-delimited
+            # stream http.client has already handed the socket to the response,
+            # so close() touches nothing and the reader stays blocked.
+            # Neither step may depend on the hub answering: a wedged hub is the
+            # case this method exists for. shutdown() wakes a blocked recv on
+            # Linux but not on Windows; closing the handle does on Windows.
+            # detach() first, so the reader's socket object can never touch a
+            # handle number the OS has since given to someone else.
+            sock = getattr(conn, '_sse_sock', None) or conn.sock
+            if sock is not None:
+                try:
+                    sock.shutdown(socket.SHUT_RDWR)
+                except Exception:
+                    pass
+                try:
+                    socket.close(sock.detach())
+                except Exception:
+                    pass
             try:
                 conn.close()
             except Exception:
@@ -411,6 +434,9 @@ class MCPSSEClient:
                 "Connection": "keep-alive",
                 "User-Agent": "nth-spoke-monitor/1.0",
             })
+            # Kept for force_reconnect(): getresponse() drops conn.sock when the
+            # stream is close-delimited.
+            conn._sse_sock = conn.sock
             resp = conn.getresponse()
         except Exception:
             conn.close()

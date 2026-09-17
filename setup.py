@@ -42,7 +42,8 @@ def copy_file(source, destination):
 
 
 def install(target_home, *, quartet_url='', clients=('claude', 'codex'),
-            skip_dependencies=False, register_codex=True, codex_binary=None, codex_app=None):
+            skip_dependencies=False, register_codex=True, codex_binary=None, codex_app=None,
+            claude_binary=None):
     target_home = Path(target_home).resolve()
     claude_home = target_home / '.claude'
     codex_home = Path(os.environ.get('CODEX_HOME', str(target_home / '.codex')))
@@ -83,6 +84,8 @@ def install(target_home, *, quartet_url='', clients=('claude', 'codex'),
         config['codex_binary'] = str(codex_binary)
     if codex_app:
         config['codex_app'] = str(codex_app)
+    if claude_binary:
+        config['claude_binary'] = str(claude_binary)
     write_json(config_path, config)
     quartet_url = config.get('quartet_url', '')
     if 'claude' in clients:
@@ -143,6 +146,7 @@ def main():
     parser.add_argument('--clients', default='claude,codex')
     parser.add_argument('--codex-binary')
     parser.add_argument('--codex-app', help='Save the installed desktop executable for trio desktop')
+    parser.add_argument('--claude-binary', help='Save a Claude Code executable for trio claude (default: claude on PATH)')
     parser.add_argument('--skip-dependencies', action='store_true', help='Use current Python for an isolated staging test')
     parser.add_argument('--no-register-codex', action='store_true', help='Stage files without changing Codex MCP settings')
     args = parser.parse_args()
@@ -152,7 +156,8 @@ def main():
     os.umask(0o077)
     print(json.dumps(install(args.home, quartet_url=args.quartet_url, clients=clients,
         skip_dependencies=args.skip_dependencies, register_codex=not args.no_register_codex,
-        codex_binary=args.codex_binary, codex_app=args.codex_app), indent=2))
+        codex_binary=args.codex_binary, codex_app=args.codex_app,
+        claude_binary=args.claude_binary), indent=2))
 
 
 if __name__ == '__main__':

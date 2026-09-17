@@ -93,6 +93,11 @@ def _find_free_port(preferred: int = 8000) -> int:
 SERVER_PORT = int(os.environ.get("NTH_PORT", "0")) or _find_free_port()
 mcp = FastMCP(SERVER_NAME, host=SERVER_HOST, port=SERVER_PORT)
 
+# Claude channel mode only (set in __main__): this stdio process is the single
+# path into the session, so its event listeners live here. None everywhere else,
+# including the SSE hub and every Codex launch.
+_CHANNEL_HUB = None
+
 # ── Console feed ──────────────────────────────────────────────────────
 # Human-readable live feed for the server terminal window.
 # ANSI colors: 90=gray, 32=green, 33=yellow, 35=magenta, 36=cyan, 31=red, 1=bold
@@ -1136,6 +1141,12 @@ def _get_session_by_token(db, session_token: str):
     ).fetchone()
 
 
+def _guidance(footer: str) -> str:
+    """A server footer, adapted for a client that must not run a Monitor."""
+    from nth_event_access import adapt_monitor_guidance
+    return adapt_monitor_guidance(footer, TOOL_PREFIX)
+
+
 def _sentinel_nag(member) -> str:
     """Check caller's Monitor heartbeat freshness. Returns a nag string or empty.
 
@@ -1154,6 +1165,11 @@ def _sentinel_nag(member) -> str:
     fresh = (bool(mhb) and _seconds_since(mhb) < 300) or \
             (bool(whb) and _seconds_since(whb) < 300)
     if fresh:
+        return ""
+    # Codex, and Claude in channel mode, must never be told to start a Monitor:
+    # their delivery state is reported by the delivery status tool.
+    from nth_event_access import uses_monitor
+    if not uses_monitor():
         return ""
     if TOOL_PREFIX == "quartet":
         return ("[server] Monitor heartbeat stale. Spokes: launch "
@@ -1713,7 +1729,17 @@ def nth_connect(
             _console("👋", channel, f"{name} joined ({len(members)} members)", 32)
         if os.environ.get("TRIO_NATIVE_CLIENT"):
             from nth_event_access import native_connect_response
-            resp = native_connect_response(resp)
+            # Channel mode is what this process can do, not what the launcher
+            # asked for: without a hub there is nothing that could push.
+            resp = native_connect_response(resp, channel=_CHANNEL_HUB is not None)
+            if _CHANNEL_HUB is not None and resp.get("session_token"):
+                # The same successful connect Trio binds a Codex thread from.
+                # A listener failure must not fail the join.
+                try:
+                    resp["event_delivery"]["listener"] = _CHANNEL_HUB.start(
+                        resp["channel"], resp["member_id"], resp["session_token"])
+                except Exception as exc:
+                    resp["event_delivery"]["listener"] = {"status": "failed", "error": type(exc).__name__}
         return json.dumps(resp)
 
     finally:
@@ -2509,7 +2535,7 @@ def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: st
                     msg_list.append(entry)
 
                 nag = _sentinel_nag(member)
-                footer = MESSAGE_FOOTER + (" " + nag if nag else "")
+                footer = _guidance(MESSAGE_FOOTER + (" " + nag if nag else ""))
                 resp = {
                     "event": "new_messages",
                     "unread_count": len(msg_list),
@@ -3806,7 +3832,7 @@ def nth_complete(channel: str, member_id: str, task_id: int, result: str = "") -
         resp = {
             "ok": True,
             "task_id": task_id,
-            "footer": "[server] Task done — but you are NOT done. Stay connected. Peers may have follow-up questions. Restart your background monitor.",
+            "footer": _guidance("[server] Task done — but you are NOT done. Stay connected. Peers may have follow-up questions. Restart your background monitor."),
         }
         if unblocked:
             resp["unblocked"] = unblocked
@@ -3980,7 +4006,7 @@ def nth_cancel(channel: str, member_id: str, task_id: int, reason: str = "") -> 
             "ok": True,
             "task_id": task_id,
             "status": "cancelled",
-            "footer": "[server] Task cancelled — stay connected. Peers may need to discuss next steps. Restart your background monitor.",
+            "footer": _guidance("[server] Task cancelled — stay connected. Peers may need to discuss next steps. Restart your background monitor."),
         }
         if unblocked:
             resp["unblocked"] = unblocked
@@ -5012,18 +5038,81 @@ def nth_cleanup(channel: str = "", all_ended: bool = False) -> str:
 
 @mcp.tool(name=f"{TOOL_PREFIX}_delivery_status")
 def nth_delivery_status(channel: str, member_id: str, session_token: str) -> str:
-    """Check this session's local Codex listener without exposing credentials."""
+    """Check this session's event delivery (the Codex listener, or the Claude
+    channel listener) without exposing credentials."""
     from nth_event_access import delivery_status
-    return json.dumps(delivery_status(channel, member_id, session_token))
+    return json.dumps(delivery_status(channel, member_id, session_token, hub=_CHANNEL_HUB,
+                                      host=_host_info() if _CHANNEL_HUB is not None else None))
 
 
 @mcp.tool(name=f"{TOOL_PREFIX}_listen")
 def nth_listen(channel: str, member_id: str, session_token: str,
-               filter_mode: str = "about", enabled: bool = True) -> str:
-    """Change or stop this session's Codex listener; preserve read watermarks."""
+               filter_mode: str = "", enabled: bool | None = None) -> str:
+    """Start, change or stop this session's event listener; preserve read
+    watermarks. An omitted filter_mode or enabled leaves that setting as it
+    is, so a filter change never re-enables a stopped listener. enabled=true
+    restarts it from these credentials after a session restart."""
     from nth_event_access import listen
-    return json.dumps(listen(channel, member_id, session_token, filter_mode, enabled))
+    return json.dumps(listen(channel, member_id, session_token, filter_mode, enabled, hub=_CHANNEL_HUB))
+
+
+def _poll_body(result):
+    """The JSON body of an nth_poll result.
+
+    A poll whose messages carry image attachments returns [payload, *image_blocks],
+    and payload is the JSON string itself, not a content block. Reading it as a
+    block raised on every poll; the poll never acks, so the same message came
+    back each time and one attachment ended delivery for good.
+    """
+    if isinstance(result, (list, tuple)):
+        result = result[0] if result else None
+    if isinstance(result, str):
+        return json.loads(result)
+    text = result.get("text") if isinstance(result, dict) else getattr(result, "text", None)
+    if isinstance(text, str):
+        return json.loads(text)
+    raise ValueError("nth_poll returned no JSON body")
+
+
+def _local_poll_factory(binding):
+    """In-process poll for a channel listener: the same canonical tool an agent
+    calls, never a second import of this module."""
+    def poll(arguments):
+        return _poll_body(nth_poll(**arguments))
+    return poll, None
+
+
+def _host_info():
+    """The MCP host's name and version from its initialize request, or None."""
+    try:
+        info = mcp.get_context().session.client_params.clientInfo
+        return {"name": info.name, "version": info.version}
+    except Exception:  # noqa: BLE001 - optional detail; status must not depend on it
+        return None
 
 
 if __name__ == "__main__":
-    mcp.run()
+    # Same rule as nth_claude_channel.channel_mode(), checked without importing
+    # it: Codex and hub launches of this file must not depend on that module.
+    if (os.environ.get("TRIO_NATIVE_CLIENT") == "claude"
+            and os.environ.get("TRIO_CLAUDE_CHANNEL") == "1"):
+        import asyncio
+        try:
+            from nth_claude_channel import ChannelHub, complete_local_calls, run_stdio
+            hub = ChannelHub(TOOL_PREFIX, "local", str(DB_PATH.resolve()), _local_poll_factory)
+            complete_local_calls(mcp, hub)
+            # FastMCP.run() hides the stdio write stream a channel needs.
+            serve = run_stdio(mcp._mcp_server, hub)
+        except Exception as exc:  # noqa: BLE001
+            # Channel mode leans on mcp internals. If a release moves them, keep the
+            # tools and say so: the session then reports monitor mode, not a channel
+            # it does not have.
+            print(f"[nth] channel delivery is unavailable ({type(exc).__name__}: {exc}); "
+                  "serving without it", file=sys.stderr)
+            os.environ["TRIO_CLAUDE_CHANNEL"] = "unavailable"
+            mcp.run()
+        else:
+            _CHANNEL_HUB = hub
+            asyncio.run(serve)
+    else:
+        mcp.run()

@@ -2,15 +2,20 @@
 
 Shared repository guidance for Claude Code and Codex. CLAUDE.md points here.
 
-## Native event delivery (8.2.0-beta.1)
+## Native event delivery (8.3.0-beta.1)
 
 Trio owns the local event service. `nth_event_service.py` observes explicitly
 registered Codex endpoints, binds successful MCP connect results to their real
 thread, and supervises durable local/Quartet subscriptions. `nth_cli.py` owns
 launchers; `nth_quartet_proxy.py` supplies a local stdio frontend to Quartet.
-Claude uses the canonical Monitor via `nth_watch.py`; Codex uses standalone
-tool output at the next active-turn model boundary. Never replace this with
-terminal typing or a second server attached to an already owned thread.
+Claude launched with `trio claude` receives channel events from a listener
+inside each stdio frontend (`nth_claude_channel.py`); launched plainly it falls
+back to the canonical Monitor via `nth_watch.py`, which from Claude Code 2.1.274
+is a 30-minute lease. Codex uses standalone tool output at the next active-turn
+model boundary. Never replace this with terminal typing or a second server
+attached to an already owned thread. A channel notification has no receipt:
+Claude status reports `written`, never `accepted`, and readiness is a separate
+check from joining for both providers.
 
 `python setup.py install` is the native Claude/Codex installer. It must preserve
 unrelated settings and retain backups. It installs both skills with all their
@@ -133,4 +138,4 @@ The overlap is narrow: heartbeat patterns, prompt engineering for mechanical age
 
 ## Versioning
 
-Versions track behavioral evolution; v8+ also ships tagged GitHub beta releases. Current: **v8.2.0-beta.1** (2026-09-13) — native Claude/Codex events and local runtime. Prior: **v8.1.1-beta.1** (2026-08-15) — known-gaps sprint: tailnet owner enforcement (tagged-node hubs need `NTH_TAILNET_OWNER`), untrusted-identity retry, Tailscale CLI discovery, D-Bus reveal, suite fully green. Prior: **v8.1.0-beta.1** (2026-08-14) — 16-PR integration reviewed by five sessions across four lenses and landed on five blast-radius branches (file links + reveal, image attachments, STT dictation, member removal, search, unread divider, working indicator; CSRF origin check, upload gate + quota). Prior: **v8.0.2-beta.1** (2026-08-11) — War Council hardening (XSS in the context relay, snapshot field projection, EventHub reaping, `pounds` restored to the tool allowlist, publisher session pinning + honest data ages). v8.0.1-beta.1 added the context relay + rings, session auto-discovery, codex publisher and web overhaul. Major versions correspond to live multi-agent test sessions that drove feature additions. v4.9 introduced agent-based idle monitoring. v5 unified monitoring into the adaptive sentinel. v5.1 introduced wrapper scripts, Haiku restart loops, peer heartbeat detection. v6.0 rebranded from trio/roam to nth and added dual-transport architecture (stdio + SSE over Tailscale). v6.1 split the skill in two (`/trio`, `/quartet`). v6.2 added session-token capability scoping. v7 replaced the two-Haiku-subagent sentinel with a single persistent `nth_monitor.py` launched via Claude Code's `Monitor` tool, tuned polling to 0.5s / 3s with batched heartbeat writes, and added operator tooling (`nth_console.py`, `nth_dashboard.py`). See CHANGELOG.md for the full history.
+Versions track behavioral evolution; v8+ also ships tagged GitHub beta releases. Current: **v8.3.0-beta.1** (2026-09-17) — push delivery for Claude Code through channels, a readiness contract for both providers, and two rounds of review hardening. Prior: **v8.2.0-beta.1** (2026-09-13) — native Claude/Codex events and local runtime. Prior: **v8.1.1-beta.1** (2026-08-15) — known-gaps sprint: tailnet owner enforcement (tagged-node hubs need `NTH_TAILNET_OWNER`), untrusted-identity retry, Tailscale CLI discovery, D-Bus reveal, suite fully green. Prior: **v8.1.0-beta.1** (2026-08-14) — 16-PR integration reviewed by five sessions across four lenses and landed on five blast-radius branches (file links + reveal, image attachments, STT dictation, member removal, search, unread divider, working indicator; CSRF origin check, upload gate + quota). Prior: **v8.0.2-beta.1** (2026-08-11) — War Council hardening (XSS in the context relay, snapshot field projection, EventHub reaping, `pounds` restored to the tool allowlist, publisher session pinning + honest data ages). v8.0.1-beta.1 added the context relay + rings, session auto-discovery, codex publisher and web overhaul. Major versions correspond to live multi-agent test sessions that drove feature additions. v4.9 introduced agent-based idle monitoring. v5 unified monitoring into the adaptive sentinel. v5.1 introduced wrapper scripts, Haiku restart loops, peer heartbeat detection. v6.0 rebranded from trio/roam to nth and added dual-transport architecture (stdio + SSE over Tailscale). v6.1 split the skill in two (`/trio`, `/quartet`). v6.2 added session-token capability scoping. v7 replaced the two-Haiku-subagent sentinel with a single persistent `nth_monitor.py` launched via Claude Code's `Monitor` tool, tuned polling to 0.5s / 3s with batched heartbeat writes, and added operator tooling (`nth_console.py`, `nth_dashboard.py`). See CHANGELOG.md for the full history.

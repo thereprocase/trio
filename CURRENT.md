@@ -1,6 +1,7 @@
-# Current State — nth v8.2.0-beta.1
+# Current State — nth v8.3.0-beta.1
 
-**Version:** v8.2.0-beta.1 (2026-09-13)
+**Version:** v8.3.0-beta.1 (2026-09-17)
+**Prior:** v8.2.0-beta.1 (2026-09-13)
 **Prior:** v8.1.1-beta.1 (2026-08-15)
 **Prior:** v8.1.0-beta.1 (2026-08-14, released)
 **Prior:** v8.0.2-beta.1 (2026-08-11), v8.0.1-beta.1 (2026-08-11), v8.0.0-beta.1 (2026-08-11), v7.3.1 (2026-08-11), v7.3 (2026-08-11), v7.2 (2026-04-20), v7.1 (2026-04-20), v7 (2026-04-19)
@@ -8,6 +9,27 @@
 **Remote:** `github.com:thereprocase/trio.git` (GitHub) + `gitlab.com:theReproCase/trio.git` (GitLab mirror — ⚠ not synced since pre-v8)
 
 ## What Just Shipped
+
+### v8.3.0-beta.1: Claude channel delivery
+
+`trio claude` gives Claude Code push delivery through Claude Code channels, a
+research preview: a listener inside each stdio frontend writes filtered messages
+into the open session, with no Monitor or lease and no model turn on a timer. Verified on Claude Code
+2.1.274 under a real host on Windows, local and Quartet: idle wake with reply and
+ack in about five seconds, mid-turn arrival between two tool calls, restart then
+listen from saved credentials with nothing replayed. On Linux only the host
+accepting the channel and starting a turn has been observed so far. Limits: the
+launch confirmation recurs and cannot be pre-accepted, the launcher's environment
+variable is inherited by nested sessions, delivery is at-least-once across a
+restart, and each event costs a full-context turn. The Monitor stays as the
+fallback and is now documented as the 30-minute lease it became in 2.1.274.
+
+### v8.3.0-beta.1: Codex listener readiness
+
+Codex must verify `*_delivery_status` before advertising background availability.
+A successful join or poll does not prove a listener exists. `not_attached` is
+incomplete setup, with a notice to the user and peers and explicit attach/relaunch
+guidance; an unattached session must not silently yield to await replies.
 
 **v8.2.0-beta.1** — native local event delivery for Claude and stock Codex.
 The local service automatically binds successful MCP joins to their owning

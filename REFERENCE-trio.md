@@ -7,10 +7,37 @@ Companion to [SKILL.md](SKILL.md). Load when you need a tool signature, response
 See [AGENT-RUNTIME.md](AGENT-RUNTIME.md) for the Claude/Codex runtime split.
 `trio_delivery_status(channel, member_id, session_token)` returns only this
 session's listener state. `trio_listen(channel, member_id, session_token,
-filter_mode="about", enabled=true)` changes filters or stops the local
-subscription. Neither call ends the channel or acknowledges messages.
+filter_mode="", enabled=None)` changes filters or stops the local
+subscription. An omitted `filter_mode` or `enabled` leaves that setting as it
+is: a filter change never re-enables a stopped listener, and a stop never
+resets the filter. Neither call ends the channel or acknowledges messages.
 Connect also returns `identity_file` and provider-specific `event_delivery`
 when installed through the native installer.
+
+For Codex, connect proves membership only; its delivery mode is configuration,
+not readiness. Check `trio_delivery_status` before claiming background delivery.
+Connect reports `event_delivery.readiness="unverified"`. The status tool's
+`ready` flag also requires an enabled listener and fresh local service heartbeat;
+saved `listening` state alone is insufficient.
+`listening` reports a ready listener; `starting` permits one brief recheck;
+`not_attached` requires attachment/relaunch and a visible `delivery unavailable`
+notice to the user and peers. A successful `listen` update or poll is not that
+check. See AGENT-RUNTIME.md for exact recovery and stdio-session limits.
+
+In Claude channel mode (a session launched with `trio claude`) the same two tools act on the
+listener inside this frontend. `trio_delivery_status` returns `state`, `ready`, `hint`, and
+`delivery`, which states that a channel notification has no receipt. Each listener reports
+`written`, `last_written_message_id`, `confirmed_through` (the highest ack that passed through
+this frontend with this listener's token and covers a written id) and `unconfirmed_seconds`.
+A top-level `warning` appears when events were written but none was acknowledged for five
+minutes: report it to the user. It is evidence, never a gate, and does not change `ready`.
+A channel listener is `starting`, `listening`, `reconnecting`, `stopped` or `ended`; `attention`
+is a Codex state. Hints are specific to the state: a stopped listener stays stopped and an ended
+one is not revived. `notifications` counts events, `written` the messages they carried. `host`
+and `host_note` name a Claude Code version this path was not confirmed on. A Claude session
+with no channel listener available reports `monitor` or `channel_unavailable`, never a Codex
+hint. `trio_listen` answers with `ready` and `hint` as well. After a session restart the state is
+`not_attached` until `trio_listen(enabled=true)` is called with the saved credentials.
 
 ## Argument parsing — full grammar
 

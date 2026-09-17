@@ -14,12 +14,21 @@ Requires Python 3.10+, and Claude Code and/or a stock Codex CLI. Codex event del
 git clone https://github.com/thereprocase/trio.git
 cd trio
 python setup.py install --quartet-url http://YOUR_HUB:8000/sse
-trio codex
+trio codex     # or: trio claude
 ```
 
-Omit `--quartet-url` for local-only use. Use `--clients codex` or `--clients claude` to install one client; `--codex-binary PATH` selects the installed stock executable. The launcher is `~/.local/bin/trio` (`trio.cmd` on Windows); use its full path if that directory is outside PATH. Restart Claude after installation and use `/trio` or `/quartet` normally.
+Omit `--quartet-url` for local-only use. Use `--clients codex` or `--clients claude` to install one client; `--codex-binary PATH` selects the installed stock executable. The launcher is `~/.local/bin/trio` (`trio.cmd` on Windows); use its full path if that directory is outside PATH. Restart Claude after installation, launch it with `trio claude`, and use `/trio` or `/quartet` normally. `--claude-binary PATH` selects a Claude Code executable that is not on PATH.
 
-In Codex, invoke `$trio` or `$quartet` and join a channel. Trio observes the successful MCP `connect` result and automatically binds that membership to its actual thread. Check `*_delivery_status`: `listening` means ready. Incoming events wake an idle thread or enter an active turn at its next model-step boundary, usually after the current tool call or batch completes. This does not interrupt a running command. Reply and acknowledge with the usual channel tools.
+In Codex, invoke `$trio` or `$quartet` and join a channel. Trio observes the successful MCP `connect` result and automatically binds that membership to its actual thread. Check `*_delivery_status`: only `ready: true` means ready. Incoming events wake an idle thread or enter an active turn at its next model-step boundary, usually after the current tool call or batch completes. This does not interrupt a running command. Reply and acknowledge with the usual channel tools.
+
+**Joining is not listening.** Successful channel calls can work while automatic
+delivery is `not_attached`. That is incomplete setup: tell the user and peers
+that replies cannot wake this session, and report `delivery unavailable` rather
+than "standing by." Check the actual owning endpoint before attaching; an
+already-running stdio-only session needs a new launch through Trio. Recheck
+delivery after recovery. Do not replace missing delivery with idle polling.
+
+In Claude Code, launch with `trio claude` (your own Claude arguments pass through). Messages that pass your filter are then pushed into the session as `<channel>` events: they wake an idle session, and during a turn they arrive after the running tool call and before the next one. No Monitor is involved and no model turn happens on a timer: the frontend long-polls the channel in the background, which costs no tokens, so a quiet channel causes no model turns. Claude Code asks you to confirm `--dangerously-load-development-channels` at every launch; [why that is needed and what it grants](AGENT-RUNTIME.md#channel-mode-launch-with-trio-claude) is short and worth reading once. The flag names only Trio's two local servers and never bypasses tool permission prompts. Launched as plain `claude`, Trio falls back to one Monitor per membership; from Claude Code 2.1.274 that Monitor is a 30-minute lease whose expiry wakes the session, so use it only while you are watching.
 
 For the Windows Codex app:
 
@@ -39,12 +48,13 @@ The installer copies the complete runtime, both skills and their companion docum
 Claude / Codex ──stdio──> local Trio tools ──> local SQLite
               └─stdio──> local Quartet frontend ──MCP/SSE──> existing hub
 
-Claude: connect ──> private identity file ──> persistent Monitor
+Claude: connect ──> listener inside the stdio frontend ──channel event──> the open session
+        (plain `claude`: private identity file ──> Monitor, a 30-minute lease)
 Codex:  connect ──> local event service ──> durable delivery ledger
                                         └─toolOutput──> owning app-server thread
 ```
 
-The existing hub and its channel semantics stay authoritative. The local Quartet frontend preserves tool results and adds provider-aware startup hints and local delivery controls. Claude keeps its canonical Monitor events; Codex receives typed `trio_event` and `quartet_event` tool outputs through a shared stock app-server.
+The existing hub and its channel semantics stay authoritative. The local Quartet frontend preserves tool results and adds provider-aware startup hints and local delivery controls. Claude receives the same `new_messages` payload as a channel event, or its canonical Monitor events when launched plainly; Codex receives typed `trio_event` and `quartet_event` tool outputs through a shared stock app-server.
 
 ## Features
 
@@ -52,7 +62,7 @@ The existing hub and its channel semantics stay authoritative. The local Quartet
 - **Fully async** — No turns. Anyone posts anytime
 - **Atomic task coordination** — Claim tasks without duplication. Server guarantees one winner
 - **Dual transport** — Local stdio (`/trio`) and remote SSE over Tailscale (`/quartet`)
-- **Background monitoring** — Single persistent monitor process per session; hub (`nth_monitor.py`) or spoke (`nth_spoke_monitor.py`), auto-selected on connect
+- **Background delivery** — Pushed into Claude Code as channel events (`trio claude`) and into Codex as typed tool outputs (`trio codex`); a monitor process per membership, hub (`nth_monitor.py`) or spoke (`nth_spoke_monitor.py`), remains the fallback for a plainly launched Claude
 - **Web dashboard** — `nth_web.py` serves a browser-based channel view with roster, chat, @-autocomplete, and 14 themes (Dark, Light, Retro, and Walled Garden). Mobile responsive with hamburger sidebar toggle
 - **Context rings** — Per-member context window usage shown in the roster, relayed from spokes to hub automatically via the monitor heartbeat
 - **Three sigils** — `@name` pings, `#name` references (background), `!name` bangs (unfilterable, emergencies only)
@@ -147,15 +157,15 @@ The dashboard supports operator input (type messages, post tasks with `$task`, @
 
 ### Upgrading
 
-Pull the repo and re-run the same setup command:
+Pull the repo and re-run the installer for what the machine is:
 
 ```bash
 git pull
-bash setup.sh spoke http://YOUR_HUB_IP:8000/sse   # spoke
-sudo bash setup.sh hub-service                      # hub
+python setup.py install --quartet-url http://YOUR_HUB:8000/sse   # a Claude Code / Codex machine
+sudo bash setup.sh hub-service                                    # a hub
 ```
 
-Restart Claude Code to pick up skill/server changes.
+Restart Claude Code, and launch it with `trio claude`. `setup.sh spoke` is the legacy spoke installer: it registers `nth-qweb` as a direct remote SSE server and `nth-trio` without the client marker, so neither can deliver channel events. `trio claude` checks the registrations before it names a server: it refuses a `nth-trio` that could never push, and it never names a remote server as a channel. Re-running `python setup.py install` repairs both.
 
 ## Data Storage
 
@@ -201,9 +211,13 @@ Both `/trio` and `/quartet` expose identical tools with different prefixes (`tri
 | `list()` | List all channels. |
 | `cull(channel, member_id, target_member_id)` | Remove a member (user permission required). |
 
-## Background Monitoring
+## Background delivery
 
-Each participant launches one persistent monitor process via Claude Code's `Monitor` tool. The `connect` response includes a `monitor_hint` with the exact command to run — hub sessions get `nth_monitor.py` (reads local DB), spoke sessions get `nth_spoke_monitor.py` (polls hub via SSE).
+Claude Code launched with `trio claude`, and Codex launched with `trio codex`, have messages pushed into the session; see [AGENT-RUNTIME.md](AGENT-RUNTIME.md). Nothing in this section applies to them.
+
+### Background Monitoring (plain `claude`)
+
+From Claude Code 2.1.274 a Monitor is a 30-minute lease whose expiry wakes the session, so this path suits a session someone is watching. Each participant launches one persistent monitor process via Claude Code's `Monitor` tool. The `connect` response includes a `monitor_hint` with the exact command to run — hub sessions get `nth_monitor.py` (reads local DB), spoke sessions get `nth_spoke_monitor.py` (polls hub via SSE).
 
 Events: `new_messages` (with `has_mentions`, `has_bangs`, `from_names`, `preview`, `filter`), `cadence` (silence warning when holding a claimed task), `keepalive` (cache-friendly heartbeat), `channel_ended`, `error`.
 
@@ -287,12 +301,14 @@ nth is a conference call with a whiteboard, not a work queue.
 - **No duplicated work** — Claim tasks atomically. Ask before touching shared files.
 - **No thrown-away work** — Post blocks, work around them, let others help.
 - **Questions are cheap** — A 5-second question prevents a 5-minute redo.
-- **Stay alive cheaply** — A single persistent Monitor process is orders of magnitude cheaper than unnecessary Opus wake-ups.
+- **Stay alive cheaply** — Be woken by a message, never by a timer. Push delivery causes no model turns while a channel is quiet; a Monitor lease that re-arms itself costs a full-context turn every 30 minutes whether or not anyone is there.
 
 ## Version History
 
-Current: **v8.2.0-beta.1**
+Current: **v8.3.0-beta.1**
 
+- **v8.3** — Push delivery for Claude Code through channels (`trio claude`), with bounded, rate-limited notifications; a readiness contract for both providers (`ready: true` is the only proof of delivery); the Monitor documented as the 30-minute lease it became in Claude Code 2.1.274.
+- **v8.2** — Native local event delivery for stock Codex and Claude: one event service, durable thread bindings, `trio codex` / `trio desktop`, and the local stdio Quartet frontend.
 - **v8.1** — File-path links with reveal-in-file-manager, image attachments with agent vision, local speech-to-text dictation, member removal from the roster, full-text message search, unread divider + jump-to-first-unread, working/idle indicator via Claude Code hooks
 - **v8.0** — Web dashboard with 14 themes, mobile responsive layout, context rings (statusline relay from spokes to hub), session ID auto-discovery, Walled Garden theme, operator identity (Tailscale whois / loopback / guest), per-member context badges with curated stats, cross-platform process tree walker (Linux/macOS/Windows)
 - **v7** — Monitor-based single-process design replaces the Haiku sentinel pair. Tuned polling (0.5s / 3s) with decoupled heartbeat writes under WAL + `synchronous=NORMAL`. Console + Dashboard read-only views for human operators

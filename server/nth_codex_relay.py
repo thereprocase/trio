@@ -17,7 +17,7 @@ import threading
 
 from nth_codex_socket import CodexSocketClient
 from nth_spoke_monitor import MCPSSEClient
-from nth_event_sources import create_source
+from nth_event_sources import create_source, select_messages  # select_messages re-exported for existing callers
 
 
 class UncertainDelivery(RuntimeError):
@@ -115,16 +115,6 @@ def load_binding(path):
     if binding['filter'] not in ('all', 'about', 'at'):
         raise ValueError('Relay filter must be all, about or at')
     return binding
-
-
-def select_messages(poll, filter_mode):
-    # Filter the newly returned message itself, not stale batch-level flags.
-    # Fetch all visible messages so @someone-else plus !me cannot be filtered
-    # out by the hub's mentions_only shortcut before its bang reaches us.
-    return [message for message in poll.get('messages', [])
-            if filter_mode == 'all' or message.get('banged')
-            or message.get('mentioned')
-            or (filter_mode == 'about' and message.get('referenced'))]
 
 
 def run(binding, spool_path, *, once=False, stop_event=None, on_status=None,

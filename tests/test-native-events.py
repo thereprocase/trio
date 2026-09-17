@@ -9,13 +9,14 @@ import sqlite3
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'server'))
 import nth_event_service as service
-from nth_event_access import native_connect_response
+from nth_event_access import delivery_status, listen, native_connect_response
 from nth_codex_relay import Spool
 from nth_codex_runtime import CodexRuntimeManager
 
@@ -48,6 +49,121 @@ class NativeTests(unittest.TestCase):
         service.register(self.binding)
         self.assertFalse(service.bindings()[0]['enabled'])
         self.assertEqual(json.loads(service.bindings()[0]['config'])['filter'], 'at')
+    def test_codex_connect_requires_verification_even_with_a_configured_endpoint(self):
+        identity = dict(channel='room', member_id='member-1', session_token='private-token')
+        for source in ('local', 'quartet'):
+            for endpoint in ('', 'unix:///tmp/native-test.sock'):
+                with self.subTest(source=source, endpoint=endpoint), patch.dict(os.environ, {
+                    'TRIO_NATIVE_CLIENT': 'codex', 'TRIO_CODEX_ENDPOINT': endpoint,
+                }):
+                    result = native_connect_response(dict(identity), source=source,
+                                                     url='http://hub.example/sse')
+                    self.assertEqual(result['event_delivery']['readiness'], 'unverified')
+                    self.assertIn('A successful join is not readiness', result['instructions'])
+                    prefix = 'trio' if source == 'local' else 'quartet'
+                    self.assertIn(prefix + '_delivery_status', result['instructions'])
+                    self.assertEqual(result['monitor_hint'], '')
+    def test_codex_missing_listener_is_incomplete_setup_not_background_availability(self):
+        result = delivery_status('room', 'member-1', 'private-token')
+        self.assertEqual(result['state'], 'not_attached')
+        self.assertFalse(result['ready'])
+        self.assertTrue(result['hint'].startswith('Setup is incomplete:'))
+        self.assertIn('tell your peers', result['hint'])
+        self.assertFalse(service.bindings())  # Readiness checks must not connect or bind.
+    def test_codex_status_ignores_an_inherited_claude_channel_flag(self):
+        key = service.register(self.binding)
+        service.set_status(key, 'listening')
+        (service.state_dir() / 'service.json').write_text(json.dumps({'heartbeat': time.time()}))
+        for inherited in ('1', 'unavailable'):
+            with self.subTest(inherited=inherited), patch.dict(os.environ, {
+                'TRIO_NATIVE_CLIENT': 'codex', 'TRIO_CLAUDE_CHANNEL': inherited,
+            }):
+                result = delivery_status('room', 'member-1', 'private-token')
+                self.assertEqual((result['state'], result['ready']), ('listening', True))
+                missing = delivery_status('room', 'member-1', 'wrong-token')
+                self.assertEqual(missing['state'], 'not_attached')
+                self.assertIn('Launch Codex', missing['hint'])
+                self.assertNotIn('Monitor', missing['hint'])
+    def test_codex_can_stop_and_change_filter_with_an_inherited_claude_flag(self):
+        key = service.register(self.binding)
+        service.set_status(key, 'listening')
+        (service.state_dir() / 'service.json').write_text(json.dumps({'heartbeat': time.time()}))
+        for inherited in ('1', 'unavailable'):
+            with self.subTest(inherited=inherited), patch.dict(os.environ, {
+                'TRIO_NATIVE_CLIENT': 'codex', 'TRIO_CLAUDE_CHANNEL': inherited,
+            }):
+                service.configure_listener('room', 'member-1', 'private-token', enabled=True)
+                stopped = listen('room', 'member-1', 'private-token', enabled=False)
+                self.assertFalse(service.bindings()[0]['enabled'])
+                self.assertFalse(stopped['ready'])
+                listen('room', 'member-1', 'private-token', filter_mode='at')
+                row = service.bindings()[0]
+                self.assertFalse(row['enabled'])
+                self.assertEqual(json.loads(row['config'])['filter'], 'at')
+    def test_codex_readiness_needs_an_enabled_listening_subscription(self):
+        key = service.register(self.binding)
+        service_file = service.state_dir() / 'service.json'
+        service_file.write_text(json.dumps({'heartbeat': time.time()}))
+        for state in ('starting', 'reconnecting', 'attention', 'ended', 'stopped', 'listening'):
+            with self.subTest(state=state):
+                service.set_status(key, state)
+                result = delivery_status('room', 'member-1', 'private-token')
+                self.assertEqual(result['ready'], state == 'listening')
+        service.configure_listener('room', 'member-1', 'private-token', enabled=False)
+        # A delayed worker status update must not overrule the user's stop.
+        service.set_status(key, 'listening')
+        late = delivery_status('room', 'member-1', 'private-token')
+        self.assertFalse(late['ready'])
+        # Nor may the top-level state or the hint suggest it is, or should be, running.
+        self.assertEqual(late['state'], 'stopping')
+        self.assertIn('stays stopped', late['hint'])
+        self.assertNotIn('recovers on its own', late['hint'])
+        self.assertFalse(delivery_status('room', 'member-1', 'wrong-token')['ready'])
+    def test_codex_stop_and_terminal_states_come_before_service_health(self):
+        key = service.register(self.binding)
+        (service.state_dir() / 'service.json').unlink(missing_ok=True)   # no live service at all
+        service.configure_listener('room', 'member-1', 'private-token', enabled=False)
+        stopped = delivery_status('room', 'member-1', 'private-token')
+        # A listener stopped on purpose is not a service fault to repair.
+        self.assertEqual((stopped['state'], stopped['ready']), ('stopped', False))
+        self.assertIn('stays stopped', stopped['hint'])
+        self.assertNotIn('service', stopped['hint'].lower())
+        service.configure_listener('room', 'member-1', 'private-token', enabled=True)
+        for state, error, phrases in (
+                ('attention', 'unconfirmed_delivery', ('owning thread', 'durable delivery ledger', 'does not settle it')),
+                ('ended', 'membership_ended', ('not revived automatically', 'Never reconnect or reclaim'))):
+            with self.subTest(state=state):
+                service.set_status(key, state, error)
+                result = delivery_status('room', 'member-1', 'private-token')
+                self.assertEqual((result['state'], result['ready']), (state, False))
+                self.assertIn(error, result['hint'])
+                for phrase in phrases:
+                    self.assertIn(phrase, result['hint'])
+                # Restarting the service or the listener resolves neither.
+                self.assertNotIn('trio start', result['hint'])
+                self.assertNotIn('enabled=true', result['hint'])
+    def test_codex_saved_listening_state_is_not_ready_without_a_fresh_service(self):
+        key = service.register(self.binding)
+        service.set_status(key, 'listening')
+        service_file = service.state_dir() / 'service.json'
+        now = time.time()
+        cases = (None, '{invalid', '{}', '[]', json.dumps({'heartbeat': 'bad'}),
+                 json.dumps({'heartbeat': now - 60}), json.dumps({'heartbeat': now + 60}),
+                 json.dumps({'heartbeat': float('nan')}),
+                 json.dumps({'heartbeat': float('inf')}))
+        for heartbeat in cases:
+            with self.subTest(heartbeat=heartbeat):
+                if heartbeat is None:
+                    service_file.unlink(missing_ok=True)
+                else:
+                    service_file.write_text(heartbeat)
+                result = delivery_status('room', 'member-1', 'private-token')
+                self.assertFalse(result['ready'])
+                self.assertNotEqual(result['state'], 'listening')
+                self.assertIn('service', result['hint'].lower())
+        # Status inspection must neither reconnect nor mutate the saved binding.
+        row = service.bindings()[0]
+        self.assertEqual((row['status'], row['enabled'], row['revision']), ('listening', 1, 1))
     def test_filter_change_preserves_receipts(self):
         path = self.root / 'spool.sqlite'
         spool = Spool(path, self.binding)
@@ -134,7 +250,14 @@ class NativeTests(unittest.TestCase):
         self.assertEqual(config['mcpServers']['nth-qweb']['type'], 'stdio')
         for client in ('.claude', '.codex'):
             for flavor in ('trio', 'quartet'):
-                self.assertTrue((profile / client / 'skills' / flavor / 'SKILL.md').exists())
+                installed_skill = profile / client / 'skills' / flavor
+                for installed_name, source_name in (
+                    ('SKILL.md', f'SKILL-{flavor}.md'), ('AGENT-RUNTIME.md', 'AGENT-RUNTIME.md'),
+                    ('REFERENCE.md', f'REFERENCE-{flavor}.md'),
+                    ('PROTOCOLS.md', f'PROTOCOLS-{flavor}.md'),
+                ):
+                    self.assertEqual((installed_skill / installed_name).read_bytes(),
+                                     (ROOT / source_name).read_bytes())
         self.assertTrue(Path(result['server'], 'nth_event_service.py').exists())
         self.assertTrue(list(profile.glob('.claude.json.bak-*')))
     def test_managed_event_steers_active_turn_and_preserves_private_routing(self):

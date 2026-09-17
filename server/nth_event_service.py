@@ -246,6 +246,20 @@ class Observer:
                 client.stop()
 
 
+def service_alive(window=8):
+    """True only for a fresh heartbeat. Reads one file; never starts the service.
+
+    A registry row keeps saying 'listening' after the service that owned it has
+    died, so readiness is decided here and not from the row.
+    """
+    try:
+        age = time.time() - json.loads((state_dir() / 'service.json').read_text())['heartbeat']
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+    # A NaN or infinite heartbeat fails both comparisons; a future one is not fresh.
+    return -1 < age < window
+
+
 def ensure_service():
     ready = state_dir() / 'service.json'
     try:
