@@ -67,11 +67,14 @@ def format_event(prefix, channel, member_id, message):
 
 
 class Listener:
-    def __init__(self, hub, binding, poll, close=None):
+    def __init__(self, hub, binding, poll, close=None, high_water=0):
         self.hub = hub
         self.binding = dict(binding)
         self.poll = poll                      # callable(arguments: dict) -> dict; may block
         self.close = close
+        # Inherited from a replaced listener: a filter change or a re-enable must
+        # not push again what this process has already written.
+        self.high_water = high_water
         self.status = 'starting'
         self.error = ''
         self.written = 0
@@ -102,6 +105,8 @@ class Listener:
     def _run(self):
         try:
             self._loop()
+        except Exception as exc:  # noqa: BLE001 - a dead thread must never keep reporting 'listening'
+            self.status, self.error = 'ended', type(exc).__name__
         finally:
             if self.close:
                 try:
@@ -111,11 +116,10 @@ class Listener:
 
     def _loop(self):
         b = self.binding
-        high_water = 0
         failures = 0
         while not self._stop.is_set():
             started = time.monotonic()
-            before = high_water
+            before = self.high_water
             try:
                 poll = self.poll({
                     'channel': b['channel'], 'member_id': b['member_id'],
@@ -141,22 +145,27 @@ class Listener:
                 self.status, self.error = 'ended', 'channel ended'
                 return
             self.status, self.error = 'listening', ''
-            messages = [m for m in (poll.get('messages') or [])
-                        if isinstance(m.get('id'), int) and m['id'] > high_water]
-            for message in select_messages({'messages': messages}, b['filter']):
-                content, meta = format_event(self.hub.prefix, b['channel'], b['member_id'], message)
-                if not self.hub.push(content, meta, cancelled=self._stop.is_set):
-                    if not self._stop.is_set():
-                        self.status, self.error = 'ended', 'transport closed'
+            messages = sorted((m for m in (poll.get('messages') or [])
+                               if isinstance(m.get('id'), int) and m['id'] > self.high_water),
+                              key=lambda m: m['id'])
+            selected = {m['id'] for m in select_messages({'messages': messages}, b['filter'])}
+            for message in messages:
+                # Stop is honoured between messages, and the mark moves one message
+                # at a time: whatever was not written stays unseen for a successor.
+                if self._stop.is_set():
                     return
-                self.written += 1
-                self.last_written = message['id']
-            # Advance only after every selected message is on the transport.
-            if messages:
-                high_water = max(m['id'] for m in messages)
+                if message['id'] in selected:
+                    content, meta = format_event(self.hub.prefix, b['channel'], b['member_id'], message)
+                    if not self.hub.push(content, meta, cancelled=self._stop.is_set):
+                        if not self._stop.is_set():
+                            self.status, self.error = 'ended', 'transport closed'
+                        return
+                    self.written += 1
+                    self.last_written = message['id']
+                self.high_water = message['id']
             # A non-acking poll returns the same backlog immediately. Same guard
             # as the spoke monitor: a fast, empty-handed poll waits before retrying.
-            if time.monotonic() - started < 1.0 and high_water == before:
+            if time.monotonic() - started < 1.0 and self.high_water == before:
                 self._stop.wait(2.0)
 
 
@@ -184,33 +193,59 @@ class ChannelHub:
         so a slow loop is waited out, never treated as a failure: giving up early
         would drop a message the listener is about to mark as seen.
         """
-        if self.writer is None or self.loop is None:
+        if self.writer is None or self.loop is None or (cancelled and cancelled()):
             return False
         note = types.JSONRPCNotification(jsonrpc='2.0', method=METHOD,
                                          params={'content': content, 'meta': meta})
-        future = asyncio.run_coroutine_threadsafe(
-            self.writer.send(SessionMessage(message=types.JSONRPCMessage(note))), self.loop)
+
+        async def write():
+            # Checked here, on the loop thread, at the moment of writing. Cancelling
+            # the future from the waiting thread is not enough: asyncio runs a new
+            # task's first step before a cancellation scheduled after it, and a
+            # stream write completes in that first step.
+            if cancelled and cancelled():
+                return False
+            await self.writer.send(SessionMessage(message=types.JSONRPCMessage(note)))
+            return True
+
+        future = asyncio.run_coroutine_threadsafe(write(), self.loop)
         while True:
             try:
-                future.result(timeout=5)
-                return True
+                return future.result(timeout=.2)
             except (TimeoutError, concurrent.futures.TimeoutError):
-                if self.loop.is_closed() or (cancelled and cancelled() and future.cancel()):
+                if self.loop.is_closed():
                     return False
+                # Stopped while still queued: stop waiting. write() refuses to send
+                # whenever the loop reaches it. A stop landing in the instant a send
+                # completes can report an unwritten message that was written; the
+                # successor then repeats that one message. Never a loss.
+                if cancelled and cancelled() and future.cancel():
+                    return False
+            except concurrent.futures.CancelledError:
+                return False
             except Exception:  # noqa: BLE001 - closed transport: delivery is over, the process is not
                 return False
 
     def start(self, channel, member_id, session_token, filter_mode='about'):
+        """Start or replace this membership's listener.
+
+        Called directly only for a verified successful connect, which may carry a
+        rotated token. Agent-supplied credentials go through configure().
+        """
         if filter_mode not in FILTERS:
             raise ValueError('Invalid listening filter')
         binding = {'source': self.source, 'url': self.url, 'channel': channel,
                    'member_id': member_id, 'session_token': session_token, 'filter': filter_mode}
         with self.lock:
             previous = self.listeners.pop((channel, member_id), None)
+            inherited = 0
             if previous:
                 previous.stop()
+                # The stopped thread may still be inside a poll; it advances its
+                # mark only per written message, so the value read here is safe.
+                inherited = previous.high_water
             poll, close = self.poll_factory(binding)
-            listener = Listener(self, binding, poll, close)
+            listener = Listener(self, binding, poll, close, high_water=inherited)
             self.listeners[listener.key] = listener
             listener.start()
         return listener.public()
@@ -228,17 +263,33 @@ class ChannelHub:
     def configure(self, channel, member_id, session_token, *, filter_mode=None, enabled=None):
         if filter_mode is not None and filter_mode not in FILTERS:
             raise ValueError('Invalid listening filter')
-        current = self._owned(channel, member_id, session_token)
+        with self.lock:
+            existing = self.listeners.get((channel, member_id))
+        current = existing if existing and existing.binding['session_token'] == session_token else None
+        if existing and not current and existing.status != 'ended':
+            # Credentials that do not own the listener change nothing: they must
+            # never evict or replace a working subscription.
+            return []
         if enabled is False:
             if current:
+                if filter_mode:
+                    current.binding['filter'] = filter_mode
                 current.stop()
             return self.status(channel, member_id, session_token)
-        # enabled True/None: (re)start from credentials alone. After a session
-        # restart this frontend is a new process, and the rule is probe, then listen.
         wanted = filter_mode or (current.binding['filter'] if current else 'about')
+        if current and enabled is None and current.status == 'stopped':
+            # A filter change alone never re-enables an explicit stop; the filter
+            # is remembered for the next enable.
+            current.binding['filter'] = wanted
+            return [current.public()]
         if current and current.status in ('starting', 'listening', 'reconnecting') \
                 and current.binding['filter'] == wanted:
             return [current.public()]
+        if current is None and enabled is None:
+            return []
+        # enabled=True (or a filter change on a live listener): (re)start from
+        # credentials alone. After a session restart this frontend is a new
+        # process, and the rule is probe, then listen.
         return [self.start(channel, member_id, session_token, wanted)]
 
     def stop_all(self):

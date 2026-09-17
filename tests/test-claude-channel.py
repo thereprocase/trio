@@ -25,17 +25,24 @@ class RecordingWriter:
     def __init__(self):
         self.sent = []
         self.closed = False
+        self.on_send = lambda: None
 
     async def send(self, session_message):
         if self.closed:
             raise RuntimeError('transport closed')
         self.sent.append(session_message.message.root)
+        self.on_send()
 
 
 class ScriptedSource:
-    """Returns each scripted response once, then an empty long poll until stopped."""
+    """Returns each scripted response once, then `idle` on every later poll.
+
+    A hub returns the same unread backlog until the agent acks, so a test that
+    replaces a listener sets `idle` to that backlog.
+    """
     def __init__(self, responses):
         self.responses = list(responses)
+        self.idle = {'event': 'no_new', 'messages': []}
         self.calls = []
         self.closed = False
 
@@ -48,7 +55,7 @@ class ScriptedSource:
                     raise response
                 return response
             time.sleep(.05)
-            return {'event': 'no_new', 'messages': []}
+            return self.idle
 
         def close():
             self.closed = True
@@ -209,6 +216,83 @@ class ChannelTests(unittest.TestCase):
         self.assertEqual(len(hub.listeners), 1)
         self.assertIsNot(hub.listeners[('test', 'receiver')], first)
         self.assertTrue(wait_until(lambda: not first.thread.is_alive()))
+
+    def test_filter_change_does_not_replay_what_was_already_written(self):
+        hub = self.hub([])
+        self.source.idle = {'event': 'new_messages', 'messages': MESSAGES}   # never acked
+        hub.start('test', 'receiver', TOKEN, 'at')
+        self.assertTrue(wait_until(lambda: self.pushed_ids() == [2, 4]))
+        hub.configure('test', 'receiver', TOKEN, filter_mode='all')
+        later = {'id': 5, 'from': 'peer', 'content': 'ambient, after the change'}
+        self.source.idle = {'event': 'new_messages', 'messages': MESSAGES + [later]}
+        self.assertTrue(wait_until(lambda: 5 in self.pushed_ids()))
+        self.assertEqual(self.pushed_ids(), [2, 4, 5])
+
+    def test_filter_change_alone_never_reenables_an_explicit_stop(self):
+        hub = self.hub([])
+        hub.start('test', 'receiver', TOKEN, 'about')
+        hub.configure('test', 'receiver', TOKEN, enabled=False)
+        stopped = hub.listeners[('test', 'receiver')]
+        changed = hub.configure('test', 'receiver', TOKEN, filter_mode='all')
+        self.assertEqual((changed[0]['status'], changed[0]['enabled'], changed[0]['filter']),
+                         ('stopped', False, 'all'))
+        self.assertIs(hub.listeners[('test', 'receiver')], stopped)
+        resumed = hub.configure('test', 'receiver', TOKEN, enabled=True)
+        self.assertEqual((resumed[0]['filter'], resumed[0]['enabled']), ('all', True))
+        # Without a listener there is nothing to change, and nothing is started.
+        self.assertEqual(hub.configure('test', 'stranger', TOKEN, filter_mode='all'), [])
+        self.assertNotIn(('test', 'stranger'), hub.listeners)
+
+    def test_credentials_that_do_not_own_a_listener_never_replace_it(self):
+        hub = self.hub([])
+        hub.start('test', 'receiver', TOKEN, 'about')
+        first = hub.listeners[('test', 'receiver')]
+        for attempt in ({'enabled': True}, {'filter_mode': 'all'}, {'filter_mode': 'at', 'enabled': True}):
+            self.assertEqual(hub.configure('test', 'receiver', 'someone-elses-token', **attempt), [], attempt)
+            self.assertIs(hub.listeners[('test', 'receiver')], first)
+            self.assertTrue(first.thread.is_alive())
+            self.assertEqual(first.binding['filter'], 'about')
+        hub.configure('test', 'receiver', TOKEN, enabled=False)           # a stopped one is still owned
+        self.assertEqual(hub.configure('test', 'receiver', 'someone-elses-token', enabled=True), [])
+        self.assertIs(hub.listeners[('test', 'receiver')], first)
+
+    def test_an_ended_listener_can_be_restarted_with_fresh_credentials(self):
+        hub = self.hub([{'error': 'session revoked'}])
+        hub.start('test', 'receiver', TOKEN)
+        self.assertTrue(wait_until(lambda: hub.status('test', 'receiver', TOKEN)[0]['status'] == 'ended'))
+        fresh = hub.configure('test', 'receiver', 'token-after-reconnect', enabled=True)
+        self.assertEqual(fresh[0]['enabled'], True)
+        self.assertEqual(hub.status('test', 'receiver', TOKEN), [])
+
+    def test_stop_withdraws_a_write_still_queued_behind_a_busy_loop(self):
+        hub = self.hub([])
+        release, stopped, result = threading.Event(), threading.Event(), []
+        self.loop.call_soon_threadsafe(release.wait, 10)   # a synchronous tool holding the loop
+        worker = threading.Thread(target=lambda: result.append(
+            hub.push('queued', {'message_id': '9'}, cancelled=stopped.is_set)))
+        worker.start()
+        time.sleep(.4)
+        self.assertEqual(result, [])                       # still waiting: never dropped on its own
+        stopped.set()
+        worker.join(timeout=3)
+        self.assertEqual(result, [False])
+        release.set()
+        time.sleep(.4)
+        self.assertEqual(self.writer.sent, [])             # nothing escaped after the stop
+        self.assertFalse(hub.push('after stop', {'message_id': '10'}, cancelled=stopped.is_set))
+
+    def test_stop_mid_batch_loses_nothing_and_a_reenable_repeats_nothing(self):
+        hub = self.hub([])
+        self.source.idle = {'event': 'new_messages', 'messages': MESSAGES}
+        self.writer.on_send = hub.stop_all                 # stop lands right after the first write
+        hub.start('test', 'receiver', TOKEN, 'all')
+        first = hub.listeners[('test', 'receiver')]
+        self.assertTrue(wait_until(lambda: not first.thread.is_alive()))
+        self.assertEqual((self.pushed_ids(), first.high_water), ([1], 1))
+        self.writer.on_send = lambda: None
+        hub.configure('test', 'receiver', TOKEN, enabled=True)
+        self.assertTrue(wait_until(lambda: len(self.writer.sent) == 4))
+        self.assertEqual(self.pushed_ids(), [1, 2, 3, 4])
 
 
 if __name__ == '__main__':
