@@ -151,6 +151,7 @@ can cause them. Each has a test that fails on the code before the fix.
 | A process-group SIGINT sent to the real launcher (Linux) | the program handles it and exits with its own status; with the handler removed the launcher dies and kills it |
 | `claude --version`, `claude mcp list` through the launcher, real Claude Code 2.1.274 | real output, no flag added |
 | `codex --version`, `codex mcp list` through the launcher, real codex-cli 0.154.0 | real output, no `--remote`, no server started |
+| Terminal detection in a real Git Bash (mintty) window, Windows | with a pseudo console `isatty` is true; with `MSYS=disable_pcon` it is false, the pipes are named `\msys-…-pty0-from-master-nat`, and the launcher still finds a terminal |
 | Reclaim race and legacy `ended` reply | reproduced by the reviewer on the unfixed commit, gone after the fix |
 
 Test files touched by this release pass on Windows and on Linux. The full
@@ -174,6 +175,15 @@ Those of beta.1 stand, with these changes:
   started from inside a session, because tools do not load your shell profile.
   A one-shot child started through the launcher is now safe: the variable is
   removed for it.
+- A prompt that begins with `-` cannot be passed on the command line through
+  the functions: PowerShell removes a bare `--` before a function sees it, and
+  a leading `--` typed to the bash function is read as Trio's own separator.
+  Type such a prompt inside the session.
+- Options may come before a subcommand. The launcher follows Claude Code's own
+  parsing: `claude --model NAME doctor` is `doctor`, and `claude --debug mcp`
+  is a session with the debug filter `mcp`, because `--debug` takes the next
+  word. When a launch that looks like a session finds no terminal, the
+  launcher says so in one line on stderr.
 - The launch confirmation still recurs and cannot be pre-accepted. Claude Code
   documents an administrator allowlist for channel plugins on Team and
   Enterprise plans that may remove it; that route is untested here.

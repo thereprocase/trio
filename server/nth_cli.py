@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import shutil
 import signal
@@ -105,6 +106,24 @@ CLAUDE_SUBCOMMANDS = frozenset((
 # with channels, so it is left exactly as plain Claude Code runs it.
 CLAUDE_ONE_SHOT_FLAGS = frozenset(('-p', '--print', '-h', '--help', '-v', '--version',
                                    '--bg', '--background'))
+# Options may come before a subcommand (`claude --debug mcp list`), so a word that
+# is an option's value must not be read as one. From `claude --help`, 2.1.274: an
+# option written <value> or [value] takes the next word, one written <values...>
+# takes every word up to the next option.
+CLAUDE_VALUE_OPTIONS = frozenset((
+    '--agent', '--agents', '--append-system-prompt', '--append-system-prompt-file', '--autocompact',
+    '--cloud', '-d', '--debug', '--debug-file', '--effort', '--environment', '--fallback-model',
+    '--from-pr', '--input-format', '--json-schema', '--max-budget-usd', '--model', '-n', '--name',
+    '--output-format', '--permission-mode', '--permission-prompts', '--plugin-dir', '--plugin-url',
+    '--prompt-suggestions', '--remote-control', '--remote-control-session-name-prefix', '-r', '--resume',
+    '--session-id', '--setting-sources', '--settings', '--system-prompt', '--system-prompt-file',
+    '--system-prompt-snapshot', '--teleport', '-w', '--worktree'))
+CLAUDE_LIST_OPTIONS = frozenset((
+    '--add-dir', '--allowedTools', '--allowed-tools', '--betas', '--disallowedTools', '--disallowed-tools',
+    '--file', '--mcp-config', '--tools', CHANNEL_FLAG))
+# What MSYS2 and Cygwin name the pipes they hand a native Windows program when
+# their terminal runs without a pseudo console.
+MSYS_TERMINAL_PIPE = re.compile(r'\\(msys|cygwin)-[0-9a-f]+-pty\d+-(from|to)-master', re.IGNORECASE)
 
 
 # The same for Codex (codex-cli 0.154.0). Only the subcommands whose own --help lists
@@ -231,12 +250,56 @@ def claude_environment():
     return dict(os.environ, TRIO_CLAUDE_CHANNEL='1')
 
 
+def msys_terminal(stream):
+    """True when `stream` is the pipe of an MSYS2 or Cygwin terminal (Git Bash's
+    mintty) that runs without a pseudo console. A person is typing there, but a
+    native Windows program is handed pipes and isatty() says no."""
+    if os.name != 'nt':
+        return False
+    try:
+        import ctypes
+        import msvcrt
+        from ctypes import wintypes
+        kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+        kernel32.GetFileType.argtypes = [wintypes.HANDLE]
+        kernel32.GetFileInformationByHandleEx.argtypes = [wintypes.HANDLE, ctypes.c_int,
+                                                          ctypes.c_void_p, wintypes.DWORD]
+        handle = msvcrt.get_osfhandle(stream.fileno())
+        if kernel32.GetFileType(handle) != 3:                       # FILE_TYPE_PIPE
+            return False
+        buffer = ctypes.create_string_buffer(4 + 2 * 512)
+        if not kernel32.GetFileInformationByHandleEx(handle, 2, buffer, len(buffer)):   # FileNameInfo
+            return False
+        length = int.from_bytes(buffer.raw[:4], 'little')
+        return bool(MSYS_TERMINAL_PIPE.match(buffer.raw[4:4 + length].decode('utf-16-le', 'replace')))
+    except Exception:  # noqa: BLE001 - a probe: any failure means "not known to be a terminal"
+        return False
+
+
 def terminal_attached():
     """True when a person is at both ends. An interactive session needs a terminal."""
     try:
-        return sys.stdin.isatty() and sys.stdout.isatty()
+        return all(stream.isatty() or msys_terminal(stream) for stream in (sys.stdin, sys.stdout))
     except (AttributeError, ValueError):
         return False
+
+
+def claude_subcommand(arguments):
+    """The subcommand a Claude Code argv names, or '' for a session."""
+    skip = listing = False
+    for argument in arguments:
+        if argument == '--':
+            break
+        if argument.startswith('-'):
+            name = argument.split('=', 1)[0]
+            skip = name in CLAUDE_VALUE_OPTIONS and '=' not in argument
+            listing = name in CLAUDE_LIST_OPTIONS
+        elif skip:
+            skip = False
+        elif not listing:
+            # The first word that is no option's value: a subcommand, or the prompt.
+            return argument if argument in CLAUDE_SUBCOMMANDS else ''
+    return ''
 
 
 def claude_session_wanted(arguments, terminal=True):
@@ -245,11 +308,13 @@ def claude_session_wanted(arguments, terminal=True):
     arguments = list(arguments)
     if arguments[:1] == ['--']:
         arguments = arguments[1:]
-    if not terminal or arguments[:1] and arguments[0] in CLAUDE_SUBCOMMANDS:
+    if not terminal or claude_subcommand(arguments):
         return False
     # Options end at a bare `--`: what follows is the prompt, whatever it looks like.
     options = arguments[:arguments.index('--')] if '--' in arguments else arguments
-    return not any(argument in CLAUDE_ONE_SHOT_FLAGS for argument in options)
+    # Short flags combine: `-pc` is --print --continue.
+    return not any(argument in CLAUDE_ONE_SHOT_FLAGS or re.fullmatch(r'-[A-Za-z]*[phv][A-Za-z]*', argument)
+                   for argument in options)
 
 
 def claude_passthrough(arguments, binary=None):
@@ -300,6 +365,9 @@ def launch_codex(arguments):
     if arguments[:1] == ['--']:
         arguments = arguments[1:]
     if not codex_session_wanted(arguments, terminal_attached()):
+        if codex_session_wanted(arguments):
+            print('[trio] no terminal on stdin and stdout: starting Codex without Trio\'s shared server',
+                  file=sys.stderr)
         binary = codex_binary()
         guard_command_shim(binary, arguments)
         return run_foreground([binary, *arguments])
@@ -415,6 +483,9 @@ def main(argv=None):
     if argv[:1] == ['claude']:
         os.umask(0o077)
         if not claude_session_wanted(argv[1:], terminal_attached()):
+            if claude_session_wanted(argv[1:]):
+                print('[trio] no terminal on stdin and stdout: starting Claude Code without channel '
+                      'delivery', file=sys.stderr)
             return run_foreground(claude_passthrough(argv[1:]), env=plain_environment())
         return run_foreground(claude_command(argv[1:]), env=claude_environment())
     parser = argparse.ArgumentParser(description=__doc__)

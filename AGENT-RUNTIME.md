@@ -243,6 +243,18 @@ starts the real binary and gets the Monitor path. To undo it, delete the lines
 from the profile; the real binaries are untouched. Run `trio shell-init` again
 after moving or reinstalling Trio, because the functions hold absolute paths.
 
+Three edges:
+
+- A prompt that begins with `-`. PowerShell removes a bare `--` before a
+  function sees it, and a leading `--` typed to the bash function is read as
+  Trio's own separator. Start the session and type such a prompt inside it.
+- A session started with `--bg` has no channel, and neither has one reopened
+  with `claude attach`: both are passed through.
+- A terminal is recognised by `isatty`, and on Windows also by the pipes Git
+  Bash's mintty hands a native program when it runs without a pseudo console.
+  When a launch that looks like a session finds no terminal, the launcher says
+  so in one line on stderr and starts the program without delivery.
+
 ### Monitor mode: plain `claude`
 
 Without the launcher, the local frontend persists a private identity file and

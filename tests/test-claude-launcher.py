@@ -202,14 +202,50 @@ class LauncherTests(unittest.TestCase):
                 self.assertNotIn('TRIO_CLAUDE_CHANNEL', launched.kwargs['env'])
                 self.assertEqual(launched.kwargs['env']['UNRELATED_SETTING'], 'kept')
 
-    def test_without_a_terminal_nothing_is_added(self):
+    def test_without_a_terminal_nothing_is_added_and_it_says_so(self):
         self.configure()
         self.terminal.stop()
         try:
-            with patch.object(nth_cli, 'terminal_attached', return_value=False):
+            with patch.object(nth_cli, 'terminal_attached', return_value=False), \
+                 patch('sys.stderr', new_callable=io.StringIO) as stderr:
                 self.assertEqual(self.launch('--continue').args[0], ['claude', '--continue'])
+                # It looked like a session: passing it through in silence would be deaf by default.
+                self.assertIn('without channel delivery', stderr.getvalue())
+                said = len(stderr.getvalue())
+                # A one-shot never wanted a channel, so there is nothing to say.
+                self.launch('-p', 'a prompt')
+                self.assertEqual(len(stderr.getvalue()), said)
         finally:
             self.terminal.start()
+
+    def test_a_git_bash_terminal_without_a_pseudo_console_counts_as_a_terminal(self):
+        # The pipe names a native Windows program was handed by mintty with MSYS=disable_pcon.
+        for name in ('\\msys-1888ae32e00d56aa-pty0-from-master-nat', '\\msys-1888ae32e00d56aa-pty0-to-master-nat',
+                     '\\cygwin-e022582115c10879-pty1-from-master'):
+            self.assertTrue(nth_cli.MSYS_TERMINAL_PIPE.match(name), name)
+        for name in ('\\msys-1888ae32e00d56aa-pipe-0x1', '\\mojo.1234.5678', 'msys-1888ae32e00d56aa-pty0-from-master', ''):
+            self.assertFalse(nth_cli.MSYS_TERMINAL_PIPE.match(name), name)
+        # An ordinary pipe, as a script or an editor hands over, is not a terminal.
+        probe = ('import sys\n'
+                 f'sys.path.insert(0, {str(Path(nth_cli.__file__).resolve().parent)!r})\n'
+                 'import nth_cli\n'
+                 'print(nth_cli.msys_terminal(sys.stdin), nth_cli.terminal_attached())\n')
+        done = subprocess.run([sys.executable, '-c', probe], input='', capture_output=True, text=True, timeout=60)
+        self.assertEqual(done.stdout.split(), ['False', 'False'], done.stderr[-400:])
+
+    def test_options_before_a_subcommand_do_not_hide_it(self):
+        wanted = nth_cli.claude_session_wanted
+        for arguments in (['--model', 'chosen-model', 'doctor'], ['--model=chosen-model', 'mcp', 'list'],
+                          ['--settings', 'file.json', '--verbose', 'update'], ['-pc', 'a prompt'],
+                          ['-cp', 'a prompt']):
+            with self.subTest(plain=arguments):
+                self.assertFalse(wanted(arguments))
+        # Claude Code's own parser gives these words to the option before them, so
+        # they are values or a prompt, never a subcommand.
+        for arguments in (['--debug', 'mcp', 'list'], ['--add-dir', 'one', 'two', 'mcp'], ['--resume', 'doctor'],
+                          ['--model', 'mcp'], ['--continue', 'fix the mcp server'], ['-c']):
+            with self.subTest(session=arguments):
+                self.assertTrue(wanted(arguments))
 
     def test_a_prompt_after_the_separator_is_never_read_as_an_option(self):
         self.configure()
