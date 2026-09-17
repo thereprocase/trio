@@ -82,7 +82,12 @@ class NativeTests(unittest.TestCase):
         service.configure_listener('room', 'member-1', 'private-token', enabled=False)
         # A delayed worker status update must not overrule the user's stop.
         service.set_status(key, 'listening')
-        self.assertFalse(delivery_status('room', 'member-1', 'private-token')['ready'])
+        late = delivery_status('room', 'member-1', 'private-token')
+        self.assertFalse(late['ready'])
+        # Nor may the top-level state or the hint suggest it is, or should be, running.
+        self.assertEqual(late['state'], 'stopping')
+        self.assertIn('stays stopped', late['hint'])
+        self.assertNotIn('recovers on its own', late['hint'])
         self.assertFalse(delivery_status('room', 'member-1', 'wrong-token')['ready'])
     def test_codex_saved_listening_state_is_not_ready_without_a_fresh_service(self):
         key = service.register(self.binding)

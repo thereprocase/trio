@@ -149,6 +149,10 @@ def delivery_status(channel, member_id, session_token, hub=None):
                        'through trio codex/trio desktop, then check again.' + POLL_ONLY)
     state = listeners[0]['status']
     prefix = 'trio' if listeners[0]['source'] == 'local' else 'quartet'
+    if not listeners[0]['enabled'] and state not in ('stopped', 'ended', 'attention'):
+        # A worker's late status write can land after the user's stop. The stop
+        # wins: report it as stopping and never advise turning it back on.
+        return _status(listeners, 'stopping', _recovery_hint(prefix, 'stopped'))
     return _status(listeners, state, _recovery_hint(prefix, state, listeners[0]['error']))
 
 
