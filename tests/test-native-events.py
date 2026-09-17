@@ -16,7 +16,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'server'))
 import nth_event_service as service
-from nth_event_access import delivery_status, native_connect_response
+from nth_event_access import delivery_status, listen, native_connect_response
 from nth_codex_relay import Spool
 from nth_codex_runtime import CodexRuntimeManager
 
@@ -70,6 +70,36 @@ class NativeTests(unittest.TestCase):
         self.assertTrue(result['hint'].startswith('Setup is incomplete:'))
         self.assertIn('tell your peers', result['hint'])
         self.assertFalse(service.bindings())  # Readiness checks must not connect or bind.
+    def test_codex_status_ignores_an_inherited_claude_channel_flag(self):
+        key = service.register(self.binding)
+        service.set_status(key, 'listening')
+        (service.state_dir() / 'service.json').write_text(json.dumps({'heartbeat': time.time()}))
+        for inherited in ('1', 'unavailable'):
+            with self.subTest(inherited=inherited), patch.dict(os.environ, {
+                'TRIO_NATIVE_CLIENT': 'codex', 'TRIO_CLAUDE_CHANNEL': inherited,
+            }):
+                result = delivery_status('room', 'member-1', 'private-token')
+                self.assertEqual((result['state'], result['ready']), ('listening', True))
+                missing = delivery_status('room', 'member-1', 'wrong-token')
+                self.assertEqual(missing['state'], 'not_attached')
+                self.assertIn('Launch Codex', missing['hint'])
+                self.assertNotIn('Monitor', missing['hint'])
+    def test_codex_can_stop_and_change_filter_with_an_inherited_claude_flag(self):
+        key = service.register(self.binding)
+        service.set_status(key, 'listening')
+        (service.state_dir() / 'service.json').write_text(json.dumps({'heartbeat': time.time()}))
+        for inherited in ('1', 'unavailable'):
+            with self.subTest(inherited=inherited), patch.dict(os.environ, {
+                'TRIO_NATIVE_CLIENT': 'codex', 'TRIO_CLAUDE_CHANNEL': inherited,
+            }):
+                service.configure_listener('room', 'member-1', 'private-token', enabled=True)
+                stopped = listen('room', 'member-1', 'private-token', enabled=False)
+                self.assertFalse(service.bindings()[0]['enabled'])
+                self.assertFalse(stopped['ready'])
+                listen('room', 'member-1', 'private-token', filter_mode='at')
+                row = service.bindings()[0]
+                self.assertFalse(row['enabled'])
+                self.assertEqual(json.loads(row['config'])['filter'], 'at')
     def test_codex_readiness_needs_an_enabled_listening_subscription(self):
         key = service.register(self.binding)
         service_file = service.state_dir() / 'service.json'

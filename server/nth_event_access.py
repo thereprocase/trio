@@ -187,6 +187,10 @@ def _status(listeners, state, hint):
 def _is_claude_session():
     """A Claude client, or any server the `trio claude` launcher started. An unset
     client keeps the registry path it has always had."""
+    # A Codex launched inside Claude inherits the channel flag. Its explicit
+    # provider wins: Claude fallback must not hide Codex status or prevent a stop.
+    if os.environ.get('TRIO_NATIVE_CLIENT') == 'codex':
+        return False
     return (os.environ.get('TRIO_NATIVE_CLIENT') == 'claude'
             or os.environ.get('TRIO_CLAUDE_CHANNEL') in ('1', 'unavailable'))
 
