@@ -14,6 +14,8 @@ import nth_quartet_proxy as proxy
 
 TOKEN = 'test-capability'
 HUB_GUIDANCE = 'Launch a Monitor with nth_spoke_monitor.py'
+HUB_FOOTER = ('[server] Stay connected. RESTART YOUR BACKGROUND MONITOR NOW if it is not running. '
+              '[server] Monitor heartbeat stale. Spokes: launch nth_spoke_monitor.py.')
 PROPERTIES = {key: {'type': 'string'} for key in ('channel', 'member_id', 'session_token')}
 
 
@@ -53,8 +55,11 @@ class FakeHub:
             body = {'ok': True, 'channel': 'room', 'member_id': 'member-1', 'session_token': TOKEN,
                     'monitor_hint': 'python3 nth_spoke_monitor.py room member-1',
                     'instructions': HUB_GUIDANCE}
+        elif name == 'quartet_roster':
+            body = {'ok': True, 'members': []}                       # nothing for a frontend to adapt
         else:
-            body = {'ok': True, 'echo': params['arguments']}
+            body = {'ok': True, 'echo': params['arguments'], 'footer': HUB_FOOTER,
+                    'messages': [{'id': 1, 'from': 'peer', 'content': HUB_FOOTER}]}
         text = json.dumps(body)
         return {'content': [{'type': 'text', 'text': text}], 'structuredContent': {'result': text},
                 'isError': False}
@@ -120,11 +125,30 @@ class ProxyTests(unittest.TestCase):
         self.call(server, 'quartet_ack', channel='room', member_id='someone-else', through_id=4)
         self.assertNotIn('session_token', remote.calls[-1][1]['arguments'])
 
+    def test_hub_monitor_footers_are_adapted_in_both_forms_and_peer_content_is_not(self):
+        for environment in ({'TRIO_NATIVE_CLIENT': 'claude', 'TRIO_CLAUDE_CHANNEL': '1'},
+                            {'TRIO_NATIVE_CLIENT': 'codex'}):
+            with self.subTest(environment=environment):
+                FakeHub.instances.clear()
+                result = self.call(self.serve(**environment), 'quartet_ack',
+                                   channel='room', member_id='member-1', through_id=1)
+                self.assertEqual(result.structuredContent, {'result': result.content[0].text})
+                body = json.loads(result.content[0].text)
+                self.assertNotIn('MONITOR NOW', body['footer'])
+                self.assertNotIn('heartbeat stale', body['footer'])
+                self.assertIn('quartet_delivery_status', body['footer'])
+                self.assertEqual(body['messages'][0]['content'], HUB_FOOTER)
+        # Nothing to adapt: the hub's own bytes pass through untouched.
+        result = self.call(self.serve(TRIO_NATIVE_CLIENT='codex'), 'quartet_roster', channel='room', member_id='m')
+        self.assertEqual(result.content[0].text, json.dumps({'ok': True, 'members': []}))
+
     def test_without_channel_mode_calls_pass_through_unchanged(self):
         server = self.serve(TRIO_NATIVE_CLIENT='claude')
         self.call(server, 'quartet_connect', summary='test', name='member', channel='room')
-        self.call(server, 'quartet_ack', channel='room', member_id='member-1', through_id=4)
+        result = self.call(server, 'quartet_ack', channel='room', member_id='member-1', through_id=4)
         self.assertNotIn('session_token', FakeHub.instances[0].calls[-1][1]['arguments'])
+        # A Claude session that does run a Monitor keeps the hub's guidance.
+        self.assertEqual(json.loads(result.content[0].text)['footer'], HUB_FOOTER)
 
 
 if __name__ == '__main__':

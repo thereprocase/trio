@@ -12,7 +12,8 @@ import os
 from mcp.server import Server
 from mcp import types
 from nth_spoke_monitor import MCPSSEClient
-from nth_event_access import native_connect_response, delivery_status, listen
+from nth_event_access import (adapt_response_guidance, native_connect_response,
+                              delivery_status, listen)
 from nth_claude_channel import (ChannelHub, call_succeeded, channel_mode,
                                 quartet_poll_factory, run_stdio)
 
@@ -72,36 +73,53 @@ def create_server(url):
         response = await remote('tools/call', {'name': name, 'arguments': arguments})
         if hub is not None:
             hub.observe(name, arguments, call_succeeded(response))
-        if name == 'quartet_connect' and not response.get('isError'):
-            for block in response.get('content', []):
-                if block.get('type') == 'text':
-                    try:
-                        body = json.loads(block['text'])
-                    except ValueError:
-                        continue
-                    if isinstance(body, dict):
-                        body = native_connect_response(body, source='quartet', url=url)
-                        if hub is not None and not body.get('error') and all(
-                                body.get(k) for k in ('channel', 'member_id', 'session_token')):
-                            # The same successful connect result Trio binds a Codex
-                            # thread from. A listener failure must not fail the join.
-                            try:
-                                body['event_delivery']['listener'] = hub.start(
-                                    body['channel'], body['member_id'], body['session_token'])
-                            except Exception as exc:  # noqa: BLE001
-                                body['event_delivery']['listener'] = {'status': 'failed', 'error': type(exc).__name__}
-                        block['text'] = json.dumps(body)
-                        # The hub also returns the body as structured content, and a
-                        # host may show the model that form. Left as it was, it would
-                        # carry the hub's own monitor guidance past this rewrite.
-                        structured = response.get('structuredContent')
-                        if isinstance(structured, dict):
-                            if isinstance(structured.get('result'), str):
-                                structured['result'] = block['text']
-                            else:
-                                response['structuredContent'] = body
-                        break
+        if not response.get('isError'):
+            adapt(response, connected if name == 'quartet_connect' else guided)
         return types.CallToolResult.model_validate(response)
+
+    def connected(body):
+        body = native_connect_response(body, source='quartet', url=url)
+        if hub is not None and not body.get('error') and all(
+                body.get(k) for k in ('channel', 'member_id', 'session_token')):
+            # The same successful connect result Trio binds a Codex thread from.
+            # A listener failure must not fail the join.
+            try:
+                body['event_delivery']['listener'] = hub.start(
+                    body['channel'], body['member_id'], body['session_token'])
+            except Exception as exc:  # noqa: BLE001
+                body['event_delivery']['listener'] = {'status': 'failed', 'error': type(exc).__name__}
+        return guided(body)
+
+    def guided(body):
+        # The hub writes its footers for Claude's Monitor and cannot know who asks.
+        return adapt_response_guidance(body, 'quartet')
+
+    def adapt(response, transform):
+        """Transform the response's JSON body, in every form the hub returned it."""
+        for block in response.get('content', []):
+            if block.get('type') != 'text':
+                continue
+            try:
+                body = json.loads(block['text'])
+            except ValueError:
+                continue
+            if not isinstance(body, dict):
+                continue
+            before = json.dumps(body)
+            body = transform(body)
+            if json.dumps(body) == before:
+                return                      # nothing to adapt: pass the hub's bytes through
+            block['text'] = json.dumps(body)
+            # The hub also returns the body as structured content, and a host may
+            # show the model that form. Left as it was, it would carry the hub's
+            # own monitor guidance past this rewrite.
+            structured = response.get('structuredContent')
+            if isinstance(structured, dict):
+                if isinstance(structured.get('result'), str):
+                    structured['result'] = block['text']
+                else:
+                    response['structuredContent'] = body
+            return
 
     return server, client, hub
 

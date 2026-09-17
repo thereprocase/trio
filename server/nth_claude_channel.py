@@ -85,8 +85,11 @@ class Listener:
         # The only end-to-end evidence a channel offers: an ack that passed through
         # this frontend and covers something it wrote.
         self.first_written = 0
+        self.acked_through = 0
         self.confirmed_through = 0
         self.unconfirmed_since = None
+        # Writes come from the listener thread, acks from the tool-call path.
+        self._evidence = threading.Lock()
         self._stop = threading.Event()
         self.thread = threading.Thread(target=self._run, name='claude-channel-listener', daemon=True)
 
@@ -114,10 +117,25 @@ class Listener:
 
     def acknowledged(self, through_id):
         """The agent acked through this frontend. Only an ack covering a written id is evidence."""
-        if not self.first_written or through_id < self.first_written:
-            return
-        self.confirmed_through = max(self.confirmed_through, through_id)
-        if through_id >= self.last_written:
+        with self._evidence:
+            self.acked_through = max(self.acked_through, through_id)
+            self._settle()
+
+    def _wrote(self, message_id):
+        with self._evidence:
+            self.written += 1
+            self.last_written = message_id
+            self.first_written = self.first_written or message_id
+            if self.unconfirmed_since is None:
+                self.unconfirmed_since = time.time()
+            self._settle()
+
+    def _settle(self):
+        # Order-independent: an ack can reach the tool path before the listener
+        # thread has recorded the write it answers.
+        if self.first_written and self.acked_through >= self.first_written:
+            self.confirmed_through = max(self.confirmed_through, min(self.acked_through, self.last_written))
+        if self.acked_through >= self.last_written:
             self.unconfirmed_since = None
 
     def _run(self):
@@ -182,11 +200,7 @@ class Listener:
                         if not self._stop.is_set():
                             self.status, self.error = 'ended', 'transport closed'
                         return
-                    self.written += 1
-                    self.last_written = message['id']
-                    self.first_written = self.first_written or message['id']
-                    if self.unconfirmed_since is None:
-                        self.unconfirmed_since = time.time()
+                    self._wrote(message['id'])
                 self.high_water = message['id']
             # A non-acking poll returns the same backlog immediately. Same guard
             # as the spoke monitor: a fast, empty-handed poll waits before retrying.
@@ -275,7 +289,7 @@ class ChannelHub:
             listener = Listener(self, binding, poll, close, high_water=inherited)
             if previous:
                 # Same membership, same process: its delivery evidence carries over.
-                for field in ('written', 'last_written', 'first_written',
+                for field in ('written', 'last_written', 'first_written', 'acked_through',
                               'confirmed_through', 'unconfirmed_since'):
                     setattr(listener, field, getattr(previous, field))
             self.listeners[listener.key] = listener
@@ -310,7 +324,10 @@ class ChannelHub:
         with self.lock:
             listener = self.listeners.get((arguments.get('channel'), arguments.get('member_id')))
         through_id = arguments.get('through_id')
-        if listener is not None and isinstance(through_id, int):
+        # Another valid session of the same member moves its own watermark, not
+        # this one's: only an ack made with this listener's token counts here.
+        if (listener is not None and isinstance(through_id, int)
+                and arguments.get('session_token') == listener.binding['session_token']):
             listener.acknowledged(through_id)
 
     def _owned(self, channel, member_id, session_token):

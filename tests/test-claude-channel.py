@@ -309,10 +309,13 @@ class ChannelTests(unittest.TestCase):
         self.assertTrue(wait_until(lambda: self.writer.sent))
         state = lambda: hub.status('test', 'receiver', TOKEN)[0]
         self.assertEqual((state()['written'], state()['confirmed_through']), (1, 0))
-        call = {'channel': 'test', 'member_id': 'receiver'}
+        call = {'channel': 'test', 'member_id': 'receiver', 'session_token': TOKEN}
         hub.observe('quartet_ack', dict(call, through_id=1), True)         # covers nothing that was written
         hub.observe('quartet_ack', dict(call, through_id=2), False)        # the ack itself failed
         hub.observe('quartet_send', dict(call, through_id=2), True)        # not an ack
+        # Another valid session of the same member moves its own watermark, not this one's.
+        hub.observe('quartet_ack', dict(call, through_id=2, session_token='another-session'), True)
+        hub.observe('quartet_ack', {'channel': 'test', 'member_id': 'receiver', 'through_id': 2}, True)
         self.assertEqual(state()['confirmed_through'], 0)
         hub.listeners[('test', 'receiver')].unconfirmed_since = time.time() - 400
         stale = delivery_status('test', 'receiver', TOKEN, hub=hub)
@@ -325,6 +328,46 @@ class ChannelTests(unittest.TestCase):
         # The evidence survives a filter change, like the high-water mark.
         hub.configure('test', 'receiver', TOKEN, filter_mode='all')
         self.assertEqual((state()['written'], state()['confirmed_through']), (1, 2))
+
+    def test_an_ack_that_overtakes_its_write_still_settles(self):
+        hub = self.hub([])
+        hub.start('test', 'receiver', TOKEN)
+        listener = hub.listeners[('test', 'receiver')]
+        # The tool path can see the ack before the listener thread records the write.
+        listener.acknowledged(2)
+        self.assertEqual((listener.confirmed_through, listener.unconfirmed_since), (0, None))
+        listener._wrote(2)
+        self.assertEqual((listener.confirmed_through, listener.unconfirmed_since), (2, None))
+        listener._wrote(4)
+        self.assertEqual(listener.confirmed_through, 2)
+        self.assertIsNotNone(listener.unconfirmed_since)
+        listener.acknowledged(9)                       # confirms what was written, no more
+        self.assertEqual((listener.confirmed_through, listener.unconfirmed_since), (4, None))
+
+    def test_monitor_footers_are_adapted_only_for_sessions_without_a_monitor(self):
+        from nth_event_access import adapt_monitor_guidance, adapt_response_guidance
+        footer = ('[server] Remember: 3-call cadence with confidence (high/medium/low). Stay connected. '
+                  'RESTART YOUR BACKGROUND MONITOR NOW if it is not running. [server] Monitor heartbeat '
+                  "stale. Spokes: launch nth_spoke_monitor.py (see SKILL.md 'Monitor'); hub sessions: "
+                  're-issue the nth_monitor.py Monitor(...) block.')
+        for env in ({'TRIO_NATIVE_CLIENT': 'codex'},
+                    {'TRIO_NATIVE_CLIENT': 'claude', 'TRIO_CLAUDE_CHANNEL': '1'}):
+            with patch.dict(os.environ, env, clear=True):
+                adapted = adapt_monitor_guidance(footer, 'quartet')
+                self.assertIn('3-call cadence', adapted)
+                self.assertNotIn('MONITOR NOW', adapted)
+                self.assertNotIn('heartbeat stale', adapted)
+                self.assertNotIn('nth_spoke_monitor', adapted)
+                self.assertIn('does not use a Monitor: check quartet_delivery_status', adapted)
+                self.assertEqual(adapt_monitor_guidance('[server] Stay connected.', 'trio'),
+                                 '[server] Stay connected.')
+                peer = {'footer': footer, 'messages': [{'id': 1, 'content': footer}]}
+                adapt_response_guidance(peer, 'quartet')
+                self.assertEqual(peer['messages'][0]['content'], footer)     # peer content is never rewritten
+                self.assertNotIn('MONITOR NOW', peer['footer'])
+        for env in ({'TRIO_NATIVE_CLIENT': 'claude'}, {}):
+            with patch.dict(os.environ, env, clear=True):
+                self.assertEqual(adapt_monitor_guidance(footer, 'quartet'), footer)
 
     def test_call_results_are_read_in_both_frontends_shapes(self):
         from types import SimpleNamespace

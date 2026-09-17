@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import sys
 
@@ -88,6 +89,44 @@ def native_connect_response(response, *, source='local', url=''):
 
 POLL_ONLY = ' Until it reports ready=true, tell your peers you only see messages when you poll.'
 UNCONFIRMED_WARNING_SECONDS = 300
+
+# Server footers written for Claude's Monitor. A hub cannot know which client is
+# asking, so the local frontends adapt them for a session that must not run one.
+_MONITOR_NUDGES = ('RESTART YOUR BACKGROUND MONITOR NOW if it is not running.',
+                   'Restart your background monitor.')
+_STALE_MONITOR = re.compile(r'\[server\] Monitor heartbeat stale\.[^\[]*')
+
+
+def uses_monitor():
+    """False for Codex and for a Claude session launched for channel delivery."""
+    client = os.environ.get('TRIO_NATIVE_CLIENT')
+    return not (client == 'codex' or (client == 'claude' and os.environ.get('TRIO_CLAUDE_CHANNEL') == '1'))
+
+
+def adapt_monitor_guidance(text, prefix):
+    """Replace Monitor instructions in a server footer with the delivery check.
+
+    Only server-authored fields are passed here. Peer message content is never
+    rewritten, whatever it says.
+    """
+    if uses_monitor() or not isinstance(text, str):
+        return text
+    adapted = _STALE_MONITOR.sub('', text)
+    for nudge in _MONITOR_NUDGES:
+        adapted = adapted.replace(nudge, '')
+    if adapted == text:
+        return text
+    return (adapted.strip() + ' This session does not use a Monitor: check '
+            + prefix + '_delivery_status instead.').strip()
+
+
+def adapt_response_guidance(body, prefix):
+    """Adapt the server-authored guidance fields of one parsed tool response, in place."""
+    if isinstance(body, dict):
+        for key in ('footer', 'reminder'):
+            if key in body:
+                body[key] = adapt_monitor_guidance(body[key], prefix)
+    return body
 
 
 def _recovery_hint(prefix, state, error=''):

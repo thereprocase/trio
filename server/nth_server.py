@@ -1141,6 +1141,12 @@ def _get_session_by_token(db, session_token: str):
     ).fetchone()
 
 
+def _guidance(footer: str) -> str:
+    """A server footer, adapted for a client that must not run a Monitor."""
+    from nth_event_access import adapt_monitor_guidance
+    return adapt_monitor_guidance(footer, TOOL_PREFIX)
+
+
 def _sentinel_nag(member) -> str:
     """Check caller's Monitor heartbeat freshness. Returns a nag string or empty.
 
@@ -1159,6 +1165,11 @@ def _sentinel_nag(member) -> str:
     fresh = (bool(mhb) and _seconds_since(mhb) < 300) or \
             (bool(whb) and _seconds_since(whb) < 300)
     if fresh:
+        return ""
+    # Codex, and Claude in channel mode, must never be told to start a Monitor:
+    # their delivery state is reported by the delivery status tool.
+    from nth_event_access import uses_monitor
+    if not uses_monitor():
         return ""
     if TOOL_PREFIX == "quartet":
         return ("[server] Monitor heartbeat stale. Spokes: launch "
@@ -2522,7 +2533,7 @@ def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: st
                     msg_list.append(entry)
 
                 nag = _sentinel_nag(member)
-                footer = MESSAGE_FOOTER + (" " + nag if nag else "")
+                footer = _guidance(MESSAGE_FOOTER + (" " + nag if nag else ""))
                 resp = {
                     "event": "new_messages",
                     "unread_count": len(msg_list),
@@ -3819,7 +3830,7 @@ def nth_complete(channel: str, member_id: str, task_id: int, result: str = "") -
         resp = {
             "ok": True,
             "task_id": task_id,
-            "footer": "[server] Task done — but you are NOT done. Stay connected. Peers may have follow-up questions. Restart your background monitor.",
+            "footer": _guidance("[server] Task done — but you are NOT done. Stay connected. Peers may have follow-up questions. Restart your background monitor."),
         }
         if unblocked:
             resp["unblocked"] = unblocked
@@ -3993,7 +4004,7 @@ def nth_cancel(channel: str, member_id: str, task_id: int, reason: str = "") -> 
             "ok": True,
             "task_id": task_id,
             "status": "cancelled",
-            "footer": "[server] Task cancelled — stay connected. Peers may need to discuss next steps. Restart your background monitor.",
+            "footer": _guidance("[server] Task cancelled — stay connected. Peers may need to discuss next steps. Restart your background monitor."),
         }
         if unblocked:
             resp["unblocked"] = unblocked

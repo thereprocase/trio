@@ -174,9 +174,20 @@ class StdioChannelTests(unittest.TestCase):
         unread = host.tool('trio_poll', channel='channel-test', member_id=receiver['member_id'],
                            session_token=receiver['session_token'], wait_seconds=0, auto_ack=False)
         self.assertEqual(unread.get('messages', []), [])
+        # No server footer may tell a channel session to start a Monitor.
+        say('@receiver one more, to read by poll')
+        polled = host.tool('trio_poll', channel='channel-test', member_id=receiver['member_id'],
+                           session_token=receiver['session_token'], wait_seconds=0, auto_ack=False)
+        self.assertIn('3-call cadence', polled['footer'])
+        self.assertNotIn('MONITOR', polled['footer'].upper().replace('NOT USE A MONITOR', ''))
+        self.assertIn('trio_delivery_status', polled['footer'])
+        host.tool('trio_ack', channel='channel-test', member_id=receiver['member_id'],
+                  through_id=polled['messages'][-1]['id'])
         status = host.tool('trio_delivery_status', channel='channel-test',
                            member_id=receiver['member_id'], session_token=receiver['session_token'])
-        self.assertEqual(status['listeners'][0]['confirmed_through'], mention)
+        # At least the pushed mention is confirmed. Whether the polled message was
+        # also pushed before its ack is a race, and either outcome is correct.
+        self.assertGreaterEqual(status['listeners'][0]['confirmed_through'], mention)
         self.assertNotIn(receiver['session_token'], json.dumps(status))
 
         # Stop stays stopped.
@@ -229,6 +240,10 @@ class StdioChannelTests(unittest.TestCase):
         host.tool('trio_send', channel='channel-test', member_id=sender['member_id'],
                   message='@receiver hello', session_token=sender['session_token'])
         self.assertEqual(host.drain(3), [])
+        # A Claude session that does run a Monitor keeps the Monitor guidance.
+        polled = host.tool('trio_poll', channel='channel-test', member_id=receiver['member_id'],
+                           session_token=receiver['session_token'], wait_seconds=0, auto_ack=False)
+        self.assertIn('RESTART YOUR BACKGROUND MONITOR NOW', polled['footer'])
 
 
 if __name__ == '__main__':
