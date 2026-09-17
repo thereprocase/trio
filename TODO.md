@@ -2,6 +2,32 @@
 
 ## Open
 
+### Delivery wrap-up (2026-09-17)
+
+Evidence and implementation constraints: [consolidated handoff](reviews/delivery-handoff-20260917.md).
+
+- [ ] Build and qualify the Claude `asyncRewake` fallback. Windows idle and short
+  mid-turn experiments passed; no production implementation exists. Test Linux,
+  hours-long lifetime, exit cleanup, resume/clear/compaction, idempotency and long
+  foreground calls. Keep peer text out of host-framed hook reminders.
+- [ ] Complete final Windows interactive `claude` shell-function acceptance:
+  expected development-channel prompt, ready status, idle message, reply and ack.
+- [ ] Recover a saved `codex_app` executable after Microsoft Store version changes;
+  currently re-run installation with the new `--codex-app PATH`. Native IDE/app
+  attachment remains a separate compatibility check from terminal launchers.
+- [ ] Diagnose the intermittent supervisor shutdown-state assertion. Do not hide
+  it by rerunning until green. Run skipped Node checks where Node is available;
+  schedule excluded soak tests separately when needed.
+- [ ] Give the post-beta.2 runtime a distinct version/tag in the next release;
+  until then record `dbedc23` or its file hashes, not the version string alone.
+- [ ] Inspect ownership of reported older Windows proxy processes before cleanup;
+  retain shared/live processes. Close old test channels only with user approval.
+
+Completed: Codex startup serialization/atomic record/fallback (PR #58), exact
+Windows+WSL installation verification, final WSL local+remote Claude reply/ack,
+and the README overview (PR #59). Do not reopen these from older release notes.
+
+
 ### Native event delivery follow-up (8.2.0-beta.1)
 
 - Add a supported reconciliation command and bounded receipt retention; current
@@ -208,7 +234,9 @@ Shipped as the monitor context relay (`poll(monitor_context=…)` → `members.c
 
 The server footer already nags about stale monitors. With `NTH_VERSION` + node check-ins in place, the hub can see when a spoke's declared `node_version` trails its own and append a one-line "your install is vX, hub is vY — rerun setup.sh" nag to poll responses for that member. Cheap, self-healing fleet hygiene.
 
-### UserPromptSubmit hook as monitor complement (~v10)
+### Historical UserPromptSubmit hook idea (~v10)
+**Historical:** superseded as current guidance by the [2026-09-17 delivery work](#delivery-wrap-up-2026-09-17). The text below preserves the original proposal; its claim that Monitor already works reliably predates the lifetime change.
+
 **Severity:** Low / Idea | **Since:** v5.1 (2026-04-07)
 
 Inspired by Gas Town's `UserPromptSubmit` hook pattern (Yegge). A Claude Code hook on `UserPromptSubmit` could check the trio DB for unread messages at every turn boundary. If messages are pending, the hook returns `{"decision": "block", "reason": "You have N unread trio messages..."}` and Claude Code re-injects that as system context. Zero background processes needed for turn-boundary detection.

@@ -131,9 +131,11 @@ start would let a repository's `.mcp.json` disable `claude` inside it.) It
 leaves out, with a warning, a `nth-qweb` that is registered as a remote server,
 which is what the legacy `setup.sh spoke` leaves behind.
 
-Observed on Claude Code 2.1.274 (Windows host; on Linux only the first item has
-been observed so far). These are observations of a preview feature, not
-guarantees:
+Observed on Claude Code 2.1.274. Windows tests cover the behaviors below; later
+WSL tests also verify local and remote idle wake, reply and acknowledgment on
+the final installed runtime. See the [dated evidence and remaining acceptance
+gaps](https://github.com/thereprocase/trio/blob/main/reviews/delivery-handoff-20260917.md). These are observations of a preview
+feature, not guarantees:
 
 - An event wakes an idle session and the turn starts by itself.
 - During a turn, an event arrives at the next model-step boundary: after the

@@ -11,12 +11,21 @@
 
 ## Main after v8.3.0-beta.2
 
-Codex shared-server startup is serialized across processes and its record is replaced
-atomically. Independent Windows and WSL checks with the real Codex binary confirmed
-two concurrent launchers reuse one server. OS and SQLite startup failures preserve
-the plain CLI fallback. Independent
-WSL checks on the installed beta.1 Claude host also verified actual idle wake, reply and
-acknowledgment for both local Trio (7.31 seconds) and remote Quartet (6.06 seconds).
+Runtime follow-up `dbedc23` (PR #58) is installed on Windows and WSL; 90 server
+files and 20 skill docs match on each. `7656390` (PR #59) adds the README overview.
+The version constant remains beta.2; use the commit/hash to distinguish the
+follow-up from tag `v8.3.0-beta.2` (`571e805`).
+
+Concurrent real Codex launchers reuse one server on both OSes. Final installed
+WSL Claude local and remote idle reply/ack tests passed in 3.17 s and 3.75 s,
+without a Monitor or polling loop. The final Windows interactive shell-function
+Claude idle-wake acceptance remains open; earlier Windows channel tests and
+current function smoke tests are separate evidence.
+
+The complete [delivery handoff](reviews/delivery-handoff-20260917.md) records
+validation, experimental hook findings, evidence limits and cleanup candidates.
+[Open work](TODO.md#delivery-wrap-up-2026-09-17) includes the unbuilt hook path,
+Store app-path recovery and the intermittent supervisor test.
 
 ## What Just Shipped
 
@@ -41,8 +50,8 @@ research preview: a listener inside each stdio frontend writes filtered messages
 into the open session, with no Monitor or lease and no model turn on a timer. Verified on Claude Code
 2.1.274 under a real host on Windows, local and Quartet: idle wake with reply and
 ack in about five seconds, mid-turn arrival between two tool calls, restart then
-listen from saved credentials with nothing replayed. On Linux only the host
-accepting the channel and starting a turn has been observed so far. Limits: the
+listen from saved credentials with nothing replayed. At release time, Linux evidence covered only host acceptance and turn startup;
+the later WSL reply/ack tests above supersede that limitation. Limits: the
 launch confirmation recurs and cannot be pre-accepted, the launcher's environment
 variable is inherited by nested sessions, delivery is at-least-once across a
 restart, and each event costs a full-context turn. The Monitor stays as the
