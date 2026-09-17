@@ -535,6 +535,88 @@ class ChannelTests(unittest.TestCase):
                                     'session_token': TOKEN}, True)
         self.assertEqual(self.state(hub)['confirmed_through'], 0)
 
+    def test_the_local_call_wrapper_completes_only_acks_and_passes_failures_through(self):
+        from mcp import types
+        from mcp.server.fastmcp import FastMCP
+        server, seen = FastMCP('wrapper-test'), []
+
+        @server.tool(name='trio_ack')
+        def ack(channel: str, member_id: str, through_id: int, session_token: str = '') -> str:
+            seen.append(session_token)
+            return json.dumps({'ok': True, 'watermark': through_id})
+
+        @server.tool(name='trio_send')
+        def send(channel: str, member_id: str, message: str, session_token: str = '') -> str:
+            seen.append(session_token)
+            return json.dumps({'ok': True})
+
+        @server.tool(name='trio_broken')
+        def broken(channel: str, member_id: str) -> str:
+            raise ValueError('the tool itself failed')
+
+        hub = self.hub([{'event': 'new_messages', 'messages': [MESSAGES[1]]}], prefix='trio', source='local')
+        hub.start('test', 'receiver', TOKEN, 'about')
+        self.assertTrue(wait_until(lambda: self.writer.sent))
+        channel_module.complete_local_calls(server, hub)
+        handler = server._mcp_server.request_handlers[types.CallToolRequest]
+
+        def call(tool_name, /, **arguments):
+            request = types.CallToolRequest(method='tools/call', params=types.CallToolRequestParams(
+                name=tool_name, arguments=arguments))
+            return asyncio.run(handler(request)).root
+
+        acked = call('trio_ack', channel='test', member_id='receiver', through_id=2)
+        self.assertFalse(acked.isError)
+        self.assertEqual(seen[-1], TOKEN)
+        self.assertEqual(self.state(hub)['confirmed_through'], 2)
+        call('trio_send', channel='test', member_id='receiver', message='hello')
+        self.assertEqual(seen[-1], '')                     # posting still takes the caller's own token
+        self.assertTrue(call('trio_broken', channel='test', member_id='receiver').isError)
+        # Completion runs on raw arguments, before the tool validates them. A malformed
+        # call must fail as the tool's validation error, not as an error from completion.
+        malformed = call('trio_ack', channel=['not', 'text'], member_id='receiver', through_id=2)
+        self.assertTrue(malformed.isError)
+        self.assertNotIn('unhashable', malformed.content[0].text)
+
+    def test_the_quartet_listener_connects_once_however_often_the_hub_fails(self):
+        class FlakyClient:
+            instances = []
+
+            def __init__(self, url):
+                self.connects = self.reconnects = self.closed = 0
+                self.healthy = False
+                FlakyClient.instances.append(self)
+
+            def connect(self):
+                self.connects += 1
+                raise RuntimeError('Timed out waiting for SSE endpoint event')
+
+            def call_tool(self, name, arguments, timeout=60):
+                if not self.healthy:
+                    raise RuntimeError('Not connected (no SSE endpoint)')
+                return {'event': 'no_new', 'messages': [], 'timeout': timeout}
+
+            def force_reconnect(self):
+                self.reconnects += 1
+
+            def close(self):
+                self.closed += 1
+
+        with patch('nth_spoke_monitor.MCPSSEClient', FlakyClient):
+            poll, close = channel_module.quartet_poll_factory({'url': 'http://hub.example/sse'})
+        client = FlakyClient.instances[0]
+        for _ in range(4):
+            with self.assertRaises(RuntimeError):
+                poll({'wait_seconds': 15})
+        # connect() starts a reader thread on every call and the client reconnects by
+        # itself: calling it again on each retry left one more thread behind per failure.
+        self.assertEqual(client.connects, 1)
+        self.assertGreaterEqual(client.reconnects, 1)       # a wedged reader is still kicked
+        client.healthy = True
+        self.assertEqual(poll({'wait_seconds': 15})['timeout'], 45)
+        close()
+        self.assertEqual(client.closed, 1)
+
     def test_an_ack_through_this_frontend_is_the_only_delivery_evidence(self):
         from nth_event_access import delivery_status
         hub = self.hub([{'event': 'new_messages', 'messages': [MESSAGES[1]]}])
