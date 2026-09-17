@@ -22,8 +22,13 @@ automatically; `quartet_event` arrives at the next model-step boundary.
 Use `quartet_listen` for filter changes or stopping the local subscription.
 The Claude Monitor/TaskStop sections below do not apply to Codex.
 
-In **Claude Code**, call `quartet_connect` and start one persistent Monitor
-using the returned `monitor_hint`. Its private identity file is already saved.
+In **Claude Code**, launch through `trio claude` and call `quartet_connect`. The response's
+`event_delivery.mode` is then `channel`: messages that pass your filter arrive on their
+own as `<channel>` events, including while you are idle. Do not start a Monitor. Check
+`quartet_delivery_status` and claim background availability only on `ready: true`. A channel
+event has no receipt, so acknowledge after processing. Launched as plain `claude`, the
+mode is `monitor`: start one Monitor with the returned `monitor_hint`, and read the
+lease rules in the Monitor section first. The identity file is saved automatically.
 Both clients share the same channel, reply, acknowledgement and task rules.
 
 You are one participant in a shared workspace. Other sessions rely on you using these tools correctly — skipping a poll, an ack, or a task cancel breaks coordination for everyone.
@@ -169,6 +174,9 @@ Two rules, for the same reason as the session token:
 
 ## Monitor — launch one persistent watcher after connect
 
+**Monitor mode only.** Skip this section when `event_delivery.mode` is `channel` (a session
+launched with `trio claude`): events are pushed and a Monitor would only add wake-ups.
+
 After `quartet_connect` you must launch a single background event monitor via Claude Code's `Monitor` tool. It streams channel events (new messages, cadence violations, channel-ended) to you as notifications for the lifetime of the session — no subagent, no relaunch loop.
 
 **Use `nth_spoke_monitor.py` — that is the normal `/quartet` case.** (The hub-local
@@ -191,9 +199,9 @@ straight out of the `monitor_hint` field that `quartet_connect` just returned.
 
 **Python launcher**: use `python3` on macOS/Linux, `py` on Windows (the PEP 397 launcher installed with python.org Python). `python3` does not exist on Windows by default.
 
-`timeout_ms` is ignored when `persistent=True`, but the `Monitor` schema still validates it — the value must be ≥ 1000. Any valid number works; the monitor runs until the session ends regardless.
+From Claude Code 2.1.274 a Monitor is a lease. `timeout_ms` above 3600000 is rejected, a `persistent=True` Monitor expires after 30 minutes, and each expiry wakes the session. Re-arm it only while the user is present and the channel is live, and never past an end time the user gave. Earlier builds ignored `timeout_ms` for a persistent Monitor.
 
-Each line of stdout becomes a separate notification. The monitor runs until the session ends, `TaskStop` is called, or the channel is ended by a peer.
+Each line of stdout becomes a separate notification. The monitor runs until its lease expires, `TaskStop` is called, or the channel is ended by a peer.
 
 **Hub vs spoke — don't guess, read the connect response.** `quartet_connect` returns `"transport"` (`"stdio"` = you spawned a local server, the DB is on this machine — hub-style monitoring works; `"sse"` = you're a spoke reaching a remote hub) and `"monitor_hint"` with the ready-to-run monitor command for your case. Filesystem heuristics are unreliable: a box can be a trio hub AND a quartet spoke at once (a local stub `nth.db` proves nothing — 20 minutes of misdiagnosis were once spent this way).
 
