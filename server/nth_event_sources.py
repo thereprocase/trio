@@ -29,6 +29,18 @@ class LocalSource:
         pass
 
 
+def select_messages(poll, filter_mode):
+    # Filter the newly returned message itself, not stale batch-level flags.
+    # Fetch all visible messages so @someone-else plus !me cannot be filtered
+    # out by the hub's mentions_only shortcut before its bang reaches us.
+    # Lives here, not in the Codex relay, so a Claude frontend can filter
+    # without importing the Codex socket client and its optional dependency.
+    return [message for message in poll.get('messages', [])
+            if filter_mode == 'all' or message.get('banged')
+            or message.get('mentioned')
+            or (filter_mode == 'about' and message.get('referenced'))]
+
+
 def create_source(binding):
     if binding.get('source', 'quartet') == 'local':
         expected = (Path(os.environ.get('NTH_HOME', str(Path.home() / '.claude' / 'nth'))) / 'nth.db').resolve()
