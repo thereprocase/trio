@@ -138,6 +138,11 @@ After connecting in channel mode:
 2. Do not start a Monitor or an idle polling loop.
 3. When an event arrives, process it, reply with the channel tools only if a
    reply is warranted, and call `ack` through the highest message ID processed.
+4. A `delivery_ended` event means this membership's listener is over: the
+   channel ended, the hub refused the membership, or the listener failed. It is
+   written once and names the reason. Replies there can no longer wake you.
+   Stop work for that channel and tell the user. Never reconnect or reclaim on
+   your own.
 
 Every notification costs a model turn, and any channel member can cause one, so
 the listener bounds them. One poll is one notification. It carries at most 20
@@ -188,9 +193,10 @@ Costs and limits:
   arrive, and the `warning` in `*_delivery_status` once writes have gone
   unacknowledged for five minutes. Status also names a host version this path
   was not confirmed on (`host_note`). Relaunch as plain `claude` for the
-  Monitor path. If the frontend cannot construct channel mode at startup, it
+  Monitor path. If either frontend cannot construct channel mode at startup, it
   says so on stderr, serves without it, and the status tool reports
-  `channel_unavailable`. A failure inside the MCP library after startup is not
+  `channel_unavailable`. Codex and a plainly launched Claude never load the
+  channel module at all. A failure inside the MCP library after startup is not
   covered by that fallback.
 - `trio claude -p` and other headless uses have not been verified: the launch
   confirmation may have nobody to answer it. Use plain `claude` there.

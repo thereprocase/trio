@@ -8,14 +8,14 @@ import argparse
 import asyncio
 import json
 import os
+import sys
 
 from mcp.server import Server
+from mcp.server.stdio import stdio_server
 from mcp import types
 from nth_spoke_monitor import MCPSSEClient
-from nth_event_access import (adapt_response_guidance, native_connect_response,
-                              delivery_status, listen, uses_monitor)
-from nth_claude_channel import (ChannelHub, call_succeeded, channel_mode,
-                                quartet_poll_factory, run_stdio)
+from nth_event_access import (adapt_response_guidance, claude_channel_requested,
+                              native_connect_response, delivery_status, listen, uses_monitor)
 
 LOCAL_TOOLS = ('quartet_delivery_status', 'quartet_listen')
 # A hub that never stops paging must not hang the tool listing.
@@ -80,12 +80,32 @@ def _adapt(response, transform):
         return
 
 
+def channel_hub(url):
+    """A ChannelHub when this session was launched for channel delivery, else None.
+
+    The channel module leans on mcp internals, so it is loaded only when asked for
+    and never at import time: if a release of the library moves them, this
+    frontend must still start for Codex and for a Claude that keeps its Monitor,
+    neither of which wanted a channel. A session that did is told, loudly.
+    """
+    if not claude_channel_requested():
+        return None
+    try:
+        import nth_claude_channel as channel
+        return channel.ChannelHub('quartet', 'quartet', url, channel.quartet_poll_factory)
+    except Exception as exc:  # noqa: BLE001
+        print(f'[nth] channel delivery is unavailable ({type(exc).__name__}: {exc}); '
+              'serving without it', file=sys.stderr)
+        os.environ['TRIO_CLAUDE_CHANNEL'] = 'unavailable'
+        return None
+
+
 def create_server(url):
     server = Server('nth-qweb')
     client = MCPSSEClient(url)
     # Claude channel mode: this process owns the only path into the session, so
     # its listeners live here. Codex keeps using the central event service.
-    hub = ChannelHub('quartet', 'quartet', url, quartet_poll_factory) if channel_mode() else None
+    hub = channel_hub(url)
     # All mutable state lives in this one dict. Bare flags in this scope were
     # once shadowed by a helper of the same name, which disabled the connection.
     state = {'started': False, 'listed': False, 'accepts_token': set()}
@@ -153,7 +173,7 @@ def create_server(url):
             arguments = hub.complete(name, arguments, name in state['accepts_token'])
         response = await remote('tools/call', {'name': name, 'arguments': arguments})
         if hub is not None and is_ack:
-            hub.observe(name, arguments, call_succeeded(response))
+            hub.observe(name, arguments, hub.call_succeeded(response))
         if isinstance(response, dict) and not response.get('isError'):
             if name == 'quartet_connect':
                 _adapt(response, lambda body: _joined(body, url, hub))
@@ -175,7 +195,12 @@ async def main():
     os.umask(0o077)
     server, client, hub = create_server(args.url)
     try:
-        await run_stdio(server, hub)
+        if hub is not None:
+            await hub.run_stdio(server)
+        else:
+            # Codex and a plainly launched Claude need nothing from the channel module.
+            async with stdio_server() as (reader, writer):
+                await server.run(reader, writer, server.create_initialization_options())
     finally:
         client.close()
 
