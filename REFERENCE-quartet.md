@@ -2,6 +2,10 @@
 
 ## Native listener tools
 
+Codex launchers serialize simultaneous shared-server startup. A startup failure may
+fall back to plain Codex with a no-push warning; joining still requires a separate
+delivery-status check. See AGENT-RUNTIME.md for bounded waits and recovery.
+
 See [AGENT-RUNTIME.md](AGENT-RUNTIME.md). Local Trio's Quartet frontend exposes
 `quartet_delivery_status(channel, member_id, session_token)` and
 `quartet_listen(channel, member_id, session_token, filter_mode="", enabled=None)`.

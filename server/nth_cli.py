@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Trio's local runtime, Codex and Claude launchers, and event-service controls."""
 import argparse
+from contextlib import contextmanager
 import json
 import os
 from pathlib import Path
@@ -9,8 +10,10 @@ import shlex
 import shutil
 import signal
 import socket
+import sqlite3
 import subprocess
 import sys
+import tempfile
 import time
 
 from nth_codex_socket import CodexSocketClient
@@ -481,7 +484,7 @@ def launch_codex(arguments):
         return run_foreground([binary, *arguments])
     try:
         endpoint, binary = ensure_codex()
-    except RuntimeError as problem:
+    except (RuntimeError, OSError, sqlite3.Error) as problem:
         # Trio may fail to add delivery; it must never fail to start the tool. With
         # `codex` aliased to this launcher, a server that did not come up would
         # otherwise leave the user with an error and no Codex.
@@ -554,18 +557,59 @@ def connectable(endpoint):
         client.stop()
 
 
+@contextmanager
+def codex_startup_lock(timeout=60):
+    """Serialize independent launchers, including Windows, until the record is ready.
+
+    This private database is only a cross-process lease, not the event registry.
+    Closing the connection (also on a crashed process) releases the write lock.
+    """
+    lease = sqlite3.connect(state_dir() / 'codex-startup.sqlite', timeout=timeout,
+                            isolation_level=None)
+    try:
+        lease.execute('BEGIN IMMEDIATE')
+        yield
+    finally:
+        lease.close()
+
+
+def write_codex_record(record, value):
+    """Readers see either the previous complete record or the replacement."""
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=record.parent,
+                                         prefix=record.name + '.', suffix='.tmp', delete=False) as handle:
+            temporary = Path(handle.name)
+            json.dump(value, handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, record)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
 def ensure_codex(binary=None):
+    # Re-read only AFTER acquiring the lease: another launcher may have started
+    # the server while this process waited. Hold through readiness and publication.
+    with codex_startup_lock():
+        return _ensure_codex_locked(binary)
+
+
+def _ensure_codex_locked(binary=None):
     record = state_dir() / 'codex-server.json'
     try:
         existing = json.loads(record.read_text())
-        if connectable(existing['endpoint']):
-            add_endpoint(existing['endpoint'], settings().get('quartet_url', ''))
-            ensure_service()
-            # The server still runs, but an update may have removed the file it was
-            # started from: the client is resolved afresh, with the same fallback.
-            return existing['endpoint'], codex_binary(existing['binary'])
-    except (OSError, ValueError, KeyError):
-        pass
+    except (OSError, ValueError):
+        existing = None
+    if (isinstance(existing, dict) and isinstance(existing.get('endpoint'), str)
+            and connectable(existing['endpoint'])):
+        # Local registration/service failures must propagate to the plain-launch
+        # fallback, never be mistaken for a dead server that should be replaced.
+        add_endpoint(existing['endpoint'], settings().get('quartet_url', ''))
+        ensure_service()
+        # A running server can outlive its executable after an update.
+        return existing['endpoint'], codex_binary(binary or existing.get('binary'))
     binary = codex_binary(binary)
     if os.name == 'nt':
         with socket.socket() as probe:
@@ -575,16 +619,15 @@ def ensure_codex(binary=None):
     else:
         endpoint = 'unix://' + str(state_dir() / 'codex.sock')
     command = [binary, *mcp_overrides(endpoint), 'app-server', '--listen', endpoint]
-    log = open(state_dir() / 'codex-server.log', 'ab')
-    process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=log,
-                               stderr=log, **background_options())
-    log.close()
+    with open(state_dir() / 'codex-server.log', 'ab') as log:
+        process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=log,
+                                   stderr=log, **background_options())
     deadline = time.monotonic() + 30
     while time.monotonic() < deadline:
         if process.poll() is not None:
             raise RuntimeError('Codex server exited; inspect events/codex-server.log')
         if connectable(endpoint):
-            record.write_text(json.dumps({'endpoint': endpoint, 'binary': binary, 'pid': process.pid}))
+            write_codex_record(record, {'endpoint': endpoint, 'binary': binary, 'pid': process.pid})
             add_endpoint(endpoint, settings().get('quartet_url', ''))
             ensure_service()
             return endpoint, binary

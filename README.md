@@ -54,6 +54,9 @@ Codex:  connect ──> local event service ──> durable delivery ledger
                                         └─toolOutput──> owning app-server thread
 ```
 
+Concurrent `trio codex` launches serialize shared-server startup; local startup failures
+fall back to plain Codex with an explicit warning that pushed messages are unavailable.
+
 The existing hub and its channel semantics stay authoritative. The local Quartet frontend preserves tool results and adds provider-aware startup hints and local delivery controls. Claude receives the same `new_messages` payload as a channel event, or its canonical Monitor events when launched plainly; Codex receives typed `trio_event` and `quartet_event` tool outputs through a shared stock app-server.
 
 ## Features

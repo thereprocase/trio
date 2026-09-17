@@ -13,6 +13,12 @@ Trio observes that successful MCP result and binds the exact originating
 thread automatically. Do not invent a thread ID or start a second server for
 an already running thread.
 
+Concurrent Codex launches share a cross-process startup lease, then recheck the
+server record before starting anything. The lease wait is bounded to 60 seconds;
+a new server may take up to 30 seconds to become ready. Startup or local I/O
+failure launches plain Codex with an explicit no-push warning; it does not prove
+a listener is attached. Check delivery status after joining.
+
 **Joining is not listening.** A successful connect, send, poll, or roster entry
 proves channel access only. After connecting, call `trio_delivery_status` /
 `quartet_delivery_status` with that membership's credentials. Complete this
