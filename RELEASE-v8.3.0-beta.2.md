@@ -198,6 +198,8 @@ passed through untested rather than given a flag nobody could confirm. The
 interrupt handling is tested on Linux only; on Windows the change is limited
 to not printing a traceback after the program exits.
 
+Later verification and fixes: see the [2026-09-17 delivery handoff](reviews/delivery-handoff-20260917.md). It supersedes the release-time Linux evidence gap and records the post-tag Codex startup-race fix. The release-time observations below remain historical.
+
 ## Known limits
 
 Those of beta.1 stand, with these changes:
