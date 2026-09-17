@@ -18,8 +18,8 @@ Evidence and implementation constraints: [consolidated handoff](reviews/delivery
 - [ ] Diagnose the intermittent supervisor shutdown-state assertion. Do not hide
   it by rerunning until green. Run skipped Node checks where Node is available;
   schedule excluded soak tests separately when needed.
-- [ ] Give the post-beta.2 runtime a distinct version/tag in the next release;
-  until then record `dbedc23` or its file hashes, not the version string alone.
+- [x] Publish the startup fix as `v8.3.0-beta.3` with a distinct runtime version.
+  Earlier install evidence remains pinned to `dbedc23`.
 - [ ] Inspect ownership of reported older Windows proxy processes before cleanup;
   retain shared/live processes. Close old test channels only with user approval.
 
