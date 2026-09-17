@@ -118,7 +118,10 @@ contents. Claude Code resolves a server name by scope (local, then the
 project's `.mcp.json`, then user), and the flag grants by name, so the launcher
 applies the same check to every same-name registration in a higher scope for
 the directory the session starts in and for each directory above it. Servers
-from an enterprise `managed-mcp.json` are not examined. It refuses to start when `nth-trio` is not, and it
+from an enterprise `managed-mcp.json` are not examined. When `nth-trio` does not pass, the launcher refuses the grant, not the
+session: it says why on stderr and starts Claude Code without the flag, so the
+session uses the Monitor. (With `claude` aliased to the launcher, refusing to
+start would let a repository's `.mcp.json` disable `claude` inside it.) It
 leaves out, with a warning, a `nth-qweb` that is registered as a remote server,
 which is what the legacy `setup.sh spoke` leaves behind.
 

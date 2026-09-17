@@ -87,6 +87,15 @@ class LauncherTests(unittest.TestCase):
         codex.assert_not_called()
         return call.call_args
 
+    def degraded(self, *arguments):
+        """The channel grant is refused and the session starts plain. Returns what was said."""
+        with patch('sys.stderr', new_callable=io.StringIO) as stderr:
+            launched = self.launch(*arguments)
+        self.assertEqual(launched.args[0], ['claude', *arguments])
+        self.assertNotIn('TRIO_CLAUDE_CHANNEL', launched.kwargs['env'])
+        self.assertIn('WITHOUT channel delivery', stderr.getvalue())
+        return stderr.getvalue()
+
     def refused(self, *arguments, executable='claude', error=RuntimeError):
         with patch.object(nth_cli.shutil, 'which', return_value=executable), \
              patch.object(nth_cli.subprocess, 'call', return_value=0) as call:
@@ -153,11 +162,11 @@ class LauncherTests(unittest.TestCase):
         for servers, reason in cases:
             with self.subTest(reason=reason):
                 self.register(**servers)
-                message = self.refused()
+                message = self.degraded()
                 self.assertIn(reason, message)
                 self.assertIn('python setup.py install', message)
         (self.home / '.claude.json').write_text('{not json', encoding='utf-8')
-        self.assertIn('Could not read Claude\'s MCP configuration', self.refused())
+        self.assertIn('Could not read Claude\'s MCP configuration', self.degraded())
 
     def test_a_same_name_registration_in_a_higher_scope_is_checked_too(self):
         # The flag grants by name, and Claude Code resolves a name local scope first,
@@ -170,7 +179,7 @@ class LauncherTests(unittest.TestCase):
                                 ('local scope of an ancestor', {str(self.project.parent): {'nth-trio': remote}})):
             with self.subTest(shadow=label):
                 self.register(projects=projects)
-                message = self.refused()
+                message = self.degraded()
                 self.assertIn('is also registered in local scope for', message)
                 self.assertIn('remote (http) server', message)
                 self.assertIn('claude mcp remove --scope local nth-trio', message)
@@ -182,13 +191,13 @@ class LauncherTests(unittest.TestCase):
             with self.subTest(project_file=label):
                 (holder / '.mcp.json').write_text(json.dumps({'mcpServers': {'nth-trio': remote}}), encoding='utf-8')
                 with patch.object(nth_cli, 'launch_directory', return_value=self.project / 'nested' / 'deeper'):
-                    message = self.refused()
+                    message = self.degraded('--continue')
                 self.assertIn(str(holder / '.mcp.json'), message)
                 self.assertIn('remote (http) server', message)
                 (holder / '.mcp.json').unlink()
         # A project file that cannot be parsed but names the server cannot be checked.
         (self.project / '.mcp.json').write_text('{"mcpServers": {"nth-trio": {broken', encoding='utf-8')
-        self.assertIn('could not be read', self.refused())
+        self.assertIn('could not be read', self.degraded())
         (self.project / '.mcp.json').write_text('{"mcpServers": {"other": {broken', encoding='utf-8')
         self.assertEqual(self.launch().args[0][-2:], ['server:nth-trio', 'server:nth-qweb'])
         (self.project / '.mcp.json').unlink()

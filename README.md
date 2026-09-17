@@ -165,7 +165,7 @@ python setup.py install --quartet-url http://YOUR_HUB:8000/sse   # a Claude Code
 sudo bash setup.sh hub-service                                    # a hub
 ```
 
-Restart Claude Code, and launch it with `trio claude`. `setup.sh spoke` is the legacy spoke installer: it registers `nth-qweb` as a direct remote SSE server and `nth-trio` without the client marker, so neither can deliver channel events. `trio claude` checks the registrations before it names a server: it refuses a `nth-trio` that could never push, and it never names a remote server as a channel. Re-running `python setup.py install` repairs both.
+Restart Claude Code, and launch it with `trio claude`. `setup.sh spoke` is the legacy spoke installer: it registers `nth-qweb` as a direct remote SSE server and `nth-trio` without the client marker, so neither can deliver channel events. `trio claude` checks the registrations before it names a server: it will not name a `nth-trio` that could never push (it says why and starts Claude Code without channel delivery), and it never names a remote server as a channel. Re-running `python setup.py install` repairs both.
 
 ## Data Storage
 

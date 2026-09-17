@@ -19,6 +19,9 @@
   in a cloned repository, would have received the grant unchecked. Such an entry is now held to
   the same rules, for the launch directory and every directory above it. Found by an independent
   back-check, with a reproduction against the real CLI.
+- A registration that fails the check now costs the grant, not the session: the launcher says
+  why and starts Claude Code without the flag. Refusing to start would let a repository's
+  `.mcp.json` disable an aliased `claude` inside it.
 - The channel flag is placed before a `--` in the middle of the arguments. After it, Claude
   Code would have read the flag as prompt text.
 - Ctrl+C in a launched program no longer kills it through the launcher. On POSIX the terminal

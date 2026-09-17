@@ -190,6 +190,10 @@ def registration_problem(name, script, registered):
     return ''
 
 
+class ChannelRefused(RuntimeError):
+    """The channel grant was refused. The session itself can still start, without it."""
+
+
 def launch_directory():
     return Path.cwd()
 
@@ -259,8 +263,8 @@ def channel_servers():
         config = json.loads(path.read_text(encoding='utf-8-sig'))
         registered = config.get('mcpServers') or {}
     except (OSError, ValueError, AttributeError):
-        raise RuntimeError(f'Could not read Claude\'s MCP configuration at {path}. '
-                           'Run: python setup.py install') from None
+        raise ChannelRefused(f'Could not read Claude\'s MCP configuration at {path}. '
+                             'Run: python setup.py install') from None
     wanted = [entry for entry in CHANNEL_SERVERS if entry[0] == 'nth-trio' or settings().get('quartet_url')]
     named = []
     directory = launch_directory()
@@ -276,8 +280,7 @@ def channel_servers():
         if not problem:
             named.append('server:' + name)
         elif name == 'nth-trio':
-            raise RuntimeError(f'{name} {problem}. `trio claude` will not name it as a channel. {remedy} '
-                               'Plain `claude` still works, through the Monitor.')
+            raise ChannelRefused(f'{name} {problem}. It will not be named as a channel. {remedy}'.strip())
         else:
             print(f'[trio] {name} {problem}: Quartet messages will NOT be pushed into this session. '
                   + remedy, file=sys.stderr)
@@ -560,7 +563,16 @@ def main(argv=None):
                 print('[trio] no terminal on stdin and stdout: starting Claude Code without channel '
                       'delivery', file=sys.stderr)
             return run_foreground(claude_passthrough(argv[1:]), env=plain_environment())
-        return run_foreground(claude_command(argv[1:]), env=claude_environment())
+        try:
+            command = claude_command(argv[1:])
+        except ChannelRefused as refusal:
+            # The grant is refused, not the session. With `claude` aliased to this
+            # launcher, refusing to start would let a repository's .mcp.json turn
+            # `claude` into a dead command inside it.
+            print(f'[trio] {refusal}\n[trio] Starting Claude Code WITHOUT channel delivery. A channel joined '
+                  'from this session uses the Monitor.', file=sys.stderr)
+            return run_foreground(claude_passthrough(argv[1:]), env=plain_environment())
+        return run_foreground(command, env=claude_environment())
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest='command', required=True)
     sub.add_parser('start', help='Start the local event service')

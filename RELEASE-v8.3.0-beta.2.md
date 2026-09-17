@@ -109,7 +109,12 @@ in that case, and report it.
   would have received the grant unchecked. Found by an independent reviewer, who reproduced it
   against the real CLI on beta.1. Every same-name registration in a higher scope is now held to
   the same rules, for the directory the session starts in and each directory above it, and one
-  that cannot be read is refused. With the shell functions the launcher runs in every
+  that cannot be read is refused.
+- **A refused grant no longer refuses the session.** In beta.1 `trio claude` would not start
+  when `nth-trio` failed its check. Once `claude` means the launcher, that would let a
+  repository's `.mcp.json` turn `claude` into a dead command inside it. The launcher now says
+  why on stderr and starts Claude Code without the flag; a channel joined from that session
+  honestly reports the Monitor path. Raised in review of the fix above. With the shell functions the launcher runs in every
   directory, so this mattered more for this release than for the last. Servers from an
   enterprise `managed-mcp.json` are not examined.
 - **The channel flag was placed after a `--` in the middle of the arguments**,
