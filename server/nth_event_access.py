@@ -89,6 +89,29 @@ def native_connect_response(response, *, source='local', url=''):
 POLL_ONLY = ' Until it reports ready=true, tell your peers you only see messages when you poll.'
 
 
+def _recovery_hint(prefix, state, error=''):
+    """What to do about a listener that exists but is not ready.
+
+    One generic "restart it" would undo a stop the user asked for, replay a
+    delivery nobody confirmed, or revive a membership the hub has refused.
+    """
+    if state == 'stopped':
+        return ('Delivery is off: this listener was stopped on request and stays stopped. Do not '
+                're-enable it on your own; call ' + prefix + '_listen with enabled=true only when '
+                'the user asks for delivery again.' + POLL_ONLY)
+    if state == 'attention':
+        return ('Delivery needs attention: an event could not be confirmed (' + (error or 'unknown') +
+                '), so the listener paused rather than replay it. Reconcile first: read the channel '
+                'with ' + prefix + '_poll, acknowledge what you have processed, and tell the user. '
+                'Do not re-enable it as a retry.' + POLL_ONLY)
+    if state == 'ended':
+        return ('Delivery has ended (' + (error or 'no reason recorded') + ') and is not revived '
+                'automatically. Probe with ' + prefix + '_poll: if the membership is refused or the '
+                'channel is over, tell the user. Never reconnect or reclaim on your own.' + POLL_ONLY)
+    return ('Delivery is not ready yet: the listener is ' + str(state) + ' and recovers on its own. '
+            'Check again shortly; do not reconnect.' + POLL_ONLY)
+
+
 def _status(listeners, state, hint):
     # `ready` is the only field a skill may treat as "I am listening": a saved
     # status string alone has already been mistaken for a working subscription.
@@ -101,14 +124,18 @@ def delivery_status(channel, member_id, session_token, hub=None):
         return {'error': 'session_token is required'}
     if hub is not None:
         # Claude channel mode: the listener lives in this frontend process.
+        from nth_claude_channel import UNCONFIRMED
         listeners = hub.status(channel, member_id, session_token)
         if not listeners:
-            return _status([], 'not_attached', 'Setup is incomplete: no channel listener for this '
-                           'membership in this session. Call ' + hub.prefix + '_listen with enabled=true '
-                           'to start one from these credentials.' + POLL_ONLY)
-        return _status(listeners, listeners[0]['status'], 'Setup is incomplete: the channel listener is '
-                       + listeners[0]['status'] + '. Call ' + hub.prefix + '_listen with enabled=true '
-                       'to restart it.' + POLL_ONLY)
+            result = _status([], 'not_attached', 'Setup is incomplete: no channel listener for this '
+                             'membership in this session. Call ' + hub.prefix + '_listen with '
+                             'enabled=true to start one from these credentials.' + POLL_ONLY)
+        else:
+            state = listeners[0]['status']
+            result = _status(listeners, state, _recovery_hint(hub.prefix, state, listeners[0]['error']))
+        # ready means this frontend is listening and will write; it is not a host receipt.
+        result['delivery'] = UNCONFIRMED
+        return result
     from nth_event_service import public_status, service_alive
     listeners = public_status(channel, member_id, session_token)
     if not listeners:
@@ -120,9 +147,9 @@ def delivery_status(channel, member_id, session_token, hub=None):
         return _status(listeners, 'service_unavailable', 'Setup is incomplete: the local Trio event service '
                        'is not running, so the saved listener delivers nothing. Run trio start, or relaunch '
                        'through trio codex/trio desktop, then check again.' + POLL_ONLY)
-    return _status(listeners, listeners[0]['status'], 'Setup is incomplete: the listener is '
-                   + str(listeners[0]['status']) + '. Check again shortly, or restart it with '
-                   'the listen tool.' + POLL_ONLY)
+    state = listeners[0]['status']
+    prefix = 'trio' if listeners[0]['source'] == 'local' else 'quartet'
+    return _status(listeners, state, _recovery_hint(prefix, state, listeners[0]['error']))
 
 
 def listen(channel, member_id, session_token, filter_mode='', enabled=None, hub=None):

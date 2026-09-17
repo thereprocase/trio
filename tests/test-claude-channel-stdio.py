@@ -176,7 +176,11 @@ class StdioChannelTests(unittest.TestCase):
         status = host.tool('trio_delivery_status', channel='channel-test',
                            member_id=receiver['member_id'], session_token=receiver['session_token'])
         self.assertEqual((status['state'], status['ready']), ('stopped', False))
-        self.assertTrue(status['hint'].startswith('Setup is incomplete:'))
+        # A stop the user asked for is not a fault to repair.
+        self.assertTrue(status['hint'].startswith('Delivery is off:'))
+        self.assertIn('stays stopped', status['hint'])
+        self.assertIn('tell your peers', status['hint'])
+        self.assertIn('no receipt', status['delivery'])
         silent = say('@receiver while you were stopped')
         host.drain(3)
         self.assertNotIn(silent, [int(e['meta']['message_id']) for e in receiver_events()])

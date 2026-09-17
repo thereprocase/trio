@@ -281,6 +281,34 @@ class ChannelTests(unittest.TestCase):
         self.assertEqual(self.writer.sent, [])             # nothing escaped after the stop
         self.assertFalse(hub.push('after stop', {'message_id': '10'}, cancelled=stopped.is_set))
 
+    def test_recovery_hints_never_prescribe_a_generic_restart(self):
+        from nth_event_access import _recovery_hint, delivery_status
+        stopped = _recovery_hint('quartet', 'stopped')
+        self.assertIn('stays stopped', stopped)
+        self.assertIn('only when the user asks', stopped)
+        attention = _recovery_hint('trio', 'attention', 'unconfirmed_delivery')
+        self.assertIn('Reconcile first', attention)
+        self.assertIn('unconfirmed_delivery', attention)
+        self.assertNotIn('enabled=true', attention)
+        ended = _recovery_hint('quartet', 'ended', 'membership refused')
+        self.assertIn('not revived automatically', ended)
+        self.assertIn('Never reconnect or reclaim', ended)
+        self.assertNotIn('enabled=true', ended)
+        for state in ('starting', 'reconnecting', 'stopping'):
+            waiting = _recovery_hint('trio', state)
+            self.assertIn('recovers on its own', waiting)
+            self.assertNotIn('enabled=true', waiting)
+        for hint in (stopped, attention, ended, waiting):
+            self.assertIn('tell your peers you only see messages when you poll', hint)
+        # An ended listener reports its own reason and is not ready.
+        hub = self.hub([{'error': 'session revoked'}])
+        hub.start('test', 'receiver', TOKEN)
+        self.assertTrue(wait_until(lambda: hub.status('test', 'receiver', TOKEN)[0]['status'] == 'ended'))
+        status = delivery_status('test', 'receiver', TOKEN, hub=hub)
+        self.assertEqual((status['state'], status['ready']), ('ended', False))
+        self.assertIn('membership refused', status['hint'])
+        self.assertEqual(status['delivery'], UNCONFIRMED)
+
     def test_stop_mid_batch_loses_nothing_and_a_reenable_repeats_nothing(self):
         hub = self.hub([])
         self.source.idle = {'event': 'new_messages', 'messages': MESSAGES}
