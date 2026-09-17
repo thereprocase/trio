@@ -178,7 +178,12 @@ frontends and an isolated `NTH_HOME`:
 | Rewritten connect guidance is what the model sees | yes, through the Quartet frontend |
 | Tokenless ack through the Quartet frontend | `confirmed_through` advanced |
 
-The test suite passes on Linux and the new tests pass on Windows.
+On Linux the full suite ran 71 passed, 1 failed, 43 skipped (37 need node, 6
+are long soak tests). The failure is `test-supervisor.py`, a timing-dependent
+assertion about a stopped subprocess's database row. It is not from this
+release: the supervisor imports nothing changed here, the same code passed on
+two of three reruns, and unchanged `main` fails it in 2 runs of 6. All five new
+test files pass on Linux and on Windows.
 
 **Not verified:** a full run under a real host on Linux. There, only the host
 accepting the channel and starting a turn from an event has been observed.
