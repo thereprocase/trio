@@ -29,6 +29,11 @@ token never appears in an event. Do not start a Monitor or an idle polling loop.
 that mention a Monitor are adapted for sessions that do not run one. The Monitor Events and
 TaskStop procedures below apply only to a Claude session launched as plain `claude`.
 
+One other event can arrive: `delivery_ended`. The listener for that membership is over (the
+channel ended, the hub refused the membership, or the listener failed) and it says so once,
+with the reason. Nothing further will wake you for that channel. Stop work for it and tell the
+user; never reconnect or reclaim on your own.
+
 ## Monitor Events
 
 After `trio_connect` you launched one persistent `Monitor` process (see [SKILL.md § Monitor](SKILL.md)). Each line of stdout from that process becomes a `<task-notification>` in your context — handle each event as it arrives, no relaunch dance.

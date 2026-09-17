@@ -122,7 +122,9 @@ class ChannelTests(unittest.TestCase):
         for note in self.writer.sent:
             content = note.params['content']
             if '\n' in content:
-                ids += [message['id'] for message in json.loads(content.split('\n', 1)[1])['messages']]
+                # A delivery_ended notice carries no messages.
+                ids += [message['id'] for message in
+                        json.loads(content.split('\n', 1)[1]).get('messages', [])]
             else:
                 ids.append(int(note.params['meta']['message_id']))
         return ids
@@ -319,13 +321,77 @@ class ChannelTests(unittest.TestCase):
             time.sleep(.65)
         self.assertLess(len(calls), 10)
 
+    def test_a_hub_that_fails_every_poll_is_never_reported_as_listening(self):
+        from nth_event_access import delivery_status
+        # What the SSE client returns when the hub answers a poll with an error text.
+        failed = {'_raw': 'Error executing tool quartet_poll: database is locked'}
+        hub = self.hub([failed, failed, failed])
+        self.source.idle = failed
+        with patch.object(channel_module, 'RETRY_STEP_SECONDS', .05):
+            hub.start('test', 'receiver', TOKEN, 'about')
+            self.assertTrue(wait_until(lambda: len(self.source.calls) >= 4))
+            status = delivery_status('test', 'receiver', TOKEN, hub=hub)
+            # Deaf must not say ready. Read as empty polls, this reported `listening`.
+            self.assertEqual((status['state'], status['ready']), ('reconnecting', False))
+            self.assertEqual(self.state(hub)['error'], 'no poll result')
+            # The zero-wait first poll is still owed: none has succeeded yet.
+            self.assertEqual({call['wait_seconds'] for call in self.source.calls}, {0})
+            self.source.idle = {'event': 'new_messages', 'messages': [MESSAGES[1]]}
+            self.assertTrue(wait_until(lambda: self.pushed_ids() == [2]))
+        self.assertEqual(self.state(hub)['status'], 'listening')
+
+    def test_the_size_cap_holds_wherever_a_message_hides_its_bulk(self):
+        bulky = (dict(mention(1), **{'from': 'n' * 40000}),
+                 dict(mention(2), attachments=[{'id': i, 'filename': 'f' * 120} for i in range(200)]),
+                 dict(mention(3), content={'nested': '<' * 9000}))
+        for message in bulky:
+            with self.subTest(id=message['id']):
+                self.writer.sent.clear()
+                hub = self.hub([{'event': 'new_messages', 'messages': [message]}])
+                hub.start('test', 'receiver', TOKEN, 'at')
+                self.assertTrue(wait_until(lambda: self.writer.sent))
+                note = self.writer.sent[0].params
+                self.assertLessEqual(len(note['content']), channel_module.MAX_BATCH_CHARS)
+                self.assertEqual((note['meta']['message_id'], note['meta']['truncated'], note['meta']['mentioned']),
+                                 (str(message['id']), 'true', 'true'))
+                self.assertIn('read it in full with quartet_poll', note['content'])
+                hub.stop_all()
+
+    def test_a_listener_that_ends_says_so_once_in_the_session(self):
+        hub = self.hub([{'event': 'ended', 'ended_by': 'peer', 'unread_count': 3}])
+        hub.start('test', 'receiver', TOKEN)
+        self.assertTrue(wait_until(lambda: self.writer.sent))
+        time.sleep(.2)
+        self.assertEqual(len(self.writer.sent), 1)
+        note = self.writer.sent[0].params
+        self.assertEqual((note['meta']['event'], note['meta']['reason']), ('delivery_ended', 'channel ended'))
+        lead, body = note['content'].split('\n', 1)
+        self.assertIn('has stopped', lead)
+        self.assertIn('can no longer wake you', lead)
+        self.assertIn('3 message(s) you had not read: read them with quartet_history', lead)
+        self.assertEqual(json.loads(body)['event'], 'delivery_ended')
+        self.assertNotIn(TOKEN, json.dumps(note))
+        # A stop the user asked for is not an ending, and says nothing.
+        self.writer.sent.clear()
+        quiet = self.hub([])
+        quiet.start('test', 'receiver', TOKEN)
+        quiet.configure('test', 'receiver', TOKEN, enabled=False)
+        time.sleep(.2)
+        self.assertEqual(self.writer.sent, [])
+
     def test_refused_membership_ends_without_reclaiming(self):
         hub = self.hub([{'error': 'session revoked'}])
         hub.start('test', 'receiver', TOKEN)
         self.assertTrue(wait_until(lambda: self.state(hub)['status'] == 'ended'))
         time.sleep(.2)
         self.assertEqual(len(self.source.calls), 1)
-        self.assertEqual(self.writer.sent, [])
+        # No message is pushed, and the one thing written is the notice that delivery
+        # is over: an idle agent would otherwise go on believing it can be woken.
+        self.assertEqual(self.pushed_ids(), [])
+        self.assertEqual(len(self.writer.sent), 1)
+        notice = self.writer.sent[0].params
+        self.assertEqual(notice['meta']['reason'], 'membership refused')
+        self.assertIn('Never reconnect or reclaim it on your own', notice['content'])
         self.assertTrue(wait_until(lambda: self.source.closed))
 
     def test_channel_end_stops_the_listener(self):

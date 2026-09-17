@@ -1,5 +1,6 @@
 """Quartet stdio frontend against a fake hub; isolated NTH_HOME, no network, no credentials."""
 import asyncio
+import io
 import json
 import os
 from pathlib import Path
@@ -192,6 +193,26 @@ class ProxyTests(unittest.TestCase):
         for malformed in ({'content': None}, {'content': [None]}, {'content': 'text'}, {}):
             self.assertIsNone(proxy._adapt(malformed, proxy._guided))
 
+    def test_a_missing_channel_module_costs_channel_mode_not_the_frontend(self):
+        env = {k: v for k, v in os.environ.items() if not k.startswith(('TRIO_', 'NTH_'))}
+        env.update(NTH_HOME=self.temp.name, TRIO_NATIVE_CLIENT='claude', TRIO_CLAUDE_CHANNEL='1')
+        with patch.dict(os.environ, env, clear=True), patch.object(proxy, 'MCPSSEClient', FakeHub), \
+             patch.dict(sys.modules, {'nth_claude_channel': None}), \
+             patch('sys.stderr', new_callable=io.StringIO) as stderr:
+            server, _, hub = proxy.create_server('http://hub.example/sse')
+            self.assertIsNone(hub)
+            self.assertIn('channel delivery is unavailable', stderr.getvalue())
+            # Every later answer in this process now says so, instead of promising pushes.
+            self.assertEqual(os.environ['TRIO_CLAUDE_CHANNEL'], 'unavailable')
+            self.environment = dict(os.environ)
+            body = json.loads(self.call(server, 'quartet_connect', summary='test', name='member',
+                                        channel='room').content[0].text)
+            self.assertEqual(body['event_delivery']['mode'], 'monitor')
+            self.assertTrue(body['monitor_hint'])
+            status = json.loads(self.call(server, 'quartet_delivery_status', channel='room',
+                                          member_id='member-1', session_token=TOKEN).content[0].text)
+            self.assertEqual((status['state'], status['ready']), ('channel_unavailable', False))
+
     def test_without_channel_mode_calls_pass_through_unchanged(self):
         server = self.serve(TRIO_NATIVE_CLIENT='claude')
         self.call(server, 'quartet_connect', summary='test', name='member', channel='room')
@@ -236,6 +257,19 @@ class ProcessTests(unittest.TestCase):
                     process.stdout.close()
                     process.stderr.close()
             return frame['result'], process.returncode
+
+    def test_the_frontend_imports_without_the_channel_module(self):
+        # Codex and a plainly launched Claude never asked for a channel. If a release of the
+        # mcp library moves what the channel module needs, they must still get their tools.
+        script = ('import sys\n'
+                  'sys.modules["nth_claude_channel"] = None\n'
+                  f'sys.path.insert(0, {str(SERVER_DIR)!r})\n'
+                  'import nth_quartet_proxy\n'
+                  'print("imported")\n')
+        env = {k: v for k, v in os.environ.items() if not k.startswith(('TRIO_', 'NTH_'))}
+        env.update(TRIO_NATIVE_CLIENT='codex', PYTHONDONTWRITEBYTECODE='1')
+        done = subprocess.run([sys.executable, '-c', script], env=env, capture_output=True, text=True, timeout=60)
+        self.assertEqual((done.returncode, done.stdout.strip()), (0, 'imported'), done.stderr[-400:])
 
     def test_the_frontend_serves_and_exits_cleanly_with_and_without_channel_mode(self):
         # Codex and a plainly launched Claude run through the same run_stdio, with no hub.

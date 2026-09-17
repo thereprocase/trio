@@ -95,6 +95,7 @@ def _embed(payload):
 def format_event(prefix, channel, member_id, messages, more_unread=0):
     """Messages from one poll -> (content, meta). The JSON matches the Codex relay's payload."""
     first, last, count = messages[0]['id'], messages[-1]['id'], len(messages)
+    channel = str(channel)[:120]             # a hub-chosen string must not carry the bulk either
     event_id = f'{channel}:{last}'
     payload = {'event': 'new_messages', 'channel': channel, 'event_id': event_id, 'messages': messages}
     if more_unread:
@@ -132,6 +133,17 @@ def format_event(prefix, channel, member_id, messages, more_unread=0):
             'sender': ','.join(senders)[:200], 'truncated': str(bool(shortened)).lower()}
     for flag in ('mentioned', 'banged', 'referenced'):
         meta[flag] = str(any(bool(message.get(flag)) for message in messages)).lower()
+    return lead + '\n' + _embed(payload), meta
+
+
+def format_notice(prefix, channel, member_id, reason, advice):
+    """The one event a listener writes when it ends: delivery has stopped, and why."""
+    lead = (f'Delivery for {prefix} channel "{_attribute(channel)}" has stopped for member '
+            f'"{_attribute(member_id)}": {_attribute(reason)}. No further events will arrive for it, '
+            f'and replies there can no longer wake you. {advice}')
+    payload = {'event': 'delivery_ended', 'channel': str(channel)[:120], 'reason': str(reason)[:120]}
+    meta = {'channel': _attribute(channel), 'member_id': _attribute(member_id),
+            'event': 'delivery_ended', 'reason': _attribute(reason)}
     return lead + '\n' + _embed(payload), meta
 
 
@@ -238,12 +250,29 @@ class Listener:
         if self.acked_through >= self.last_written:
             self.unconfirmed_since = None
 
+    def _end(self, reason, advice):
+        """Delivery for this membership is over. Say so once, in the session.
+
+        Under the Monitor an agent was told when its channel ended. An idle agent on
+        push delivery is told nothing unless this says it: it would go on believing
+        it can be woken. One event per listener lifetime, so it is not rate limited.
+        """
+        self.status, self.error = 'ended', reason
+        try:
+            b = self.binding
+            content, meta = format_notice(self.hub.prefix, b['channel'], b['member_id'], reason, advice)
+            self.hub.push(content, meta, cancelled=self._stop.is_set)
+        except Exception:  # noqa: BLE001 - best effort; the status above already says it
+            pass
+
     def _run(self):
         try:
             self._loop()
         except Exception as exc:  # noqa: BLE001 - a dead thread must never keep reporting 'listening'
             if not self._stop.is_set():
-                self.status, self.error = 'ended', type(exc).__name__
+                self._end(type(exc).__name__,
+                          'The listener failed unexpectedly. Tell the user, and check '
+                          + self.hub.prefix + '_delivery_status.')
         finally:
             self._close()
 
@@ -292,6 +321,14 @@ class Listener:
             text = text[:len(text) * 3 // 4]
             batch = [dict(batch[0], content=text, truncated=True)]
             content, meta = render(batch)
+        if len(content) > MAX_BATCH_CHARS:
+            # The bulk was not in the text: a name, an attachment list, a nested body.
+            # A well-behaved hub bounds all of those; the cap must hold without it.
+            # Only the id and the flags travel, and the agent reads the rest with poll.
+            stub = {'id': batch[0]['id'], 'truncated': True}
+            stub.update({flag: True for flag in ('mentioned', 'banged', 'referenced') if batch[0].get(flag)})
+            batch = [stub]
+            content, meta = render(batch)
         if not self.hub.push(content, meta, cancelled=self._stop.is_set):
             if not self._stop.is_set():
                 self.status, self.error = 'ended', 'transport closed'
@@ -327,16 +364,31 @@ class Listener:
                 self._stop.wait(min(RETRY_STEP_SECONDS * failures, RETRY_MAX_SECONDS))
                 continue
             elapsed = time.monotonic() - started
-            failures = 0
-            first = False
             if self._stop.is_set():
                 return
+            if isinstance(poll, dict) and not poll.get('error') and 'event' not in poll:
+                # Not a poll result. A hub that fails the call hands back an error
+                # text, which the SSE client passes on as {'_raw': ...}. Reading that
+                # as an empty poll reported `listening` and ready while every poll
+                # failed: deaf, and saying otherwise. Every real result names its event.
+                failures += 1
+                self.status, self.error = 'reconnecting', 'no poll result'
+                self._stop.wait(min(RETRY_STEP_SECONDS * failures, RETRY_MAX_SECONDS))
+                continue
+            failures = 0
+            first = False
             if not isinstance(poll, dict) or poll.get('error'):
                 # Refused: revoked or displaced membership. Never auto-reclaim.
-                self.status, self.error = 'ended', 'membership refused'
+                self._end('membership refused',
+                          'The hub refused this membership: it was revoked or displaced. Tell the user. '
+                          'Never reconnect or reclaim it on your own.')
                 return
             if poll.get('ended') or poll.get('event') in ('ended', 'channel_not_found', 'channel_gone'):
-                self.status, self.error = 'ended', 'channel ended'
+                unread = poll.get('unread_count')
+                last = (f' It closed with {unread} message(s) you had not read: read them with '
+                        f'{self.hub.prefix}_history.' if isinstance(unread, int) and unread > 0 else '')
+                self._end('channel ended', 'The channel was ended.' + last +
+                          ' Stop work for it and tell the user.')
                 return
             self.status, self.error = 'listening', ''
             fresh = self._fresh(poll.get('messages'))

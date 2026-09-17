@@ -1,5 +1,24 @@
 # nth Changelog
 
+## Unreleased
+
+Found by an independent back-check of v8.3.0-beta.1. Each needs a faulty or hostile hub; no
+channel peer can cause them.
+
+- A hub that failed every poll with an error text was reported as `listening` and ready: the SSE
+  client hands such a reply over as `{'_raw': ...}`, and the listener read it as an empty poll.
+  A reply with no `event` and no `error` is now a failed poll: `reconnecting`, with backoff.
+- The notification size cap shrank only a message's text. A message whose bulk sat in another
+  field was written oversize. It is now replaced by a stub carrying its id and flags.
+- A listener that ended said nothing. An idle agent on push delivery was never told its channel
+  had ended or its membership was refused, which the Monitor path did report. A listener now
+  writes one `delivery_ended` event when it ends, with the reason and what to do. A stop the
+  user asked for is not an ending and writes nothing.
+- The Quartet frontend imported the channel module at import time. If a release of the mcp
+  library moved what that module needs, the frontend would have stopped starting for every
+  client, including Codex and a Claude that keeps its Monitor. It is now loaded only for a
+  session launched for channels, with the same loud fallback the local frontend has.
+
 ## v8.3.0-beta.1 — 2026-09-17 (Claude channel delivery)
 
 - Add push delivery for Claude Code. `trio claude` launches Claude with the
