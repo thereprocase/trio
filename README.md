@@ -17,7 +17,7 @@ python setup.py install --quartet-url http://YOUR_HUB:8000/sse
 trio codex     # or: trio claude
 ```
 
-Omit `--quartet-url` for local-only use. Use `--clients codex` or `--clients claude` to install one client; `--codex-binary PATH` selects the installed stock executable. The launcher is `~/.local/bin/trio` (`trio.cmd` on Windows); use its full path if that directory is outside PATH. Restart Claude after installation, launch it with `trio claude`, and use `/trio` or `/quartet` normally. `--claude-binary PATH` selects a Claude Code executable that is not on PATH.
+Omit `--quartet-url` for local-only use. Use `--clients codex` or `--clients claude` to install one client; `--codex-binary PATH` selects the installed stock executable. The launcher is `~/.local/bin/trio` (`trio.cmd` on Windows); use its full path if that directory is outside PATH. Restart Claude after installation, launch it with `trio claude`, and use `/trio` or `/quartet` normally. `--claude-binary PATH` selects a Claude Code executable that is not on PATH. To make plain `claude` and `codex` start through Trio in every terminal, add the output of `trio shell-init powershell` (or `bash`, `zsh`) to your shell profile; see [AGENT-RUNTIME.md](AGENT-RUNTIME.md).
 
 In Codex, invoke `$trio` or `$quartet` and join a channel. Trio observes the successful MCP `connect` result and automatically binds that membership to its actual thread. Check `*_delivery_status`: only `ready: true` means ready. Incoming events wake an idle thread or enter an active turn at its next model-step boundary, usually after the current tool call or batch completes. This does not interrupt a running command. Reply and acknowledge with the usual channel tools.
 
@@ -165,7 +165,7 @@ python setup.py install --quartet-url http://YOUR_HUB:8000/sse   # a Claude Code
 sudo bash setup.sh hub-service                                    # a hub
 ```
 
-Restart Claude Code, and launch it with `trio claude`. `setup.sh spoke` is the legacy spoke installer: it registers `nth-qweb` as a direct remote SSE server and `nth-trio` without the client marker, so neither can deliver channel events. `trio claude` checks the registrations before it names a server: it refuses a `nth-trio` that could never push, and it never names a remote server as a channel. Re-running `python setup.py install` repairs both.
+Restart Claude Code, and launch it with `trio claude`. `setup.sh spoke` is the legacy spoke installer: it registers `nth-qweb` as a direct remote SSE server and `nth-trio` without the client marker, so neither can deliver channel events. `trio claude` checks the registrations before it names a server: it will not name a `nth-trio` that could never push (it says why and starts Claude Code without channel delivery), and it never names a remote server as a channel. Re-running `python setup.py install` repairs both.
 
 ## Data Storage
 
@@ -305,9 +305,9 @@ nth is a conference call with a whiteboard, not a work queue.
 
 ## Version History
 
-Current: **v8.3.0-beta.1**
+Current: **v8.3.0-beta.2**
 
-- **v8.3** — Push delivery for Claude Code through channels (`trio claude`), with bounded, rate-limited notifications; a readiness contract for both providers (`ready: true` is the only proof of delivery); the Monitor documented as the 30-minute lease it became in Claude Code 2.1.274.
+- **v8.3** — `trio shell-init` makes plain `claude` and `codex` start through Trio (beta.2). Push delivery for Claude Code through channels (`trio claude`), with bounded, rate-limited notifications; a readiness contract for both providers (`ready: true` is the only proof of delivery); the Monitor documented as the 30-minute lease it became in Claude Code 2.1.274.
 - **v8.2** — Native local event delivery for stock Codex and Claude: one event service, durable thread bindings, `trio codex` / `trio desktop`, and the local stdio Quartet frontend.
 - **v8.1** — File-path links with reveal-in-file-manager, image attachments with agent vision, local speech-to-text dictation, member removal from the roster, full-text message search, unread divider + jump-to-first-unread, working/idle indicator via Claude Code hooks
 - **v8.0** — Web dashboard with 14 themes, mobile responsive layout, context rings (statusline relay from spokes to hub), session ID auto-discovery, Walled Garden theme, operator identity (Tailscale whois / loopback / guest), per-member context badges with curated stats, cross-platform process tree walker (Linux/macOS/Windows)

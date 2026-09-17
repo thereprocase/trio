@@ -114,7 +114,14 @@ is only acceptable for a local program, the launcher reads that configuration
 first. It names a server only if it is a stdio entry, marked for Claude, whose
 command is a Python interpreter and whose first argument is this installation's
 own frontend file. That is a check of the registration, not of the file's
-contents. It refuses to start when `nth-trio` is not, and it
+contents. Claude Code resolves a server name by scope (local, then the
+project's `.mcp.json`, then user), and the flag grants by name, so the launcher
+applies the same check to every same-name registration in a higher scope for
+the directory the session starts in and for each directory above it. Servers
+from an enterprise `managed-mcp.json` are not examined. When `nth-trio` does not pass, the launcher refuses the grant, not the
+session: it says why on stderr and starts Claude Code without the flag, so the
+session uses the Monitor. (With `claude` aliased to the launcher, refusing to
+start would let a repository's `.mcp.json` disable `claude` inside it.) It
 leaves out, with a warning, a `nth-qweb` that is registered as a remote server,
 which is what the legacy `setup.sh spoke` leaves behind.
 
@@ -198,8 +205,64 @@ Costs and limits:
   `channel_unavailable`. Codex and a plainly launched Claude never load the
   channel module at all. A failure inside the MCP library after startup is not
   covered by that fallback.
-- `trio claude -p` and other headless uses have not been verified: the launch
-  confirmation may have nobody to answer it. Use plain `claude` there.
+- Only an interactive session gets the flag. `trio claude mcp ...`, `update`,
+  `doctor` and the other subcommands, `-p/--print`, `--help`, `--version`,
+  `--bg`, and any launch without a terminal on stdin and stdout go to the real
+  binary exactly as typed, with `TRIO_CLAUDE_CHANNEL` removed and without the
+  registration check. Such a run has nobody to answer the launch confirmation
+  and no open session to push into. The subcommand list is the one Claude Code
+  2.1.274 prints; a subcommand added later is not known to the launcher and
+  gets the flag, which Claude Code may refuse. Run the real binary by its path
+  in that case.
+
+### Making plain `claude` and `codex` start through Trio
+
+A session can only receive pushes if it was launched for them, so the way to
+make every session attachable is to make the launcher the normal way in.
+`trio shell-init powershell` (or `bash`, `zsh`) prints two shell functions,
+`claude` and `codex`, that call this installation's interpreter and launcher by
+path (`--clients claude` or `--clients codex` prints only that one). Add the
+output to your shell profile yourself: Trio never edits a profile. For example:
+
+```
+trio shell-init powershell | Add-Content -Path $PROFILE     # PowerShell
+trio shell-init bash >> ~/.bashrc                           # bash (zsh: ~/.zshrc)
+```
+
+In PowerShell use `Add-Content`, which keeps the profile's encoding; `>>` in
+Windows PowerShell 5.1 appends UTF-16 to a UTF-8 file. If the profile's folder
+does not exist yet, create it first:
+`New-Item -ItemType Directory -Force (Split-Path $PROFILE)`. The installer
+prints these lines with the launcher's full path when it finishes.
+
+After that `claude` anywhere is `trio claude`, including its arguments and
+piped input, and the non-session uses above behave as they always did.
+`codex` is `trio codex` in the same way: the interactive form, and the
+subcommands that Codex itself lets run against an app-server (`resume`, `fork`,
+`agents`, `queue`, `archive`, `delete`, `unarchive` in codex-cli 0.154.0), use
+Trio's shared server; `exec`, `login`, `mcp`, `update` and every other
+subcommand, `--help`, `--version`, and an interactive form without a terminal
+reach the real binary as typed and start nothing. A
+session launched this way listens to nothing until it joins a channel. The
+price is the launch confirmation each time. The functions exist only in your
+interactive shells: an editor extension, the desktop app or a scheduled task
+starts the real binary. A Claude Code started that way gets the Monitor path;
+a Codex started that way has no listener at all (`not_attached`) and hears
+nothing until it is prompted. To undo it, delete the lines
+from the profile; the real binaries are untouched. Run `trio shell-init` again
+after moving or reinstalling Trio, because the functions hold absolute paths.
+
+Three edges:
+
+- A prompt that begins with `-`. PowerShell removes a bare `--` before a
+  function sees it, and a leading `--` typed to the bash function is read as
+  Trio's own separator. Start the session and type such a prompt inside it.
+- A session started with `--bg` has no channel, and neither has one reopened
+  with `claude attach`: both are passed through.
+- A terminal is recognised by `isatty`, and on Windows also by the pipes Git
+  Bash's mintty hands a native program when it runs without a pseudo console.
+  When a launch that looks like a session finds no terminal, the launcher says
+  so in one line on stderr and starts the program without delivery.
 
 ### Monitor mode: plain `claude`
 

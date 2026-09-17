@@ -221,6 +221,90 @@ class NativeTests(unittest.TestCase):
             nth_cli.main(['codex', '--model', 'chosen-model', 'resume', 'thread-id'])
         self.assertEqual(call.call_args.args[0], ['codex', '--remote', 'unix:///tmp/test.sock',
                                                 '--model', 'chosen-model', 'resume', 'thread-id'])
+    def test_launcher_leaves_codex_invocations_that_open_no_session_alone(self):
+        import nth_cli
+
+        def launched(arguments, terminal=True):
+            with patch.object(nth_cli, 'ensure_codex', return_value=('unix:///tmp/test.sock', 'codex')) as server, \
+                 patch.object(nth_cli, 'codex_binary', return_value='codex'), \
+                 patch.object(nth_cli, 'terminal_attached', return_value=terminal), \
+                 patch.object(nth_cli.subprocess, 'call', return_value=0) as call:
+                nth_cli.main(['codex', *arguments])
+            return call.call_args.args[0], server.called
+
+        # With `codex` aliased to `trio codex`, these must behave as they always did:
+        # typed argv, and no shared app-server started on their account.
+        for arguments in (['exec', 'a prompt'], ['login'], ['mcp', 'list'], ['--version'], ['resume', '--help'],
+                          ['-C', 'app', 'exec', 'a prompt'], ['-m', 'chosen-model', 'review'], ['help']):
+            with self.subTest(plain=arguments):
+                self.assertEqual(launched(arguments), (['codex', *arguments], False))
+        # A session, or session management the shared server owns. `-p` is --profile
+        # and `-C` is --cd: their values are not subcommands.
+        for arguments in ([], ['a prompt'], ['-C', 'app'], ['-p', 'exec'], ['fork', 'thread-id'],
+                          ['-m', 'chosen-model', '--', 'exec']):
+            with self.subTest(session=arguments):
+                self.assertEqual(launched(arguments),
+                                 (['codex', '--remote', 'unix:///tmp/test.sock', *arguments], True))
+        # No terminal: the interactive form is left alone, session management is not.
+        self.assertEqual(launched(['a prompt'], terminal=False), (['codex', 'a prompt'], False))
+        self.assertEqual(launched(['archive', 'thread-id'], terminal=False),
+                         (['codex', '--remote', 'unix:///tmp/test.sock', 'archive', 'thread-id'], True))
+        self.assertEqual(launched(['--', 'exec', 'a prompt']), (['codex', 'exec', 'a prompt'], False))
+        # The aliases Codex documents for exec and apply.
+        for arguments in (['e', 'a prompt'], ['a'], ['-m', 'chosen-model', 'e', 'a prompt']):
+            with self.subTest(alias=arguments):
+                self.assertEqual(launched(arguments), (['codex', *arguments], False))
+        # An app-server the user named is theirs: Codex rejects a second --remote.
+        for arguments in (['--remote', 'ws://127.0.0.1:1'], ['--remote=ws://127.0.0.1:1', 'resume', 'thread-id'],
+                          ['-m', 'chosen-model', '--remote', 'unix:///tmp/own.sock', 'a prompt']):
+            with self.subTest(own_server=arguments):
+                command, started = launched(arguments)
+                self.assertEqual((command, started), (['codex', *arguments], False))
+                self.assertEqual(sum(part == '--remote' or part.startswith('--remote=') for part in command), 1)
+        # After the separator it is the prompt, not an option.
+        self.assertEqual(launched(['-m', 'chosen-model', '--', '--remote'])[0],
+                         ['codex', '--remote', 'unix:///tmp/test.sock', '-m', 'chosen-model', '--', '--remote'])
+
+    def test_a_shared_server_that_cannot_start_costs_delivery_not_the_session(self):
+        import io
+        import nth_cli
+        with patch.object(nth_cli, 'ensure_codex', side_effect=RuntimeError('Codex server exited; inspect the log')), \
+             patch.object(nth_cli, 'codex_binary', return_value='codex'), \
+             patch.object(nth_cli, 'terminal_attached', return_value=True), \
+             patch.object(nth_cli.subprocess, 'call', return_value=0) as call, \
+             patch('sys.stderr', new_callable=io.StringIO) as stderr:
+            self.assertEqual(nth_cli.main(['codex', '-m', 'chosen-model', 'a prompt']), 0)
+        # With `codex` aliased to the launcher, an error here would mean no Codex at all.
+        self.assertEqual(call.call_args.args[0], ['codex', '-m', 'chosen-model', 'a prompt'])
+        self.assertIn('Codex server exited', stderr.getvalue())
+        self.assertIn('WITHOUT Trio\'s shared server', stderr.getvalue())
+
+    def test_a_reused_codex_server_does_not_pin_a_client_binary_that_is_gone(self):
+        import io
+        import nth_cli
+        record = service.state_dir() / 'codex-server.json'
+        record.write_text(json.dumps({'endpoint': 'unix:///tmp/live.sock',
+                                      'binary': str(self.root / 'removed-by-an-update' / 'codex'), 'pid': 1}))
+        with patch.object(nth_cli, 'connectable', return_value=True), \
+             patch.object(nth_cli, 'add_endpoint'), patch.object(nth_cli, 'ensure_service'), \
+             patch.object(nth_cli.shutil, 'which', side_effect=lambda name: '/usr/bin/codex' if name == 'codex' else None), \
+             patch('sys.stderr', new_callable=io.StringIO):
+            self.assertEqual(nth_cli.ensure_codex(), ('unix:///tmp/live.sock', '/usr/bin/codex'))
+
+    def test_a_stale_saved_codex_binary_falls_back_to_the_one_on_path(self):
+        import io
+        import nth_cli
+        (self.root / 'native.json').write_text(json.dumps({'codex_binary': str(self.root / 'removed-by-an-update' / 'codex')}))
+        with patch.object(nth_cli.shutil, 'which', side_effect=lambda name: '/usr/bin/codex' if name == 'codex' else None), \
+             patch('sys.stderr', new_callable=io.StringIO) as stderr:
+            self.assertEqual(nth_cli.codex_binary(), '/usr/bin/codex')
+        self.assertIn('no longer exists', stderr.getvalue())
+        self.assertIn('--codex-binary', stderr.getvalue())
+        kept = self.root / 'codex-kept'
+        kept.write_text('placeholder')
+        (self.root / 'native.json').write_text(json.dumps({'codex_binary': str(kept)}))
+        self.assertEqual(nth_cli.codex_binary(), str(kept))
+
     def test_native_connect_keeps_tokens_out_of_launch_command(self):
         identity = {'channel': 'room', 'member_id': 'member-1', 'session_token': 'private-token', 'reclaim_secret': 'private-reclaim'}
         with patch.dict(os.environ, {'TRIO_NATIVE_CLIENT': 'claude'}):
@@ -260,6 +344,15 @@ class NativeTests(unittest.TestCase):
                                      (ROOT / source_name).read_bytes())
         self.assertTrue(Path(result['server'], 'nth_event_service.py').exists())
         self.assertTrue(list(profile.glob('.claude.json.bak-*')))
+        # The installer tells the user how to make plain launches go through Trio,
+        # and leaves the profile to them.
+        windows, posix = setup.next_steps(result, platform='nt'), setup.next_steps(result, platform='posix')
+        self.assertIn(f'& "{result["launcher"]}" shell-init powershell | Add-Content -Path $PROFILE', windows)
+        self.assertIn('shell-init bash >> ~/.bashrc', posix)
+        for text in (windows, posix):
+            self.assertIn('Restart Claude Code and Codex', text)
+            self.assertIn('To undo, delete the two functions', text)
+        self.assertFalse(list(profile.glob('**/*profile*.ps1')) + list(profile.glob('.bashrc')))
     def test_managed_event_steers_active_turn_and_preserves_private_routing(self):
         db_path = self.root / 'managed.sqlite'
         with contextlib.closing(sqlite3.connect(db_path)) as db:

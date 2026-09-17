@@ -1,6 +1,39 @@
 # nth Changelog
 
-## Unreleased
+## v8.3.0-beta.2 — 2026-09-17 (plain launches through Trio, launcher and back-check fixes)
+
+- `trio shell-init powershell|bash|zsh` prints shell functions that make plain `claude` and
+  `codex` start through Trio, so that every terminal-launched session can receive pushes. They
+  call the installed interpreter and launcher by path (on Windows this avoids `trio.cmd` and
+  cmd.exe's second parse of the arguments) and forward piped input. Trio never edits a profile.
+- `trio claude` adds the channel flag only to an interactive session. Subcommands (`mcp`,
+  `update`, `doctor`, ...), `-p/--print`, `--help`, `--version`, `--bg` and a launch without a
+  terminal reach the real binary as typed, with `TRIO_CLAUDE_CHANNEL` removed and without the
+  registration check.
+- `trio codex` uses the shared app-server only for the interactive form and for the subcommands
+  that accept `--remote`. `exec`, `login`, `mcp` and the rest reach the real binary as typed
+  and no longer start the server.
+- The launcher check now covers every registration Claude Code could select. It validated
+  the installed, user-scoped `nth-trio`, but the flag grants by name and Claude Code resolves a
+  name local scope first, then the project's `.mcp.json`. A same-name entry there, for instance
+  in a cloned repository, would have received the grant unchecked. Such an entry is now held to
+  the same rules, for the launch directory and every directory above it. Found by an independent
+  back-check, with a reproduction against the real CLI.
+- A registration that fails the check now costs the grant, not the session: the launcher says
+  why and starts Claude Code without the flag. Refusing to start would let a repository's
+  `.mcp.json` disable an aliased `claude` inside it.
+- Both launchers fall back to the command on PATH when a saved binary no longer exists, as
+  happens when the Codex app updates, instead of failing every launch. A reused app-server's
+  recorded binary is checked the same way.
+- A shared app-server that cannot be started costs delivery, not the session: `trio codex` says
+  why and starts Codex without it. Trio may fail to add delivery; it must not fail to start
+  the tool.
+- `trio codex` passes a command line that already names `--remote` as typed (Codex rejects a
+  second one), and knows the aliases `e` (exec) and `a` (apply).
+- The channel flag is placed before a `--` in the middle of the arguments. After it, Claude
+  Code would have read the flag as prompt text.
+- Ctrl+C in a launched program no longer kills it through the launcher. On POSIX the terminal
+  interrupts the launcher too, and `subprocess.call` kills its child when that happens.
 
 Found by an independent back-check of v8.3.0-beta.1. Each needs a faulty or hostile hub; no
 channel peer can cause them.

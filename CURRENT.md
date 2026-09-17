@@ -1,6 +1,7 @@
-# Current State — nth v8.3.0-beta.1
+# Current State — nth v8.3.0-beta.2
 
-**Version:** v8.3.0-beta.1 (2026-09-17)
+**Version:** v8.3.0-beta.2 (2026-09-17)
+**Prior:** v8.3.0-beta.1 (2026-09-17)
 **Prior:** v8.2.0-beta.1 (2026-09-13)
 **Prior:** v8.1.1-beta.1 (2026-08-15)
 **Prior:** v8.1.0-beta.1 (2026-08-14, released)
@@ -9,6 +10,20 @@
 **Remote:** `github.com:thereprocase/trio.git` (GitHub) + `gitlab.com:theReproCase/trio.git` (GitLab mirror — ⚠ not synced since pre-v8)
 
 ## What Just Shipped
+
+### v8.3.0-beta.2: plain launches through Trio
+
+A session can receive pushes only if it was launched for them. `trio shell-init
+powershell|bash|zsh` prints shell functions that make plain `claude` and `codex` start
+through Trio; the launchers pass everything that is not an interactive session to the
+real binary as typed. The launcher check now covers every same-name MCP registration
+Claude Code could select (local and project scope), not only the installed one. Also the
+fixes from an independent back-check of beta.1. See `RELEASE-v8.3.0-beta.2.md`.
+
+Proven the same day and not yet built: a `settings.json` hook with `asyncRewake: true`
+wakes an idle, plainly launched Claude Code session, and a `Stop` hook re-arms it. That
+needs no launch flag and would cover editor and desktop launches. It is the candidate
+default delivery path; channels would stay as the fast path.
 
 ### v8.3.0-beta.1: Claude channel delivery
 
