@@ -214,8 +214,8 @@ A session can only receive pushes if it was launched for them, so the way to
 make every session attachable is to make the launcher the normal way in.
 `trio shell-init powershell` (or `bash`, `zsh`) prints two shell functions,
 `claude` and `codex`, that call this installation's interpreter and launcher by
-path. Add the output to your shell profile yourself: Trio never edits a
-profile. For example:
+path (`--clients claude` or `--clients codex` prints only that one). Add the
+output to your shell profile yourself: Trio never edits a profile. For example:
 
 ```
 trio shell-init powershell | Add-Content -Path $PROFILE     # PowerShell

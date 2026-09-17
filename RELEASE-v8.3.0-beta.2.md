@@ -49,6 +49,9 @@ the full path the installer printed.
 **3. Open a new terminal.** `claude` and `codex` now start through Trio, from
 any directory, with your arguments and piped input passed on.
 
+`--clients claude` (or `codex`) prints only that one function, for a machine
+where the other command should stay as it is.
+
 Trio prints the functions and never edits a profile itself. To undo the change,
 delete the two functions from the profile; the real binaries are untouched. The
 functions hold absolute paths to this installation, so run `shell-init` again
