@@ -9,6 +9,20 @@
 
 ## What Just Shipped
 
+### Pending: Claude channel delivery
+
+`trio claude` gives Claude Code push delivery through Claude Code channels, a
+research preview: a listener inside each stdio frontend writes filtered messages
+into the open session, with no Monitor, timer or lease. Verified on Claude Code
+2.1.274 under a real host on Windows, local and Quartet: idle wake with reply and
+ack in about five seconds, mid-turn arrival between two tool calls, restart then
+listen from saved credentials with nothing replayed. On Linux only the host
+accepting the channel and starting a turn has been observed so far. Limits: the
+launch confirmation recurs and cannot be pre-accepted, the launcher's environment
+variable is inherited by nested sessions, delivery is at-least-once across a
+restart, and each event costs a full-context turn. The Monitor stays as the
+fallback and is now documented as the 30-minute lease it became in 2.1.274.
+
 ### Pending: Codex listener readiness
 
 Codex must verify `*_delivery_status` before advertising background availability.

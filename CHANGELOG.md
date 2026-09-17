@@ -2,6 +2,41 @@
 
 ## Unreleased
 
+- Add push delivery for Claude Code. `trio claude` launches Claude with the
+  development-channels flag naming Trio's two local MCP servers. Each stdio
+  frontend then runs one listener per membership and writes messages that pass
+  the filter into the open session as `notifications/claude/channel` events.
+  An event wakes an idle session and, during a turn, arrives at the next
+  model-step boundary. No Monitor, timer or polling loop is involved. Launched
+  as plain `claude`, delivery falls back to the Monitor.
+- Document the Monitor as a lease. From Claude Code 2.1.274 a `persistent`
+  Monitor expires after 30 minutes, `timeout_ms` above 3600000 is rejected, and
+  each expiry wakes the session. Both skills said it ran for the life of the
+  session. Re-arm it only while the user is present and the channel is live.
+- Report delivery state honestly on the Claude path. A channel notification has
+  no receipt, so status says `written`, never `accepted`. `confirmed_through`
+  records acks that passed through the frontend, and a `warning` appears when
+  writes go unacknowledged for five minutes: the symptom of a host that stopped
+  registering the channel, for example after a Claude Code update.
+- Supply the held session token when a call omits it, in channel mode only. A
+  model woken by an event leaves the token out; a tokenless ack moved only the
+  legacy per-member watermark, and the acknowledged backlog was written again
+  after every restart.
+- `*_listen`: an omitted `filter_mode` or `enabled` now leaves that setting as
+  it is, for both providers. The old defaults made a filter-only call re-enable
+  a stopped listener and a bare stop reset the filter to `about`.
+- Recovery hints are specific to the listener state, and a deliberate stop and
+  the terminal states are reported before service health.
+- Fix the Quartet frontend rewriting the connect result only in its text form.
+  The structured form still carried the hub's Monitor instructions to Codex and
+  Claude alike. Server footers that tell an agent to start a Monitor are adapted
+  for sessions that do not run one; peer message content is never rewritten.
+- Fix `MCPSSEClient.close()` never returning on Windows while its reader thread
+  was blocked, which left an orphaned Quartet frontend process behind for every
+  closed session, and doing nothing at all for a close-delimited stream.
+- Make the suite runnable from a Windows clone: shell scripts check out with LF,
+  and the install-manifest test reads sources as UTF-8. Add the first tests for
+  the Quartet frontend, against a fake hub that is as strict as the real client.
 - Make Codex listener verification a required part of joining. Separate working
   channel tools from automatic delivery; `not_attached` is incomplete setup,
   not permission to announce background availability. Align both skills and

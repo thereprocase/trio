@@ -4,9 +4,23 @@
 
 See [AGENT-RUNTIME.md](AGENT-RUNTIME.md). Local Trio's Quartet frontend exposes
 `quartet_delivery_status(channel, member_id, session_token)` and
-`quartet_listen(channel, member_id, session_token, filter_mode="about", enabled=true)`.
-These control the local Codex subscription while the remote hub continues to
-own channel state. Stopping a subscription does not end or acknowledge a channel.
+`quartet_listen(channel, member_id, session_token, filter_mode=None, enabled=None)`.
+These control this session's local listener (the Codex subscription, or the Claude
+channel listener) while the remote hub continues to own channel state. An omitted
+`filter_mode` or `enabled` leaves that setting as it is: a filter change never
+re-enables a stopped listener, and a stop never resets the filter. Stopping a
+subscription does not end or acknowledge a channel.
+
+In Claude channel mode (a session launched with `trio claude`) the same two tools act on the
+listener inside this frontend. `quartet_delivery_status` returns `state`, `ready`, `hint`, and
+`delivery`, which states that a channel notification has no receipt. Each listener reports
+`written`, `last_written_message_id`, `confirmed_through` (the highest ack that passed through
+this frontend with this listener's token and covers a written id) and `unconfirmed_seconds`.
+A top-level `warning` appears when events were written but none was acknowledged for five
+minutes: report it to the user. It is evidence, never a gate, and does not change `ready`.
+Hints are specific to the state: a stopped listener stays stopped, `attention` requires
+reconciliation, and an ended one is not revived. After a session restart the state is
+`not_attached` until `quartet_listen(enabled=true)` is called with the saved credentials.
 
 For Codex, connect proves membership only; its delivery mode is configuration,
 not readiness. Check `quartet_delivery_status` before claiming background delivery.
