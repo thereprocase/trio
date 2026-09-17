@@ -8,7 +8,19 @@ import shlex
 import sys
 
 
-def native_connect_response(response, *, source='local', url=''):
+def claude_channel_requested():
+    """True when the launcher asked for channel delivery AND this server serves Claude.
+
+    The single definition of that condition. What a frontend reports as its mode
+    is narrower still: whether it actually built a hub (see `channel` below).
+    """
+    return (os.environ.get('TRIO_NATIVE_CLIENT') == 'claude'
+            and os.environ.get('TRIO_CLAUDE_CHANNEL') == '1')
+
+
+def native_connect_response(response, *, source='local', url='', channel=None):
+    """Shape a successful join for this client. `channel` is whether the calling
+    frontend really has a channel hub; None means decide from the environment."""
     if response.get('error') or not response.get('session_token'):
         return response
     from nth_event_service import home, state_dir
@@ -22,7 +34,10 @@ def native_connect_response(response, *, source='local', url=''):
     identity = {k: response.get(k, '') for k in ('channel', 'member_id', 'session_token', 'reclaim_secret')}
     identity.update(source=source, url=source_url)
     if path.exists() and not identity['reclaim_secret']:
-        identity['reclaim_secret'] = json.loads(path.read_text()).get('reclaim_secret', '')
+        try:
+            identity['reclaim_secret'] = json.loads(path.read_text(encoding='utf-8')).get('reclaim_secret', '')
+        except (OSError, ValueError, AttributeError):
+            pass   # a damaged identity file must not fail the join that rewrites it
     fd = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
     with os.fdopen(fd, 'w', encoding='utf-8') as handle:
         json.dump(identity, handle)
@@ -30,7 +45,9 @@ def native_connect_response(response, *, source='local', url=''):
     native = os.environ.get('TRIO_NATIVE_CLIENT') == 'codex'
     # Claude's host declares nothing channel-related in its handshake, so the
     # `trio claude` launcher states it, as `trio codex` does with its endpoint.
-    channel = not native and os.environ.get('TRIO_CLAUDE_CHANNEL') == '1'
+    # A mode of `channel` promises pushes and forbids a Monitor, so it is claimed
+    # only when a hub exists to push with.
+    channel = not native and (claude_channel_requested() if channel is None else bool(channel))
     response['event_delivery'] = {
         'provider': 'codex' if native else 'claude',
         'mode': ('automatic' if native and os.environ.get('TRIO_CODEX_ENDPOINT') else
@@ -99,8 +116,7 @@ _STALE_MONITOR = re.compile(r'\[server\] Monitor heartbeat stale\.[^\[]*')
 
 def uses_monitor():
     """False for Codex and for a Claude session launched for channel delivery."""
-    client = os.environ.get('TRIO_NATIVE_CLIENT')
-    return not (client == 'codex' or (client == 'claude' and os.environ.get('TRIO_CLAUDE_CHANNEL') == '1'))
+    return not (os.environ.get('TRIO_NATIVE_CLIENT') == 'codex' or claude_channel_requested())
 
 
 def adapt_monitor_guidance(text, prefix):
@@ -117,16 +133,23 @@ def adapt_monitor_guidance(text, prefix):
     if adapted == text:
         return text
     return (adapted.strip() + ' This session does not use a Monitor: check '
-            + prefix + '_delivery_status instead.').strip()
+            + str(prefix) + '_delivery_status instead.').strip()
 
 
 def adapt_response_guidance(body, prefix):
-    """Adapt the server-authored guidance fields of one parsed tool response, in place."""
+    """Adapt the server-authored guidance fields of one parsed tool response, in place.
+
+    Returns True when something changed, so a caller can skip re-serialising.
+    """
+    changed = False
     if isinstance(body, dict):
         for key in ('footer', 'reminder'):
             if key in body:
-                body[key] = adapt_monitor_guidance(body[key], prefix)
-    return body
+                adapted = adapt_monitor_guidance(body[key], prefix)
+                if adapted != body[key]:
+                    body[key] = adapted
+                    changed = True
+    return changed
 
 
 def _recovery_hint(prefix, state, error=''):
@@ -141,13 +164,13 @@ def _recovery_hint(prefix, state, error=''):
                 'the user asks for delivery again.' + POLL_ONLY)
     if state == 'attention':
         # Poll and ack alone would leave the ledger's `sending` row unresolved.
-        return ('Delivery needs attention: an event could not be confirmed (' + (error or 'unknown') +
+        return ('Delivery needs attention: an event could not be confirmed (' + str(error or 'unknown') +
                 '), so the listener paused rather than replay it. Reconcile first: inspect the exact '
                 'owning thread for that event and the durable delivery ledger, as AGENT-RUNTIME.md '
                 'describes, and tell the user what you find. Reading the channel with ' + prefix +
                 '_poll does not settle it. Do not re-enable the listener as a retry.' + POLL_ONLY)
     if state == 'ended':
-        return ('Delivery has ended (' + (error or 'no reason recorded') + ') and is not revived '
+        return ('Delivery has ended (' + str(error or 'no reason recorded') + ') and is not revived '
                 'automatically. Probe with ' + prefix + '_poll: if the membership is refused or the '
                 'channel is over, tell the user. Never reconnect or reclaim on your own.' + POLL_ONLY)
     return ('Delivery is not ready yet: the listener is ' + str(state) + ' and recovers on its own. '
@@ -157,16 +180,44 @@ def _recovery_hint(prefix, state, error=''):
 def _status(listeners, state, hint):
     # `ready` is the only field a skill may treat as "I am listening": a saved
     # status string alone has already been mistaken for a working subscription.
-    ready = bool(listeners) and state == 'listening' and bool(listeners[0]['enabled'])
+    ready = bool(listeners) and state == 'listening' and listeners[0].get('enabled') in (True, 1)
     return {'listeners': listeners, 'state': state, 'ready': ready, 'hint': '' if ready else hint}
 
 
-def delivery_status(channel, member_id, session_token, hub=None):
+def _is_claude_session():
+    """A Claude client, or any server the `trio claude` launcher started. An unset
+    client keeps the registry path it has always had."""
+    return (os.environ.get('TRIO_NATIVE_CLIENT') == 'claude'
+            or os.environ.get('TRIO_CLAUDE_CHANNEL') in ('1', 'unavailable'))
+
+
+def _claude_without_hub():
+    """Status for a Claude session whose frontend has no channel hub.
+
+    Without this, the question fell through to the Codex registry and a Claude
+    agent was told to launch Codex.
+    """
+    if os.environ.get('TRIO_CLAUDE_CHANNEL') in ('1', 'unavailable'):
+        hint = ('Setup is incomplete: this session was launched for channel delivery, but this MCP '
+                'server cannot provide it. It is either not registered for Claude (re-run '
+                '`python setup.py install`) or it reported at startup that channel delivery is '
+                'unavailable. Nothing is pushed into this session. Tell the user. Until it is fixed, '
+                'start one Monitor from the monitor_hint in your connect response, and tell your '
+                'peers you only see messages when you poll or while that Monitor runs.')
+        return {'listeners': [], 'state': 'channel_unavailable', 'ready': False, 'hint': hint}
+    return {'listeners': [], 'state': 'monitor', 'ready': False,
+            'hint': ('This session delivers through a Claude Monitor, which this tool cannot observe, '
+                     'so it cannot report ready here. You are reachable only while the Monitor '
+                     'started from monitor_hint is running: check your own background tasks. Launch '
+                     'with `trio claude` for push delivery that this tool can verify.')}
+
+
+def delivery_status(channel, member_id, session_token, hub=None, host=None):
     if not session_token:
         return {'error': 'session_token is required'}
     if hub is not None:
         # Claude channel mode: the listener lives in this frontend process.
-        from nth_claude_channel import UNCONFIRMED
+        from nth_claude_channel import UNCONFIRMED, host_note
         listeners = hub.status(channel, member_id, session_token)
         if not listeners:
             result = _status([], 'not_attached', 'Setup is incomplete: no channel listener for this '
@@ -177,16 +228,25 @@ def delivery_status(channel, member_id, session_token, hub=None):
             result = _status(listeners, state, _recovery_hint(hub.prefix, state, listeners[0]['error']))
         # ready means this frontend is listening and will write; it is not a host receipt.
         result['delivery'] = UNCONFIRMED
-        if listeners and listeners[0]['unconfirmed_seconds'] > UNCONFIRMED_WARNING_SECONDS:
+        note = host_note(host)
+        if host:
+            result['host'] = host
+        if note:
+            result['host_note'] = note
+        if (result['state'] == 'listening'
+                and listeners[0]['unconfirmed_seconds'] > UNCONFIRMED_WARNING_SECONDS):
             # The one failure a channel cannot report itself: a host that stopped
             # registering it. Writes still succeed; nothing is ever acknowledged.
+            # Only a listening listener can be in it: a stopped one is not waiting.
             result['warning'] = (
                 'Events were written ' + str(listeners[0]['unconfirmed_seconds']) + ' seconds ago and none '
                 'has been acknowledged since. If you did not receive them as <channel> events, this '
                 'session is not receiving pushes: check that it was launched with `trio claude`, and '
-                'whether a Claude Code update changed channels. Tell the user, and tell your peers you '
-                'only see messages when you poll.')
+                'whether a Claude Code update changed channels. ' + (note + ' ' if note else '') +
+                'Tell the user, and tell your peers you only see messages when you poll.')
         return result
+    if _is_claude_session():
+        return _claude_without_hub()
     from nth_event_service import public_status, service_alive
     listeners = public_status(channel, member_id, session_token)
     if not listeners:
@@ -216,21 +276,30 @@ def delivery_status(channel, member_id, session_token, hub=None):
 
 def listen(channel, member_id, session_token, filter_mode='', enabled=None, hub=None):
     """Omitted filter_mode/enabled leave that setting as it is: a filter change
-    must not re-enable a stopped listener, and a stop must not reset the filter."""
+    must not re-enable a stopped listener, and a stop must not reset the filter.
+
+    The reply carries `ready` and a hint, computed exactly as the status tool
+    computes them: a bare "updated" read as success in a contract where only
+    ready=true counts.
+    """
     if not session_token:
         return {'error': 'session_token is required'}
     filter_mode = filter_mode or None
-    if hub is not None:
-        try:
+    if hub is None and _is_claude_session():
+        return dict(_claude_without_hub(), state='not_attached')
+    try:
+        if hub is not None:
             listeners = hub.configure(channel, member_id, session_token,
                                       filter_mode=filter_mode, enabled=enabled)
-        except ValueError as exc:
-            return {'error': str(exc)}
-        return {'listeners': listeners, 'state': 'updated' if listeners else 'not_attached'}
-    from nth_event_service import configure_listener
-    try:
-        listeners = configure_listener(channel, member_id, session_token,
-                                       filter_mode=filter_mode, enabled=enabled)
+        else:
+            from nth_event_service import configure_listener
+            listeners = configure_listener(channel, member_id, session_token,
+                                           filter_mode=filter_mode, enabled=enabled)
     except ValueError as exc:
         return {'error': str(exc)}
-    return {'listeners': listeners, 'state': 'updated' if listeners else 'not_attached'}
+    now = delivery_status(channel, member_id, session_token, hub=hub)
+    hint = now.get('hint') or ('' if now.get('ready') else
+                               'This call does not prove delivery: a listener that has just '
+                               'started reports ready only once its first poll succeeds.')
+    return {'listeners': listeners, 'state': 'updated' if listeners else 'not_attached',
+            'delivery_state': now.get('state'), 'ready': bool(now.get('ready')), 'hint': hint}

@@ -155,6 +155,10 @@ class StdioChannelTests(unittest.TestCase):
         status = host.tool('trio_delivery_status', channel='channel-test',
                            member_id=receiver['member_id'], session_token=receiver['session_token'])
         self.assertEqual((status['state'], status['ready'], status['hint']), ('listening', True, ''))
+        # The host named itself in the handshake. It is not a release this path was
+        # confirmed on, and status says so instead of leaving that to prose.
+        self.assertEqual(status['host'], {'name': 'fake-claude-host', 'version': '0'})
+        self.assertIn('last confirmed on Claude Code', status['host_note'])
         stranger = host.tool('trio_delivery_status', channel='channel-test',
                              member_id=receiver['member_id'], session_token='not-the-token')
         self.assertEqual((stranger['state'], stranger['ready'], stranger['listeners']), ('not_attached', False, []))

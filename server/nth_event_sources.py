@@ -35,7 +35,11 @@ def select_messages(poll, filter_mode):
     # out by the hub's mentions_only shortcut before its bang reaches us.
     # Lives here, not in the Codex relay, so a Claude frontend can filter
     # without importing the Codex socket client and its optional dependency.
-    return [message for message in poll.get('messages', [])
+    # The poll comes from a hub, possibly a remote one: tolerate a null or
+    # malformed message list instead of ending the caller's delivery loop.
+    messages = poll.get('messages') if isinstance(poll, dict) else None
+    return [message for message in (messages if isinstance(messages, list) else [])
+            if isinstance(message, dict)
             if filter_mode == 'all' or message.get('banged')
             or message.get('mentioned')
             or (filter_mode == 'about' and message.get('referenced'))]

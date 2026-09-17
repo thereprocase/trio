@@ -1729,7 +1729,9 @@ def nth_connect(
             _console("👋", channel, f"{name} joined ({len(members)} members)", 32)
         if os.environ.get("TRIO_NATIVE_CLIENT"):
             from nth_event_access import native_connect_response
-            resp = native_connect_response(resp)
+            # Channel mode is what this process can do, not what the launcher
+            # asked for: without a hub there is nothing that could push.
+            resp = native_connect_response(resp, channel=_CHANNEL_HUB is not None)
             if _CHANNEL_HUB is not None and resp.get("session_token"):
                 # The same successful connect Trio binds a Codex thread from.
                 # A listener failure must not fail the join.
@@ -5039,7 +5041,8 @@ def nth_delivery_status(channel: str, member_id: str, session_token: str) -> str
     """Check this session's event delivery (the Codex listener, or the Claude
     channel listener) without exposing credentials."""
     from nth_event_access import delivery_status
-    return json.dumps(delivery_status(channel, member_id, session_token, hub=_CHANNEL_HUB))
+    return json.dumps(delivery_status(channel, member_id, session_token, hub=_CHANNEL_HUB,
+                                      host=_host_info() if _CHANNEL_HUB is not None else None))
 
 
 @mcp.tool(name=f"{TOOL_PREFIX}_listen")
@@ -5053,19 +5056,39 @@ def nth_listen(channel: str, member_id: str, session_token: str,
     return json.dumps(listen(channel, member_id, session_token, filter_mode, enabled, hub=_CHANNEL_HUB))
 
 
+def _poll_body(result):
+    """The JSON body of an nth_poll result.
+
+    A poll whose messages carry image attachments returns [payload, *image_blocks],
+    and payload is the JSON string itself, not a content block. Reading it as a
+    block raised on every poll; the poll never acks, so the same message came
+    back each time and one attachment ended delivery for good.
+    """
+    if isinstance(result, (list, tuple)):
+        result = result[0] if result else None
+    if isinstance(result, str):
+        return json.loads(result)
+    text = result.get("text") if isinstance(result, dict) else getattr(result, "text", None)
+    if isinstance(text, str):
+        return json.loads(text)
+    raise ValueError("nth_poll returned no JSON body")
+
+
 def _local_poll_factory(binding):
     """In-process poll for a channel listener: the same canonical tool an agent
     calls, never a second import of this module."""
     def poll(arguments):
-        result = nth_poll(**arguments)
-        if isinstance(result, str):
-            return json.loads(result)
-        # Image polls are MCP content arrays: the first block is the JSON body.
-        if isinstance(result, list) and result:
-            block = result[0]
-            return json.loads(block.text if hasattr(block, "text") else block["text"])
-        return result
+        return _poll_body(nth_poll(**arguments))
     return poll, None
+
+
+def _host_info():
+    """The MCP host's name and version from its initialize request, or None."""
+    try:
+        info = mcp.get_context().session.client_params.clientInfo
+        return {"name": info.name, "version": info.version}
+    except Exception:  # noqa: BLE001 - optional detail; status must not depend on it
+        return None
 
 
 if __name__ == "__main__":
@@ -5074,10 +5097,22 @@ if __name__ == "__main__":
     if (os.environ.get("TRIO_NATIVE_CLIENT") == "claude"
             and os.environ.get("TRIO_CLAUDE_CHANNEL") == "1"):
         import asyncio
-        from nth_claude_channel import ChannelHub, complete_local_calls, run_stdio
-        _CHANNEL_HUB = ChannelHub(TOOL_PREFIX, "local", str(DB_PATH.resolve()), _local_poll_factory)
-        complete_local_calls(mcp, _CHANNEL_HUB)
-        # FastMCP.run() hides the stdio write stream a channel needs.
-        asyncio.run(run_stdio(mcp._mcp_server, _CHANNEL_HUB))
+        try:
+            from nth_claude_channel import ChannelHub, complete_local_calls, run_stdio
+            hub = ChannelHub(TOOL_PREFIX, "local", str(DB_PATH.resolve()), _local_poll_factory)
+            complete_local_calls(mcp, hub)
+            # FastMCP.run() hides the stdio write stream a channel needs.
+            serve = run_stdio(mcp._mcp_server, hub)
+        except Exception as exc:  # noqa: BLE001
+            # Channel mode leans on mcp internals. If a release moves them, keep the
+            # tools and say so: the session then reports monitor mode, not a channel
+            # it does not have.
+            print(f"[nth] channel delivery is unavailable ({type(exc).__name__}: {exc}); "
+                  "serving without it", file=sys.stderr)
+            os.environ["TRIO_CLAUDE_CHANNEL"] = "unavailable"
+            mcp.run()
+        else:
+            _CHANNEL_HUB = hub
+            asyncio.run(serve)
     else:
         mcp.run()
