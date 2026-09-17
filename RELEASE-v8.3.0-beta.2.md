@@ -215,9 +215,11 @@ Those of beta.1 stand, with these changes:
   is a session with the debug filter `mcp`, because `--debug` takes the next
   word. When a launch that looks like a session finds no terminal, the
   launcher says so in one line on stderr.
-- Two `trio codex` launches that both find no running app-server can each start one; one of
-  them then fails with "Codex server exited". Start the first session, then the second. This
-  has been so since v8.1; it was reproduced in review of this release and is not fixed in it.
+- Two `trio codex` launches that both find no running app-server can each start one, and one
+  of them then finds its server gone. This has been so since v8.1; it was reproduced in review
+  of this release and is not fixed in it. What changed is the cost: a shared server that cannot
+  be started no longer ends the launch. The launcher says why and starts Codex without it, so
+  that session works but cannot receive pushes. Start the first session, then the second.
 - `trio desktop` still fails after a Microsoft Store update of the Codex app: the saved
   `codex_app` path contains the package version. Re-run `python setup.py install --codex-app
   PATH` after such an update. Found in review of this release; not fixed in it.

@@ -25,6 +25,9 @@
 - Both launchers fall back to the command on PATH when a saved binary no longer exists, as
   happens when the Codex app updates, instead of failing every launch. A reused app-server's
   recorded binary is checked the same way.
+- A shared app-server that cannot be started costs delivery, not the session: `trio codex` says
+  why and starts Codex without it. Trio may fail to add delivery; it must not fail to start
+  the tool.
 - `trio codex` passes a command line that already names `--remote` as typed (Codex rejects a
   second one), and knows the aliases `e` (exec) and `a` (apply).
 - The channel flag is placed before a `--` in the middle of the arguments. After it, Claude

@@ -265,6 +265,20 @@ class NativeTests(unittest.TestCase):
         self.assertEqual(launched(['-m', 'chosen-model', '--', '--remote'])[0],
                          ['codex', '--remote', 'unix:///tmp/test.sock', '-m', 'chosen-model', '--', '--remote'])
 
+    def test_a_shared_server_that_cannot_start_costs_delivery_not_the_session(self):
+        import io
+        import nth_cli
+        with patch.object(nth_cli, 'ensure_codex', side_effect=RuntimeError('Codex server exited; inspect the log')), \
+             patch.object(nth_cli, 'codex_binary', return_value='codex'), \
+             patch.object(nth_cli, 'terminal_attached', return_value=True), \
+             patch.object(nth_cli.subprocess, 'call', return_value=0) as call, \
+             patch('sys.stderr', new_callable=io.StringIO) as stderr:
+            self.assertEqual(nth_cli.main(['codex', '-m', 'chosen-model', 'a prompt']), 0)
+        # With `codex` aliased to the launcher, an error here would mean no Codex at all.
+        self.assertEqual(call.call_args.args[0], ['codex', '-m', 'chosen-model', 'a prompt'])
+        self.assertIn('Codex server exited', stderr.getvalue())
+        self.assertIn('WITHOUT Trio\'s shared server', stderr.getvalue())
+
     def test_a_reused_codex_server_does_not_pin_a_client_binary_that_is_gone(self):
         import io
         import nth_cli

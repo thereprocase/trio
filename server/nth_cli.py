@@ -479,7 +479,17 @@ def launch_codex(arguments):
         binary = codex_binary()
         guard_command_shim(binary, arguments)
         return run_foreground([binary, *arguments])
-    endpoint, binary = ensure_codex()
+    try:
+        endpoint, binary = ensure_codex()
+    except RuntimeError as problem:
+        # Trio may fail to add delivery; it must never fail to start the tool. With
+        # `codex` aliased to this launcher, a server that did not come up would
+        # otherwise leave the user with an error and no Codex.
+        print(f'[trio] {problem}\n[trio] Starting Codex WITHOUT Trio\'s shared server: this session '
+              'cannot receive pushed messages.', file=sys.stderr)
+        binary = codex_binary()
+        guard_command_shim(binary, arguments)
+        return run_foreground([binary, *arguments])
     guard_command_shim(binary, arguments)
     return run_foreground([binary, '--remote', endpoint, *arguments])
 
