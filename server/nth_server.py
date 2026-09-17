@@ -93,6 +93,11 @@ def _find_free_port(preferred: int = 8000) -> int:
 SERVER_PORT = int(os.environ.get("NTH_PORT", "0")) or _find_free_port()
 mcp = FastMCP(SERVER_NAME, host=SERVER_HOST, port=SERVER_PORT)
 
+# Claude channel mode only (set in __main__): this stdio process is the single
+# path into the session, so its event listeners live here. None everywhere else,
+# including the SSE hub and every Codex launch.
+_CHANNEL_HUB = None
+
 # ── Console feed ──────────────────────────────────────────────────────
 # Human-readable live feed for the server terminal window.
 # ANSI colors: 90=gray, 32=green, 33=yellow, 35=magenta, 36=cyan, 31=red, 1=bold
@@ -1714,6 +1719,14 @@ def nth_connect(
         if os.environ.get("TRIO_NATIVE_CLIENT"):
             from nth_event_access import native_connect_response
             resp = native_connect_response(resp)
+            if _CHANNEL_HUB is not None and resp.get("session_token"):
+                # The same successful connect Trio binds a Codex thread from.
+                # A listener failure must not fail the join.
+                try:
+                    resp["event_delivery"]["listener"] = _CHANNEL_HUB.start(
+                        resp["channel"], resp["member_id"], resp["session_token"])
+                except Exception as exc:
+                    resp["event_delivery"]["listener"] = {"status": "failed", "error": type(exc).__name__}
         return json.dumps(resp)
 
     finally:
@@ -5012,18 +5025,46 @@ def nth_cleanup(channel: str = "", all_ended: bool = False) -> str:
 
 @mcp.tool(name=f"{TOOL_PREFIX}_delivery_status")
 def nth_delivery_status(channel: str, member_id: str, session_token: str) -> str:
-    """Check this session's local Codex listener without exposing credentials."""
+    """Check this session's event delivery (the Codex listener, or the Claude
+    channel listener) without exposing credentials."""
     from nth_event_access import delivery_status
-    return json.dumps(delivery_status(channel, member_id, session_token))
+    return json.dumps(delivery_status(channel, member_id, session_token, hub=_CHANNEL_HUB))
 
 
 @mcp.tool(name=f"{TOOL_PREFIX}_listen")
 def nth_listen(channel: str, member_id: str, session_token: str,
                filter_mode: str = "about", enabled: bool = True) -> str:
-    """Change or stop this session's Codex listener; preserve read watermarks."""
+    """Start, change or stop this session's event listener; preserve read
+    watermarks. enabled=true restarts it from these credentials after a
+    session restart."""
     from nth_event_access import listen
-    return json.dumps(listen(channel, member_id, session_token, filter_mode, enabled))
+    return json.dumps(listen(channel, member_id, session_token, filter_mode, enabled, hub=_CHANNEL_HUB))
+
+
+def _local_poll_factory(binding):
+    """In-process poll for a channel listener: the same canonical tool an agent
+    calls, never a second import of this module."""
+    def poll(arguments):
+        result = nth_poll(**arguments)
+        if isinstance(result, str):
+            return json.loads(result)
+        # Image polls are MCP content arrays: the first block is the JSON body.
+        if isinstance(result, list) and result:
+            block = result[0]
+            return json.loads(block.text if hasattr(block, "text") else block["text"])
+        return result
+    return poll, None
 
 
 if __name__ == "__main__":
-    mcp.run()
+    # Same rule as nth_claude_channel.channel_mode(), checked without importing
+    # it: Codex and hub launches of this file must not depend on that module.
+    if (os.environ.get("TRIO_NATIVE_CLIENT") == "claude"
+            and os.environ.get("TRIO_CLAUDE_CHANNEL") == "1"):
+        import asyncio
+        from nth_claude_channel import ChannelHub, run_stdio
+        _CHANNEL_HUB = ChannelHub(TOOL_PREFIX, "local", str(DB_PATH.resolve()), _local_poll_factory)
+        # FastMCP.run() hides the stdio write stream a channel needs.
+        asyncio.run(run_stdio(mcp._mcp_server, _CHANNEL_HUB))
+    else:
+        mcp.run()
