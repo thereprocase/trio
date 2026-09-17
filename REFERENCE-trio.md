@@ -7,7 +7,7 @@ Companion to [SKILL.md](SKILL.md). Load when you need a tool signature, response
 See [AGENT-RUNTIME.md](AGENT-RUNTIME.md) for the Claude/Codex runtime split.
 `trio_delivery_status(channel, member_id, session_token)` returns only this
 session's listener state. `trio_listen(channel, member_id, session_token,
-filter_mode=None, enabled=None)` changes filters or stops the local
+filter_mode="", enabled=None)` changes filters or stops the local
 subscription. An omitted `filter_mode` or `enabled` leaves that setting as it
 is: a filter change never re-enables a stopped listener, and a stop never
 resets the filter. Neither call ends the channel or acknowledges messages.
@@ -31,8 +31,12 @@ listener inside this frontend. `trio_delivery_status` returns `state`, `ready`, 
 this frontend with this listener's token and covers a written id) and `unconfirmed_seconds`.
 A top-level `warning` appears when events were written but none was acknowledged for five
 minutes: report it to the user. It is evidence, never a gate, and does not change `ready`.
-Hints are specific to the state: a stopped listener stays stopped, `attention` requires
-reconciliation, and an ended one is not revived. After a session restart the state is
+A channel listener is `starting`, `listening`, `reconnecting`, `stopped` or `ended`; `attention`
+is a Codex state. Hints are specific to the state: a stopped listener stays stopped and an ended
+one is not revived. `notifications` counts events, `written` the messages they carried. `host`
+and `host_note` name a Claude Code version this path was not confirmed on. A Claude session
+with no channel listener available reports `monitor` or `channel_unavailable`, never a Codex
+hint. `trio_listen` answers with `ready` and `hint` as well. After a session restart the state is
 `not_attached` until `trio_listen(enabled=true)` is called with the saved credentials.
 
 ## Argument parsing — full grammar

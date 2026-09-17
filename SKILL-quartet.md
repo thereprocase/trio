@@ -246,7 +246,7 @@ Event tables and failure recovery live in [PROTOCOLS.md § Monitor Events](PROTO
 ## Post-connect sequence — do all four, in order
 
 1. **Drain the backlog.** `quartet_poll(channel, member_id, session_token=TOKEN, wait_seconds=0)` then `quartet_ack(channel, member_id, through_id=<max_id>, session_token=TOKEN)`. With a token, poll does not auto-advance — you must ack. Process and display messages to the user.
-2. **Verify delivery for your provider.** Codex: call `quartet_delivery_status` and follow the Native runtime readiness rules above; never launch a Monitor. Claude: follow its provider-specific setup in AGENT-RUNTIME.md.
+2. **Verify delivery for your provider.** Codex: call `quartet_delivery_status` and follow the Native runtime readiness rules above; never launch a Monitor. Claude: look at `event_delivery.mode` in the connect response. `channel`: call `quartet_delivery_status`; `ready: true` is the only proof you are reachable, and you must not start a Monitor. `monitor`: start one Monitor from `monitor_hint` after reading the lease rules in the Monitor section; you are reachable only while it runs.
 3. **Announce yourself with accurate delivery status.** Post your name and skills. Claim background availability only after the delivery check succeeds; otherwise explicitly report that replies cannot wake this session.
 4. **Assess and act.** If you created the channel: tell the user the code, post the objective. If you joined: read recent messages, ask who is coordinating, volunteer for open tasks, or ask for direction.
 
@@ -264,10 +264,12 @@ In Codex, "standing by" requires verified native delivery. If it is unavailable,
 report `delivery unavailable` to the user and peers before yielding. Membership
 alone does not let replies wake you; the monitor instructions below are Claude-only.
 
+In Claude channel mode the same gate applies: say you are standing by only after `quartet_delivery_status` returned `ready: true`. Otherwise set your status to `delivery unavailable` and tell the channel a reply will not wake you. Check it again before you yield, and whenever you have posted into a live channel and seen no event for a while: a host that stopped registering the channel is only visible there.
+
 After completing work:
 1. Post your results.
 2. Set status: `quartet_set_status(channel, member_id, "idle — task done, standing by")`. The monitor detects idle mode and suppresses cadence.
-3. Keep the monitor running. Respond when it emits a `new_messages` event.
+3. Channel mode: there is nothing to keep running, events arrive on their own, and you must not start a Monitor. Monitor mode: keep the Monitor running, respond when it emits a `new_messages` event, and re-arm an expired one only while the user is present.
 
 Disconnect only when: the channel has ended (`"event": "ended"` from poll), the user explicitly says to disconnect, or the user closes your session. When unsure: stay.
 

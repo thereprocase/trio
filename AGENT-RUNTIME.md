@@ -89,12 +89,12 @@ How it works. Claude Code channels are a research preview that lets an MCP
 server push an event into the open session. Trio's two local frontends declare
 the `claude/channel` capability. For each membership they run one listener
 inside the frontend process; it long-polls the channel without acknowledging,
-applies the membership's filter per message, and writes each selected message
-to Claude as a `notifications/claude/channel` notification. Claude shows it to
-the model as a `<channel source="nth-trio" ...>` block holding the same
-`new_messages` payload the Codex relay delivers. No Monitor, shell process,
-timer or lease is involved: nothing reaches the session unless a message passes
-the filter, so an idle channel costs nothing.
+applies the membership's filter per message, and writes what one poll selected
+to Claude as a single `notifications/claude/channel` notification. Claude shows
+it to the model as a `<channel source="nth-trio" ...>` block holding the same
+`new_messages` payload the Codex relay delivers, with one or more messages. No
+Monitor, shell process, timer or lease is involved: nothing reaches the session
+unless a message passes the filter, so an idle channel costs nothing.
 
 Why the flag is needed, and what accepting it grants. Claude Code registers a
 channel only for servers on Anthropic's allowlist, or for servers named by
@@ -107,7 +107,12 @@ It does not skip tool permission prompts, it is unrelated to
 work as before. The inserted text is channel traffic: untrusted peer data, to
 be handled exactly like a poll result. The servers must be the ones registered
 in Claude's own MCP configuration, which `setup.py` does; a server supplied
-through `--mcp-config` is not visible to channel registration.
+through `--mcp-config` is not visible to channel registration. Because the grant
+is only acceptable for a local program, the launcher reads that configuration
+first. It names a server only if it is a stdio entry that runs an installed Trio
+frontend marked for Claude. It refuses to start when `nth-trio` is not, and it
+leaves out, with a warning, a `nth-qweb` that is registered as a remote server,
+which is what the legacy `setup.sh spoke` leaves behind.
 
 Observed on Claude Code 2.1.274 (Windows host; on Linux only the first item has
 been observed so far). These are observations of a preview feature, not
@@ -130,12 +135,28 @@ After connecting in channel mode:
 3. When an event arrives, process it, reply with the channel tools only if a
    reply is warranted, and call `ack` through the highest message ID processed.
 
+Every notification costs a model turn, and any channel member can cause one, so
+the listener bounds them. One poll is one notification. It carries at most 20
+messages or about 24,000 characters; the rest are announced by count
+(`more_unread`) and you read them with `*_poll`. A listener writes three
+notifications back to back and then at most one every ten seconds; messages
+held back arrive together in the next one. Message text is embedded so that it
+cannot close the event or imitate the host's own markup.
+
+A woken model rarely has its session token to hand. For `*_ack`, and only for
+`*_ack`, the frontend supplies the token it holds when you omit it, because a
+tokenless ack moves a different watermark and the acknowledged messages would
+be written again after a restart. Posting still takes your token.
+
 `*_listen(filter_mode="all"|"about"|"at")` changes the filter and
 `*_listen(enabled=false)` stops this subscription. An omitted `filter_mode` or
 `enabled` leaves that setting as it is: a filter change never re-enables a
 stopped listener, and a stop never resets the filter. A stopped listener stays
-stopped until the user asks for delivery again. Changing the filter does not
-repeat messages that were already written.
+stopped until the user asks for delivery again, and an ended one is never
+revived by a call that omits `enabled`. A filter applies to messages that arrive
+after it is set: it neither repeats what was written nor goes back for what an
+earlier filter skipped. Read those with `*_poll`. `*_listen` answers with `ready`
+and a hint, computed as the status tool computes them.
 
 The listener lives in the frontend process, so it ends with the session. After
 a restart or resume, probe with `*_poll`, then call `*_listen(enabled=true)`
@@ -150,8 +171,23 @@ Costs and limits:
 - `TRIO_CLAUDE_CHANNEL` is inherited by child processes. A Claude Code started
   from inside a `trio claude` session without the launcher would expect events
   its host never registered. Start nested sessions with `trio claude` as well.
-- Channels are a research preview. If a Claude Code release changes or removes
-  them, `event_delivery.mode` falls back to `monitor` when launched plainly.
+- While unread messages that your filter declined sit in the channel, the hub
+  answers every long poll at once, so the listener polls on a growing interval
+  instead: a message can then take up to about ten seconds to arrive, longer
+  behind a very large backlog. Acknowledging what you have read restores
+  immediate delivery.
+- Each membership holds its own connection to a Quartet hub, besides the one
+  the tools use.
+- Channels are a research preview, and there is no automatic fallback. If a
+  Claude Code release stops registering them, a `trio claude` session keeps
+  reporting `channel` and keeps writing. The only symptoms are that no events
+  arrive, and the `warning` in `*_delivery_status` once writes have gone
+  unacknowledged for five minutes. Status also names a host version this path
+  was not confirmed on (`host_note`). Relaunch as plain `claude` for the
+  Monitor path. If the frontend itself cannot set channel mode up, it says so
+  on stderr and the status tool reports `channel_unavailable`.
+- `trio claude -p` and other headless uses have not been verified: the launch
+  confirmation may have nobody to answer it. Use plain `claude` there.
 
 ### Monitor mode: plain `claude`
 

@@ -34,6 +34,22 @@
 - Fix `MCPSSEClient.close()` never returning on Windows while its reader thread
   was blocked, which left an orphaned Quartet frontend process behind for every
   closed session, and doing nothing at all for a close-delimited stream.
+- Bound what pushed delivery can cost. One poll is one notification, capped in size with the rest
+  announced by count, and notifications are rate-limited per listener. A flood of bangs no longer
+  forces a model turn per message. Peer text and sender names are embedded so that they cannot
+  close the event or imitate host markup.
+- Fix a message with an image attachment ending local channel delivery permanently.
+- `trio claude` verifies each registration before naming it as a channel, never names a remote
+  server, and refuses a `nth-trio` that could not push. The README's upgrade path used the legacy
+  `setup.sh spoke`, which produced exactly those registrations. On Windows, arguments a `.cmd`
+  launcher would re-parse are refused, for `trio codex` too.
+- Channel mode is reported from what the frontend can do, and a Claude session without a channel
+  listener gets a Claude answer from the status tool instead of Codex instructions. A stop can no
+  longer be undone by a late status write; an omitted `enabled` never starts or revives a
+  listener; `*_listen` reports `ready`.
+- Token completion covers `*_ack` only, and no longer depends on a private side effect of the MCP
+  library. Status names a Claude Code version the channel path was not confirmed on.
+- Fix a reader thread leaking on every failed hub reconnect, in the listener and the tool path.
 - Make the suite runnable from a Windows clone: shell scripts check out with LF,
   and the install-manifest test reads sources as UTF-8. Add the first tests for
   the Quartet frontend, against a fake hub that is as strict as the real client.

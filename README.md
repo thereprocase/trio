@@ -157,15 +157,15 @@ The dashboard supports operator input (type messages, post tasks with `$task`, @
 
 ### Upgrading
 
-Pull the repo and re-run the same setup command:
+Pull the repo and re-run the installer for what the machine is:
 
 ```bash
 git pull
-bash setup.sh spoke http://YOUR_HUB_IP:8000/sse   # spoke
-sudo bash setup.sh hub-service                      # hub
+python setup.py install --quartet-url http://YOUR_HUB:8000/sse   # a Claude Code / Codex machine
+sudo bash setup.sh hub-service                                    # a hub
 ```
 
-Restart Claude Code to pick up skill/server changes.
+Restart Claude Code, and launch it with `trio claude`. `setup.sh spoke` is the legacy spoke installer: it registers `nth-qweb` as a direct remote SSE server and `nth-trio` without the client marker, so neither can deliver channel events. `trio claude` checks the registrations before it names a server: it refuses a `nth-trio` that could never push, and it never names a remote server as a channel. Re-running `python setup.py install` repairs both.
 
 ## Data Storage
 
@@ -211,9 +211,13 @@ Both `/trio` and `/quartet` expose identical tools with different prefixes (`tri
 | `list()` | List all channels. |
 | `cull(channel, member_id, target_member_id)` | Remove a member (user permission required). |
 
-## Background Monitoring
+## Background delivery
 
-Each participant launches one persistent monitor process via Claude Code's `Monitor` tool. The `connect` response includes a `monitor_hint` with the exact command to run — hub sessions get `nth_monitor.py` (reads local DB), spoke sessions get `nth_spoke_monitor.py` (polls hub via SSE).
+Claude Code launched with `trio claude`, and Codex launched with `trio codex`, have messages pushed into the session; see [AGENT-RUNTIME.md](AGENT-RUNTIME.md). Nothing in this section applies to them.
+
+### Background Monitoring (plain `claude`)
+
+From Claude Code 2.1.274 a Monitor is a 30-minute lease whose expiry wakes the session, so this path suits a session someone is watching. Each participant launches one persistent monitor process via Claude Code's `Monitor` tool. The `connect` response includes a `monitor_hint` with the exact command to run — hub sessions get `nth_monitor.py` (reads local DB), spoke sessions get `nth_spoke_monitor.py` (polls hub via SSE).
 
 Events: `new_messages` (with `has_mentions`, `has_bangs`, `from_names`, `preview`, `filter`), `cadence` (silence warning when holding a claimed task), `keepalive` (cache-friendly heartbeat), `channel_ended`, `error`.
 
@@ -297,7 +301,7 @@ nth is a conference call with a whiteboard, not a work queue.
 - **No duplicated work** — Claim tasks atomically. Ask before touching shared files.
 - **No thrown-away work** — Post blocks, work around them, let others help.
 - **Questions are cheap** — A 5-second question prevents a 5-minute redo.
-- **Stay alive cheaply** — A single persistent Monitor process is orders of magnitude cheaper than unnecessary Opus wake-ups.
+- **Stay alive cheaply** — Be woken by a message, never by a timer. Push delivery costs nothing while a channel is quiet; a Monitor lease that re-arms itself costs a full-context turn every 30 minutes whether or not anyone is there.
 
 ## Version History
 

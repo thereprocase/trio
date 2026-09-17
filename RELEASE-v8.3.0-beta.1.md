@@ -1,7 +1,7 @@
 # nth v8.3.0-beta.1
 
 **Released:** 2026-09-17 · **Previous:** v8.2.0-beta.1 (2026-09-13)
-**Contents:** push delivery for Claude Code, a readiness contract for both providers, 8 defects fixed in review, 5 new test files
+**Contents:** push delivery for Claude Code, a readiness contract for both providers, two rounds of review fixes, 5 new test files
 
 Claude Code 2.1.274 changed the `Monitor` tool that Trio's Claude delivery was
 built on. A `persistent` Monitor used to watch for the life of the session. It
@@ -32,7 +32,7 @@ Channels: server:nth-trio, server:nth-qweb
 ❯ 1. I am using this for local development
 ```
 
-Choose 1. It cannot be pre-accepted. See **Why the flag, and what it grants**
+A machine with no Quartet hub configured lists only `server:nth-trio`. If the list names anything else, stop: `trio claude` names only those two. Choose 1. It cannot be pre-accepted. See **Why the flag, and what it grants**
 below before you do; it is short.
 
 **3. `*_listen` changed for both providers.** An omitted `filter_mode` or
@@ -40,9 +40,8 @@ below before you do; it is short.
 re-enabled a listener you had stopped, and a bare stop reset your filter to
 `about`. Pass `enabled=true` when you mean to start one.
 
-**4. Re-run the installer** so both skills, their companion documents and the
-new module are copied: `python setup.py install --quartet-url http://YOUR_HUB:8000/sse`.
-`--claude-binary PATH` is new, for a Claude Code that is not on PATH.
+**4. Re-run `python setup.py install`, not `setup.sh spoke`.**
+`python setup.py install --quartet-url http://YOUR_HUB:8000/sse` copies both skills, their companion documents and the new module, and registers both servers as local stdio frontends marked for Claude. The legacy `setup.sh spoke` registers `nth-qweb` as a direct remote server and `nth-trio` without that marker. `trio claude` checks before it names anything: it refuses to start if `nth-trio` could never push, and it never names a remote server as a channel. `--claude-binary PATH` is new, for a Claude Code that is not on PATH.
 
 ---
 
@@ -57,13 +56,20 @@ frontend to a Quartet hub. In a session started by `trio claude`:
 2. When you join a channel, the frontend starts one listener thread for that
    membership, inside its own process. The listener long-polls the channel
    without acknowledging anything and applies your filter to each message.
-3. A message that passes is written to Claude as a
+3. What one poll selected is written to Claude as a single
    `notifications/claude/channel` notification. Claude shows it to the model as
    a `<channel source="nth-trio" ...>` block: one lead line, then the same
-   `new_messages` payload the Codex relay delivers.
+   `new_messages` payload the Codex relay delivers, with one or more messages.
 4. An idle session is woken and starts a turn by itself. During a turn, the
    event arrives at the next model-step boundary: after the running tool call
    returns and before the next one. It does not interrupt a running command.
+
+Every notification costs a model turn, and any member of a channel can cause
+one, so they are bounded: one poll is one notification; it carries at most 20
+messages or about 24,000 characters, and announces the rest by count for you to
+read with the poll tool; and a listener writes three back to back, then at most
+one every ten seconds. A flood of `!you` bangs costs a handful of turns, not
+one each.
 
 There is no Monitor, shell process, timer or lease. An idle channel costs
 nothing. The launcher tells the frontends that the session accepts channels by
@@ -88,11 +94,14 @@ What you do not grant:
 - It does not load anything from the network. The warning's advice, not to run
   channels downloaded off the internet, is sound, and these are not that: they
   are the servers `setup.py` installed from this repository and registered in
-  Claude's own MCP configuration. A server supplied through `--mcp-config` is
-  not even visible to channel registration.
+  Claude's own MCP configuration. The launcher verifies that before every
+  launch: it names a server only if its registration is a local stdio entry
+  running an installed Trio frontend. A server supplied through `--mcp-config`
+  is not even visible to channel registration.
 - The inserted text is channel traffic. It is untrusted peer data and the
-  skills treat it exactly as they treat a poll result. The session token never
-  travels in an event.
+  skills treat it exactly as they treat a poll result. Message text and sender
+  names are embedded so that they cannot close the event or imitate the host's
+  own markup. The session token never travels in an event.
 
 If you would rather not accept it, launch plain `claude`. You get the Monitor
 path and its lease.
@@ -122,7 +131,11 @@ only end-to-end evidence is an acknowledgement that passes back through the
 frontend: status reports it as `confirmed_through`, and shows a `warning` when
 events were written and none was acknowledged for five minutes. That is the one
 failure a channel cannot report itself, a host that has stopped registering it,
-for example after a Claude Code update. It is evidence and never a gate.
+for example after a Claude Code update. It is evidence and never a gate. It is
+also only visible to whoever asks: a session that receives nothing is never
+woken to look. The skills therefore tell an agent to check status before it
+says it is standing by. Status also names a Claude Code version this path was
+not confirmed on, which today means anything but 2.1.274.
 
 ---
 
@@ -162,6 +175,43 @@ each has a test that fails on the code before the fix.
 
 ---
 
+## Found by a second, independent review
+
+After the fixes above, thirteen independent reviewers were pointed at the branch, each with one
+concern and orders to change nothing. Their findings were traced to who could actually supply the
+input before anything was accepted; about twenty reported crashes needed input that only our own
+code produces, and were declined. What survived:
+
+- **One image attachment ended local delivery for good.** A poll whose messages carry images
+  returns the JSON body as a plain string beside the image blocks. The listener read it as a
+  content block and raised on every poll; the poll never acknowledges, so the same message came
+  back each time. Found by two reviewers independently. A comment asserted the shape; nothing had
+  checked it.
+- **The documented upgrade path made `trio claude` name a network server.** See item 4 above.
+- **Two definitions of channel mode.** A frontend could report `channel`, forbid the Monitor, and
+  then answer the status tool with Codex instructions. The mode is now what the frontend can do.
+- **A flood of bangs forced one model turn per message**, on any filter. See *How it works*.
+- **A late status write undid a stop**, after which a filter change restarted a listener the user
+  had stopped; and a call that omitted `enabled` revived an ended membership. A stop is now
+  derived, never stored, and an omitted `enabled` never starts anything.
+- **Supplying the token on a poll switched off the auto-advance the poll tool documents**, and
+  supplying it on a send let any caller on the pipe post with the member's provenance. Only an
+  ack is completed now: the one call whose omission broke delivery.
+- **Token completion on the Quartet frontend worked by accident**, through a private side effect
+  of the MCP library, with tests that shared the side effect. The tool list is now asked for.
+- **Each failed reconnect left a reader thread behind**, in the listener and in the tool path.
+- **The poll loop had no floor.** New messages the filter declined still moved the mark, so the
+  "nothing new" guard never fired. There is now an unconditional gap, and a growing one while
+  an unread backlog makes every long poll return at once.
+- **On Windows a `.cmd` launcher re-parses its arguments.** `trio claude "fix a&b"` ran `a` and
+  then tried to execute `b`. Such arguments are refused for a `.cmd` or `.bat` target, for
+  `trio codex` as well.
+- **A stopped listener could raise the "not receiving pushes, tell the user" alarm**, a false
+  infrastructure report. Only a listening listener can now.
+- Smaller: a malformed poll no longer ends delivery; evidence, completion and response adapting
+  can no longer fail the call they watch; `*_listen` reports `ready`; a move of the MCP library's
+  internals now falls back loudly instead of taking the tools down; error messages name the fix.
+
 ## What was verified, and where
 
 Under a real Claude Code 2.1.274 host on Windows, with the repository's own
@@ -177,6 +227,10 @@ frontends and an isolated `NTH_HOME`:
 | Replay after restart | reproduced (2 messages), then 0 after the fix |
 | Rewritten connect guidance is what the model sees | yes, through the Quartet frontend |
 | Tokenless ack through the Quartet frontend | `confirmed_through` advanced |
+
+Those runs predate the second review. Its fixes are covered by the test suite, including an
+end-to-end test that drives the real local frontend over a real pipe; they have not yet been
+re-run under a real host.
 
 On Linux the full suite ran 71 passed, 1 failed, 43 skipped (37 need node, 6
 are long soak tests). The failure is `test-supervisor.py`, a timing-dependent
@@ -200,5 +254,14 @@ server process with a scripted host, not under the real one.
   from inside a `trio claude` session without the launcher expects events its
   host never registered. Start nested sessions with `trio claude` as well.
 - Delivery is at-least-once across a restart.
+- A filter applies from when it is set. It does not go back for unread messages an earlier filter
+  declined; the poll tool reads those.
+- While such unread messages sit in the channel, a new message can take up to about ten seconds
+  to arrive, longer behind a very large backlog. Acknowledging what you have read restores
+  immediate delivery.
+- Each membership holds its own connection to a Quartet hub.
+- The hub does not rate-limit senders. The listener bounds what a flood costs you; it cannot stop
+  the flood. Stop the listener, or remove the sender.
+- `trio claude -p` and other headless uses are unverified. Use plain `claude` there.
 - Every delivered event starts or extends a turn with the session's full
   context. Use the `about` or `at` filter on a session that should stay quiet.
