@@ -1,3 +1,8 @@
+# Shell scripts are executed by bash, which cannot run CRLF line endings. A
+# Windows clone with core.autocrlf=true would otherwise check them out as CRLF,
+# and tests/run-all.sh then fails under WSL or Git Bash before running anything.
+*.sh text eol=lf
+
 # Vendored avatar art (SVG Repo). These are third-party assets, not source we
 # maintain, so they are exempt from the whitespace checks the release suite
 # runs via `git diff --check`. Without this, 29 files of trailing whitespace

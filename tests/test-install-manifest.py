@@ -32,7 +32,7 @@ def check(name, cond):
         failures.append(name)
 
 
-text = SETUP.read_text()
+text = SETUP.read_text(encoding="utf-8")
 
 # Both lists carry .js as well as .py: nth_ask_client.js is read at import time
 # like any module, and matching only *.py silently truncated list A at the first
@@ -57,7 +57,7 @@ def imported_by(module_file: Path) -> set:
     of nesting — a deferred import inside a function still needs the file to be
     on disk when that function runs."""
     try:
-        tree = ast.parse(module_file.read_text())
+        tree = ast.parse(module_file.read_text(encoding="utf-8"))
     except (OSError, SyntaxError):
         return set()
     found = set()
@@ -107,7 +107,7 @@ check("setup.sh: both install paths copy server/web/ recursively "
 
 def declared_assets() -> list:
     """Read WEB_CSS_FILES / WEB_JS_FILES out of nth_web.py without importing."""
-    tree = ast.parse((SERVER / "nth_web.py").read_text())
+    tree = ast.parse((SERVER / "nth_web.py").read_text(encoding="utf-8"))
     names = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Assign):
