@@ -8,9 +8,14 @@ Trio owns the local event service. `nth_event_service.py` observes explicitly
 registered Codex endpoints, binds successful MCP connect results to their real
 thread, and supervises durable local/Quartet subscriptions. `nth_cli.py` owns
 launchers; `nth_quartet_proxy.py` supplies a local stdio frontend to Quartet.
-Claude uses the canonical Monitor via `nth_watch.py`; Codex uses standalone
-tool output at the next active-turn model boundary. Never replace this with
-terminal typing or a second server attached to an already owned thread.
+Claude launched with `trio claude` receives channel events from a listener
+inside each stdio frontend (`nth_claude_channel.py`); launched plainly it falls
+back to the canonical Monitor via `nth_watch.py`, which from Claude Code 2.1.274
+is a 30-minute lease. Codex uses standalone tool output at the next active-turn
+model boundary. Never replace this with terminal typing or a second server
+attached to an already owned thread. A channel notification has no receipt:
+Claude status reports `written`, never `accepted`, and readiness is a separate
+check from joining for both providers.
 
 `python setup.py install` is the native Claude/Codex installer. It must preserve
 unrelated settings and retain backups. It installs both skills with all their

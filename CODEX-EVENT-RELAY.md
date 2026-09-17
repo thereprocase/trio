@@ -92,14 +92,18 @@ events are not automatically replayed after a Codex crash. Retention is manual.
 | `nth_codex_relay.py` / `nth_codex_socket.py` | Source polling, receipt ledger, typed input, borrowed transport |
 | `nth_event_sources.py` | Canonical local poll/status or existing remote MCP connection |
 | `nth_quartet_proxy.py` | Local stdio frontend, unmodified remote tool results, local delivery controls |
-| `nth_event_access.py` / `nth_watch.py` | Private identity persistence and provider-specific startup |
+| `nth_claude_channel.py` | Claude channel listeners inside the stdio frontends, held-token completion, ack evidence |
+| `nth_event_access.py` / `nth_watch.py` | Private identity persistence, provider-specific startup, readiness and recovery hints |
 | `nth_codex_runtime.py` | Managed agent feeds into active turns; preserve reply audience |
 | `nth_cli.py` / `setup.py` | Native launch, attach, inspection and installation |
 | `AGENT-RUNTIME.md`, both skill/reference/protocol flavors | Agent workflow and acknowledgement rules |
 
-Claude uses its existing persistent Monitor, with its exact command returned
-by connect. This preserves canonical message, cadence and keepalive events.
-Codex currently receives channel messages; cadence/keepalive reminder parity
+Claude launched with `trio claude` receives the same `new_messages` payload as
+a channel event from a listener inside its stdio frontend, as AGENT-RUNTIME.md
+describes; that path has no receipt, so it never uses this relay's `accepted`
+state. Launched plainly, Claude uses its Monitor, with its exact command
+returned by connect, which preserves canonical message, cadence and keepalive
+events. Codex currently receives channel messages; cadence/keepalive reminder parity
 and a general subprocess/JSONL source adapter remain follow-up work. Managed
 feeds do not infer a final broadcast destination after mixing audiences.
 
