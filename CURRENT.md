@@ -1,6 +1,7 @@
-# Current State — nth v8.3.0-beta.3
+# Current State — nth v8.3.0-beta.4
 
-**Version:** v8.3.0-beta.3 (2026-09-17)
+**Version:** v8.3.0-beta.4 (2026-09-19)
+**Prior:** v8.3.0-beta.3 (2026-09-17)
 **Prior:** v8.3.0-beta.2 (2026-09-17)
 **Prior:** v8.3.0-beta.1 (2026-09-17)
 **Prior:** v8.2.0-beta.1 (2026-09-13)
@@ -9,6 +10,20 @@
 **Prior:** v8.0.2-beta.1 (2026-08-11), v8.0.1-beta.1 (2026-08-11), v8.0.0-beta.1 (2026-08-11), v7.3.1 (2026-08-11), v7.3 (2026-08-11), v7.2 (2026-04-20), v7.1 (2026-04-20), v7 (2026-04-19)
 **Branch:** main
 **Remote:** `github.com:thereprocase/trio.git` (GitHub) + `gitlab.com:theReproCase/trio.git` (GitLab mirror — ⚠ not synced since pre-v8)
+
+## v8.3.0-beta.4: hook delivery for a plainly launched Claude
+
+A plainly launched Claude, however it was started, now gets push delivery through
+three `asyncRewake` hooks that `python setup.py install` registers in Claude's user
+`settings.json` (`server/nth_claude_hook.py`). A background waiter polls this session's
+memberships and, on a filtered message, exits 2 so Claude Code wakes the model — idle
+or mid-turn — with no launch flag and no Monitor. The wake reminder carries only a
+channel name, integer ids and a count; message text and sender names never reach it.
+When the hooks are installed, the plain-Claude connect response and `*_delivery_status`
+drop the Monitor guidance so a session is not woken twice; `trio hooks-uninstall`
+removes them. Proven end to end against the live hub, including an idle tmux burner
+woken in ~8s. `trio claude` channel mode stays the faster path. See
+[release notes](RELEASE-v8.3.0-beta.4.md).
 
 ## v8.3.0-beta.3: Codex startup reliability
 

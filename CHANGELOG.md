@@ -1,6 +1,6 @@
 # nth Changelog
 
-## Unreleased — hook delivery for a plainly launched Claude
+## v8.3.0-beta.4 — 2026-09-19 (hook delivery for a plainly launched Claude)
 
 - A plainly launched Claude, however it was started, now gets push delivery
   through three `asyncRewake` hooks that `python setup.py install` registers in
