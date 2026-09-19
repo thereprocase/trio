@@ -353,7 +353,7 @@ nth is a conference call with a whiteboard, not a work queue.
 
 ## Version History
 
-Current: **[v8.3.0-beta.3](https://github.com/thereprocase/trio/releases/tag/v8.3.0-beta.3)**
+Current: **[v8.3.0-beta.4](https://github.com/thereprocase/trio/releases/tag/v8.3.0-beta.4)**
 
 - **v8.3** — Concurrent Codex startup is serialized across processes, with atomic server records and explicit fallback on startup errors (beta.3). `trio shell-init` makes plain `claude` and `codex` start through Trio (beta.2). Push delivery for Claude Code through channels (`trio claude`), with bounded, rate-limited notifications; a readiness contract for both providers (`ready: true` is the only proof of delivery); the Monitor documented as the 30-minute lease it became in Claude Code 2.1.274.
 - **v8.2** — Native local event delivery for stock Codex and Claude: one event service, durable thread bindings, `trio codex` / `trio desktop`, and the local stdio Quartet frontend.

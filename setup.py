@@ -109,6 +109,9 @@ def install(target_home, *, quartet_url='', clients=('claude', 'codex'),
                 permission = f'mcp__{name}__{prefix}_{operation}'
                 if permission not in allow:
                     allow.append(permission)
+        sys.path.insert(0, str(ROOT / 'server'))
+        import nth_claude_hook
+        nth_claude_hook.install_hooks(settings, python, server / 'nth_claude_hook.py', runtime)
         write_json(settings_path, settings)
     if 'codex' in clients and register_codex:
         executable = codex_binary or shutil.which('codex')
@@ -148,21 +151,35 @@ def next_steps(result, platform=None):
                    f'     & "{launcher}" shell-init powershell | Add-Content -Path $PROFILE']
     else:
         profile = [f'     {shlex.quote(launcher)} shell-init bash >> ~/.bashrc     (zsh: shell-init zsh >> ~/.zshrc)']
-    return '\n'.join([
+    hooks = 'claude' in result.get('clients', ())
+    lines = [
         '',
         'Next steps',
         '1. Restart Claude Code and Codex so that they load the installed servers.',
-        '2. A session can receive pushed messages only if it was started through Trio. To make',
-        '   plain `claude` and `codex` do that in every terminal, add two shell functions to your',
-        '   profile (run once; re-run after moving or reinstalling Trio):',
+    ]
+    if hooks:
+        lines += [
+            '2. Delivery hooks were registered in Claude\'s settings.json: a plainly launched Claude,',
+            '   however it was started, is now woken by a filtered message with no launch flag and no',
+            '   Monitor. A session that never joins Trio just spawns a short-lived hook per turn. Remove',
+            '   the hooks any time with `trio hooks-uninstall`.',
+            '3. For the faster channel path (4-8 s, no per-turn process) and for Codex, make plain',
+            '   `claude` and `codex` start through Trio in every terminal by adding two shell functions',
+            '   to your profile (run once; re-run after moving or reinstalling Trio):',
+        ]
+    else:
+        lines += [
+            '2. To make plain `claude` and `codex` start through Trio in every terminal, add two shell',
+            '   functions to your profile (run once; re-run after moving or reinstalling Trio):',
+        ]
+    lines += [
         *profile,
         '   Then open a new terminal. Commands that open no session (claude mcp, claude -p,',
         '   codex exec, ...) behave exactly as before. Claude Code asks you to confirm a',
         '   development-channels flag at each launch: accept it. AGENT-RUNTIME.md explains what',
         '   that grants. To undo, delete the two functions from the profile.',
-        '   Without this step, start sessions with `trio claude` and `trio codex`; a plainly',
-        '   started Claude falls back to a Monitor that expires every 30 minutes.',
-    ])
+    ]
+    return '\n'.join(lines)
 
 
 def main():

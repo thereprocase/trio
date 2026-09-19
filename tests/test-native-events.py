@@ -310,7 +310,8 @@ class NativeTests(unittest.TestCase):
 
     def test_native_connect_keeps_tokens_out_of_launch_command(self):
         identity = {'channel': 'room', 'member_id': 'member-1', 'session_token': 'private-token', 'reclaim_secret': 'private-reclaim'}
-        with patch.dict(os.environ, {'TRIO_NATIVE_CLIENT': 'claude'}):
+        # An isolated settings dir with no delivery hooks: the monitor branch, deterministically.
+        with patch.dict(os.environ, {'TRIO_NATIVE_CLIENT': 'claude', 'CLAUDE_CONFIG_DIR': str(self.root)}):
             result = native_connect_response(dict(identity))
         self.assertNotIn('private-token', result['monitor_hint'])
         self.assertNotIn('private-reclaim', result['monitor_hint'])
@@ -324,6 +325,27 @@ class NativeTests(unittest.TestCase):
             result = native_connect_response(dict(identity))
         self.assertEqual(result['event_delivery']['mode'], 'automatic')
         self.assertEqual(result['monitor_hint'], '')
+
+    def test_a_plain_claude_with_hooks_installed_is_told_not_to_run_a_monitor(self):
+        import nth_claude_hook
+        settings = {}
+        nth_claude_hook.install_hooks(settings, sys.executable, self.root / 'nth_claude_hook.py', self.root)
+        (self.root / 'settings.json').write_text(json.dumps(settings), encoding='utf-8')
+        identity = {'channel': 'room', 'member_id': 'm', 'session_token': 't'}
+        with patch.dict(os.environ, {'TRIO_NATIVE_CLIENT': 'claude', 'CLAUDE_CONFIG_DIR': str(self.root)}):
+            result = native_connect_response(dict(identity))
+            status = delivery_status('room', 'm', 't')
+        # Mode is still 'monitor' (no channel hub), but the guidance is hook delivery.
+        self.assertEqual(result['monitor_hint'], '')
+        self.assertIn('delivery hooks are installed', result['instructions'])
+        self.assertIn('Do NOT launch a Monitor', result['instructions'])
+        self.assertEqual(status['state'], 'hooks')
+        self.assertIn('do not launch a Monitor', status['hint'])
+        # Remove them again and the monitor guidance returns.
+        self.assertEqual(nth_claude_hook.uninstall_hooks(settings), 3)
+        (self.root / 'settings.json').write_text(json.dumps(settings), encoding='utf-8')
+        with patch.dict(os.environ, {'TRIO_NATIVE_CLIENT': 'claude', 'CLAUDE_CONFIG_DIR': str(self.root)}):
+            self.assertTrue(native_connect_response(dict(identity))['monitor_hint'])
     def test_install_preserves_unrelated_settings_and_installs_both_skills(self):
         spec = importlib.util.spec_from_file_location('native_setup', ROOT / 'setup.py')
         setup = importlib.util.module_from_spec(spec); spec.loader.exec_module(setup)

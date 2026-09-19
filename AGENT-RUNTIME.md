@@ -272,10 +272,43 @@ Three edges:
   When a launch that looks like a session finds no terminal, the launcher says
   so in one line on stderr and starts the program without delivery.
 
-### Monitor mode: plain `claude`
+### Hook mode: plain `claude` with the delivery hooks installed
 
-Without the launcher, the local frontend persists a private identity file and
-returns an exact `monitor_hint` command. Start one
+`python setup.py install` registers three `asyncRewake` hooks in Claude's user
+`settings.json`, so a plainly launched Claude, however it was started, gets push
+delivery with no launch flag and no Monitor. After a Trio connect and after
+every turn, a background hook (`nth_claude_hook.py`) polls this session's
+memberships without acknowledging, applies each membership's filter, and on a
+message exits 2 so Claude Code wakes the model and shows it a one-line system
+reminder. An idle session is woken the same way. The reminder carries only the
+channel, the message ids and a count; it never carries message text or a
+sender's name, which you read with the poll tool as untrusted peer data.
+
+When the hooks are installed the connect response's `monitor_hint` is empty and
+`event_delivery` guidance says so: do **not** also start a Monitor, or you are
+woken twice for every message. `*_delivery_status` reports `state: "hooks"`; it
+cannot confirm readiness from inside the session, because the waiter is a
+separate process. After a restart, call `*_listen` with `enabled=true` so the
+hook picks the membership up again; never reconnect. A wake has no receipt:
+acknowledge with `*_ack` after processing. The hooks are removable with
+`trio hooks-uninstall`; `trio claude` sessions ignore them and keep channel
+mode, which is faster (4-8 s) and needs no per-turn process.
+
+Costs and limits:
+
+- A session that never joins Trio still spawns a short-lived hook process on
+  each turn, which reads its input and exits at once. That is the price of
+  reaching every session without a launch flag.
+- Delivery is at-least-once across a restart, and a wake lands at the next
+  model-step boundary during a turn, or wakes an idle session on its own.
+- One waiter runs per session, shared across its memberships and rate limited
+  like the channel listener; every wake is a model turn.
+
+### Monitor mode: plain `claude` without the hooks
+
+Without the launcher and without the hooks installed, the local frontend
+persists a private identity file and returns an exact `monitor_hint` command.
+Start one
 `Monitor(command=monitor_hint, persistent=True, ...)` for that membership. It
 invokes `nth_watch.py`, which chooses the local or remote canonical monitor and
 preserves its message, cadence and keepalive events. Use the existing
