@@ -16,7 +16,9 @@ Current version: **8.3.0-beta.4**.
 
 **Claude: MCP channel events.** `trio claude` enables Trio's local MCP servers as [Claude Code channels](https://code.claude.com/docs/en/channels-reference). Their listeners wait for messages outside the model and push `<channel>` events into the session, so a quiet channel costs zero model turns. At launch Claude Code asks you to confirm the `--dangerously-load-development-channels` flag, which names only `server:nth-trio` and, when configured, `server:nth-qweb`. Tool permission prompts stay in force.
 
-**Plain `claude`: the Monitor fallback.** A Claude session launched directly uses one Monitor per membership. From Claude Code 2.1.274 a Monitor is a 30-minute lease ([Monitor documentation](https://code.claude.com/docs/en/tools-reference#monitor-tool)), and each expiry wakes the session to re-arm it. Use this path while someone is watching the session.
+**Plain `claude`: hook delivery.** `python setup.py install` registers three `asyncRewake` hooks in Claude's user settings. After each turn a background waiter long-polls the session's memberships and wakes the model when a message passes its filter, so a Claude started from an editor extension, the desktop app or a terminal also gets push delivery. The wake carries the channel name, message ids and a count; the agent reads the messages with the poll tool. `trio claude` channel mode stays the faster path (4–8 s). Remove the hooks with `trio hooks-uninstall`; see [hook mode](AGENT-RUNTIME.md#hook-mode-plain-claude-with-the-delivery-hooks-installed).
+
+**Plain `claude` with the hooks removed: the Monitor.** The session uses one Monitor per membership. From Claude Code 2.1.274 a Monitor is a 30-minute lease ([Monitor documentation](https://code.claude.com/docs/en/tools-reference#monitor-tool)), and each expiry wakes the session to re-arm it. Use this path while someone is watching the session.
 
 **What to do:** follow the [quick start](#native-quick-start), launch through Trio, join your channel, and check `*_delivery_status` for **`ready: true`**. To route plain `codex` and `claude` commands through these launchers, add `trio shell-init` output to your shell profile. Manual polling works on both clients for an attended session. App and IDE launch paths have their own limits; see [the runtime guide](AGENT-RUNTIME.md).
 
@@ -58,7 +60,7 @@ Claude / Codex ──stdio──> local Trio tools ──> local SQLite
               └─stdio──> local Quartet frontend ──MCP/SSE──> hub
 
 Claude: connect ──> listener inside the stdio frontend ──channel event──> the open session
-        (plain `claude`: private identity file ──> Monitor, a 30-minute lease)
+        (plain `claude`: delivery hooks; with the hooks removed, a 30-minute Monitor lease)
 Codex:  connect ──> local event service ──> durable delivery ledger
                                         └─toolOutput──> owning app-server thread
 ```
@@ -73,7 +75,7 @@ The hub and its channel semantics stay authoritative. The local Quartet frontend
 - **Fully async**: anyone posts at any time
 - **Atomic task coordination**: the server guarantees exactly one winner per claim
 - **Dual transport**: local stdio (`/trio`) and remote SSE over Tailscale (`/quartet`)
-- **Background delivery**: pushed into Claude Code as channel events (`trio claude`) and into Codex as typed tool outputs (`trio codex`); a monitor process per membership, hub (`nth_monitor.py`) or spoke (`nth_spoke_monitor.py`), serves a plainly launched Claude
+- **Background delivery**: pushed into Claude Code as channel events (`trio claude`) and into Codex as typed tool outputs (`trio codex`); a plainly launched Claude gets delivery hooks, with a monitor process per membership, hub (`nth_monitor.py`) or spoke (`nth_spoke_monitor.py`), as the hook-free path
 - **Web dashboard**: `nth_web.py` serves a browser channel view with roster, chat, @-autocomplete, 20 themes and a responsive mobile layout
 - **Context rings**: per-member context window usage in the roster, relayed from spokes to the hub with the monitor heartbeat
 - **Three sigils**: `@name` pings, `#name` references (background), `!name` bangs (always delivered; for emergencies)
@@ -215,9 +217,9 @@ Restart Claude Code and launch it with `trio claude`. `setup.sh spoke` registers
 | `list()` | List all channels. |
 | `cull(channel, member_id, target_member_id)` | Remove a member (user permission required). |
 
-## Background Monitoring (plain `claude`)
+## Background Monitoring (plain `claude` without hooks)
 
-Sessions launched with `trio claude` or `trio codex` receive pushed messages; see [AGENT-RUNTIME.md](AGENT-RUNTIME.md). This section covers a plainly launched Claude.
+Sessions launched with `trio claude` or `trio codex`, and plain `claude` sessions with the delivery hooks installed, receive pushed messages; see [AGENT-RUNTIME.md](AGENT-RUNTIME.md). This section covers a plainly launched Claude with the hooks removed.
 
 From Claude Code 2.1.274 a Monitor is a 30-minute lease whose expiry wakes the session, so this path suits a session someone is watching. Each participant launches one persistent monitor process via Claude Code's `Monitor` tool. The `connect` response includes a `monitor_hint` with the exact command to run: hub sessions get `nth_monitor.py` (reads the local DB), spoke sessions get `nth_spoke_monitor.py` (polls the hub via SSE).
 
@@ -292,7 +294,7 @@ Participants join a channel, talk, coordinate tasks, and leave.
 - **Atomic claims**: each task has exactly one owner at a time; shared files get a question before an edit.
 - **Visible blocks**: post a block, keep working around it, and let others help.
 - **Early questions**: a short question to the channel settles ambiguity before work starts.
-- **Message-driven wakeups**: push delivery runs at zero model turns while a channel is quiet; a self-renewing Monitor lease costs a full-context turn every 30 minutes.
+- **Message-driven wakeups**: channel and hook delivery run at zero model turns while a channel is quiet; a self-renewing Monitor lease costs a full-context turn every 30 minutes.
 
 ## Contributing
 
