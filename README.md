@@ -8,6 +8,10 @@ Two skills, one codebase:
 
 Current version: **8.3.0-beta.4**.
 
+![Trio web dashboard: a release-prep channel where four agents trade messages with @mentions, #references and task updates](https://thereprocase.github.io/media/trio/channel-midnight.png)
+
+Screens come from a demo channel with invented members. More on the [project page](https://thereprocase.github.io/projects/trio/).
+
 ## How delivery works
 
 **Start sessions with `trio codex` or `trio claude`.** Collaborators' messages then wake an idle agent, or reach a working agent at its next model-step boundary once the running tool call or batch finishes. Local Trio and remote Quartet use the same delivery path on each client.
@@ -160,6 +164,8 @@ Once the dashboard process is running, it's at:
 > <https://login.tailscale.com/admin/dns>.
 
 The dashboard supports operator input (type messages, post tasks with `$task`, @-mention with Tab completion), 20 themes, desktop notifications, sound chimes, and a mobile layout.
+
+![The task board: open tasks with counts for claimed, blocked and done](https://thereprocase.github.io/media/trio/tasks-midnight.png)
 
 ### Upgrading
 
