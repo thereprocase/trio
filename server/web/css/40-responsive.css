@@ -1,0 +1,120 @@
+@media (max-width:880px) { .app { grid-template-columns:1fr; }.sidebar { position:fixed; z-index:2; inset:0 auto 0 0; width:300px; transform:translateX(-105%); transition:transform .25s ease; }.app.nav-open .sidebar { transform:none; }.scrim-nav { position:fixed; inset:0; z-index:1; background:#0006; }.app.nav-open + .scrim-nav { display:block; } }
+
+/* These live here rather than in the 880px block of 10-shell.css because
+   30-workspace.css re-declares .workspace-view and .pref-row unconditionally and
+   loads later. Media queries contribute no specificity, so at equal specificity
+   source order decides and the earlier mobile rule simply loses. 10-shell.css
+   already carries one dead rule for exactly this reason
+   (.workspace-view{padding:22px 18px 40px}, measured as 34px at every width).
+   This file loads last, so a rule placed here actually applies. */
+
+/* A preference row is label + control on one line. 30-workspace.css already lets
+   the row wrap here, but wrapping never triggers: .pr-txt is flex:1 with
+   min-width:0, so it shrinks instead of pushing the control down. Meanwhile a
+   <select> is width:auto — it sizes to its widest OPTION, measured 267px, not the
+   120px its min-width suggests — and flex:none forbids it shrinking at all. So
+   the label absorbs the entire shortfall: at 412px the "Speech-to-text engine"
+   label measured 15px wide and 752px tall, one character per line.
+
+   Scoped to rows with a wide control. Applying it to every row was measured to
+   push the 48px switch off a plain toggle row onto a second line and add 193px
+   of page height at 360px, for no benefit — those rows were never squeezed. */
+@media (max-width:640px){
+  .pref-row:has(> .pref-select, > .pref-range) .pr-txt{ flex:1 1 100%; }
+}
+
+/* 34px of horizontal padding each side is a desktop number; on a 360px phone it
+   spends 19% of the screen on margin. */
+@media (max-width:880px){
+  .workspace-view{ padding:22px 16px 40px; }
+}
+
+/* The drawer footer's notch allowance. 10-shell.css declared this inside its own
+   880px block and it never applied — 30-workspace.css re-declares .side-foot and
+   loads later. It was the ONLY use of env() in the whole tree, so until now the
+   codebase's sole piece of home-indicator handling did nothing. */
+@media (max-width:880px){
+  .side-foot{ padding-bottom:calc(10px + env(safe-area-inset-bottom)); }
+}
+
+/* The off-canvas drawer had no drop shadow. 10-shell.css asks for --shadow-lg in
+   its own 880px block, but a later unconditional .sidebar rule sets the desktop
+   inset hairline and wins on source order — measured, the open drawer computed
+   `-1px 0 0 0 inset` at 360px.
+
+   Scoped to the OPEN drawer, and that scoping is the whole point. The closed
+   drawer is not hidden, it is translateX(-105%): still visibility:visible,
+   opacity:1, display:flex, with its right edge at x=-15px. --shadow-lg has a
+   zero x-offset and a 50px blur, so unscoped it spills ~25px back onto the
+   screen while the drawer is SHUT — which is the state a phone is in almost all
+   the time. Measured at 390px light: the leftmost 28px of every screen darkened,
+   mean column luminance 231.6 -> 221.6 at x=0, 8036 differing pixel samples; the
+   dark themes' 60px blur reached x=47. Scoping costs nothing — the open drawer
+   is pixel-identical either way. */
+@media (max-width:880px){
+  .app.nav-open .sidebar{ box-shadow:var(--shadow-lg); }
+}
+
+/* The composer input has no font-size of its own, so it inherits body's 15px.
+   iOS Safari zooms the page in whenever an editable under 16px takes focus and
+   does NOT zoom back out on blur, so the operator is left on a zoomed,
+   horizontally-panned page after every message — on the most-used control in the
+   app. 16px is the exact WebKit threshold; 15.5px still zooms.
+
+   Whoever built the search overlay already knew this: .search-top input is
+   explicitly 16px. The composer was simply missed.
+
+   Width is not the capability boundary: an iPad at 881-1024px still has a
+   coarse primary pointer and the same focus-zoom behaviour. Keying this to the
+   input device covers those layouts too while a mouse-primary desktop keeps
+   15px. With the composer empty the phone geometry is byte-identical; a draft
+   on a wrap boundary may gain a line (at 360px, 149px -> 176px). */
+@media (hover:none) and (pointer:coarse){
+  .composer-shell .composer-input{ font-size:16px; }
+}
+
+/* The conversation gutter narrows on a phone; --gutter drives BOTH the message
+   list and the composer, so they cannot drift apart again. Do not "fix" the
+   composer alone by pinning it to 16px on mobile: measured, that aligns 640px
+   but makes 720px and 768px worse (-24.4px -> -34.4px of misalignment), because
+   .messages is on a viewport-relative gutter up there, not a flat 16px. */
+@media (max-width:640px){
+  :root{ --gutter:16px; }
+}
+
+/* Populated Messages/Attention inbox cards have three header peers: avatar,
+   identity copy, and a nowrap unread/waiting badge. In a flex row the identity
+   copy kept its min-content width, so a long agent/thread name plus the badge
+   widened the entire workspace beyond a 320-390px phone. Give the copy the
+   only fluid track and put status beneath it; the avatar remains a stable
+   anchor while every text-bearing descendant is allowed to shrink. */
+@media (max-width:640px){
+  .att-card{ min-width:0; padding:14px 12px; overflow:hidden; }
+  .att-card .ac-h{
+    display:grid;
+    grid-template-columns:36px minmax(0,1fr);
+    align-items:center;
+    min-width:0;
+  }
+  .att-card .ac-h>.av{ grid-column:1; grid-row:1 / span 2; }
+  .att-card .ac-h>span:not(.av):not(.waiting){ grid-column:2; min-width:0; }
+  .att-card .ac-h .who,
+  .att-card .ac-h .sub{
+    display:block;
+    max-width:100%;
+    overflow:hidden;
+    text-overflow:ellipsis;
+    white-space:nowrap;
+  }
+  .att-card .ac-h .waiting{
+    grid-column:2;
+    margin-left:0;
+    justify-self:start;
+    min-width:0;
+  }
+  .att-card .reason,
+  .att-card .reason p,
+  .att-card .att-detail,
+  .att-card .att-detail .r .v{ min-width:0; max-width:100%; overflow-wrap:anywhere; }
+  .att-card .reason pre{ max-width:100%; overflow:auto; }
+}
