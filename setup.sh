@@ -187,7 +187,9 @@ UNIT
     else
         echo "WARNING: /healthz not answering yet — check: journalctl -u quartet-hub -n 30"
     fi
-    if curl -fsS -m 5 -o /dev/null http://127.0.0.1:8765/; then
+    # The unit serves https only (--tailscale-tls); -k because the certificate
+    # names the MagicDNS host, not the loopback address.
+    if curl -fsSk -m 5 -o /dev/null https://127.0.0.1:8765/; then
         echo "nth-web:     landing page OK (port 8765)"
     else
         echo "WARNING: nth-web not answering — check: journalctl -u nth-web -n 30"
