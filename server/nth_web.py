@@ -397,8 +397,14 @@ IDENTITY_SOURCE_TAILSCALE = "tailscale"
 IDENTITY_SOURCE_LOOPBACK = "loopback"
 IDENTITY_SOURCE_GUEST = "guest"
 IDENTITY_SOURCE_PENDING = "pending"
+# A named participant from another tailnet account, listed by the hub owner in
+# NTH_TAILNET_MEMBERS. Tailscale proves who they are; the listing makes them a
+# member under their own name. They post like anyone else and hold none of the
+# operator-only powers (cull, local paths), which stay with the owner.
+IDENTITY_SOURCE_MEMBER = "member"
 # Agents reading the roster can check the member's summary field:
 #   "human — tailnet: alice"          → identity-traceable via Tailscale
+#   "human — member (tailnet: bob@…)" → named member listed by the hub owner
 #   "human — local (user: alice)"     → connected via loopback; trust level is
 #                                       "already has a shell on this box"
 #   "human — GUEST (self-declared)"   → untrusted self-declared identity
@@ -491,6 +497,10 @@ class OperatorIdentity:
     source: str             # "tailscale" | "guest" | "pending"
     login: str = ""         # Tailscale login or raw self-declared name
     created_at: float = 0.0
+    # True for a guest whose name came from Tailscale whois (a tailnet user
+    # who is not the hub owner, e.g. someone a node was shared with). The
+    # name is verified; the permissions stay those of any other guest.
+    tailnet_verified: bool = False
 
     @property
     def display_name(self) -> str:
@@ -510,6 +520,10 @@ class OperatorIdentity:
             return f"human — tailnet: {self.login or self.name}"
         if self.source == IDENTITY_SOURCE_LOOPBACK:
             return f"human — local (user: {self.login or self.name})"
+        if self.source == IDENTITY_SOURCE_MEMBER:
+            return f"human — member (tailnet: {self.login})"
+        if self.source == IDENTITY_SOURCE_GUEST and self.tailnet_verified:
+            return f"human — GUEST (tailnet-verified: {self.login})"
         if self.source == IDENTITY_SOURCE_GUEST:
             return "human — GUEST (self-declared)"
         return "human — pending identity"
@@ -606,6 +620,20 @@ def _warn_tailscale_missing_once() -> None:
         "[nth_web] tailscale CLI not found on PATH or at any known install "
         "location; tailnet peers cannot be identified and will be treated as "
         "untrusted guests. Add it to PATH to restore tailnet trust.\n")
+
+
+def tailnet_members() -> Dict[str, str]:
+    """NTH_TAILNET_MEMBERS as {login: display name}.
+
+    Format: comma-separated `login=Name` pairs, e.g.
+    `NTH_TAILNET_MEMBERS=bob@example.com=Bob,carol@example.com=Carol`.
+    Read on every call so a unit restart is the only step after an edit."""
+    members: Dict[str, str] = {}
+    for entry in (os.environ.get("NTH_TAILNET_MEMBERS") or "").split(","):
+        login, sep, name = entry.strip().partition("=")
+        if sep and login.strip() and name.strip():
+            members[login.strip().lower()] = name.strip()
+    return members
 
 
 def tailscale_whois(remote_ip: str) -> Optional[Dict[str, str]]:
@@ -769,7 +797,14 @@ class OperatorRegistry:
         provisional = False
         if owner:
             if login and login != owner:
-                return None            # falls through to the guest tier
+                # Another tailnet account: Tailscale vouches for WHO it is.
+                # Accounts the owner listed join as named members; any other
+                # account gets its Tailscale name with guest permissions,
+                # instead of being parked nameless until it self-declares one.
+                member_name = tailnet_members().get(login.lower())
+                if member_name:
+                    return self._tailnet_member(token, login, member_name)
+                return self._tailnet_guest(token, login, info.get("display") or "")
         else:
             # Owner undeterminable. FAIL CLOSED: drop to guest.
             #
@@ -815,7 +850,8 @@ class OperatorRegistry:
             self.put(token, ident)
         return ident
 
-    def register_guest(self, token: str, raw_name: str) -> OperatorIdentity:
+    @staticmethod
+    def _clean_guest_name(raw_name: str, token: str) -> str:
         # Normalise Unicode + strip controls to blunt lookalike-impersonation.
         # NFKC folds full-width ＠ / ＃ / ！ etc. into their ASCII twins so we
         # can reject them consistently; the "Cc" category filter drops zero-
@@ -829,6 +865,45 @@ class OperatorRegistry:
         # member_id prefix.
         if lower in {"all", "everyone", "here", "channel"} or lower.startswith("_op_"):
             name = f"Guest-{token[:4]}"
+        return name
+
+    def _tailnet_member(self, token: str, login: str, name: str) -> OperatorIdentity:
+        """A participant the hub owner listed in NTH_TAILNET_MEMBERS.
+
+        Keyed by login like _tailnet_guest, so every device and cookie of the
+        same account is the same member."""
+        clean = self._clean_guest_name(name, token)
+        ident = OperatorIdentity(
+            member_id=f"{OPERATOR_MEMBER_ID_PREFIX}m_{_slug(login.split('@', 1)[0]) or 'member'}",
+            name=clean,
+            source=IDENTITY_SOURCE_MEMBER,
+            login=login,
+            created_at=time.time(),
+        )
+        self.put(token, ident)
+        return ident
+
+    def _tailnet_guest(self, token: str, login: str, display: str) -> OperatorIdentity:
+        """A guest named by Tailscale whois rather than by the browser.
+
+        The member id follows the LOGIN, so the same person on a second device
+        or a fresh cookie is the same member, and a browser cannot rename it
+        (see _handle_identify)."""
+        login_user = login.split("@", 1)[0]
+        name = self._clean_guest_name(display or login_user, token)
+        ident = OperatorIdentity(
+            member_id=f"{OPERATOR_MEMBER_ID_PREFIX}g_{_slug(login_user) or 'tailnet'}_tn",
+            name=name,
+            source=IDENTITY_SOURCE_GUEST,
+            login=login,
+            created_at=time.time(),
+            tailnet_verified=True,
+        )
+        self.put(token, ident)
+        return ident
+
+    def register_guest(self, token: str, raw_name: str) -> OperatorIdentity:
+        name = self._clean_guest_name(raw_name, token)
         slug = _slug(name) or "guest"
         # Reuse the existing guest member_id when this token already has a
         # guest identity — a re-identify is a rename, not a new member.
@@ -7959,7 +8034,9 @@ class NthWebHandler(BaseHTTPRequestHandler):
             return
         token, _is_new = self._get_or_mint_cookie()
         existing = OPERATOR_REGISTRY.get(token)
-        if existing and existing.source in (IDENTITY_SOURCE_TAILSCALE, IDENTITY_SOURCE_LOOPBACK):
+        if existing and (existing.source in (IDENTITY_SOURCE_TAILSCALE, IDENTITY_SOURCE_LOOPBACK,
+                                             IDENTITY_SOURCE_MEMBER)
+                         or existing.tailnet_verified):
             # Already identity-traceable — refuse to downgrade to Guest.
             self._json({
                 "ok": True, "upgraded": False,
