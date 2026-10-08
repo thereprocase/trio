@@ -78,7 +78,7 @@ class Notice(NamedTuple):
 def from_event(prefix, meta, server=None):
     """The notice for one event a Listener reported (its `meta`), or None when the
     event is malformed. The event's content, which is peer text, is never read."""
-    if not isinstance(meta, dict):
+    if not isinstance(meta, dict) or meta.get('event') not in ('new_messages', 'delivery_ended'):
         return None
     try:
         if meta.get('event') == 'delivery_ended':

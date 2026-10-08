@@ -913,6 +913,12 @@
   // "no mic support in this browser" disablement, which is independent of
   // and must survive the active/processing toggling done here.
   function setDictationButtonState(active, { processing = false, statusText = '' } = {}) {
+    // A pending request owns dictation across navigation until its cleanup
+    // settles. Keep that visible even when refresh/unmount stops the mic.
+    if (transcribing) {
+      active = false; processing = true;
+      statusText = sttHealthCache?.remote ? "Transcribing (hub's speech service)…" : 'Transcribing (Whisper on the hub)…';
+    }
     const button = byId('dictate-btn');
     const status = byId('dictate-status');
     if (button) {
@@ -943,10 +949,14 @@
   function stopDictation() {
     dictationGen++; // invalidate any in-flight async callback from this session (LOTC/Aragorn)
     if (recognition) { recognition.stop(); recognition = null; }
-    if (recorder?.state === 'recording') recorder.stop();
+    if (recorder?.state === 'recording') {
+      transcribing = true; // stop queues onstop; reserve ownership immediately
+      recorder.stop();
+    }
     stopTracks(); stopMeter(); document.body.classList.remove('dictating'); setDictationButtonState(false);
   }
   async function browserDictation() {
+    if (transcribing) return; // also guard an earlier toast's browser action
     const Speech = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!Speech) throw new Error('Browser speech recognition is unavailable');
     const myGen = dictationGen; // captured now — stopDictation()/unmount() bump this
@@ -1092,7 +1102,7 @@
         // exists to delete. An explicit button makes the switch a thing the
         // user chose, once, for this recording only. (LOTC/Frodo, critical)
         const reason = error.name === 'TimeoutError' || error.name === 'AbortError'
-          ? 'Local transcription failed: the request timed out. Try again.'
+          ? 'Hub dictation timed out. Tap the mic and say it again, or use browser dictation.'
           : humanEngineError(error.message) || 'Local transcription failed';
         refreshSttHealth(); // the hub may have lost its engine; let the next tap know
         if (hasBrowserDictation()) {
@@ -1112,6 +1122,7 @@
     startMeter(stream);
   }
   async function toggleDictation() {
+    if (transcribing) return; // serialize recordings until the request settles
     // Mid-getUserMedia-await: neither recorder nor stream exists yet, so
     // there's nothing for stopDictation() to stop — just ignore the extra
     // click rather than tearing down a session that hasn't started.
@@ -1138,8 +1149,10 @@
       Trio.ui.toast(choice.message, DICTATION_TOAST_MS, choice.offerBrowser ? offerBrowserAction() : null);
       return;
     }
+    const myGen = dictationGen, startedIn = conversationId();
     try { return await localDictation(); }
     catch (error) {
+      if (dictationGen !== myGen || conversationId() !== startedIn) return;
       const reason = humanEngineError(error.message) || 'Local dictation failed';
       if (!canRecognise) throw new Error(reason);
       // Explicit Local: say what broke and offer the browser engine; never

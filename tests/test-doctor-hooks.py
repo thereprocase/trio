@@ -26,6 +26,24 @@ class HookImportTests(unittest.TestCase):
     def test_complete_install_imports(self):
         self.assertEqual(self.row()[1], doctor.OK)
 
+    def test_invalid_hook_encoding_and_null_bytes_report_failure(self):
+        for contents in (b'\xff', b'import nth_listener\x00\n'):
+            with self.subTest(contents=contents):
+                (self.install / 'nth_claude_hook.py').write_bytes(contents)
+                row = self.row()
+                self.assertEqual(row[1], doctor.FAIL)
+                self.assertIn('nth_claude_hook', row[2])
+
+    def test_reported_module_names_are_capped_at_80_characters(self):
+        module = 'nth_' + 'x' * 120
+        for source in ('import ' + module + '\n', 'try:\n import ' + module + '\nexcept ImportError:\n pass\n'):
+            with self.subTest(source=source):
+                (self.install / 'nth_claude_hook.py').write_text(source)
+                row = self.row()
+                self.assertEqual(row[1], doctor.FAIL)
+                self.assertIn(module[:80], row[2])
+                self.assertNotIn(module[:81], row[2])
+
     def test_current_native_modules_import(self):
         for p in self.install.glob('*.py'):
             p.unlink()

@@ -535,6 +535,10 @@ class WakeFor:
         del content                                  # peer text: never used here
         if cancelled and cancelled():
             return False
+        # Older hook callers supplied message metadata without an event tag.
+        # Normalize that format here; the shared parser requires a known tag.
+        if isinstance(meta, dict) and 'event' not in meta:
+            meta = {**meta, 'event': 'new_messages'}
         notice = from_event(self.prefix, meta, self.server)
         if notice is None:
             return False
