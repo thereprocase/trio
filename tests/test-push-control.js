@@ -220,29 +220,27 @@ const click = el => (el._listeners.click || []).forEach(fn => fn({ type: 'click'
     state.dmKey = ''; state.dmThread = null;
   });
 
-  await check('a 409 replaces the browser subscription, retries, and moves the identity\'s other channels', async () => {
+  await check('a 409 replaces the browser subscription, retries, and moves the identity\'s other channels server-side', async () => {
     pushCapable(ANDROID);
     win.Notification.permission = 'granted';
     current = subscription;
-    let unsubscribed = 0, n = 0;
+    serverSubs = [];                 // this identity has no row on this channel yet
+    let unsubscribed = 0, conflicted = false;
     const second = { ...subscription, endpoint: ENDPOINT + '-new', toJSON() { return { endpoint: ENDPOINT + '-new', keys: { p256dh: 'BPUB', auth: 'AUTH' } }; } };
     subscription.unsubscribe = () => { unsubscribed++; current = null; return Promise.resolve(true); };
     pushManager.subscribe = opts => { second.options = { applicationServerKey: opts.applicationServerKey.buffer }; current = second; return Promise.resolve(second); };
     const realFetch = win.fetch;
+    const reply = (status, data) => { const text = JSON.stringify(data); return { ok: status < 300, status, text: async () => text, json: async () => data }; };
     win.fetch = async (url, init = {}) => {
-      if (url === '/api/push/subscribe' && n++ === 0) {
-        calls.push({ url, method: 'POST', body: JSON.parse(init.body) });
-        const text = JSON.stringify({ error: 'this device is subscribed under another identity' });
-        return { ok: false, status: 409, text: async () => text, json: async () => JSON.parse(text) };
+      const body = init.body ? JSON.parse(init.body) : null;
+      if (url === '/api/push/subscribe' && body.subscription.endpoint === ENDPOINT && !conflicted) {
+        conflicted = true;
+        calls.push({ url, method: 'POST', body });
+        return reply(409, { error: 'this device is subscribed under another identity' });
       }
-      if (url.startsWith('/api/push/status') && n > 0) {
-        // This identity also had #dev on the old endpoint.
-        calls.push({ url, method: 'GET', body: null });
-        const data = { enabled: true, delivering: true, named: true, subscriptions: [],
-                       mine: [{ channel: 'dev', endpoint: ENDPOINT, mode: 'mentions' },
-                              { channel: 'ops', endpoint: ENDPOINT + '-new', mode: 'all' }] };
-        const text = JSON.stringify(data);
-        return { ok: true, status: 200, text: async () => text, json: async () => data };
+      if (url === '/api/push/move') {
+        calls.push({ url, method: 'POST', body });
+        return reply(200, { ok: true, moved: ['dev'] });
       }
       return realFetch(url, init);
     };
@@ -255,17 +253,45 @@ const click = el => (el._listeners.click || []).forEach(fn => fn({ type: 'click'
       await settle();
       const posts = calls.filter(c => c.url === '/api/push/subscribe');
       assert.strictEqual(unsubscribed, 1);
-      assert.strictEqual(posts.length, 3);
-      assert.strictEqual(posts[1].body.subscription.endpoint, ENDPOINT + '-new');
-      // The other channel moves to the new endpoint with its own mode...
-      assert.deepStrictEqual([posts[2].body.channel, posts[2].body.mode, posts[2].body.subscription.endpoint],
-                             ['dev', 'mentions', ENDPOINT + '-new']);
-      // ...and the old endpoint's rows are cleared.
-      const unsub = calls.find(c => c.url === '/api/push/unsubscribe');
-      assert.deepStrictEqual(unsub && unsub.body, { endpoint: ENDPOINT });
+      assert.deepStrictEqual(posts.map(p => p.body.subscription.endpoint), [ENDPOINT, ENDPOINT + '-new']);
+      // The identity's other channels move in ONE server-side call, so a
+      // member at its quota cannot lose one in between.
+      const move = calls.filter(c => c.url === '/api/push/move');
+      assert.strictEqual(move.length, 1);
+      assert.strictEqual(move[0].body.old_endpoint, ENDPOINT);
+      assert.strictEqual(move[0].body.subscription.endpoint, ENDPOINT + '-new');
+      assert.ok(!calls.some(c => c.url === '/api/push/unsubscribe'), 'no unsubscribe-then-resubscribe dance');
       assert.deepStrictEqual(pressed(s), ['all']);
       assert.match(s.querySelector('.push-status').textContent, /#dev/);
     } finally { win.fetch = realFetch; }
+  });
+
+  await check('opening the control quietly renews a subscribed device with its current mode', async () => {
+    pushCapable(ANDROID);
+    win.Notification.permission = 'granted';
+    current = subscription;
+    subscription.unsubscribe = () => Promise.resolve(true);
+    serverSubs = [{ endpoint: ENDPOINT, mode: 'every5m' }];
+    permissionCalls = 0;
+    calls.length = 0;
+    const s = new FakeElement('section');
+    push.render(s, 'ops');
+    await settle();
+    const posts = calls.filter(c => c.url === '/api/push/subscribe');
+    assert.strictEqual(permissionCalls, 0, 'no permission prompt');
+    assert.strictEqual(posts.length, 1);
+    assert.deepStrictEqual([posts[0].body.channel, posts[0].body.mode, posts[0].body.subscription.endpoint],
+                           ['ops', 'every5m', ENDPOINT]);
+    assert.deepStrictEqual(pressed(s), ['every5m']);
+  });
+
+  await check('a device that is not subscribed here is not renewed', async () => {
+    serverSubs = [];
+    calls.length = 0;
+    const s = new FakeElement('section');
+    push.render(s, 'ops');
+    await settle();
+    assert.ok(!calls.some(c => c.url === '/api/push/subscribe'));
   });
 
   await check('a server with no sending hub says so', async () => {
