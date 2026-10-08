@@ -24,8 +24,7 @@
     const m = ISO_RE.exec(value.trim());
     if (!m) return null;
     const fraction = m[4] ? '.' + (m[4] + '00').slice(0, 3) : '';
-    // Every timestamp the hub writes is UTC; a zoneless one is read as UTC
-    // rather than silently reinterpreted in the browser's zone.
+    // A zoneless timestamp is read as UTC, the zone the hub writes.
     let zone = (m[5] || 'Z').toUpperCase();
     if (zone !== 'Z') {
       const digits = zone.slice(1).replace(':', '');
@@ -62,24 +61,40 @@
       ? d.getUTCFullYear() + '-' + pad(d.getUTCMonth() + 1) + '-' + pad(d.getUTCDate())
       : d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
   }
+  // One formatter per zone: building an Intl formatter per call cost ~30 ms
+  // per live insert once day separators were derived for every card.
+  const dayFormats = {};
+  function dayFormat(as) {
+    if (!dayFormats[as]) {
+      const options = { weekday: 'short', month: 'short', day: 'numeric' };
+      if (as === 'utc') options.timeZone = 'UTC';
+      dayFormats[as] = new Intl.DateTimeFormat([], options);
+    }
+    return dayFormats[as];
+  }
+  // Day label for a separator, which stands alone and so names its zone in
+  // UTC mode ("Thu, Oct 8 UTC").
   function day(value, as = mode()) {
     const d = parse(value);
     if (!d) return '';
-    const options = { weekday: 'short', month: 'short', day: 'numeric' };
-    if (as === 'utc') options.timeZone = 'UTC';
-    const label = d.toLocaleDateString([], options);
-    return as === 'utc' ? label + ' UTC' : label;
+    const text = dayFormat(as).format(d);
+    return as === 'utc' ? text + ' UTC' : text;
   }
   // `withDay`: true always prefixes the day; 'auto' prefixes it only when the
-  // instant is not today, for list views that span many days.
+  // instant is not today, for list views that span many days. The clock's
+  // trailing Z is the single zone marker, so the day carries none.
   function label(value, opts = {}) {
     const as = opts.mode || mode();
     const time = clock(value, as);
     const d = parse(value);
     if (!d || !opts.withDay) return time;
     if (opts.withDay === 'auto' && dayKey(d, as) === dayKey(opts.now || new Date(), as)) return time;
-    return day(d, as) + ' ' + time;
+    return dayFormat(as).format(d) + ' ' + time;
   }
+  // Full date and time with one zone marker: "Thu, Oct 8 10:25:12" locally,
+  // "Thu, Oct 8 14:25:12Z" in UTC. For any label that needs both halves (an
+  // expiry, a deadline) instead of joining day() and clock() by hand.
+  function dateTime(value, opts = {}) { return label(value, { ...opts, withDay: true }); }
 
   // A <time> node for DOM-built views. `prefix` is an optional node placed
   // before the clock text (the conversation's "#id · " marker).
@@ -117,9 +132,14 @@
   let lastPointerType = '';
   let pressTimer = null;
   let pressStart = { x: 0, y: 0 };
-  // Set when a long press has already copied, so the click some browsers fire
-  // on release (however long the hold) does not copy and announce again.
-  let swallowClick = false;
+  // A long press only ARMS the copy. Clipboard writes need user activation,
+  // which a timer callback does not have (Firefox, iOS, and the execCommand
+  // fallback on plain http all refuse it); the release that ends the press is
+  // an activating gesture, so the copy runs there.
+  let armed = null;
+  // The node the release just copied, so the click some browsers fire after
+  // it does not copy and announce a second time.
+  let swallowClick = null;
   let lastCopy = { node: null, at: 0 };
 
   function target(event) {
@@ -150,24 +170,36 @@
   function clearPress() { if (pressTimer) { clearTimeout(pressTimer); pressTimer = null; } }
   function onPointerDown(event) {
     lastPointerType = event.pointerType || '';
-    swallowClick = false;
+    swallowClick = null;
+    armed = null;
     clearPress();
     const node = target(event);
     if (!node || event.pointerType !== 'touch') return;
     pressStart = { x: event.clientX || 0, y: event.clientY || 0 };
-    pressTimer = setTimeout(() => { pressTimer = null; swallowClick = true; copyInstant(node); }, LONG_PRESS_MS);
+    pressTimer = setTimeout(() => { pressTimer = null; armed = node; }, LONG_PRESS_MS);
+  }
+  function onRelease(event) {
+    clearPress();
+    if (!armed) return;
+    const node = armed;
+    armed = null;
+    event.preventDefault?.();
+    copyInstant(node);
+    swallowClick = node;
   }
   function onActivate(event) {
     const node = target(event);
     if (!node) return;
     if (event.type === 'keydown' && event.key !== 'Enter' && event.key !== ' ') return;
-    // Right-click with a mouse keeps the browser menu; a touch long-press
-    // (which surfaces as contextmenu on Android) copies instead.
+    // Right-click with a mouse keeps the browser menu. A touch long-press
+    // surfaces as contextmenu on Android; it suppresses the native menu and
+    // arms the copy for the release, like the long-press timer does.
     if (event.type === 'contextmenu' && lastPointerType !== 'touch') return;
     event.preventDefault?.();
     event.stopPropagation?.();
     clearPress();
-    if (event.type === 'click' && swallowClick) { swallowClick = false; return; }
+    if (event.type === 'contextmenu') { armed = node; return; }
+    if (event.type === 'click' && swallowClick === node) { swallowClick = null; return; }
     copyInstant(node);
   }
   if (!Trio.time && typeof document !== 'undefined' && document.addEventListener) {
@@ -175,12 +207,19 @@
     document.addEventListener('keydown', onActivate, true);
     document.addEventListener('contextmenu', onActivate, true);
     document.addEventListener('pointerdown', onPointerDown, true);
-    ['pointerup', 'pointercancel', 'pointermove'].forEach(type => document.addEventListener(type, event => {
+    // pointerup and touchend both end a touch; whichever arrives first copies.
+    document.addEventListener('pointerup', onRelease, true);
+    document.addEventListener('touchend', onRelease, true);
+    // A cancel after the press has armed is the browser taking over the
+    // gesture; touchend still follows, so only the pending timer is dropped.
+    document.addEventListener('pointercancel', clearPress, true);
+    document.addEventListener('pointermove', event => {
       // Small finger jitter must not cancel a long press; a scroll will.
-      if (type === 'pointermove' && Math.hypot((event.clientX || 0) - pressStart.x, (event.clientY || 0) - pressStart.y) < 10) return;
+      if (Math.hypot((event.clientX || 0) - pressStart.x, (event.clientY || 0) - pressStart.y) < 10) return;
       clearPress();
-    }, true));
+      armed = null;
+    }, true);
   }
 
-  Trio.time = { parse, iso, clock, day, dayKey, label, element, html, mode, copyInstant };
+  Trio.time = { parse, iso, clock, day, dayKey, label, dateTime, element, html, mode, copyInstant };
 })();

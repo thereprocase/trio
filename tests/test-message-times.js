@@ -217,7 +217,55 @@ function stubUi({ fail = false } = {}) {
     await tick();
     assert.deepStrictEqual(seen.copied, ['2026-10-08T14:25:12.262Z']);
   });
-  await check('touch long-press (contextmenu) copies; a mouse right-click keeps the browser menu', async () => {
+  // Clipboard writes need user activation. A timer callback has none, so a
+  // long press only ARMS the copy and the release (pointerup / touchend, both
+  // activating gestures) performs it. "Synchronously inside the up dispatch"
+  // is what the assertions below pin: copied is checked before any await.
+  const hold = () => new Promise(resolve => setTimeout(resolve, 560));   // past the long-press threshold
+  await check('touch long-press: the timer only arms; the copy runs inside the pointerup handler', async () => {
+    const seen = stubUi();
+    const time = stampOf(H.cardFor(msg(26, PY_ISO)));
+    document.dispatchEvent(fakeEvent('pointerdown', time, { pointerType: 'touch', clientX: 5, clientY: 5 }));
+    await hold();
+    assert.deepStrictEqual(seen.copied, [], 'nothing is copied from the timer');
+    const up = fakeEvent('pointerup', time, { pointerType: 'touch' });
+    document.dispatchEvent(up);
+    assert.deepStrictEqual(seen.copied, ['2026-10-08T14:25:12.262Z'], 'copied during the pointerup dispatch');
+    document.dispatchEvent(fakeEvent('touchend', time));
+    assert.strictEqual(seen.copied.length, 1, 'touchend for the same gesture does not copy again');
+    await new Promise(resolve => setTimeout(resolve, 900));   // past the repeat guard
+    const late = fakeEvent('click', time);
+    document.dispatchEvent(late);
+    await tick();
+    assert.strictEqual(seen.copied.length, 1, 'the click after the release is swallowed');
+    assert.ok(late.stopped, 'the late click still does not reach the card');
+  });
+  await check('touch long-press: a browser pointercancel keeps the arm and touchend copies', async () => {
+    const seen = stubUi();
+    const time = stampOf(H.cardFor(msg(27, PY_ISO)));
+    document.dispatchEvent(fakeEvent('pointerdown', time, { pointerType: 'touch', clientX: 5, clientY: 5 }));
+    await hold();
+    document.dispatchEvent(fakeEvent('pointercancel', time));
+    assert.deepStrictEqual(seen.copied, []);
+    document.dispatchEvent(fakeEvent('touchend', time));
+    assert.deepStrictEqual(seen.copied, ['2026-10-08T14:25:12.262Z']);
+  });
+  await check('a quick touch tap copies through its click, and a scroll disarms a hold', async () => {
+    const seen = stubUi();
+    const tap = stampOf(H.cardFor(msg(28, PY_ISO)));
+    document.dispatchEvent(fakeEvent('pointerdown', tap, { pointerType: 'touch', clientX: 5, clientY: 5 }));
+    document.dispatchEvent(fakeEvent('pointerup', tap, { pointerType: 'touch' }));
+    assert.deepStrictEqual(seen.copied, [], 'a short release is not a long press');
+    document.dispatchEvent(fakeEvent('click', tap));
+    assert.strictEqual(seen.copied.length, 1, 'the tap copies via click');
+    const scrolled = stampOf(H.cardFor(msg(29, PY_ISO)));
+    document.dispatchEvent(fakeEvent('pointerdown', scrolled, { pointerType: 'touch', clientX: 5, clientY: 5 }));
+    await hold();
+    document.dispatchEvent(fakeEvent('pointermove', scrolled, { clientX: 5, clientY: 80 }));
+    document.dispatchEvent(fakeEvent('pointerup', scrolled, { pointerType: 'touch' }));
+    assert.strictEqual(seen.copied.length, 1, 'a hold that turned into a scroll copies nothing');
+  });
+  await check('Android contextmenu from touch arms the copy for the release; a mouse right-click keeps the browser menu', async () => {
     const seen = stubUi();
     const mouse = stampOf(H.cardFor(msg(22, PY_ISO)));
     document.dispatchEvent(fakeEvent('pointerdown', mouse, { pointerType: 'mouse' }));
@@ -225,24 +273,13 @@ function stubUi({ fail = false } = {}) {
     document.dispatchEvent(right);
     assert.strictEqual(right.prevented, false);
     const touch = stampOf(H.cardFor(msg(23, PY_ISO)));
-    document.dispatchEvent(fakeEvent('pointerdown', touch, { pointerType: 'touch' }));
+    document.dispatchEvent(fakeEvent('pointerdown', touch, { pointerType: 'touch', clientX: 5, clientY: 5 }));
     const press = fakeEvent('contextmenu', touch);
     document.dispatchEvent(press);
-    await tick();
-    assert.ok(press.prevented);
-    assert.deepStrictEqual(seen.copied, ['2026-10-08T14:25:12.262Z'], 'copied once, for the touch press only');
-  });
-  await check('a touch hold copies once, even when the release fires a late click', async () => {
-    const seen = stubUi();
-    const time = stampOf(H.cardFor(msg(26, PY_ISO)));
-    document.dispatchEvent(fakeEvent('pointerdown', time, { pointerType: 'touch', clientX: 5, clientY: 5 }));
-    await new Promise(resolve => setTimeout(resolve, 560));   // past the long-press threshold
-    await new Promise(resolve => setTimeout(resolve, 900));   // past the repeat guard
-    const late = fakeEvent('click', time);
-    document.dispatchEvent(late);
-    await tick();
-    assert.deepStrictEqual(seen.copied, ['2026-10-08T14:25:12.262Z']);
-    assert.ok(late.stopped, 'the late click still does not reach the card');
+    assert.ok(press.prevented, 'the native menu is suppressed');
+    assert.deepStrictEqual(seen.copied, [], 'contextmenu has no user activation, so it does not copy');
+    document.dispatchEvent(fakeEvent('pointerup', touch, { pointerType: 'touch' }));
+    assert.deepStrictEqual(seen.copied, ['2026-10-08T14:25:12.262Z'], 'copied once, on the touch release only');
   });
   await check('a failed copy says so and still shows the instant to copy by hand', async () => {
     const seen = stubUi({ fail: true });
@@ -275,7 +312,39 @@ function stubUi({ fail = false } = {}) {
     const now = new Date('2026-10-08T16:00:00Z');
     assert.strictEqual(T.label(PY_ISO, { withDay: 'auto', now, mode: 'local' }), '10:25:12');
     assert.notStrictEqual(T.label('2026-10-06T14:25:12Z', { withDay: 'auto', now, mode: 'local' }), '10:25:12');
-    assert.ok(T.label('2026-10-06T14:25:12Z', { withDay: 'auto', now, mode: 'utc' }).endsWith('UTC 14:25:12Z'));
+    const utc = T.label('2026-10-06T14:25:12Z', { withDay: 'auto', now, mode: 'utc' });
+    assert.ok(utc.endsWith(' 14:25:12Z') && !utc.includes('UTC'), 'one zone marker: ' + utc);
+  });
+  await check('dateTime(): full date and time with a single zone marker', () => {
+    const local = T.dateTime(PY_ISO, { mode: 'local' });
+    const utc = T.dateTime(PY_ISO, { mode: 'utc' });
+    assert.ok(local.endsWith(' 10:25:12') && local.length > ' 10:25:12'.length, local);
+    assert.ok(utc.endsWith(' 14:25:12Z'), utc);
+    assert.strictEqual((utc.match(/UTC|Z/g) || []).length, 1, 'exactly one zone marker: ' + utc);
+    assert.strictEqual(T.dateTime('garbage'), 'garbage');
+  });
+  await check('day separators keep naming their zone in UTC mode', () => {
+    assert.ok(T.day(PY_ISO, 'utc').endsWith(' UTC'));
+    assert.ok(!T.day(PY_ISO, 'local').includes('UTC'));
+  });
+
+  // ── agent activity rows use the real Codex record shape ─────────────────
+  // nth_codex_runtime._record_activity writes method / created_at /
+  // turn_id / item_type / status / summary — and no ts, type or content.
+  await check('activity rows read created_at, method/item_type and summary from Codex records', () => {
+    setMode('local');
+    const record = { method: 'item/completed', created_at: '2026-10-08T14:25:12+00:00', turn_id: 't1',
+      item_type: 'commandExecution', status: 'completed', summary: 'npm test' };
+    const html = Trio.agents.renderActivityEvent(record);
+    assert.ok(html.includes('<time class="msg-time" datetime="2026-10-08T14:25:12.000Z"'), html);
+    assert.ok(!html.includes('<time></time>'), 'the time is never empty for a timestamped record');
+    assert.ok(html.includes('<b>Command · completed</b>'), html);
+    assert.ok(html.includes('class="activity-event type-command"'), html);
+    assert.ok(html.includes('>npm test</pre>'), html);
+    const plan = Trio.agents.renderActivityEvent({ method: 'turn/plan/updated', created_at: '2026-10-08T14:25:12+00:00', item_type: '', status: '', summary: 'plan updated (3 steps)' });
+    assert.ok(plan.includes('<b>Plan</b>') && plan.includes('plan updated (3 steps)'), plan);
+    const other = Trio.agents.renderActivityEvent({ method: 'turn/started', created_at: '2026-10-08T14:25:12+00:00', item_type: '', status: 'inProgress' });
+    assert.ok(other.includes('<b>turn/started · inProgress</b>') && !other.includes('<pre'), other);
   });
 
   Trio.preferences.reset();

@@ -17,8 +17,9 @@
 .msg-time[datetime]:focus-visible { outline:2px solid var(--focus); outline-offset:1px; }
 .msg-time.copied { color:var(--accent-strong); }
 /* iOS Safari only delivers a tap on a non-interactive element to the
-   document-level listener when the element reads as clickable. */
-@media (hover:none) { .msg-time[datetime] { cursor:pointer; } }
+   document-level listener when the element reads as clickable; holding a
+   time copies it on release, so the hold must not start a text selection. */
+@media (hover:none) { .msg-time[datetime] { cursor:pointer; -webkit-user-select:none; user-select:none; } }
 .message-id { display:none; }
 body.message-numbers .message-id { display:inline; }
 .message-actions-menu { display:flex; gap:6px; justify-content:flex-end; margin-top:6px; }

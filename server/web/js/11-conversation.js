@@ -754,16 +754,18 @@
   function syncDaySeparators(list) {
     if (!list) return;
     const idByCard = new Map([...state.messageDomById].map(([id, card]) => [card, id]));
-    let lastDate = '';
+    let lastKey = '';
     let prev = null;
     [...list.children].forEach(el => {
       if (el.classList?.contains('day-separator')) { el.remove(); return; }
       const before = prev; prev = el;
       if (!idByCard.has(el)) return;
-      const d = date(state.messages.get(idByCard.get(el))?.created_at);
-      if (!d || d === lastDate) return;
-      lastDate = d;
-      const day = document.createElement('div'); day.className = 'day-separator'; day.textContent = d;
+      // Compare the cheap day key per card; format a label only at a boundary.
+      const createdAt = state.messages.get(idByCard.get(el))?.created_at;
+      const key = Trio.time.dayKey(createdAt);
+      if (!key || key === lastKey) return;
+      lastKey = key;
+      const day = document.createElement('div'); day.className = 'day-separator'; day.textContent = date(createdAt);
       // render() puts the separator above the unread divider; keep that order.
       list.insertBefore(day, before?.classList?.contains('unread-divider') ? before : el);
     });

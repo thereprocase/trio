@@ -916,13 +916,28 @@
       }
     }
   }
+  // Codex activity records (nth_codex_runtime._record_activity) carry
+  // method / item_type / status / summary / created_at. The ts / type /
+  // content names are read as fallbacks for any provider that uses them.
+  const ACTIVITY_ITEM_TYPES = { commandExecution: 'command', fileChange: 'file', mcpToolCall: 'tool' };
+  const ACTIVITY_METHODS = { 'turn/plan/updated': 'plan', warning: 'warning', configWarning: 'warning', 'approval/pending': 'approval' };
+  function activityType(e) {
+    if (e.type) return String(e.type).toLowerCase();
+    if (ACTIVITY_ITEM_TYPES[e.item_type]) return ACTIVITY_ITEM_TYPES[e.item_type];
+    const method = String(e.method || '');
+    if (ACTIVITY_METHODS[method]) return ACTIVITY_METHODS[method];
+    if (/error/i.test(method)) return 'error';
+    return method || 'event';
+  }
   function renderActivityEvent(e) {
-    const time = Trio.time.html(e.ts, { withDay: 'auto' });
-    const t = (e.type || 'event').toLowerCase();
+    const time = Trio.time.html(e.ts ?? e.created_at, { withDay: 'auto' });
+    const t = activityType(e);
     const meta = typeInfo[t] || { label: t, cls: '' };
-    const content = typeof e.content === 'string' ? e.content : (e.message || (e.content ? JSON.stringify(e.content, null, 2) : ''));
+    const heading = meta.label + (e.status ? ' · ' + e.status : '');
+    const raw = e.summary ?? e.content;
+    const content = typeof raw === 'string' ? raw : (e.message || (raw ? JSON.stringify(raw, null, 2) : ''));
     const body = content ? `<pre class="activity-raw">${esc(String(content).slice(0, 800))}</pre>` : '';
-    return `<article class="activity-event ${esc(meta.cls)}">${time || '<time></time>'}<b>${esc(meta.label)}</b>${body}</article>`;
+    return `<article class="activity-event ${esc(meta.cls)}">${time || '<time></time>'}<b>${esc(heading)}</b>${body}</article>`;
   }
   function showActivity(id, events = [], offset = 0) {
     let panel = $('trio-activity');
@@ -1022,5 +1037,5 @@
     });
     modelField?.addEventListener('change', rebuildEffort);
   }
-  Trio.agents = { init, mount, unmount, render, renderPage, refresh, loadDiscovery, normalizeModels, modelOptions, orderedProviders, providerLabel, initialEffortFor, FIRST_RUN, permissionOptions, viewModel, actionCaps, actionLabel, statusIcon, formatLastActive, action, create, effortsForModel, effortOptions, effortSlider, wireEffortSlider, lastEffort, rememberEffort, selection, toggleSelected, clearSelection, bulkAction, reportBulk, bulkAttributeJobs, showBulkAttributes, showBulkChannels, showBulkCompact };
+  Trio.agents = { init, mount, unmount, render, renderPage, refresh, renderActivityEvent, loadDiscovery, normalizeModels, modelOptions, orderedProviders, providerLabel, initialEffortFor, FIRST_RUN, permissionOptions, viewModel, actionCaps, actionLabel, statusIcon, formatLastActive, action, create, effortsForModel, effortOptions, effortSlider, wireEffortSlider, lastEffort, rememberEffort, selection, toggleSelected, clearSelection, bulkAction, reportBulk, bulkAttributeJobs, showBulkAttributes, showBulkChannels, showBulkCompact };
 })();
