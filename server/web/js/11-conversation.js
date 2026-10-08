@@ -629,7 +629,9 @@
         if (!attachment || !attachment.id) return;
         const href = apiUrl('/api/attachment/' + attachment.id);
         const link = document.createElement('a'); link.href = href; link.target = '_blank'; link.rel = 'noopener'; link.className = 'message-attachment';
-        if (/^image\//.test(attachment.mime || '')) {
+        // Only images every browser can show go inline; anything else (PDF, ZIP,
+        // HEIC, text) is a file the server serves as a download.
+        if (/^image\/(png|jpeg|gif|webp)$/.test(attachment.mime || '')) {
           const alt = attachment.filename || 'Attached image';
           const at = gallery.length; gallery.push({ url: href, alt });
           const image = document.createElement('img'); image.src = href; image.alt = alt; image.loading = 'lazy';
@@ -645,7 +647,12 @@
           image.addEventListener('error', () => { image.classList.add('error'); });
           link.append(image);
         }
-        else link.textContent = attachment.filename || ('Attachment #' + attachment.id);
+        else {
+          link.classList.add('message-attachment-file');
+          link.removeAttribute('target');
+          link.setAttribute('download', attachment.filename || '');
+          link.textContent = '📄 ' + (attachment.filename || ('Attachment #' + attachment.id));
+        }
         attachments.append(link);
       });
       if (attachments.children.length) content.append(attachments);

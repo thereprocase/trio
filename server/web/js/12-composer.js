@@ -276,18 +276,31 @@
   }
   function updateSendState() { const send = byId('send'); if (send) send.disabled = !validate(); }
 
+  // What the server accepts (it sniffs the bytes; this only gives a fast, clear
+  // refusal). Office files are ZIPs. A type the browser leaves blank, common for
+  // HEIC and logs, is judged by its extension.
+  const UPLOAD_TYPES = /^(image\/(png|jpeg|gif|webp|heic|heif)|application\/(pdf|zip|x-zip-compressed|vnd\.openxmlformats-officedocument\..+)|text\/(plain|csv))$/;
+  const UPLOAD_EXTENSIONS = /\.(png|jpe?g|gif|webp|heic|heif|pdf|zip|docx|xlsx|pptx|txt|csv|log|md)$/i;
+  const UPLOAD_ACCEPT = 'image/*,.heic,.heif,application/pdf,.pdf,.zip,.docx,.xlsx,.pptx,.txt,.csv,.log,.md';
+  const MAX_UPLOAD_MB = 25;
+  const INLINE_IMAGE = /^image\/(png|jpeg|gif|webp)$/;
+  async function uploadAll(files) {
+    // One at a time, in order: each keeps its own placeholder and error.
+    for (const f of files) await upload(f).catch(error => Trio.ui.toast(error.message));
+  }
   async function upload(file) {
     if (!file) return;
-    if (!/^image\/(png|jpeg|gif|webp)$/.test(file.type || '')) throw new Error('Choose a PNG, JPEG, GIF, or WebP image');
-    if (file.size > 10 * 1024 * 1024) throw new Error('Image must be 10 MB or smaller');
+    if (!UPLOAD_TYPES.test(file.type || '') && !UPLOAD_EXTENSIONS.test(file.name || '')) throw new Error((file.name || 'That file') + ': attach images, HEIC photos, PDFs, ZIP or Office files, or text');
+    if (file.size > MAX_UPLOAD_MB * 1024 * 1024) throw new Error((file.name || 'File') + ' is larger than ' + MAX_UPLOAD_MB + ' MB');
     // Bind this upload to the conversation it started in. `arr` is that
     // thread's source-of-truth array; we render only while it's still the one
     // on screen, so navigating away mid-upload never spills the image (or a
     // stuck loading placeholder) into the conversation you land on (Bug C).
     const cid = conversationId();
     const arr = attStore(cid);
-    const preview = URL.createObjectURL(file);
-    const placeholder = { id: 0, filename: file.name || 'image', loading: true, url: preview };
+    const inline = INLINE_IMAGE.test(file.type || '');
+    const preview = inline ? URL.createObjectURL(file) : '';
+    const placeholder = { id: 0, filename: file.name || 'file', mime: file.type || '', loading: true, url: preview };
     arr.push(placeholder);
     if (cid === conversationId()) renderAttachments();
     updateSendState();
@@ -320,6 +333,28 @@
       const thumb = document.createElement('div');
       thumb.className = 'attachment-thumb';
       thumb.title = attachment.filename || 'attachment';
+      const rmButton = () => {
+        const rm = document.createElement('button');
+        rm.type = 'button'; rm.className = 'rm'; rm.title = 'remove';
+        rm.setAttribute('aria-label', 'remove attachment');
+        rm.textContent = '×';
+        rm.disabled = attachment.loading;
+        rm.onclick = () => { revokePreview(attachment); state.pendingAttachments.splice(index, 1); renderAttachments(); updateSendState(); };
+        return rm;
+      };
+      if (!INLINE_IMAGE.test(attachment.mime || '')) {
+        // A file that is not a web image: a labelled chip, no preview.
+        thumb.classList.add('attachment-file');
+        const label = document.createElement('span');
+        label.className = 'attachment-file-name';
+        label.textContent = '📄 ' + (attachment.filename || 'file');
+        thumb.append(label, rmButton());
+        if (attachment.loading) {
+          const mask = document.createElement('div'); mask.className = 'loading-mask'; mask.textContent = '…'; thumb.append(mask);
+        }
+        strip.append(thumb);
+        return;
+      }
       const img = document.createElement('img');
       img.src = attachment.url || '';
       img.alt = attachment.filename || 'attachment';
@@ -332,13 +367,7 @@
       const openLightbox = () => openPreviewLightbox(img.src);
       img.onclick = openLightbox;
       img.onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openLightbox(); } };
-      const rm = document.createElement('button');
-      rm.type = 'button'; rm.className = 'rm'; rm.title = 'remove';
-      rm.setAttribute('aria-label', 'remove attachment');
-      rm.textContent = '×';
-      rm.disabled = attachment.loading;
-      rm.onclick = () => { revokePreview(attachment); state.pendingAttachments.splice(index, 1); renderAttachments(); updateSendState(); };
-      thumb.append(img, rm);
+      thumb.append(img, rmButton());
       if (attachment.loading) {
         const mask = document.createElement('div');
         mask.className = 'loading-mask';
@@ -886,17 +915,18 @@
     text.addEventListener('keydown', onKey); domListeners.push([text, 'keydown', onKey]);
     const sendClick = () => send();
     sendButton?.addEventListener('click', sendClick); if (sendButton) domListeners.push([sendButton, 'click', sendClick]);
-    const onAttach = () => { const picker = document.createElement('input'); picker.type = 'file'; picker.accept = 'image/*'; picker.onchange = () => upload(picker.files[0]).catch(error => Trio.ui.toast(error.message)); picker.click(); };
+    // multiple + a broad accept list opens the system picker with photos, camera and files.
+    const onAttach = () => { const picker = document.createElement('input'); picker.type = 'file'; picker.multiple = true; picker.accept = UPLOAD_ACCEPT; picker.onchange = () => uploadAll(Array.from(picker.files || [])); picker.click(); };
     attach?.addEventListener('click', onAttach); if (attach) domListeners.push([attach, 'click', onAttach]);
     const onPaste = async (event) => {
       const clip = event.clipboardData || window.clipboardData;
       if (!clip) return;
       const images = [];
       if (clip.files && clip.files.length) {
-        for (const f of clip.files) { if (/^image\//.test(f.type)) images.push(f); }
+        for (const f of clip.files) images.push(f);
       } else if (clip.items) {
         for (const it of clip.items) {
-          if (it.kind === 'file' && /^image\//.test(it.type)) {
+          if (it.kind === 'file') {
             const f = it.getAsFile(); if (f) images.push(f);
           }
         }
@@ -912,7 +942,7 @@
         return;
       }
       event.preventDefault();
-      for (const f of images) await upload(f).catch(error => Trio.ui.toast(error.message));
+      await uploadAll(images);
     };
     text.addEventListener('paste', onPaste); if (text) domListeners.push([text, 'paste', onPaste]);
     // Drag-drop mirrors paste: the browser would otherwise insert rich dropped
@@ -922,8 +952,8 @@
       const dt = event.dataTransfer; if (!dt) return;
       event.preventDefault();
       const images = [];
-      for (const f of (dt.files || [])) { if (/^image\//.test(f.type)) images.push(f); }
-      if (images.length) { for (const f of images) await upload(f).catch(error => Trio.ui.toast(error.message)); return; }
+      for (const f of (dt.files || [])) images.push(f);
+      if (images.length) { await uploadAll(images); return; }
       const t = dt.getData && dt.getData('text/plain');
       if (t) insertText(t);
     };

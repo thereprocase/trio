@@ -108,10 +108,51 @@ try:
     st, body = upload(port, PNG, "first.png")
     check("authz: trusted operator can upload", st == 200 and body.get("ok") is True)
 
+    # A member the hub owner listed is a Tailscale-proven person: they may upload,
+    # and still hold no local-path power. A self-declared guest may not.
+    check("authz: a listed member may upload",
+          web.IDENTITY_SOURCE_MEMBER in web.UPLOAD_ALLOWED_SOURCES)
+    check("authz: a listed member still cannot inspect local paths",
+          web.IDENTITY_SOURCE_MEMBER not in web.LOCAL_PATH_ALLOWED_SOURCES)
+    check("authz: a guest still cannot upload",
+          web.IDENTITY_SOURCE_GUEST not in web.UPLOAD_ALLOWED_SOURCES)
+
+    # ── file types: sniffed from the bytes, non-images served as downloads ──
+    def fetch(att_id):
+        url = f"http://127.0.0.1:{port}/api/attachment/{att_id}?channel={CH}"
+        with urllib.request.urlopen(url, timeout=5) as resp:
+            return resp.status, dict(resp.headers), resp.read()
+
+    samples = {
+        "report.pdf": (b"%PDF-1.7\n" + b"x" * 64, "application/pdf"),
+        "logs.zip": (b"PK\x03\x04" + b"\x00" * 64, "application/zip"),
+        "Budget.xlsx": (b"PK\x03\x04" + b"\x01" * 64, "application/zip"),
+        "IMG_0001.HEIC": (b"\x00\x00\x00\x18ftypheic" + b"\x00" * 64, "image/heic"),
+        "notes.txt": ("Field notes: ✓ dome works\n".encode() * 3, "text/plain"),
+    }
+    for name, (payload, want) in samples.items():
+        st, body = upload(port, payload, name)
+        check(f"types: {name} accepted as {want}", st == 200 and body.get("mime") == want)
+        if st == 200:
+            code, headers, data = fetch(body["id"])
+            disposition = headers.get("Content-Disposition", "")
+            check(f"types: {name} is served as a download under its own name",
+                  code == 200 and disposition.startswith("attachment;") and data == payload
+                  and "UTF-8''" in disposition)
+            check(f"types: {name} carries a sandbox CSP",
+                  "sandbox" in headers.get("Content-Security-Policy", ""))
+    st, body = upload(port, b"\x7fELF\x02\x01\x01\x00" + b"\x00" * 64, "tool.bin")
+    check("types: an unrecognised binary is refused (400)", st == 400)
+    st, body = upload(port, PNG, "inline.png")
+    code, headers, _data = fetch(body["id"])
+    check("types: a PNG is still served inline",
+          code == 200 and "Content-Disposition" not in headers)
+
     # ── per-member quota ────────────────────────────────────────────────────
     # 4096 bytes are already stored above; a 6 KB ceiling admits nothing more.
     _real_quota = web.MAX_MEMBER_ATTACH_BYTES
     try:
+        # Everything uploaded so far already exceeds this ceiling.
         web.MAX_MEMBER_ATTACH_BYTES = 6144
         st, body = upload(port, PNG, "second.png")
         check("quota: upload past the per-member ceiling is refused (413)", st == 413)
