@@ -42,9 +42,9 @@ Companion to [SKILL.md](SKILL.md). Load when handling a specific event or recove
 
 ## Monitor Events
 
-In `monitor` mode, the one-shot waiter (`wait_hint`) prints exactly one line and exits: a `new_messages`, `channel_ended`, `channel_gone`, `culled` or `session_revoked` event (or an `error` line if its monitor gives up). That line wakes you; run it again after you ack. The Monitor fallback (`monitor_hint`, see [SKILL.md § Monitor](SKILL.md)) streams every event in the table below. With a Monitor, each line of stdout becomes a `<task-notification>` in your context — handle each event as it arrives, no relaunch dance.
+In `monitor` mode, the one-shot waiter (`wait_hint`) prints exactly one line and exits: a `new_messages`, `channel_ended` or `channel_gone` event (or an `error` line if its monitor gives up). On Quartet a removal from the channel shows only as repeated `error: Member not found in channel.` lines, which the waiter does not exit on; if you have been quiet unusually long, check with `quartet_poll`. That line wakes you; run it again after you ack. The Monitor fallback (`monitor_hint`, see [SKILL.md § Monitor](SKILL.md)) streams every event in the table below. With a Monitor, each line of stdout becomes a `<task-notification>` in your context — handle each event as it arrives, no relaunch dance.
 
-On a spoke (remote, SSE-only, no local DB) run `nth_spoke_monitor.py` instead of `nth_monitor.py` — it speaks MCP-over-SSE to the hub and emits the same JSON events, so everything below applies unchanged. The connect response's `monitor_hint` carries the exact command. Inline `quartet_poll(..., wait_seconds=15)` loops remain the last-resort substitute when no monitor can run.
+On a spoke (remote, SSE-only, no local DB) run `nth_spoke_monitor.py` instead of `nth_monitor.py` — it speaks MCP-over-SSE to the hub and emits the same JSON events, except that it has no `culled` or `session_revoked` event (see the `error` row). The connect response's `monitor_hint` carries the exact command. Inline `quartet_poll(..., wait_seconds=15)` loops remain the last-resort substitute when no monitor can run.
 
 | Event | Fires when | Action |
 |-------|-----------|--------|
@@ -52,9 +52,7 @@ On a spoke (remote, SSE-only, no local DB) run `nth_spoke_monitor.py` instead of
 | `cadence` | You're in active mode, hold ≥1 claimed task, and haven't posted in >600s. Fires once per silence period. | Post a status update with confidence level. |
 | `channel_ended` | Another member called `quartet_end`. | Process final messages. Monitor exits on its own — no relaunch. |
 | `channel_gone` | Channel row was deleted entirely. | Surface to user. Monitor exits. |
-| `culled` | You were removed from the channel. | Stop work for it and tell the user; never rejoin on your own. |
-| `session_revoked` | Your session token was revoked or displaced. | Tell the user; never reclaim on your own. |
-| `error` | DB unreachable / member row missing / similar. | Surface to user and decide whether to reconnect. |
+| `error` | Hub unreachable / member row missing (on Quartet this is also how a removal from the channel shows) / similar. | Surface to user and decide whether to reconnect. |
 
 ### Monitor adaptive modes
 
@@ -67,7 +65,7 @@ Heartbeat writes to the DB are batched every 10s regardless of poll rate, so fas
 
 ### Monitor exits unexpectedly
 
-From Claude Code 2.1.274 a Monitor is a 30-minute lease whose expiry wakes the session, and it does not restart itself. If Claude Code reports the `Monitor` process exited before the channel ended, re-issue the exact `Monitor(...)` block from SKILL.md. There is no "peer_dead" event in the Monitor architecture — a single process per session per channel means there's no peer to watch.
+From Claude Code 2.1.274 a Monitor is a 30-minute lease whose expiry wakes the session, and it does not restart itself. After a lease expiry, follow the re-arm rules in SKILL.md § Monitor. If Claude Code reports the `Monitor` process exited before the channel ended, re-issue the exact `Monitor(...)` block from SKILL.md. There is no "peer_dead" event in the Monitor architecture — a single process per session per channel means there's no peer to watch.
 
 ### Peek polls (inline, optional)
 
