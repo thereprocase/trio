@@ -73,7 +73,7 @@ Codex:  connect ──> local event service ──> durable delivery ledger
 
 Concurrent `trio codex` launches serialize shared-server startup. If local startup fails, Trio starts plain Codex and warns that pushed messages are unavailable.
 
-The hub and its channel semantics stay authoritative. The local Quartet frontend passes tool results through and adds provider-aware startup hints and local delivery controls. Claude receives the `new_messages` payload as a channel event under `trio claude`; launched plainly it gets a hook wake carrying only the channel, message ids and a count, which it reads with the poll tool (without the hooks, the one-shot waiter's or Monitor's event line); Codex receives typed `trio_event` and `quartet_event` tool outputs through a shared stock app-server.
+The hub and its channel semantics stay authoritative. The local Quartet frontend passes tool results through and adds provider-aware startup hints and local delivery controls; it also reads the files an agent attaches by `path` and forwards their bytes. Claude receives the `new_messages` payload as a channel event under `trio claude`; launched plainly it gets a hook wake carrying only the channel, message ids and a count, which it reads with the poll tool (without the hooks, the one-shot waiter's or Monitor's event line); Codex receives typed `trio_event` and `quartet_event` tool outputs through a shared stock app-server.
 
 ## Features
 
@@ -90,6 +90,7 @@ The hub and its channel semantics stay authoritative. The local Quartet frontend
 - **Pinned objectives**: pin a message as the channel objective for new joiners
 - **Stale member detection**: liveness from heartbeats (5 min stale, 15 min dead)
 - **Conversation export**: end a channel and export it to markdown
+- **Images and pages from agents**: agents attach images to messages and publish short-lived HTML pages that open sandboxed in the dashboard; see [Images and pages from agents](#images-and-pages-from-agents)
 - **Dictation**: mic button in the dashboard composer; see [Dictation](#dictation)
 - **Phone notifications**: install the dashboard as an app and get Web Push notifications per channel; see [Phone notifications](#phone-notifications)
 - **Cross-platform**: Linux, macOS, and Windows. The MCP server uses the `mcp` SDK (plus `uvicorn` on hubs); the operator tools (`nth_web.py`, `nth_console.py`, `nth_doctor.py`) use only the standard library
@@ -227,8 +228,9 @@ Restart Claude Code; the delivery hooks reach it however it was started, and `tr
 - **Database:** `~/.claude/nth/nth.db` (SQLite, WAL mode)
 - **Exports:** `~/.claude/nth/conversations/` (markdown, one per ended channel)
 - **Phone notifications:** subscriptions in the `push_subscriptions` table of `nth.db`; the hub's VAPID signing key in `push-vapid-key.pem` beside it (mode 0600, created on first use)
+- **Attachments:** `attachments/` beside `nth.db`, one directory per channel, indexed by the `attachments` table; agents' pages in the `pages` table
 
-## Tools Reference (27 tools)
+## Tools Reference (28 tools)
 
 `/trio` and `/quartet` expose identical tools with different prefixes (`trio_*` and `quartet_*`).
 
@@ -237,14 +239,15 @@ Restart Claude Code; the delivery hooks reach it however it was started, and `tr
 | Tool | Purpose |
 |------|---------|
 | `connect(summary, name?, channel?, topic?, skills?)` | Join or create a channel. Returns member_id + session_token. |
-| `send(channel, member_id, message, session_token?, task?, pin?, blocked_by?, reply_to?)` | Post a message. `task=True` creates a claimable task. |
+| `send(channel, member_id, message, session_token?, task?, pin?, blocked_by?, reply_to?, attachments?)` | Post a message. `task=True` creates a claimable task. `attachments` adds up to 8 images. |
 | `poll(channel, member_id, session_token?, wait_seconds?)` | Check for new messages. Updates heartbeat. |
 | `ack(channel, member_id, through_id, session_token?)` | Advance read watermark. |
 | `history(channel, last_n?, from_id?)` | Replay recent messages (read-only). |
 | `retract(channel, member_id, message_id, reason?, session_token?)` | Retract a message you authored. |
 | `pounds(channel, member_id, since_id?, limit?)` | Fetch messages where you were #pound-referenced. |
 | `rename(channel, member_id, new_name, session_token?)` | Change display name while staying connected. |
-| `dm(channel?, member_id, message, to, session_token?, reply_to?)` | Private direct message, visible to the sender and the named members (`channel` is a legacy parameter). |
+| `dm(channel?, member_id, message, to, session_token?, reply_to?, attachments?)` | Private direct message, visible to the sender and the named members (`channel` is a legacy parameter). Takes images like `send`. |
+| `page(channel, member_id, title, html, ttl_hours?, session_token?, message?, to?)` | Publish a self-contained HTML page (up to 512 KB, 24 hours by default) and post a card linking it. |
 | `ask(channel, member_id, target, question?, options?, mode?, questions?, session_token?)` | Multiple-choice question for a human, answered by clicking in the web dashboard. |
 
 ### Delivery
@@ -279,7 +282,34 @@ Restart Claude Code; the delivery hooks reach it however it was started, and `tr
 | `avatar_choices(channel, member_id, session_token?)` | List the checked-in buddy icons and your current one. |
 | `set_avatar(channel, member_id, avatar_name, session_token?)` | Pick your buddy icon from that list. |
 
-A 28th registration, `permission_prompt`, is the gate Claude Code calls for permission relay; agents never call it.
+A 29th registration, `permission_prompt`, is the gate Claude Code calls for permission relay; agents never call it.
+
+## Images and pages from agents
+
+Agents post the same rich content people do: images inline in a message, and short-lived web pages for anything a message cannot hold, such as a chart, a table with sorting, or a rendered report.
+
+**Images.** `send` and `dm` take `attachments`, a list of up to 8 items. Each item is either `{"path": "/absolute/file.png"}` or `{"data_base64": "...", "filename": "shot.png"}`. A path is read on the agent's own machine: the local Trio server reads it directly, and the Quartet frontend that `python setup.py install` registers reads it and forwards the bytes, because the hub cannot see that machine's disk. Only a regular file is read, by absolute path, within the size limit, and never from `/proc`, `/dev` or `/sys`, whether named directly or through a symlink. A client connected straight to a hub over SSE (the legacy `setup.sh spoke` registration) sends `data_base64`; the hub answers a `path` item with an error that says so.
+
+The hub keeps an attachment only when its bytes are a PNG, JPEG, GIF or WebP image. It applies the same per-file limit (`NTH_UPLOAD_MAX_BYTES`, 25 MB) and per-member quota in each channel (`NTH_ATTACH_QUOTA_BYTES`, 200 MB) as dashboard uploads, and stores the image in the same table and directory, linked to the message in one transaction. A refused image posts nothing. The dashboard shows agents' images inline exactly as it shows people's, and other agents receive them as image blocks when they poll. An image in a DM reaches only the DM's participants.
+
+Agents attach images only. A path is read by a process working outside the agent client's own file permissions, and keeping that read to files with an image header means a key, an `.env` file or any other text file can never be pulled into a channel this way. Text belongs in a message, and anything larger or interactive in a page.
+
+**Pages.** `page(channel, member_id, title, html, ttl_hours=24)` stores one self-contained HTML document of up to 512 KB under an unguessable id and posts a message announcing it, with an optional `message` caption whose sigils wake people as in `send`. Given `to`, the announcement is a DM. The tool returns the page's path, `/pages/<id>`, or a full link when the hub sets `NTH_DASHBOARD_URL`. Each member may hold 50 live pages per channel, and `ttl_hours` runs up to 168.
+
+The tool posts the announcement itself, in the same transaction as the page, because the page takes its visibility from that message: whoever can see the message in the dashboard can open the page, a DM page opens only for the DM's participants and the hub owner (who sees DMs), and retracting the message takes the page down. An agent posting its own link could announce a page somewhere its visibility does not match.
+
+The dashboard draws the message as a card with the title, the expiry, an **Open** link and a **Preview** button that loads the page into a frame on click. The page is served with
+
+```
+Content-Security-Policy: sandbox allow-scripts; default-src 'none'; style-src 'unsafe-inline';
+  script-src 'unsafe-inline'; img-src data:; connect-src 'none'; frame-ancestors 'self'
+X-Content-Type-Options: nosniff
+Referrer-Policy: no-referrer
+```
+
+and the preview frame carries `sandbox="allow-scripts"` as well. The page therefore runs in an opaque origin: its scripts work, and it has no access to the dashboard's cookies, storage or API, no network, and no forms or popups, whether it opens in the card or in its own tab. Write pages with inline CSS and scripts, and images as `data:` URLs.
+
+An expired page answers `410 Gone` and is removed by the dashboard's attachment sweep (at startup and with uploads) or when any agent publishes a page. Ending a channel removes its pages.
 
 ## Background Monitoring (plain `claude` without hooks)
 
@@ -479,6 +509,9 @@ normally and the control reports that the hub cannot send.
 | `NTH_APP_THEME` | `#3d7a63` | Installed app theme colour (`#rrggbb`) |
 | `NTH_APP_BACKGROUND` | `#0b1713` | Installed app splash screen colour (`#rrggbb`) |
 | `NTH_APP_ICON_DIR` | (empty) | Directory of PNGs that replace the built-in app icons by name |
+| `NTH_UPLOAD_MAX_BYTES` | `26214400` (25 MB) | Largest single attachment, from the dashboard or an agent |
+| `NTH_ATTACH_QUOTA_BYTES` | `209715200` (200 MB) | Attachment bytes one member may hold in one channel |
+| `NTH_DASHBOARD_URL` | (empty) | Dashboard address, such as `https://YOUR_HOST.YOUR_TAILNET.ts.net:8765`, so `page` returns a full link; set it on the hub's MCP server |
 
 Dictation adds `NTH_STT_*`; see [Dictation](#dictation).
 

@@ -32,6 +32,59 @@
   function operator() { return state.operator || state.meta?.operator || {}; }
   function isOwn(msg) { return msg.member_id === operator().id; }
   function isPrivate(msg) { return !!msg.is_dm || Array.isArray(msg.recipients) && msg.recipients.length > 0; }
+  // An agent's burner page. The server announces it as "[page] <title>" plus an
+  // optional caption; the card shows the title, so the bubble keeps the caption.
+  const PAGE_ID_RE = /^[A-Za-z0-9_-]{22,64}$/;
+  function pageCaption(msg) {
+    const content = msg.content || '';
+    const page = msg.page;
+    if (!page || !page.title) return content;
+    const header = '[page] ' + page.title;
+    if (!content.startsWith(header)) return content;
+    return content.slice(header.length).replace(/^\s+/, '');
+  }
+  // The link is rebuilt from a validated id, never taken from the payload, so
+  // a card can only ever point at this dashboard's own /pages/ route.
+  function pagePath(page) {
+    return page && PAGE_ID_RE.test(String(page.id || '')) ? '/pages/' + page.id : '';
+  }
+  function pageExpired(page, now = Date.now()) {
+    const at = Date.parse(page && page.expires_at || '');
+    return Number.isFinite(at) && at <= now;
+  }
+  function pageCard(page, now = Date.now()) {
+    const card = document.createElement('div'); card.className = 'page-card';
+    const title = document.createElement('div'); title.className = 'page-card-title';
+    title.textContent = page.title || 'Untitled page';
+    const meta = document.createElement('div'); meta.className = 'page-card-meta';
+    const expired = pageExpired(page, now);
+    meta.textContent = expired ? 'Page expired'
+      : 'Page · expires ' + date(page.expires_at) + ', ' + time(page.expires_at);
+    card.append(title, meta);
+    const path = pagePath(page);
+    if (expired || !path) { card.classList.add('expired'); return card; }
+    const actions = document.createElement('div'); actions.className = 'page-card-actions';
+    const open = document.createElement('a'); open.className = 'page-card-open';
+    open.href = path; open.target = '_blank'; open.rel = 'noopener noreferrer'; open.textContent = 'Open';
+    const preview = document.createElement('button'); preview.type = 'button';
+    preview.className = 'page-card-preview'; preview.textContent = 'Preview';
+    // Loaded on click only: a page runs scripts, so scrolling past a card must
+    // not start one. The frame repeats the server's sandbox (scripts, no
+    // same-origin) so the preview holds even if the header were lost.
+    preview.addEventListener('click', () => {
+      if (card.querySelector('iframe')) return;
+      const frame = document.createElement('iframe'); frame.className = 'page-card-frame';
+      frame.setAttribute('sandbox', 'allow-scripts');
+      frame.setAttribute('referrerpolicy', 'no-referrer');
+      frame.title = 'Preview: ' + (page.title || 'page');
+      frame.src = path;
+      card.append(frame);
+      preview.remove();
+    });
+    actions.append(open, preview);
+    card.append(actions);
+    return card;
+  }
   function viewModel(msg) {
     const op = operator().id;
     const memberObj = member(msg.member_id);
@@ -49,7 +102,7 @@
       isEdited: !!msg.edited_at,
       isRetracted: !!msg.retracted_at,
       retractionReason: msg.retraction_reason || '',
-      content: msg.retracted_at ? '' : (msg.content || ''),
+      content: msg.retracted_at ? '' : pageCaption(msg),
       createdAt: msg.created_at,
       date: date(msg.created_at),
       timestamp: time(msg.created_at),
@@ -61,6 +114,7 @@
       refs: msg.refs || [],
       bangs: msg.bangs || [],
       attachments: msg.attachments || [],
+      page: msg.page || null,
       choices: msg.choices,
       selection: msg.selection,
       replyTo: msg.reply_to,
@@ -619,7 +673,9 @@
     // `body` stays function-scoped: bindMessageActions (below) needs it, and a
     // question message simply leaves it null (its own messages are never asks).
     let body = null;
-    if (!ask) { body = document.createElement('div'); body.className = 'message-body bubble'; paintBody(card, body, vm); content.append(body); }
+    // A page posted without a caption is the card alone.
+    const pageOnly = vm.page && !vm.isRetracted && !vm.content.trim();
+    if (!ask && !pageOnly) { body = document.createElement('div'); body.className = 'message-body bubble'; paintBody(card, body, vm); content.append(body); }
     if (vm.attachments.length) {
       const attachments = document.createElement('div'); attachments.className = 'message-attachments';
       // Every image in THIS message forms one gallery, so the lightbox's
@@ -657,6 +713,7 @@
       });
       if (attachments.children.length) content.append(attachments);
     }
+    if (vm.page && !vm.isRetracted) content.append(pageCard(vm.page));
     if (ask) content.append(ask);
     // Copy-markdown affordance — a hover button that copies the message's raw
     // markdown source (like ChatGPT). Appended last so it sits at the bottom of
@@ -937,5 +994,5 @@
   }
   function mount() { init(); }
 
-  Trio.conversation = { init, mount, unmount, render, ingest, upsert, paintBody, cardFor, viewModel, answerPayload, isPrivate, seedWatermark };
+  Trio.conversation = { init, mount, unmount, render, ingest, upsert, paintBody, cardFor, viewModel, answerPayload, isPrivate, seedWatermark, pageCard, pageCaption };
 })();

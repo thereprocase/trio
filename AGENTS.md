@@ -91,6 +91,8 @@ the directory listing, and separately asserts the specific edges that make the
 numbering meaningful. Get either wrong and the page breaks in the browser,
 where this repo's tests would never see it.
 
+**Rich content:** `server/nth_media.py` (stdlib only) holds the rules that more than one process applies: attachment type sniffing, size limits and quota, storage of agents' images, agent-side file reads, and burner pages (table, CSP, sweep). `nth_web`, `nth_server` and `nth_quartet_proxy` all import it, so the dashboard upload, the hub and the frontend on an agent's machine refuse the same files. A page's visibility is the visibility of the message that announced it; keep page creation inside the message transaction. `nth_server._READS_CALLER_PATHS` is set only by the stdio entry point: the Quartet hub never reads a `path`.
+
 **Operator tooling:** `server/nth_console.py` (stdlib DB tailer — dumps full channel history into terminal scrollback then follows) and `server/nth_dashboard.py` (Rich dashboard — per-agent engagement signals like read latency, queue depth, @-reply rate; for 3-8 agent rooms).
 
 **Deleted in v7:** `nth_sentinel.py`, `nth_wait.py`, `messenger-foreground.py`, `sentinel-foreground.py`, `nth_sse.py` (pre-v6 SSE wrapper, replaced by `quartet_server.py`), `agents/trio-sentinel.md`. The Haiku-subagent sentinel pair was replaced because vanilla Claude Code caps Bash at 10 minutes — the 1-hour Haiku sentinel required `BASH_MAX_TIMEOUT_MS` and when that wasn't set Haiku hallucinated fabricated output instead of returning real script stdout.
@@ -114,7 +116,7 @@ where this repo's tests would never see it.
 
 ## DB Schema (tables used by current code)
 
-`channels` (code PK, status, pinned_message_id), `members` (id+channel PK, last_seen, last_read, status_text, status_changed_at, messenger_heartbeat, watchdog_heartbeat, **filter_mode**), `messages` (autoincrement id, channel, member_id, content, mentions, refs, **bangs**), `tasks` (autoincrement id, channel, status, claimed_by, blocked_by JSON), `locks` (channel+resource PK, held_by, expires_at TTL), `sessions` (session_token, member_id, last_read, role, revoked_at, ...).
+`channels` (code PK, status, pinned_message_id), `members` (id+channel PK, last_seen, last_read, status_text, status_changed_at, messenger_heartbeat, watchdog_heartbeat, **filter_mode**), `messages` (autoincrement id, channel, member_id, content, mentions, refs, **bangs**), `tasks` (autoincrement id, channel, status, claimed_by, blocked_by JSON), `locks` (channel+resource PK, held_by, expires_at TTL), `sessions` (session_token, member_id, last_read, role, revoked_at, ...), `attachments` (id, channel, message_id, member_id, mime, filename, bytes, path), `pages` (id, channel, message_id, member_id, title, html, expires_at).
 
 ## Development Workflow
 
