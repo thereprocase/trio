@@ -163,12 +163,12 @@ check('every preset is either light or dark, and both modes are offered',
   && lights.every(t => t.mode === 'light') && darks.every(t => t.mode === 'dark'));
 check('no preset id appears in both modes',
   lights.every(l => !darks.some(d => d.id === l.id)));
-check('Inspired set includes all eight distinct interfaces',
+check('Inspired set includes all nine distinct interfaces',
   inspired.map(theme => theme.id).join(',') ===
-    'historic-win98,historic-gameboy,historic-geocities,inspired-ipod,inspired-messenger,inspired-slack,inspired-trailhead,inspired-high-tide');
+    'historic-win98,historic-gameboy,historic-geocities,inspired-ipod,inspired-messenger,inspired-slack,inspired-trailhead,inspired-high-tide,inspired-rescue');
 check('Inspired cards have name-only labels and a toggle mode',
   inspired.map(theme => theme.label).join(',') ===
-    'Start Menu,Link Cable,Webmaster,Now Playing,Walled Garden,Threaded,Trailhead,High Tide'
+    'Start Menu,Link Cable,Webmaster,Now Playing,Walled Garden,Threaded,Trailhead,High Tide,Rescue'
   && inspired.every(theme => theme.family === 'inspired'
   && !theme.description && ['light', 'dark'].includes(theme.mode)));
 check('Walled Garden uses the dark Messages presentation',

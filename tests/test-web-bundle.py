@@ -101,7 +101,7 @@ tokens_css = (WEB / "css" / "00-tokens.css").read_text(encoding="utf-8")
 historic_css = (WEB / "css" / "35-historic.css").read_text(encoding="utf-8")
 for preset in ("historic-win98", "historic-gameboy", "historic-geocities",
                "inspired-ipod", "inspired-messenger", "inspired-slack",
-               "inspired-trailhead", "inspired-high-tide"):
+               "inspired-trailhead", "inspired-high-tide", "inspired-rescue"):
     check(f"{preset} declares design tokens and a component skin",
           f'[data-theme="{preset}"]' in tokens_css
           and historic_css.count(f'[data-theme="{preset}"]') >= 12)
@@ -133,6 +133,13 @@ check("Trailhead and High Tide expose their signature hardware motifs",
       and 'content:"REUSE"' in historic_css
       and 'background:#00a0df' in historic_css
       and 'border-top:7px solid #e8476a' in historic_css)
+rescue = historic_css.split("Rescue — white body panels", 1)[-1]
+check("Rescue draws its livery with gradients only and adds no motion",
+      '.swatch[data-theme="inspired-rescue"]::after' in historic_css
+      and ':root[data-theme="inspired-rescue"] .topbar::after' in rescue
+      and "conic-gradient(#c8e000 25%,#d7262b 0 50%" in rescue
+      and "url(" not in rescue and "animation" not in rescue
+      and "transition:" not in rescue)
 check("retired Windows 3.1 preset is absent from tokens and component skins",
       "historic-win31" not in tokens_css and "historic-win31" not in historic_css)
 

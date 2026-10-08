@@ -14,6 +14,12 @@ Covers:
      their 512 siblings, so a hub customised before they existed keeps its
      own artwork on the Android splash.
   5. NTH_APP_BACKGROUND reaches the manifest; malformed colours are reported.
+  6. NTH_APP_DEFAULT_THEME: unset keeps light-1; a known theme id is written on
+     <html> as both data-theme (first paint) and data-default-theme (what the
+     client resets to); an unknown one falls back to light-1 with a warning
+     that lists the valid ids. The head script that applies a saved theme
+     before first paint is still in place. The browser half (a saved choice
+     wins, Reset returns to the hub default) is tests/test-hub-default-theme.js.
 
 The settings are read at import, so each case imports nth_web in a fresh
 interpreter with its own environment.
@@ -70,6 +76,9 @@ print(json.dumps({
     "title": re.search(r"<title>(.*?)</title>", head).group(1),
     "apple_title": re.search(r'apple-mobile-web-app-title" content="([^"]*)"', head).group(1),
     "theme_meta": re.search(r'name="theme-color" content="([^"]*)"', head).group(1),
+    "html_tag": re.search(r"<html[^>]*>", head).group(0),
+    "head_script": re.search(r"<script>(.*?)</script>", head, re.S).group(1),
+    "known_themes": w.KNOWN_THEMES,
     "icons": {name: hashlib.sha256(data).hexdigest() for name, data in w.PWA_ICONS.items()},
     "route_icon": hashlib.sha256(w.PWA_ROUTES["/icons/icon-192.png"][0]).hexdigest(),
     "route_apple": hashlib.sha256(w.PWA_ROUTES["/apple-touch-icon.png"][0]).hexdigest(),
@@ -264,6 +273,42 @@ got, err = probe({"NTH_APP_BACKGROUND": "#0b0405", "NTH_APP_THEME": "c0392b"})
 check("background colour override reaches the manifest",
       got["manifest"]["background_color"] == "#0b0405", got["manifest"]["background_color"])
 check("a malformed theme colour is reported", "NTH_APP_THEME='c0392b' is not #rrggbb" in err, err)
+
+# 6. Per-hub default theme.
+TOKENS_CSS = (SERVER / "web" / "css" / "00-tokens.css").read_text(encoding="utf-8")
+got, err = probe({})
+check("unset default theme keeps today's light-1 on <html>",
+      got["html_tag"] == '<html lang="en" data-theme="light-1" data-default-theme="light-1">',
+      got["html_tag"])
+check("no theme warning when the default theme is unset", "NTH_APP_DEFAULT_THEME" not in err, err)
+known = got["known_themes"]
+check("the theme ids come from the client's list and include Rescue",
+      known.get("inspired-rescue") == "Rescue" and known.get("light-1") == "Sagebrush"
+      and len(known) == 21, known)
+check("every known theme id has design tokens",
+      all(f'[data-theme="{tid}"]' in TOKENS_CSS for tid in known),
+      [tid for tid in known if f'[data-theme="{tid}"]' not in TOKENS_CSS])
+check("the head script still applies a saved theme before first paint",
+      "localStorage.getItem('trio.preferences.v1')" in got["head_script"]
+      and "document.documentElement.dataset.theme = __t" in got["head_script"])
+
+got, err = probe({"NTH_APP_DEFAULT_THEME": "inspired-rescue"})
+check("a valid default theme is written for first paint and for Reset",
+      got["html_tag"] == '<html lang="en" data-theme="inspired-rescue" '
+                         'data-default-theme="inspired-rescue">', got["html_tag"])
+check("a valid default theme is not reported", "NTH_APP_DEFAULT_THEME" not in err, err)
+
+got, _ = probe({"NTH_APP_DEFAULT_THEME": "  Inspired-Rescue "})
+check("the theme id is matched without regard to case or surrounding space",
+      'data-default-theme="inspired-rescue"' in got["html_tag"], got["html_tag"])
+
+got, err = probe({"NTH_APP_DEFAULT_THEME": 'rescue"><script>'})
+check("an unknown default theme falls back to light-1",
+      got["html_tag"] == '<html lang="en" data-theme="light-1" data-default-theme="light-1">',
+      got["html_tag"])
+check("an unknown default theme is reported with the ids that would work",
+      "NTH_APP_DEFAULT_THEME='rescue\"><script>' is not a theme id; using light-1" in err
+      and "inspired-rescue (Rescue)" in err, err)
 
 print(f"\n{PASS} passed, {FAIL} failed")
 sys.exit(1 if FAIL else 0)

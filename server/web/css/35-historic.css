@@ -171,6 +171,14 @@
 .swatch[data-theme="inspired-high-tide"]::after { content:""; position:absolute; z-index:3; left:50%; top:3px; width:15px; height:7px; translate:-50% 0; border-radius:5px 5px 2px 2px; background:#171a19; }
 .swatch[data-theme="inspired-high-tide"] .a,
 .swatch[data-theme="inspired-high-tide"] .b { display:none; }
+.swatch[data-theme="inspired-rescue"] {
+  position:relative; overflow:hidden; border:1px solid #b4bac2; border-radius:8px; background:#fff;
+}
+/* White body, red livery stripe, and the reflective checker below it. */
+.swatch[data-theme="inspired-rescue"]::before { content:""; position:absolute; left:0; right:0; top:12px; height:7px; background:#d7262b; }
+.swatch[data-theme="inspired-rescue"]::after { content:""; position:absolute; left:0; right:0; top:19px; height:6px; background:conic-gradient(#c8e000 25%,#1f2328 0 50%,#c8e000 0 75%,#1f2328 0) 0 0/12px 6px; }
+.swatch[data-theme="inspired-rescue"] .a,
+.swatch[data-theme="inspired-rescue"] .b { display:none; }
 
 /* ============================================================
    Windows 98 — Win32 bevel hierarchy and active title bars
@@ -1441,3 +1449,118 @@
 :root[data-theme="inspired-high-tide"] textarea,
 :root[data-theme="inspired-high-tide"] select,
 :root[data-theme="inspired-high-tide"] .pref-select { border:1px solid #88d5ee; border-radius:12px; background:#fff; color:#001e28; box-shadow:inset 0 1px 2px rgba(0,92,128,.07); }
+
+/* ============================================================
+   Rescue — white body panels, a red livery stripe, reflective checker
+   ============================================================ */
+/* A modern emergency-vehicle livery for long working sessions: the page stays
+   white and quiet, red marks what is selected or actionable, blue marks links
+   and focus, and the reflective yellow-green appears only as a thin checker
+   band on the chrome. Every graphic is a CSS gradient. Cross-shaped marks are
+   deliberately avoided, since medical cross emblems are legally protected. The
+   contrast ratios this relies on are listed with the tokens in 00-tokens.css. */
+:root[data-theme="inspired-rescue"] {
+  color-scheme:light;
+  --ok:#1b7a3e; --ok-tint:#e3f2e8; --warn:#9a6200; --warn-tint:#fff3d6;
+  --danger:#a3161c; --danger-tint:#fbe5e5; --info:#1f5fbf; --info-tint:#e3ecf8;
+  --rescue-hivis:#c8e000;
+  /* Two offset rows of blocks, the Battenburg pattern, in one gradient. */
+  --rescue-checker:conic-gradient(#c8e000 25%,#d7262b 0 50%,#c8e000 0 75%,#d7262b 0) 0 0/32px 8px;
+  --rescue-control-line:#7b848e;
+}
+:root[data-theme="inspired-rescue"] body { background:#e6e9ed; -webkit-font-smoothing:antialiased; text-rendering:optimizeLegibility; }
+:root[data-theme="inspired-rescue"] .app { background:#fff; }
+:root[data-theme="inspired-rescue"] .sidebar { border-right:1px solid #d5d9de; background:#fff; }
+:root[data-theme="inspired-rescue"] .brand { background:#fff; }
+:root[data-theme="inspired-rescue"] .brand-name { font-family:var(--font-body); font-weight:800; letter-spacing:.01em; }
+:root[data-theme="inspired-rescue"] .brand-mark { overflow:hidden; border-radius:10px; background:#d7262b; color:#fff; box-shadow:inset 0 0 0 1px rgba(0,0,0,.12); }
+:root[data-theme="inspired-rescue"] .brand-mark svg { width:22px; height:22px; margin-bottom:5px; }
+:root[data-theme="inspired-rescue"] .brand-mark::after { content:""; position:absolute; left:0; right:0; bottom:0; height:6px; background:conic-gradient(#c8e000 25%,#fff 0 50%,#c8e000 0 75%,#fff 0) 0 0/12px 6px; }
+:root[data-theme="inspired-rescue"] .nav-head h3,
+:root[data-theme="inspired-rescue"] .rail-section h2 { color:#474e57; font-weight:800; letter-spacing:.08em; }
+:root[data-theme="inspired-rescue"] .nav-item,
+:root[data-theme="inspired-rescue"] .dm-item,
+:root[data-theme="inspired-rescue"] .rail-item { border-radius:8px; color:#1f2328; }
+:root[data-theme="inspired-rescue"] .nav-item.active,
+:root[data-theme="inspired-rescue"] .dm-item.active,
+:root[data-theme="inspired-rescue"] .rail-item.active { background:#d7262b; color:#fff; box-shadow:none; font-weight:700; }
+:root[data-theme="inspired-rescue"] .nav-item.active::before { display:none; }
+:root[data-theme="inspired-rescue"] .nav-item.active .nav-hash,
+:root[data-theme="inspired-rescue"] .nav-item.active svg,
+:root[data-theme="inspired-rescue"] .dm-item.active .dm-copy * { color:#fff; }
+/* A red count on a red row would vanish; invert it inside the selection. */
+:root[data-theme="inspired-rescue"] .nav-item.active .badge { background:#fff; color:#b01c21; }
+:root[data-theme="inspired-rescue"] .side-foot { border-top:1px solid #d5d9de; background:#fff; }
+:root[data-theme="inspired-rescue"] .topbar,
+:root[data-theme="inspired-rescue"] .channel-drawer-head { position:relative; background:#fff; }
+/* The reflective band sits on the header's lower edge, where a vehicle's
+   checker runs along the body line. It is drawn over the header's own bottom
+   border, so it takes layout space and never covers the first message. */
+:root[data-theme="inspired-rescue"] .topbar,
+:root[data-theme="inspired-rescue"] .channel-drawer-head { border-bottom:8px solid #fff; }
+:root[data-theme="inspired-rescue"] .topbar::after,
+:root[data-theme="inspired-rescue"] .channel-drawer-head::after { content:""; position:absolute; left:0; right:0; bottom:-8px; height:8px; background:var(--rescue-checker); pointer-events:none; }
+:root[data-theme="inspired-rescue"] .topbar h1,
+:root[data-theme="inspired-rescue"] .topbar h2,
+:root[data-theme="inspired-rescue"] .channel-drawer-head h2 { font-family:var(--font-body); font-weight:800; letter-spacing:0; }
+:root[data-theme="inspired-rescue"] .messages,
+:root[data-theme="inspired-rescue"] .workspace-view { background:#f3f4f6; }
+:root[data-theme="inspired-rescue"] .messages { padding-top:28px; }
+:root[data-theme="inspired-rescue"] .message.msg .bubble { border:1px solid #d5d9de; border-radius:4px 12px 12px 12px; background:#fff; box-shadow:0 1px 2px rgba(31,35,40,.06); }
+:root[data-theme="inspired-rescue"] .message.msg.me .bubble { border-color:#d7262b; border-radius:12px 4px 12px 12px; background:#d7262b; color:#fff; box-shadow:0 1px 2px rgba(31,35,40,.10); }
+:root[data-theme="inspired-rescue"] .message.msg .message-body a { color:#1f5fbf; }
+:root[data-theme="inspired-rescue"] .message.msg.me .message-body a { color:#fff; }
+/* The shared own-bubble chips use a translucent WHITE pill, which lightens
+   red to about 3.9:1 against white text. A dark pill keeps them at 7:1. */
+:root[data-theme="inspired-rescue"] .message.msg.me .inline-mention,
+:root[data-theme="inspired-rescue"] .message.own .message-body a.file-link { background:rgba(0,0,0,.2); color:#fff; }
+:root[data-theme="inspired-rescue"] .message.own .message-body a.file-link:hover { background:rgba(0,0,0,.3); }
+:root[data-theme="inspired-rescue"] .message.msg.me.private .bubble { box-shadow:inset -4px 0 #1f5fbf; }
+:root[data-theme="inspired-rescue"] .message.msg.private .bubble { box-shadow:inset 4px 0 #1f5fbf; }
+:root[data-theme="inspired-rescue"] .day-separator { border:1px solid #d5d9de; background:#fff; box-shadow:none; color:#474e57; }
+:root[data-theme="inspired-rescue"] .icon-btn,
+:root[data-theme="inspired-rescue"] .add-btn { border-radius:8px; color:#474e57; }
+:root[data-theme="inspired-rescue"] .icon-btn:hover,
+:root[data-theme="inspired-rescue"] .add-btn:hover { background:#f1f3f5; color:#1f2328; }
+:root[data-theme="inspired-rescue"] .btn,
+:root[data-theme="inspired-rescue"] .reset-prefs { border:1px solid var(--rescue-control-line); border-radius:8px; background:#fff; color:#1f2328; box-shadow:none; font-weight:700; }
+:root[data-theme="inspired-rescue"] .btn:hover,
+:root[data-theme="inspired-rescue"] .reset-prefs:hover { background:#f1f3f5; }
+:root[data-theme="inspired-rescue"] .btn.primary,
+:root[data-theme="inspired-rescue"] .send-btn { border:1px solid #d7262b; border-radius:8px; background:#d7262b; color:#fff; box-shadow:none; font-weight:700; }
+:root[data-theme="inspired-rescue"] .btn.primary:hover,
+:root[data-theme="inspired-rescue"] .send-btn:hover { border-color:#b01c21; background:#b01c21; }
+:root[data-theme="inspired-rescue"] :focus-visible { outline-color:#1f5fbf; }
+:root[data-theme="inspired-rescue"] .pref-group,
+:root[data-theme="inspired-rescue"] .agent-card,
+:root[data-theme="inspired-rescue"] .roster-grid .agent-card,
+:root[data-theme="inspired-rescue"] .home-card,
+:root[data-theme="inspired-rescue"] .workspace-view .home-channel,
+:root[data-theme="inspired-rescue"] .task-row,
+:root[data-theme="inspired-rescue"] .attention-item,
+:root[data-theme="inspired-rescue"] .att-card,
+:root[data-theme="inspired-rescue"] .page-card,
+:root[data-theme="inspired-rescue"] .modal,
+:root[data-theme="inspired-rescue"] dialog { border:1px solid #d5d9de; border-radius:10px; background:#fff; box-shadow:0 1px 3px rgba(31,35,40,.08); }
+/* Cards carry the livery: a red stripe along the top edge, as on the body. */
+:root[data-theme="inspired-rescue"] .home-card,
+:root[data-theme="inspired-rescue"] .roster-grid .agent-card { border-top:4px solid #d7262b; }
+:root[data-theme="inspired-rescue"] .pref-group h3,
+:root[data-theme="inspired-rescue"] .modal-head { border-bottom:1px solid #d5d9de; background:#f6f7f9; color:#1f2328; font-family:var(--font-body); box-shadow:inset 4px 0 #d7262b; }
+:root[data-theme="inspired-rescue"] .page-card-open,
+:root[data-theme="inspired-rescue"] .page-card-preview { border-color:var(--rescue-control-line); border-radius:8px; font-weight:600; }
+:root[data-theme="inspired-rescue"] .status-chip,
+:root[data-theme="inspired-rescue"] .channel-status-chip,
+:root[data-theme="inspired-rescue"] .context-badge { border:1px solid #d5d9de; border-radius:6px; background:#fff; color:#1f2328; }
+/* Offers and hints are information, not alarms: they take the blue, so red
+   keeps meaning "act here". Ink on #e3ecf8 is 13.3:1, ink-2 7.1:1. */
+:root[data-theme="inspired-rescue"] .push-onboard,
+:root[data-theme="inspired-rescue"] .push-hint { border:1px solid #b9cdeb; background:#e3ecf8; box-shadow:inset 4px 0 #1f5fbf; color:#1f2328; }
+:root[data-theme="inspired-rescue"] .push-onboard .push-onboard-where { color:#474e57; }
+:root[data-theme="inspired-rescue"] .composer-shell { border-top:0; background:#f3f4f6; }
+:root[data-theme="inspired-rescue"] .composer-shell .composer-inner { border:1px solid var(--rescue-control-line); border-radius:12px; background:#fff; box-shadow:0 1px 3px rgba(31,35,40,.08); }
+:root[data-theme="inspired-rescue"] .composer-shell .composer-inner:focus-within { border-color:#1f5fbf; box-shadow:0 0 0 2px rgba(31,95,191,.25); }
+:root[data-theme="inspired-rescue"] input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
+:root[data-theme="inspired-rescue"] textarea,
+:root[data-theme="inspired-rescue"] select,
+:root[data-theme="inspired-rescue"] .pref-select { border:1px solid var(--rescue-control-line); border-radius:8px; background:#fff; color:#1f2328; box-shadow:none; }

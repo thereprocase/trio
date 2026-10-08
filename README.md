@@ -343,13 +343,23 @@ The web dashboard shows per-member context window usage as badges in the roster,
 
 ## Web Dashboard Themes
 
-20 themes in the settings picker, saved per browser in localStorage:
+21 themes in the settings picker. A theme someone picks is saved per browser
+in localStorage; a browser with no saved theme gets the hub's default, which is
+Sagebrush unless `NTH_APP_DEFAULT_THEME` names another (see
+[One app per hub](#phone-notifications)). The moon/sun button switches between
+the last light and dark themes used, with Graphite as the first dark one.
 
-| Group | Themes |
+| Group | Themes (id) |
 |-------|--------|
-| Light | Sagebrush, Frost, Slate, Linen, Clay, Mojave |
-| Dark | Midnight (default), Terminal, Graphite, Abyss, Noir, Torch |
-| Inspired | Start Menu, Link Cable, Webmaster, Now Playing, Walled Garden, Threaded, Trailhead, High Tide |
+| Light | Sagebrush (`light-1`, default), Frost (`light-2`), Slate (`light-3`), Linen (`light-4`), Clay (`light-5`), Mojave (`light-6`) |
+| Dark | Midnight (`dark-1`), Terminal (`dark-2`), Graphite (`dark-3`), Abyss (`dark-4`), Noir (`dark-5`), Torch (`dark-6`) |
+| Inspired | Start Menu (`historic-win98`), Link Cable (`historic-gameboy`), Webmaster (`historic-geocities`), Now Playing (`inspired-ipod`), Walled Garden (`inspired-messenger`), Threaded (`inspired-slack`), Trailhead (`inspired-trailhead`), High Tide (`inspired-high-tide`), Rescue (`inspired-rescue`) |
+
+Rescue is a light emergency-vehicle livery for long sessions: white panels,
+red for buttons, the selected channel and your own messages, blue for links
+and focus, and a thin yellow-green and red checker band under the header. Its
+text and controls meet WCAG AA contrast; the ratios are listed beside its
+tokens in `server/web/css/00-tokens.css`.
 
 ## Dictation
 
@@ -438,12 +448,24 @@ Environment="NTH_APP_SHORT_NAME=Field"
 Environment="NTH_APP_THEME=#c0392b"
 Environment="NTH_APP_BACKGROUND=#0b0405"
 Environment="NTH_APP_ICON_DIR=/var/lib/quartet-hub/app-icons"
+Environment="NTH_APP_DEFAULT_THEME=inspired-rescue"
 ```
 
 Quote each line: systemd splits an unquoted `Environment=` value at spaces.
 `NTH_APP_SHORT_NAME` is the label under the icon (up to 24 characters; keep
 it to about 12, since launchers truncate), and `NTH_APP_NAME` takes up to 60.
 `NTH_APP_BACKGROUND` is the splash screen colour while the app starts.
+`NTH_APP_DEFAULT_THEME` is the theme id (the ids are listed under
+[Web Dashboard Themes](#web-dashboard-themes)) that a browser sees until its
+user picks a theme; the page arrives already painted in it. A theme someone
+picked on this hub still wins, and **Settings → Reset to defaults** returns to
+the hub's theme. Changing only other settings does not lock a browser to the
+theme it had, so a new hub default reaches it at the next load; browsers that
+saved settings before this release keep the theme they had until they reset.
+An id the hub does not know is ignored, and the `nth-web` log says so and lists
+the valid ids. `NTH_APP_THEME` stays separate: it colours the phone's status
+bar and the installed app, so pick one that matches the default theme (for
+Rescue, `#d7262b`).
 `NTH_APP_ICON_DIR` holds PNGs named like the built-in set: `icon-192.png`,
 `icon-512.png`, `icon-1024.png`, `icon-maskable-192.png`,
 `icon-maskable-512.png`, `icon-maskable-1024.png`, `apple-touch-icon.png`
@@ -520,6 +542,7 @@ normally and the control reports that the hub cannot send.
 | `NTH_APP_THEME` | `#3d7a63` | Installed app theme colour (`#rrggbb`) |
 | `NTH_APP_BACKGROUND` | `#0b1713` | Installed app splash screen colour (`#rrggbb`) |
 | `NTH_APP_ICON_DIR` | (empty) | Directory of PNGs that replace the built-in app icons by name |
+| `NTH_APP_DEFAULT_THEME` | `light-1` | Theme id a browser gets on this hub until its user picks one, and the target of Reset to defaults; an unknown id falls back to `light-1` with a warning |
 | `NTH_UPLOAD_MAX_BYTES` | `26214400` (25 MB) | Largest single dashboard upload; an agent's image is capped at the lower of this and 10 MB |
 | `NTH_ATTACH_QUOTA_BYTES` | `209715200` (200 MB) | Attachment bytes one member may hold in one channel |
 | `NTH_ATTACH_ROOTS` | session working directory and temp directory | Folders (an `os.pathsep` list) an agent may attach files from by `path`; read by the local Trio server and the Quartet frontend |

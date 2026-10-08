@@ -271,6 +271,35 @@
   --r-xs:8px; --r-sm:13px; --r-md:18px; --r-lg:24px; --r-xl:30px; --r-full:999px;
   --shadow-sm:0 2px 5px rgba(13,92,91,.10); --shadow-md:0 8px 24px rgba(13,92,91,.14); --shadow-lg:0 24px 58px rgba(13,72,73,.22); --shadow-pop:0 14px 42px rgba(13,72,73,.24);
 }
+[data-theme="inspired-rescue"] {
+  /* Modern emergency-vehicle livery: white body panels, emergency red for
+     action and selection, beacon blue for links and secondary highlights, and
+     reflective yellow-green used only as decoration (35-historic.css).
+     WCAG 2.x contrast of the pairs this theme relies on:
+       ink #1f2328 on surface #fff 15.8:1, on bg #f3f4f6 13.8:1
+       ink-2 #474e57 on #fff 8.4:1, on bg 7.4:1, on accent-tint 7.0:1
+       ink-3 #5d6670 (times, placeholders, meta) on #fff 5.8:1, on bg 5.3:1
+       #fff on accent #d7262b (buttons, own bubble, active channel) 5.0:1
+       accent #d7262b as text on #fff 5.0:1, on bg 4.5:1
+       accent-strong #b01c21 on #fff 6.9:1, on accent-tint #fbe5e5 5.8:1
+       blue #1f5fbf (links, focus) on #fff 6.1:1, on bg 5.5:1, on code-bg 5.5:1
+       ok #1b7a3e 5.4:1, warn #9a6200 5.1:1, danger #a3161c 7.8:1 on #fff
+       control border #7b848e on #fff 3.8:1 (non-text, 3:1 required)
+       ink on yellow-green #c8e000 10.6:1; yellow-green itself is 1.5:1 on
+       white, so it never carries text or a control boundary. */
+  --font-display:"Hanken Grotesk",Roboto,"Segoe UI",system-ui,sans-serif;
+  --font-body:"Hanken Grotesk",Roboto,"Segoe UI",system-ui,sans-serif;
+  --bg:#f3f4f6; --bg-sink:#e6e9ed; --surface:#ffffff; --surface-2:#ffffff; --surface-hover:#f4f5f7;
+  --sidebar:#ffffff; --sidebar-hover:#f1f3f5; --line:#d5d9de; --line-soft:#e6e9ed;
+  --ink:#1f2328; --ink-2:#474e57; --ink-3:#5d6670; --ink-inv:#ffffff;
+  --bubble-agent:#ffffff; --bubble-me:#d7262b; --bubble-me-ink:#ffffff;
+  --code-bg:#f1f3f5; --code-ink:#1f5fbf;
+  --accent:#d7262b; --accent-strong:#b01c21; --accent-tint:#fbe5e5;
+  --warm:#1f5fbf; --warm-soft:#e3ecf8; --focus:#1f5fbf;
+  --st-online:#1f9d55; --st-thinking:#d08700; --st-idle:#8a929c; --st-offline:#b4bac2;
+  --r-xs:6px; --r-sm:8px; --r-md:10px; --r-lg:12px; --r-xl:16px; --r-full:999px;
+  --shadow-sm:0 1px 2px rgba(31,35,40,.08); --shadow-md:0 4px 12px rgba(31,35,40,.10); --shadow-lg:0 16px 44px rgba(31,35,40,.18); --shadow-pop:0 10px 32px rgba(31,35,40,.20);
+}
 
 /* ---- DARK presets ----
    Shared mechanical tokens (shadows, inverse ink, the secondary "warm" chip

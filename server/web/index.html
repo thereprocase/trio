@@ -16,8 +16,11 @@
   <link rel="icon" type="image/png" sizes="192x192" href="/icons/icon-192.png">
   <script>
     /* Apply the saved theme/font BEFORE first paint, so a boot hiccup can never
-       leave the hardcoded default theme showing. Mirrors 40-preferences
-       readFromStorage()'s legacy mapping; preferences.mount() re-applies later. */
+       leave the default theme showing over a saved choice. With no saved theme
+       the <html> tag already carries this hub's default (nth_web writes it from
+       NTH_APP_DEFAULT_THEME), so there is nothing to swap and no flash. Mirrors
+       40-preferences readFromStorage()'s legacy mapping; preferences.mount()
+       re-applies later. */
     try {
       var __p = JSON.parse(localStorage.getItem('trio.preferences.v1') || '{}');
       var __t = __p.theme === 'dark' ? 'dark-3' : __p.theme === 'light' ? 'light-1' : __p.theme;
