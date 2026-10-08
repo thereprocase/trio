@@ -227,8 +227,10 @@ Costs and limits:
 
 ### Making plain `claude` and `codex` start through Trio
 
-A session can only receive pushes if it was launched for them, so the way to
-make every session attachable is to make the launcher the normal way in.
+A Codex session can only receive pushes if it was launched for them, so the way
+to make every Codex session attachable is to make the launcher the normal way
+in. A plain Claude needs no launcher (the delivery hooks reach it); for Claude
+the launcher adds the faster channel path.
 `trio shell-init powershell` (or `bash`, `zsh`) prints two shell functions,
 `claude` and `codex`, that call this installation's interpreter and launcher by
 path (`--clients claude` or `--clients codex` prints only that one). Add the
@@ -309,16 +311,17 @@ When the hooks are installed the connect response's `monitor_hint` is empty and
 woken twice for every message. `*_delivery_status` reports `state: "hooks"`; it
 cannot confirm readiness from inside the session, because the waiter is a
 separate process. `*_listen` saves `filter_mode` and `enabled` for the waiter
-(an omitted value keeps the saved one) and returns `state: "hooks"`. After a
-restart, call `*_listen` with `enabled=true` so the hook picks the membership up
-again; never reconnect. A wake can also say Trio delivery has stopped for a
+(an omitted value keeps the saved one) and returns `state: "hooks"` with the
+`identity_key`, `filter_mode`, `enabled` and `ended` it saved. A resumed session
+needs nothing; in a new session, call `*_listen` with `enabled` omitted so the
+hook picks the membership up again without overriding a stop; never reconnect. A wake can also say Trio delivery has stopped for a
 membership (channel ended, membership refused, listener failure): stop work for
 that channel, tell the user, and never reconnect or reclaim on your own. A
 listener failure clears on `*_listen(enabled=true)` when the user asks for it;
 `*_listen` reports a stop it cannot clear in `ended`. A wake has no receipt:
 acknowledge with `*_ack` after processing. The hooks are removable with
 `trio hooks-uninstall`; `trio claude` sessions ignore them and keep channel
-mode, which is faster (4-8 s) and needs no per-turn process.
+mode, which is faster and needs no per-turn process.
 
 Costs and limits:
 

@@ -40,8 +40,10 @@ is a Codex state. Hints are specific to the state: a stopped listener stays stop
 one is not revived. `notifications` counts events, `written` the messages they carried. `host`
 and `host_note` name a Claude Code version this path was not confirmed on. A Claude session
 with no channel listener available reports `hooks`, `monitor` or `channel_unavailable`, never a Codex
-hint. `trio_listen` answers with `ready` and `hint` as well. After a session restart the state is
-`not_attached` until `trio_listen(enabled=true)` is called with the saved credentials.
+hint. `trio_listen` answers with `ready` and `hint` as well. In channel mode, after a session restart the state is
+`not_attached` until `trio_listen(enabled=true)` is called with the saved credentials. In hooks
+mode the state is always `hooks`, and `trio_listen` returns `identity_key`, `filter_mode`, `enabled`
+and `ended`.
 
 ## Argument parsing — full grammar
 
@@ -234,7 +236,7 @@ Claude-B: Joined as Bob (backend engineer).
 
 **Back in A:**
 ```
-[monitor: new_messages]
+[wake: new_messages]
 Bob claimed task #1. Good — let me work on the data pipeline.
 [posts task #2: "Validate input data format"]
 ```

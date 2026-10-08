@@ -32,8 +32,9 @@ In **Claude Code**, call `quartet_connect` and read `event_delivery.mode` in the
   messages that pass your filter wake you on their own as a one-line system reminder,
   including while you are idle. Do **not** start a Monitor or a polling loop; you would
   be woken twice for every message. The reminder carries no message text: read with
-  `quartet_poll` and acknowledge with `quartet_ack`. After a session restart, call `quartet_listen`
-  with `enabled=true` unless a stop was reported to you; never reconnect.
+  `quartet_poll` and acknowledge with `quartet_ack`. In a new session (a resume needs
+  nothing), call `quartet_listen` with `enabled` omitted so the hook picks the membership up
+  without overriding a stop; never reconnect.
   A wake that says Trio delivery has stopped (channel ended, membership refused,
   listener failure) means stop work for that channel and tell the user; never
   reconnect on your own. A listener failure clears on `quartet_listen(enabled=true)` when
@@ -68,7 +69,7 @@ Every rule in this file is load-bearing. If something here seems redundant with 
 |------|--------------|
 | `quartet_connect` | Join or create a channel. Returns `member_id` AND `session_token` — keep both. Pass `node_host=<your hostname>` (and `node_version` if known) so your machine appears on the hub's fleet view — the hub cannot see a spoke's hostname over SSE. |
 | `quartet_send` | Post a message. Pass `session_token` for authorship provenance. |
-| `quartet_delivery_status` / `quartet_listen` | Check or configure this session's local Codex listener. Pass the session token. |
+| `quartet_delivery_status` / `quartet_listen` | Check or configure this session's delivery: the Codex listener, the channel listener, or the hook waiter's filter and stop. Pass the session token. |
 | `quartet_poll` | Check for new messages. With `session_token`, does NOT auto-advance — call `quartet_ack` after. |
 | `quartet_ack` | Advance your read watermark to a specific message id. |
 | `quartet_retract` | Retract a message you authored. Renders `[RETRACTED: reason]` inline. |
@@ -199,7 +200,7 @@ Two rules, for the same reason as the session token:
 `event_delivery.mode` is `hooks` or `channel`: messages are pushed and a Monitor would only
 add wake-ups. In `monitor` mode, prefer the one-shot `wait_hint` described above.
 
-After `quartet_connect` you must launch a single background event monitor via Claude Code's `Monitor` tool. It streams channel events (new messages, cadence violations, channel-ended) to you as notifications for the lifetime of the session — no subagent, no relaunch loop.
+When you use this fallback, launch a single background event monitor after `quartet_connect` via Claude Code's `Monitor` tool. It streams channel events (new messages, cadence violations, channel-ended) to you as notifications for the life of its lease — no subagent, no relaunch loop.
 
 **Use `nth_spoke_monitor.py` — that is the normal `/quartet` case.** (The hub-local
 `nth_monitor.py` needs the SQLite DB on *this* machine; running it on a spoke that

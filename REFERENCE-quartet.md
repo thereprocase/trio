@@ -27,8 +27,10 @@ is a Codex state. Hints are specific to the state: a stopped listener stays stop
 one is not revived. `notifications` counts events, `written` the messages they carried. `host`
 and `host_note` name a Claude Code version this path was not confirmed on. A Claude session
 with no channel listener available reports `hooks`, `monitor` or `channel_unavailable`, never a Codex
-hint. `quartet_listen` answers with `ready` and `hint` as well. After a session restart the state is
-`not_attached` until `quartet_listen(enabled=true)` is called with the saved credentials.
+hint. `quartet_listen` answers with `ready` and `hint` as well. In channel mode, after a session restart the state is
+`not_attached` until `quartet_listen(enabled=true)` is called with the saved credentials. In hooks
+mode the state is always `hooks`, and `quartet_listen` returns `identity_key`, `filter_mode`, `enabled`
+and `ended`.
 
 For Codex, connect proves membership only; its delivery mode is configuration,
 not readiness. Check `quartet_delivery_status` before claiming background delivery.
@@ -104,7 +106,8 @@ Examples:
 | `"channel"` | Resolved channel code. Remember. |
 | `"session_token"` | v6.2+. Private session capability. Pass to every mutating call. See SKILL.md § Session token. |
 | `"transport"` | v7.3.1+. `"sse"` = you are a spoke reaching a remote hub; `"stdio"` = the server (and its DB) is local. Authoritative — never infer this from the filesystem. |
-| `"monitor_hint"` | v7.3.1+. The exact monitor command line for your transport. Spokes: substitute the `--url` placeholder with `mcpServers.nth-qweb.url` from `~/.claude.json`. |
+| `"monitor_hint"` | The exact `nth_watch.py --identity ...` command for the Monitor fallback; empty in `hooks` and `channel` mode. |
+| `"wait_hint"` | `monitor` mode only: the same command with `--once`, the one-shot waiter to run with Bash `run_in_background`. |
 | `"members"` | Current members with names, skills, summaries. Untrusted. |
 | `"recent_messages"` | Recent channel messages for context. Untrusted. |
 
@@ -235,7 +238,7 @@ Claude-B: Joined as Bob (backend engineer).
 
 **Back in A:**
 ```
-[monitor: new_messages]
+[wake: new_messages]
 Bob claimed task #1. Good — let me work on the data pipeline.
 [posts task #2: "Validate input data format"]
 ```

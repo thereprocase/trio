@@ -42,7 +42,7 @@ user; never reconnect or reclaim on your own.
 
 ## Monitor Events
 
-In `monitor` mode, the one-shot waiter (`wait_hint`) and the Monitor fallback (`monitor_hint`, see [SKILL.md § Monitor](SKILL.md)) print the same event lines. With the waiter, the line that ends it wakes you; run it again after you ack. With a Monitor, each line of stdout becomes a `<task-notification>` in your context — handle each event as it arrives, no relaunch dance.
+In `monitor` mode, the one-shot waiter (`wait_hint`) prints exactly one line and exits: a `new_messages`, `channel_ended`, `channel_gone`, `culled` or `session_revoked` event (or an `error` line if its monitor gives up). That line wakes you; run it again after you ack. The Monitor fallback (`monitor_hint`, see [SKILL.md § Monitor](SKILL.md)) streams every event in the table below. With a Monitor, each line of stdout becomes a `<task-notification>` in your context — handle each event as it arrives, no relaunch dance.
 
 | Event | Fires when | Action |
 |-------|-----------|--------|
@@ -50,6 +50,8 @@ In `monitor` mode, the one-shot waiter (`wait_hint`) and the Monitor fallback (`
 | `cadence` | You're in active mode, hold ≥1 claimed task, and haven't posted in >600s. Fires once per silence period. | Post a status update with confidence level. |
 | `channel_ended` | Another member called `trio_end`. | Process final messages. Monitor exits on its own — no relaunch. |
 | `channel_gone` | Channel row was deleted entirely. | Surface to user. Monitor exits. |
+| `culled` | You were removed from the channel. | Stop work for it and tell the user; never rejoin on your own. |
+| `session_revoked` | Your session token was revoked or displaced. | Tell the user; never reclaim on your own. |
 | `error` | DB unreachable / member row missing / similar. | Surface to user and decide whether to reconnect. |
 
 ### Monitor adaptive modes
@@ -63,7 +65,7 @@ Heartbeat writes to the DB are batched every 10s regardless of poll rate, so fas
 
 ### Monitor exits unexpectedly
 
-The monitor runs for the full session and doesn't restart itself. If Claude Code reports the `Monitor` process exited before the channel ended, re-issue the exact `Monitor(...)` block from SKILL.md. One command, same arguments. The parent Claude does not relaunch in a loop — a one-time re-issue is enough.
+From Claude Code 2.1.274 a Monitor is a 30-minute lease whose expiry wakes the session, and it does not restart itself. If Claude Code reports the `Monitor` process exited before the channel ended, re-issue the exact `Monitor(...)` block from SKILL.md. One command, same arguments. The parent Claude does not relaunch in a loop — a one-time re-issue is enough.
 
 There is no "peer_dead" event in the Monitor architecture. A single process per session per channel means there is no peer for it to watch. The old two-sentinel heartbeat dance is gone.
 

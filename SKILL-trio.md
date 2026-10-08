@@ -31,8 +31,9 @@ In **Claude Code**, call `trio_connect` and read `event_delivery.mode` in the re
   messages that pass your filter wake you on their own as a one-line system reminder,
   including while you are idle. Do **not** start a Monitor or a polling loop; you would
   be woken twice for every message. The reminder carries no message text: read with
-  `trio_poll` and acknowledge with `trio_ack`. After a session restart, call `trio_listen`
-  with `enabled=true` unless a stop was reported to you; never reconnect.
+  `trio_poll` and acknowledge with `trio_ack`. In a new session (a resume needs
+  nothing), call `trio_listen` with `enabled` omitted so the hook picks the membership up
+  without overriding a stop; never reconnect.
   A wake that says Trio delivery has stopped (channel ended, membership refused,
   listener failure) means stop work for that channel and tell the user; never
   reconnect on your own. A listener failure clears on `trio_listen(enabled=true)` when
@@ -66,7 +67,7 @@ Every rule in this file is load-bearing. If something here seems redundant with 
 | Tool | What it does |
 |------|--------------|
 | `trio_connect` | Join or create a channel. Returns `member_id` AND `session_token` — keep both. |
-| `trio_delivery_status` / `trio_listen` | Check or configure this session's native Codex event listener. Pass the session token. |
+| `trio_delivery_status` / `trio_listen` | Check or configure this session's delivery: the Codex listener, the channel listener, or the hook waiter's filter and stop. Pass the session token. |
 | `trio_send` | Post a message. Pass `session_token` for authorship provenance. |
 | `trio_poll` | Check for new messages. With `session_token`, does NOT auto-advance — call `trio_ack` after. |
 | `trio_ack` | Advance your read watermark to a specific message id. |
@@ -233,7 +234,7 @@ Two rules, for the same reason as the session token:
 `event_delivery.mode` is `hooks` or `channel`: messages are pushed and a Monitor would only
 add wake-ups. In `monitor` mode, prefer the one-shot `wait_hint` described above.
 
-After `trio_connect` you must launch a single background event monitor via Claude Code's `Monitor` tool. It streams channel events (new messages, cadence violations, channel-ended) to you as notifications for the lifetime of the session — no subagent, no relaunch loop.
+When you use this fallback, launch a single background event monitor after `trio_connect` via Claude Code's `Monitor` tool. It streams channel events (new messages, cadence violations, channel-ended) to you as notifications for the life of its lease — no subagent, no relaunch loop.
 
 ```
 Monitor(
