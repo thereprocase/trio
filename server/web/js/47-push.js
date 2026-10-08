@@ -201,9 +201,14 @@
         // identity gets an endpoint of its own; the old rows then expire at
         // the push service and the hub prunes them.
         if (e?.status !== 409) throw e;
+        const oldEndpoint = sub.endpoint;
         await sub.unsubscribe();
         sub = await browserSubscription(true);
         await api.post('/api/push/subscribe', { subscription: sub.toJSON(), channel, mode }, false);
+        const note = await moveOtherChannels(channel, oldEndpoint, sub);
+        showMode(section, mode);
+        if (note) setStatus(section, section.querySelector('.push-status').textContent + ' ' + note);
+        return;
       }
       showMode(section, mode);
     } catch (e) {
@@ -211,6 +216,31 @@
     } finally {
       disable(section, false);
     }
+  }
+
+  // After a 409 the browser endpoint was replaced, and this identity's other
+  // channels still name the old one, which the push service now rejects. Move
+  // each to the new endpoint with its mode; name any that could not be moved,
+  // since those are now off.
+  async function moveOtherChannels(channel, oldEndpoint, sub) {
+    let status;
+    try { status = await api.get('/api/push/status?channel=' + encodeURIComponent(channel), false); }
+    catch { return ''; }
+    const stale = (status?.mine || []).filter(s => s.endpoint === oldEndpoint && s.channel !== channel);
+    const moved = [], lost = [];
+    for (const row of stale) {
+      try {
+        await api.post('/api/push/subscribe', { subscription: sub.toJSON(), channel: row.channel, mode: row.mode }, false);
+        moved.push('#' + row.channel);
+      } catch { lost.push('#' + row.channel); }
+    }
+    if (stale.length) {
+      try { await api.post('/api/push/unsubscribe', { endpoint: oldEndpoint }, false); } catch { /* the push service retires it anyway */ }
+    }
+    const parts = [];
+    if (moved.length) parts.push('Also kept on for ' + moved.join(', ') + '.');
+    if (lost.length) parts.push('Now off for ' + lost.join(', ') + ' — turn them on again there.');
+    return parts.join(' ');
   }
 
   // ── Service worker wiring ─────────────────────────────────────────────

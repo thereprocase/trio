@@ -363,12 +363,14 @@ members, and guests who have picked a name.
 **Who sends.** The hub process that drives the database (the landing-mode
 dashboard holding the agent-control lease) delivers the pushes, polling for new
 messages every two seconds and sending in parallel. It stops the moment another
-hub takes the lease over, so a push is sent by one hub only. A single-channel or
-`--no-agent-control` dashboard still saves your choice, and its control says
-when no hub is sending. A summary or bang that hits a temporary push-service
+hub takes the lease over, so a push is sent by one hub only, and pauses while
+its own lease renewal is failing (a locked database, a suspend). The sending hub
+advertises itself in `nth.db`; a single-channel or `--no-agent-control`
+dashboard still saves your choice, and its control says when no hub is sending. A summary or bang that hits a temporary push-service
 failure is retried; a subscription the service rejects three times in a row is
 dropped. Guests share a small subscription pool of their own, which leaves the
-owner and members their room. Push needs the `cryptography` package in the hub's
+owner and members their room, and a guest subscription that has neither been
+renewed nor delivered to in 30 days is removed. Push needs the `cryptography` package in the hub's
 Python, which the MCP SDK already pulls in through PyJWT; without it the dashboard runs
 normally and the control reports that the hub cannot send.
 
