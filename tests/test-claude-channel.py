@@ -138,6 +138,20 @@ class ChannelTests(unittest.TestCase):
     def state(self, hub):
         return hub.status('test', 'receiver', TOKEN)[0]
 
+    def recorded(self, hub, count=1):
+        """Wait until the listener has recorded `count` written messages, then return status.
+
+        RecordingWriter.sent fills on the event-loop thread during the write
+        itself. The listener thread records that write (written, last_written,
+        the unconfirmed clock) only after push() returns, so waiting on sent and
+        then reading status raced that hand-off and read written == 0. The
+        product accepts the gap: an ack may even arrive first, which
+        test_an_ack_that_overtakes_its_write_still_settles covers.
+        """
+        if not wait_until(lambda: self.state(hub)['written'] >= count):
+            self.fail(f'the listener never recorded {count} written message(s): {self.state(hub)}')
+        return self.state(hub)
+
     # ---- mode and event format -------------------------------------------------
 
     def test_mode_requires_claude_and_the_launcher_flag(self):
@@ -494,8 +508,7 @@ class ChannelTests(unittest.TestCase):
     def test_status_is_unconfirmed_and_scoped_to_the_token(self):
         hub = self.hub([{'event': 'new_messages', 'messages': [MESSAGES[1]]}])
         hub.start('test', 'receiver', TOKEN, 'about')
-        self.assertTrue(wait_until(lambda: self.writer.sent))
-        state = self.state(hub)
+        state = self.recorded(hub)
         self.assertEqual(state['delivery'], UNCONFIRMED)
         self.assertEqual((state['provider'], state['transport'], state['written']), ('claude', 'channel', 1))
         self.assertNotIn('accepted', json.dumps(state))
@@ -575,6 +588,12 @@ class ChannelTests(unittest.TestCase):
         self.source.idle = {'event': 'new_messages', 'messages': MESSAGES}   # never acked
         hub.start('test', 'receiver', TOKEN, 'at')
         self.assertTrue(wait_until(lambda: self.pushed_ids() == [2, 4]))
+        # The listener marks 1 to 4 seen only after push() returns. Changing the
+        # filter before that leaves the successor nothing to inherit, and it
+        # replays the batch whenever the replace-join gives up first.
+        listener = hub.listeners[('test', 'receiver')]
+        self.assertTrue(wait_until(lambda: listener.high_water == 4),
+                        f'the listener never marked 1 to 4 seen (high_water {listener.high_water})')
         hub.configure('test', 'receiver', TOKEN, filter_mode='all')
         later = {'id': 5, 'from': 'peer', 'content': 'ambient, after the change'}
         self.source.idle = {'event': 'new_messages', 'messages': MESSAGES + [later]}
@@ -690,7 +709,7 @@ class ChannelTests(unittest.TestCase):
 
         hub = self.hub([{'event': 'new_messages', 'messages': [MESSAGES[1]]}], prefix='trio', source='local')
         hub.start('test', 'receiver', TOKEN, 'about')
-        self.assertTrue(wait_until(lambda: self.writer.sent))
+        self.recorded(hub)
         channel_module.complete_local_calls(server, hub)
         handler = server._mcp_server.request_handlers[types.CallToolRequest]
 
@@ -755,8 +774,8 @@ class ChannelTests(unittest.TestCase):
         from nth_event_access import delivery_status
         hub = self.hub([{'event': 'new_messages', 'messages': [MESSAGES[1]]}])
         hub.start('test', 'receiver', TOKEN, 'about')
-        self.assertTrue(wait_until(lambda: self.writer.sent))
-        self.assertEqual((self.state(hub)['written'], self.state(hub)['confirmed_through']), (1, 0))
+        state = self.recorded(hub)
+        self.assertEqual((state['written'], state['confirmed_through']), (1, 0))
         call = {'channel': 'test', 'member_id': 'receiver', 'session_token': TOKEN}
         hub.observe('quartet_ack', dict(call, through_id=1), True)         # covers nothing that was written
         hub.observe('quartet_ack', dict(call, through_id=2), False)        # the ack itself failed
@@ -781,7 +800,7 @@ class ChannelTests(unittest.TestCase):
         from nth_event_access import delivery_status
         hub = self.hub([{'event': 'new_messages', 'messages': [MESSAGES[1]]}])
         hub.start('test', 'receiver', TOKEN, 'about')
-        self.assertTrue(wait_until(lambda: self.writer.sent))
+        self.recorded(hub)                                 # the stale write below must be a recorded one
         listener = hub.listeners[('test', 'receiver')]
         listener.unconfirmed_since = time.time() - 400
         hub.configure('test', 'receiver', TOKEN, enabled=False)
