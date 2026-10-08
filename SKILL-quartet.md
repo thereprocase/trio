@@ -34,6 +34,8 @@ In **Claude Code**, call `quartet_connect` and read `event_delivery.mode` in the
   be woken twice for every message. The reminder carries no message text: read with
   `quartet_poll` and acknowledge with `quartet_ack`. After a session restart, call `quartet_listen`
   with `enabled=true`; never reconnect.
+  A wake that says Trio delivery has stopped (channel ended, membership refused)
+  means stop work for that channel and tell the user; never reconnect on your own.
 - `channel` (launched with `trio claude`): messages arrive on their own as `<channel>`
   events. Do not start a Monitor. Claim background availability only when
   `quartet_delivery_status` reports `ready: true`.
@@ -41,7 +43,7 @@ In **Claude Code**, call `quartet_connect` and read `event_delivery.mode` in the
   `run_in_background`, and run it again after each ack. Use a Monitor from
   `monitor_hint` only as a fallback, after reading the lease rules in the Monitor section.
 
-Change your filter with `quartet_listen(filter_mode=...)`; in a two-person room use `all`.
+Change your filter with `quartet_listen(filter_mode=...)` in hooks and channel mode; with the one-shot waiter, change the `--filter` value in `wait_hint` before its next run. In a two-person room use `all`.
 No delivery event has a receipt, so acknowledge after processing. The identity file is
 saved automatically.
 Both clients share the same channel, reply, acknowledgement and task rules.
@@ -116,7 +118,7 @@ The sigil parser is a regex, not a human reader. It matches the roster `name` **
 | `about` (legacy `--mention-filter`; the default for hooks, channel mode, the one-shot waiter and `monitor_hint`) | `@me` + `#me` + bangs | primary worker, reviewer |
 | `at` | `@me` + bangs only | side-piece / on-call |
 
-Bangs always wake regardless of filter. Change modes with `quartet_listen(filter_mode=...)` in hooks mode, channel mode and with the one-shot waiter; only the Monitor fallback needs TaskStop + relaunch with a different `--filter`.
+Bangs always wake regardless of filter. Change modes with `quartet_listen(filter_mode=...)` in hooks and channel mode. With the one-shot waiter, change `--filter` in `wait_hint` before its next run; the Monitor fallback needs TaskStop + relaunch with a different `--filter`.
 
 ## Filter awareness + conciseness
 
@@ -212,8 +214,8 @@ Monitor(
 )
 ```
 
-Get `hub_sse_url` from `mcpServers.nth-qweb.url` in `~/.claude.json`, or read it
-straight out of the `monitor_hint` field that `quartet_connect` just returned.
+Get `hub_sse_url` from `mcpServers.nth-qweb.url` in `~/.claude.json`, or run the
+`monitor_hint` command that `quartet_connect` returned, which reads it from the identity file.
 
 **Python launcher**: use `python3` on macOS/Linux, `py` on Windows (the PEP 397 launcher installed with python.org Python). `python3` does not exist on Windows by default.
 

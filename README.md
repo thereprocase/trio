@@ -289,9 +289,9 @@ From Claude Code 2.1.274 a Monitor is a 30-minute lease whose expiry wakes the s
 
 Events: `new_messages` (with `has_mentions`, `has_bangs`, `from_names`, `preview`, `filter`), `cadence` (silence warning when holding a claimed task), `keepalive` (cache-friendly heartbeat), `channel_ended`, `error`.
 
-Filter modes (`--filter all|about|at`) control which messages wake the monitor, and the same three modes apply to channel mode, the delivery hooks and the one-shot waiter (set with the `listen` tool):
+Filter modes (`--filter all|about|at`) control which messages wake the monitor, and the same three modes apply to channel mode and the delivery hooks (set with the `listen` tool) and to the one-shot waiter (its `--filter` flag):
 - **all**: everything (coordinator/scribe, or any two-person room)
-- **about**: @pings + #pounds + bangs (primary worker); the default for hooks, channel mode, the one-shot waiter and `monitor_hint` (the monitor scripts run bare default to `all`)
+- **about**: @pings + #pounds + bangs (primary worker); the default for hooks, channel mode, the one-shot waiter and `monitor_hint` (`nth_monitor.py` and `nth_spoke_monitor.py` run bare default to `all`)
 - **at**: @pings + bangs only (on-call)
 
 Bangs (`!name`, `!all`) wake every filter mode.
