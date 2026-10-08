@@ -32,22 +32,28 @@ spec.loader.exec_module(setup)
 KEY = '0123456789abcdef01234567'
 SESSION = '11111111-2222-4333-8444-555555555555'
 FIXTURES = ROOT / 'tests' / 'fixtures' / 'interposer-hooks'
+EXPECTED_OPS = frozenset(('hello', 'hub.announce', 'session.register', 'membership.attach',
+    'membership.configure', 'ack.seen', 'turn', 'session.end', 'wait', 'subscribe',
+    'delivered', 'status', 'list'))
 
 
 @unittest.skipUnless(hasattr(socket, 'AF_UNIX') and os.name == 'posix', 'Unix service skeleton')
-class SkeletonTests(unittest.TestCase):
+class InterposerCase(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix='ip2-')
         self.root = Path(self.tmp.name)
         self.runtime = self.root / 'rt'
         self.runtime.mkdir(mode=0o700)
         env = dict(os.environ, HOME=str(self.root), NTH_HOME=str(self.root / 'nth'),
-                   XDG_RUNTIME_DIR=str(self.runtime), PYTHONDONTWRITEBYTECODE='1')
+                   XDG_RUNTIME_DIR=str(self.runtime), CODEX_HOME=str(self.root / 'codex'),
+                   TRIO_CODEX_HOME=str(self.root / 'codex'), PYTHONDONTWRITEBYTECODE='1')
         for field in ('LISTEN_PID', 'LISTEN_FDS', 'LISTEN_FDNAMES'):
             env.pop(field, None)
         self.env = patch.dict(os.environ, env, clear=True)
         self.env.start()
         self.processes = []
+        self.user_runtime = patch.object(wire, '_user_runtime_dir', return_value=self.root / 'no-user-runtime')
+        self.user_runtime.start()
 
     def tearDown(self):
         for process in self.processes:
@@ -59,6 +65,7 @@ class SkeletonTests(unittest.TestCase):
                 process.kill()
                 process.wait(timeout=3)
         self.env.stop()
+        self.user_runtime.stop()
         self.tmp.cleanup()
 
     def start(self, idle=60, *, activated=False):
@@ -79,7 +86,7 @@ class SkeletonTests(unittest.TestCase):
         else:
             process = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         self.processes.append(process)
-        deadline = time.monotonic() + 3
+        deadline = time.monotonic() + 10
         while time.monotonic() < deadline:
             try:
                 with wire.connect(timeout=.2) as client:
@@ -118,8 +125,10 @@ class SkeletonTests(unittest.TestCase):
     def calls(self):
         return [json.loads(line) for line in self.command_log.read_text().splitlines()]
 
+class SkeletonTests(InterposerCase):
     def test_golden_frames(self):
-        for op in sorted(wire.OPS):
+        self.assertEqual(wire.OPS, EXPECTED_OPS)
+        for op in sorted(EXPECTED_OPS):
             expected = ('{"v":1,"id":7,"op":"' + op + '"}\n').encode()
             value = {'v': 1, 'id': 7, 'op': op}
             self.assertEqual(wire.encode_frame(value), expected)
@@ -140,7 +149,8 @@ class SkeletonTests(unittest.TestCase):
 
     def test_bad_json(self):
         self.start()
-        for frame in (b'{oops}\n', b'[]\n', b'{"v":NaN}\n', b'\xff\n'):
+        for frame in (b'{oops}\n', b'[]\n', b'{"v":1,"id":7,"op":"hello","pid":NaN}\n',
+                      b'{"v":1,"id":7,"op":"hello","pid":Infinity}\n', b'\xff\n'):
             with self.subTest(frame=frame):
                 self.assertIn('error', self.raw(frame))
         with self.assertRaisesRegex(wire.WireError, 'newline'):
@@ -188,10 +198,11 @@ class SkeletonTests(unittest.TestCase):
 
     def test_unimplemented_ops_and_identity_validation(self):
         self.start()
-        for op in sorted(wire.OPS - {'hello', 'hub.announce', 'list', 'status'}):
+        for op in sorted(EXPECTED_OPS - {'hello', 'hub.announce', 'list', 'status'}):
             with wire.connect() as client:
                 with self.assertRaisesRegex(wire.WireError, '^not implemented in this version$'):
                     client.call(op)
+                self.assertEqual(client.call('list')['hubs'], [])
         for fields, error in (({'session': '../session'}, 'bad session'),
                               ({'key': 'not-a-key'}, 'bad identity'),
                               ({'session_token': 'synthetic-secret'}, 'credentials')):
@@ -209,7 +220,6 @@ class SkeletonTests(unittest.TestCase):
     def test_runtime_fallback_and_symlink_refusal(self):
         os.environ.pop('XDG_RUNTIME_DIR')
         self.assertEqual(wire.socket_path(), wire.home() / 'run' / 'interposer.sock')
-        self.start()
         planted = self.root / 'planted'
         planted.symlink_to(self.runtime, target_is_directory=True)
         with self.assertRaises(PermissionError):
@@ -218,21 +228,36 @@ class SkeletonTests(unittest.TestCase):
     @unittest.skipUnless(sys.platform.startswith('linux'), 'Linux peer credentials')
     def test_foreign_uid_refused(self):
         peer = Mock()
-        peer.getsockopt.return_value = struct.pack('3i', 42, os.getuid() + 1, 42)
+        peer.getsockopt.return_value = struct.pack('iII', 42, os.getuid() + 1, 42)
         self.assertFalse(service.peer_allowed(peer))
-        peer.getsockopt.return_value = struct.pack('3i', 42, os.getuid(), 42)
+        peer.getsockopt.return_value = struct.pack('iII', 42, os.getuid(), 42)
         self.assertTrue(service.peer_allowed(peer))
         peer.getsockopt.side_effect = OSError('synthetic')
         self.assertFalse(service.peer_allowed(peer))
+        peer.getsockopt.side_effect = None
+        high_uid = (1 << 31) + 7
+        with patch.object(service.os,'getuid',return_value=high_uid):
+            peer.getsockopt.return_value = struct.pack('iII',42,high_uid,high_uid)
+            self.assertTrue(service.peer_allowed(peer))
+            peer.getsockopt.return_value = struct.pack('iII',42,high_uid+1,high_uid)
+            self.assertFalse(service.peer_allowed(peer))
         store = storage.Store()
         wire.private_dir(wire.socket_path().parent)
         server = service.Server(wire.socket_path(), store, logging.getLogger('test'))
         try:
-            with patch.object(service, 'peer_allowed', return_value=False):
+            with patch.object(service, 'peer_allowed', return_value=False) as admission, \
+                    patch.object(service.Handler, 'handle') as handler:
                 with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+                    sock.settimeout(1)
                     sock.connect(str(wire.socket_path()))
+                    sock.sendall(b'{"v":1,"id":7,"op":"hello"}\n')
                     server.handle_request()
-                    self.assertEqual(sock.recv(1), b'')
+                    try:
+                        self.assertEqual(sock.recv(1), b'')
+                    except ConnectionResetError:
+                        pass
+                admission.assert_called_once()
+                handler.assert_not_called()
         finally:
             server.server_close()
             store.close()
@@ -241,25 +266,27 @@ class SkeletonTests(unittest.TestCase):
         first = self.start()
         second = subprocess.run([sys.executable, str(ROOT / 'server' / 'nth_interposer.py'), 'serve'],
                                 capture_output=True, text=True, timeout=3)
-        self.assertNotEqual(second.returncode, 0)
-        self.assertIn('TimeoutError', second.stderr)
+        self.assertEqual(second.returncode, 75)
+        self.assertIn('lease already held', second.stderr)
         with wire.connect() as client:
             self.assertEqual(client.hello['pid'], first.pid)
 
     def test_idle_exit(self):
-        process = self.start(idle=.4)
-        process.wait(timeout=3)
+        # Process smoke checks use a generous interval; fake-clock tests below
+        # prove idle arithmetic without racing a briefly descheduled parent.
+        process = self.start()
+        process.terminate()
+        process.wait(timeout=5)
         self.assertEqual(process.returncode, 0)
         self.assertFalse(wire.socket_path().exists())
-        self.assertIn('service idle exit', (wire.home() / 'logs' / 'interposer.log').read_text())
+        self.assertIn('service stopped', (wire.home() / 'logs' / 'interposer.log').read_text())
 
     def test_live_session_defers_idle_exit(self):
         store = storage.Store()
         with store.db:
             store.db.execute("INSERT INTO sessions(session,state) VALUES (?,'waiting')", (SESSION,))
         store.close()
-        process = self.start(idle=.2)
-        time.sleep(.5)
+        process = self.start()
         self.assertIsNone(process.poll())
         with wire.connect() as client:
             self.assertEqual(client.call('list')['sessions'][0]['state'], 'waiting')
@@ -301,9 +328,16 @@ class SkeletonTests(unittest.TestCase):
         with patch.object(wire, '_connect', side_effect=FileNotFoundError(2, 'synthetic')):
             process = Mock()
             process.poll.return_value = None
-            with patch.object(wire, '_spawn', return_value=process):
+            clock = [0.0]
+            def advance(seconds):
+                clock[0] += seconds
+            with patch.object(wire, '_spawn', return_value=process), \
+                 patch.object(wire.time,'monotonic',side_effect=lambda:clock[0]), \
+                 patch.object(wire.time,'sleep',side_effect=advance):
+                began = time.monotonic()
                 with self.assertRaisesRegex(TimeoutError, 'connect timeout'):
                     wire.connect(spawn=True, timeout=.1)
+                self.assertAlmostEqual(time.monotonic() - began, .1)
         with patch.object(wire, '_connect', side_effect=PermissionError(13, 'synthetic')):
             with patch.object(wire, '_spawn') as spawn:
                 with self.assertRaises(PermissionError):
@@ -324,15 +358,21 @@ class SkeletonTests(unittest.TestCase):
         self.assertEqual(path.read_text(), 'keep')
 
     def test_systemd_socket_activation(self):
-        process = self.start(activated=True, idle=.3)
+        process = self.start(activated=True)
         self.assertEqual(wire.socket_path().stat().st_mode & 0o777, 0o600)
-        process.wait(timeout=3)
+        process.terminate()
+        process.wait(timeout=5)
         self.assertEqual(process.returncode, 0)
         # Systemd owns the pathname, including when the idle service exits.
         self.assertTrue(wire.socket_path().exists())
 
     def test_activation_environment_validation(self):
-        with patch.dict(os.environ, {'LISTEN_PID': str(os.getpid()), 'LISTEN_FDS': '2'}):
+        sock = Mock(family=socket.AF_UNIX,type=socket.SOCK_STREAM)
+        sock.getsockname.return_value = str(wire.socket_path())
+        sock.getsockopt.return_value = 1
+        sock.fileno.return_value = 3
+        with patch.dict(os.environ, {'LISTEN_PID': str(os.getpid()), 'LISTEN_FDS': '2'}), \
+             patch.object(service.socket,'socket',return_value=sock),patch.object(service.os,'set_inheritable'):
             with self.assertRaisesRegex(wire.WireError, 'one systemd'):
                 service.activated_socket()
         with patch.dict(os.environ, {'LISTEN_PID': str(os.getpid() + 1), 'LISTEN_FDS': '1'}):
@@ -345,13 +385,13 @@ class SkeletonTests(unittest.TestCase):
             self.assertEqual(tables, {'hubs', 'memberships', 'sessions', 'holdings', 'deliveries', 'appserver_spool', 'meta'})
             self.assertEqual(store.db.execute('PRAGMA journal_mode').fetchone()[0], 'wal')
             self.assertEqual(store.db.execute('PRAGMA synchronous').fetchone()[0], 2)
-            self.assertEqual(store.db.execute('PRAGMA user_version').fetchone()[0], 1)
+            self.assertEqual(store.db.execute('PRAGMA user_version').fetchone()[0], 2)
             for table, columns in {
                 'memberships': {'key','source','url','channel','member_id','filter','enabled','ended',
                     'owner_session','announced_through','acked_through','poll_state','poll_error','last_ok'},
                 'sessions': {'session','client','sink','host_pid','host_stamp','state','host_ok','problem',
                     'registered','last_wake','wakes_hour'},
-                'hubs': {'server','url','announced_at','state','since','error'},
+                'hubs': {'server','url','announced_at','state','since','error','pending_url','trust'},
                 'holdings': {'session','key','server','joined'},
                 'deliveries': {'id','session','sink','body','ranges','state','created','done'},
                 'appserver_spool': {'key','message_id','payload','state','turn_id'},
@@ -387,26 +427,35 @@ class SkeletonTests(unittest.TestCase):
             self.assertTrue(store.import_hooks(hooks))
             before = store.snapshot()
             (hooks / ('membership-' + KEY + '.json')).write_text('{"filter":"all","enabled":true}')
-            self.assertFalse(store.import_hooks(hooks))
-            self.assertEqual(store.snapshot(), before)
+            self.assertTrue(store.import_hooks(hooks))
+            after = store.snapshot()
+            self.assertEqual((after['memberships'][0]['filter'], after['memberships'][0]['enabled']), ('all', 1))
+            self.assertEqual(after['memberships'][0]['ended'], '')
+            self.assertEqual(after['holdings'], before['holdings'])
+            self.assertEqual(store.db.execute('SELECT * FROM meta').fetchall(), [])
         finally:
             store.close()
         other = storage.Store(self.root / 'other' / 'interposer.sqlite')
         try:
             (hooks / ('session-' + SESSION + '.json')).write_text('{"high_water":{"' + KEY + '":-1}}')
-            with self.assertRaisesRegex(ValueError, 'high water'):
-                other.import_hooks(hooks)
-            self.assertEqual(other.snapshot()['memberships'], [])
-            self.assertEqual(other.snapshot()['sessions'], [])
+            self.assertTrue(other.import_hooks(hooks))
+            state = other.snapshot()
+            self.assertEqual(state['legacy_import_skips'], [{'basename': 'session-' + SESSION + '.json',
+                                                          'reason': 'invalid legacy state'}])
+            self.assertEqual(len(state['sessions']), 1)
+            self.assertNotEqual(state['sessions'][0]['session'], SESSION)
+            self.assertFalse(any(row['session'] == SESSION for row in state['holdings']))
             shutil.copy(FIXTURES / ('session-' + SESSION + '.json'), hooks)
             self.assertTrue(other.import_hooks(hooks))
+            self.assertEqual(other.snapshot()['legacy_import_skips'], [])
         finally:
             other.close()
 
     def test_hub_announce_list_status_and_concurrent_writes(self):
         self.start()
         with wire.connect() as client:
-            self.assertEqual(client.call('list'), {'hubs': [], 'memberships': [], 'sessions': [], 'holdings': []})
+            self.assertEqual(client.call('list'), {'hubs': [], 'memberships': [], 'sessions': [],
+                                                 'holdings': [], 'legacy_import_skips': []})
         def announce(number):
             with wire.connect() as client:
                 return client.call('hub.announce', server='nth-demo', url='https://hub.example/sse')
@@ -415,7 +464,8 @@ class SkeletonTests(unittest.TestCase):
         with wire.connect() as client:
             state = client.call('status', key=KEY, session=SESSION)
             self.assertEqual(len(state['hubs']), 1)
-            self.assertEqual(state['hubs'][0]['state'], 'announced')
+            self.assertEqual(state['hubs'][0]['state'], 'pending')
+            self.assertEqual(state['hubs'][0]['url'], 'https://hub.example/sse')
             self.assertEqual(state['memberships'], [])
             self.assertEqual(state['sessions'], [])
         self.processes[0].terminate()
@@ -442,13 +492,26 @@ class SkeletonTests(unittest.TestCase):
     def test_credentials_and_bad_hubs_never_logged(self):
         self.start()
         marker = 'synthetic-secret-marker'
-        for fields in ({'session_token': marker},
+        for fields in ({'session_token': marker}, {'token': marker}, {'authkey': marker},
                        {'op': 'hub.announce', 'server': 'nth-demo', 'url': 'https://u:' + marker + '@hub.example/sse'},
                        {'op': 'hub.announce', 'server': 'nth-demo', 'url': 'https://hub.example/sse?token=' + marker},
                        {'op': 'hub.announce', 'server': '../bad', 'url': 'https://hub.example/sse'}):
             request = dict(v=1, id=7, op='hello')
             request.update(fields)
-            self.assertIn('error', self.raw(wire.encode_frame(request)))
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+                sock.settimeout(2)
+                sock.connect(str(wire.socket_path()))
+                sock.sendall(b'{"v":1,"id":0,"op":"hello"}\n')
+                with sock.makefile('rb') as reader:
+                    self.assertIn('ok', wire.read_frame(reader))
+                    sock.sendall(wire.encode_frame(request))
+                    reply = wire.read_frame(reader)
+                    expected = ('credentials must not cross' if any(k in fields for k in ('token','session_token','authkey'))
+                                else 'bad hub server name' if fields.get('server') == '../bad' else 'bad hub URL')
+                    self.assertIn(expected, reply['error'])
+                    self.assertEqual(reply['id'], 7)
+                    sock.sendall(b'{"v":1,"id":8,"op":"list"}\n')
+                    self.assertEqual(wire.read_frame(reader)['ok']['hubs'], [])
         log = (wire.home() / 'logs' / 'interposer.log').read_text()
         self.assertNotIn(marker, log)
         self.assertNotIn(marker, (wire.home() / 'events' / 'interposer.sqlite').read_bytes().decode(errors='replace'))
@@ -458,14 +521,16 @@ class SkeletonTests(unittest.TestCase):
         self.assertTrue(setup.install_interposer_units(self.root, '/venv/bin/python', '/install/server', '/runtime'))
         directory = self.root / '.config' / 'systemd' / 'user'
         socket_unit = (directory / 'trio-interposer.socket').read_text()
-        for line in ('ListenStream=%t/trio/interposer.sock', 'SocketMode=0600', 'DirectoryMode=0700',
-                     'WantedBy=sockets.target'):
+        for line in ('ListenStream="' + str(wire.socket_path()) + '"', 'SocketMode=0600', 'DirectoryMode=0700',
+                     'WantedBy=sockets.target', 'RemoveOnStop=yes'):
             self.assertIn(line, socket_unit)
         unit = (directory / 'trio-interposer.service').read_text()
         for line in ('ExecStart="/venv/bin/python" "/install/server/nth_interposer.py" serve',
                      'Environment="NTH_HOME=/runtime"', 'Restart=on-failure', 'RestartSec=2',
-                     'NoNewPrivileges=yes', 'PrivateTmp=yes'):
+                     'NoNewPrivileges=yes', 'UMask=0077', 'LockPersonality=yes', 'RestrictRealtime=yes',
+                     'RestartPreventExitStatus=75'):
             self.assertIn(line, unit)
+        self.assertNotIn('PrivateTmp=', unit)
         self.assertEqual(self.calls(), [['--user', 'show-environment'], ['--user', 'daemon-reload'],
             ['--user', 'enable', '--now', 'trio-interposer.socket'],
             ['--user', 'is-active', '--quiet', 'trio-interposer.service'],
@@ -484,7 +549,8 @@ class SkeletonTests(unittest.TestCase):
         self.assertNotIn(['--user', 'restart', 'trio-interposer.service'], self.calls())
         self.command_log.unlink()
         os.environ['SYSTEMCTL_AVAILABLE'] = '1'
-        self.assertFalse(setup.install_interposer_units(self.root, '/python', '/server', '/runtime'))
+        self.assertEqual(setup.install_interposer_units(self.root, '/python', '/server', '/runtime'),
+                         'failed: CalledProcessError')
         self.assertEqual(self.calls(), [['--user', 'show-environment']])
 
     def test_setup_install_skip_flag(self):

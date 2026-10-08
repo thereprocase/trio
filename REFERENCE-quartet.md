@@ -6,6 +6,8 @@
 Its protocol-1 `hello`, `hub.announce`, `list`, and `status` ops report stored
 state. Polling and delivery use the existing runtime; an answering `hello`
 does not establish listener readiness. See AGENT-RUNTIME.md.
+Status/list include `legacy_import_skips`; hub rows include `pending_url` and
+trust. Legacy files are refreshed every 60 seconds until a future explicit cutover.
 
 Codex launchers serialize simultaneous shared-server startup. A startup failure may
 fall back to plain Codex with a no-push warning; joining still requires a separate

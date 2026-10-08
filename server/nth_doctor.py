@@ -210,11 +210,18 @@ def interposer_check():
     from nth_interposer_wire import connect, socket_path, WireError
     if not hasattr(socket, 'AF_UNIX'):
         return ('interposer', SKIP, 'Unix sockets unavailable on this platform')
-    if not socket_path().exists():
-        return ('interposer', WARN, 'socket absent; service starts on demand')
     try:
+        if not socket_path().exists():
+            unit = Path.home() / '.config' / 'systemd' / 'user' / 'trio-interposer.socket'
+            detail = ('socket unit stopped or failed; see trio interposer logs' if unit.exists()
+                      else 'socket absent; service starts on demand')
+            return ('interposer', WARN, detail)
         # Diagnosis may trigger socket activation, but never spawns a fallback.
         with connect(timeout=2) as client:
+            skipped = client.call('list').get('legacy_import_skips', [])
+            if skipped:
+                return ('interposer', WARN, 'legacy import skipped: ' +
+                        '; '.join(row['basename'] + ': ' + row['reason'] for row in skipped))
             return ('interposer', OK, 'hello answered; protocol ' + str(client.hello['protocol_max']))
     except (OSError, ValueError, EOFError, WireError) as exc:
         return ('interposer', FAIL, 'hello failed: ' + type(exc).__name__)
