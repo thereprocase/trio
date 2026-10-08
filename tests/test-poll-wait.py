@@ -2,14 +2,16 @@
 """Regression test: a waiting long-poll is cheap and wakes promptly.
 
 Covers:
-  1. A send in this process wakes a waiting poll at once.
+  1. A send in this process wakes a waiting poll at once (faster than any
+     re-check could).
   2. A message written by another connection (as nth_web writes a dashboard
      post) wakes a waiting poll within the re-check interval.
   3. A quiet poll runs a pass at its start and one at its deadline, and
      none in between.
-  4. The heartbeat is written once per POLL_HEARTBEAT_SECONDS, not every pass.
-  5. get_db() runs the schema once per database file, and again for a
-     replaced file.
+  4. The heartbeat is written at most once per POLL_HEARTBEAT_SECONDS.
+  5. Traffic in another channel wakes no full pass.
+  6. get_db() runs the schema once per database file, and again after a schema
+     change by another connection or for a replaced file.
 
 Run: python3 tests/test-poll-wait.py
 """
@@ -73,16 +75,19 @@ with tempfile.TemporaryDirectory() as tmp:
         nth_server.nth_ack(channel=channel, member_id=reader, session_token=reader_token,
                            through_id=first["messages"][-1]["id"])
 
-    # 1. In-process send wakes the poll at once.
+    # 1. In-process send wakes the poll at once. The re-check is pushed out to
+    # 5 s so only the notify path can answer within the bound below.
+    nth_server.POLL_RECHECK_SECONDS = 5.0
     thread, box = poll_in_thread(channel, reader, reader_token, 10)
     time.sleep(0.5)
     nth_server.nth_send(channel=channel, member_id=writer, message="hello",
                         session_token=writer_token)
     thread.join(12)
+    nth_server.POLL_RECHECK_SECONDS = 1.0
     check("in-process send wakes a waiting poll",
           box.get("result", {}).get("event") == "new_messages", box)
-    check("in-process wake is prompt (under 0.5 s after the send)",
-          box.get("elapsed", 99) < 1.0, box.get("elapsed"))
+    check("in-process wake comes from the notify, before any re-check",
+          box.get("elapsed", 99) < 2.0, box.get("elapsed"))
     nth_server.nth_ack(channel=channel, member_id=reader, session_token=reader_token,
                        through_id=box["result"]["messages"][-1]["id"])
 
@@ -127,15 +132,43 @@ with tempfile.TemporaryDirectory() as tmp:
     quiet = json.loads(nth_server.nth_poll(channel=channel, member_id=reader,
                                            session_token=reader_token, wait_seconds=5))
     elapsed = time.monotonic() - started
-    nth_server._get_member = real_get_member
-    nth_server._poll_heartbeat = real_beat
     check("quiet poll waits out its deadline", quiet.get("event") == "no_new" and elapsed >= 4.5,
           (quiet.get("event"), elapsed))
     # One pass at the start and one at the deadline; the old loop ran one every 2 s.
     check("quiet poll runs two full passes (was one every 2 s)", len(passes) == 2, len(passes))
     check("quiet poll writes the heartbeat once", len(beats) == 1, len(beats))
 
-    # 5. Schema runs once per file, and again for a replaced file.
+    # 4b. With a short throttle the deadline pass writes it again.
+    nth_server.POLL_HEARTBEAT_SECONDS = 1.5
+    beats.clear()
+    nth_server.nth_poll(channel=channel, member_id=reader, session_token=reader_token,
+                        wait_seconds=3)
+    nth_server.POLL_HEARTBEAT_SECONDS = 20.0
+    check("heartbeat is written again once the throttle has passed", len(beats) == 2, len(beats))
+
+    # 5. Another channel's traffic, from this process and from another
+    # connection, wakes no full pass in this one.
+    other, other_token = join("poll-wait-other", "other")
+    passes.clear()
+    thread, box = poll_in_thread(channel, reader, reader_token, 5)
+    for i in range(6):
+        time.sleep(0.5)
+        nth_server.nth_send(channel="poll-wait-other", member_id=other,
+                            message=f"elsewhere {i}", session_token=other_token)
+        outside = sqlite3.connect(str(nth_server.DB_PATH))
+        outside.execute(
+            "INSERT INTO messages (channel, member_id, member_name, content, created_at) "
+            "VALUES (?, ?, ?, ?, ?)", ("poll-wait-other", other, "other", "dashboard",
+                                       nth_server.now_iso()))
+        outside.commit()
+        outside.close()
+    thread.join(10)
+    check("other channels' traffic wakes no full pass", len(passes) == 2, len(passes))
+    nth_server._get_member = real_get_member
+    nth_server._poll_heartbeat = real_beat
+
+    # 6. Schema runs once per file, again after another connection changes the
+    # schema, and again for a replaced file.
     statements = []
     real_connect = sqlite3.connect
 
@@ -149,6 +182,15 @@ with tempfile.TemporaryDirectory() as tmp:
         nth_server.get_db().close()
         creates = [s for s in statements if "CREATE TABLE" in s]
         check("get_db skips the schema for a ready file", creates == [], len(creates))
+        outside = real_connect(str(nth_server.DB_PATH))
+        outside.execute("ALTER TABLE members ADD COLUMN test_only_column TEXT")
+        outside.commit()
+        outside.close()
+        statements.clear()
+        nth_server.get_db().close()
+        creates = [s for s in statements if "CREATE TABLE" in s]
+        check("get_db reruns the schema after another connection changes it", creates != [],
+              len(creates))
         nth_server.DB_PATH.unlink()
         for suffix in ("-wal", "-shm"):
             Path(str(nth_server.DB_PATH) + suffix).unlink(missing_ok=True)

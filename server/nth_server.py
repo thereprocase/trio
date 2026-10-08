@@ -284,19 +284,20 @@ def now_iso() -> str:
 
 # The schema and migrations below are idempotent but cost ~45 statements per
 # connection, and every tool call and long-poll opens one. They run once per
-# database file per process. The key carries the file's identity and its
-# sqlite_master row count, so a replaced file or a table added by another
-# process (nth_web, a stdio server) runs them again.
+# database file per process, and only after a run that completed cleanly. The
+# key carries the file's identity and SQLite's schema_version, which every
+# CREATE, DROP and ADD COLUMN bumps, so a replaced or restored file, or a schema
+# change made by another process (nth_web, a stdio server), runs them again.
 _schema_ready_key = None
 
 
 def _schema_key(conn: sqlite3.Connection):
     try:
         st = os.stat(DB_PATH)
-        tables = conn.execute("SELECT count(*) FROM sqlite_master").fetchone()[0]
+        version = conn.execute("PRAGMA schema_version").fetchone()[0]
     except (OSError, sqlite3.Error):
         return None
-    return (str(DB_PATH), st.st_dev, st.st_ino, tables)
+    return (str(DB_PATH), st.st_dev, st.st_ino, version)
 
 
 def get_db() -> sqlite3.Connection:
@@ -310,6 +311,10 @@ def get_db() -> sqlite3.Connection:
     key = _schema_key(conn)
     if key is not None and key == _schema_ready_key:
         return conn
+    # Anything other than "the column is already there" (a lock timeout, the
+    # avatar index refused over duplicates) leaves the run unfinished, so the
+    # next open repeats it rather than the cache freezing a half-migrated file.
+    unfinished = []
     conn.execute("""
         CREATE TABLE IF NOT EXISTS channels (
             code        TEXT PRIMARY KEY,
@@ -493,8 +498,9 @@ def get_db() -> sqlite3.Connection:
     ]:
         try:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {defn}")
-        except sqlite3.OperationalError:
-            pass  # column already exists
+        except sqlite3.OperationalError as exc:
+            if 'duplicate column' not in str(exc).lower():
+                unfinished.append(exc)
     # v6: sessions table. Per-session watermark + capability role so
     # sub-agents spawned with a read_only token cannot forge posts under
     # the parent's member_id. member_id stays the public identity;
@@ -558,8 +564,9 @@ def get_db() -> sqlite3.Connection:
                  "blocked_since TEXT"):
         try:
             conn.execute(f"ALTER TABLE sessions ADD COLUMN {_col}")
-        except sqlite3.OperationalError:
-            pass  # column already exists
+        except sqlite3.OperationalError as exc:
+            if 'duplicate column' not in str(exc).lower():
+                unfinished.append(exc)
 
     # kind: 'agent' | 'human'. The managed-agent feature creates members rows
     # programmatically, so the roster needs to tell a spawned agent from a
@@ -568,15 +575,17 @@ def get_db() -> sqlite3.Connection:
     # call; the web layer stamps 'human' on operator rows as it creates them.
     try:
         conn.execute("ALTER TABLE members ADD COLUMN kind TEXT NOT NULL DEFAULT 'agent'")
-    except sqlite3.OperationalError:
-        pass  # column already exists
+    except sqlite3.OperationalError as exc:
+        if 'duplicate column' not in str(exc).lower():
+            unfinished.append(exc)
 
     # model: the agent's model tier, surfaced on the roster so an operator can
     # see what each member is running without opening it.
     try:
         conn.execute("ALTER TABLE members ADD COLUMN model TEXT NOT NULL DEFAULT ''")
-    except sqlite3.OperationalError:
-        pass  # column already exists
+    except sqlite3.OperationalError as exc:
+        if 'duplicate column' not in str(exc).lower():
+            unfinished.append(exc)
 
     # recipients: JSON array of member_ids a message is scoped to; empty or
     # '[]' means broadcast. Introduced here because the agent inbox needs it:
@@ -585,8 +594,9 @@ def get_db() -> sqlite3.Connection:
     # would read it. The user-facing DM feature builds on the same column.
     try:
         conn.execute("ALTER TABLE messages ADD COLUMN recipients TEXT NOT NULL DEFAULT '[]'")
-    except sqlite3.OperationalError:
-        pass  # column already exists
+    except sqlite3.OperationalError as exc:
+        if 'duplicate column' not in str(exc).lower():
+            unfinished.append(exc)
 
     # choices/selection: a multiple-choice question posed to a HUMAN and the
     # answer they clicked. The question payload lives on the asking message;
@@ -596,8 +606,9 @@ def get_db() -> sqlite3.Connection:
     for _col in ("choices", "selection"):
         try:
             conn.execute(f"ALTER TABLE messages ADD COLUMN {_col} TEXT NOT NULL DEFAULT ''")
-        except sqlite3.OperationalError:
-            pass  # column already exists
+        except sqlite3.OperationalError as exc:
+            if 'duplicate column' not in str(exc).lower():
+                unfinished.append(exc)
 
     # edited_at: an operator can correct their own message. A timestamp rather
     # than a destructive UPDATE, so the row survives for the audit trail and
@@ -611,8 +622,9 @@ def get_db() -> sqlite3.Connection:
     for _col in ("edited_at",):
         try:
             conn.execute(f"ALTER TABLE messages ADD COLUMN {_col} TEXT")
-        except sqlite3.OperationalError:
-            pass  # column already exists
+        except sqlite3.OperationalError as exc:
+            if 'duplicate column' not in str(exc).lower():
+                unfinished.append(exc)
 
     # Recent tool calls per session, backing the roster's expandable
     # recent-calls list. Keyed on the session FINGERPRINT (the raw
@@ -760,8 +772,9 @@ def get_db() -> sqlite3.Connection:
     for column, definition in agent_columns.items():
         try:
             conn.execute(f"ALTER TABLE agents ADD COLUMN {column} {definition}")
-        except sqlite3.OperationalError:
-            pass  # already present
+        except sqlite3.OperationalError as exc:
+            if 'duplicate column' not in str(exc).lower():
+                unfinished.append(exc)
     conn.execute(
         "UPDATE agents SET runtime_ref=session_id "
         "WHERE runtime_ref IS NULL AND session_id IS NOT NULL")
@@ -782,10 +795,10 @@ def get_db() -> sqlite3.Connection:
     # already contains duplicates therefore keeps today's application-enforced
     # behaviour and says so, rather than becoming unbootable over a constraint
     # it predates.
-    # Retried on every open so the index appears by itself once an operator
+    # Retried on every open of a database that still lacks it (the schema cache
+    # skips only clean runs), so the index appears by itself once an operator
     # resolves the duplicates — but warned about only once per process, because
-    # get_db() runs per request and a dirty database would otherwise write this
-    # line thousands of times a day.
+    # a dirty database would otherwise write this line thousands of times a day.
     try:
         conn.execute("""
             CREATE UNIQUE INDEX IF NOT EXISTS idx_agents_avatar_active
@@ -793,6 +806,7 @@ def get_db() -> sqlite3.Connection:
             WHERE archived_at IS NULL AND avatar_name != ''
         """)
     except sqlite3.IntegrityError as exc:
+        unfinished.append(exc)
         # ONLY the duplicate case. A broader catch would report corruption, I/O
         # failure or a schema fault as "duplicates already present" — a
         # confident wrong diagnosis for a fault that deserves to surface.
@@ -906,7 +920,8 @@ def get_db() -> sqlite3.Connection:
         "ON stall_events (resolved_at, id)"
     )
     conn.commit()
-    _schema_ready_key = _schema_key(conn)
+    if not unfinished:
+        _schema_ready_key = _schema_key(conn)
     return conn
 
 
@@ -914,12 +929,14 @@ def get_db() -> sqlite3.Connection:
 # A send or DM in this process wakes them at once. Writes from other processes
 # (nth_web posts from the dashboard, a stdio server on the same file) change
 # SQLite's data_version, which a waiting poll checks every POLL_RECHECK_SECONDS
-# for the cost of one pragma; the full pass runs only after something changed.
+# for the cost of one pragma. Either signal covers the whole database, so before
+# a full pass the poll probes its own channel (newest message id, channel status,
+# its membership) and goes back to waiting when nothing there changed.
 _message_wake = threading.Condition()
 _message_generation = 0
 POLL_RECHECK_SECONDS = 1.0
 # members.last_seen only needs to beat the 60 s dashboard light and the 300 s
-# stale threshold, so a waiting poll refreshes it this often, not every pass.
+# stale threshold, so a pass refreshes it at most this often.
 POLL_HEARTBEAT_SECONDS = 20.0
 
 
@@ -930,32 +947,50 @@ def _notify_new_messages() -> None:
         _message_wake.notify_all()
 
 
-def _change_marker(db: sqlite3.Connection) -> tuple:
-    """What a waiting poll compares against: this process's send counter and
-    the connection's view of commits made by every other connection."""
+def _data_version(db: sqlite3.Connection):
+    """Changes whenever another connection commits; this connection's own
+    commits (heartbeat, auto-ack) leave it alone."""
     try:
-        version = db.execute("PRAGMA data_version").fetchone()[0]
+        return db.execute("PRAGMA data_version").fetchone()[0]
     except sqlite3.Error:
-        version = None
-    return (_message_generation, version)
+        return None
 
 
-def _wait_for_change(db: sqlite3.Connection, marker: tuple, deadline: float) -> None:
-    """Block until the database may hold something new for this poll, or the
-    deadline passes. A false wake only costs one extra pass."""
+def _channel_probe(db: sqlite3.Connection, channel: str, member_id: str) -> tuple:
+    """The parts of the database a waiting poll answers to."""
+    try:
+        return tuple(db.execute(
+            "SELECT (SELECT MAX(id) FROM messages WHERE channel = ?),"
+            " (SELECT status FROM channels WHERE code = ?),"
+            " (SELECT COUNT(*) FROM members WHERE id = ? AND channel = ?)",
+            (channel, channel, member_id, channel)).fetchone())
+    except sqlite3.Error:
+        return (None,)
+
+
+def _change_marker(db: sqlite3.Connection, channel: str, member_id: str) -> tuple:
+    return (_message_generation, _data_version(db), _channel_probe(db, channel, member_id))
+
+
+def _wait_for_change(db: sqlite3.Connection, channel: str, member_id: str,
+                     marker: tuple, deadline: float) -> None:
+    """Block until this poll's channel may hold something new, or the deadline
+    (time.monotonic) passes. A false wake only costs one extra pass."""
+    generation, version, probe = marker
     while True:
-        remaining = deadline - time.time()
+        remaining = deadline - time.monotonic()
         if remaining <= 0:
             return
         with _message_wake:
-            if _message_generation != marker[0]:
+            if _message_generation == generation:
+                _message_wake.wait(min(POLL_RECHECK_SECONDS, remaining))
+            woke = _message_generation != generation
+            generation = _message_generation
+        current = _data_version(db)
+        if woke or current != version:
+            version = current
+            if _channel_probe(db, channel, member_id) != probe:
                 return
-            _message_wake.wait(min(POLL_RECHECK_SECONDS, remaining))
-            if _message_generation != marker[0]:
-                return
-        if _change_marker(db)[1] != marker[1]:
-            return
-
 
 def _poll_heartbeat(db: sqlite3.Connection, channel: str, member_id: str, now: str,
                     monitor_heartbeat: bool, monitor_filter: str) -> None:
@@ -2357,11 +2392,11 @@ def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: st
         # cannot advance this session's cursor.
 
     try:
-        deadline = time.time() + wait_seconds
+        deadline = time.monotonic() + wait_seconds
         _ctx_relayed = False
         _last_beat = None
         while True:
-            marker = _change_marker(db)
+            marker = _change_marker(db, channel, member_id)
             member = _get_member(db, channel, member_id)
             if not member:
                 return json.dumps({"error": "You are not a member of this channel."})
@@ -2413,8 +2448,8 @@ def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: st
             # rings + full drill-downs for this member. Size-capped and
             # validated; never allowed to break the poll.
             # Only on the first iteration of this long poll: the loop below
-            # re-runs every 2s, and re-writing an unchanged blob (with a
-            # fresh _relayed_at) turned a heartbeat into ~1800 UPDATEs/hour
+            # can run several passes, and re-writing an unchanged blob (with a
+            # fresh _relayed_at) once turned a heartbeat into ~1800 UPDATEs/hour
             # per spoke and made _relayed_at measure "a poll was in flight"
             # rather than "this snapshot is current".
             if (monitor_heartbeat and monitor_context and not _ctx_relayed
@@ -2461,10 +2496,10 @@ def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: st
                     filtered = [m for m in unread if from_name_lower in (m["member_name"] or "").lower()]
                     if not filtered:
                         # Matches exist but none from this sender — keep waiting
-                        if time.time() >= deadline:
+                        if time.monotonic() >= deadline:
                             return json.dumps({"event": "no_new", "unread_count": len(unread),
                                               "reminder": "No matching messages yet, but stay connected. Other members may need you. Keep polling until the channel ends or your user tells you to stop."})
-                        _wait_for_change(db, marker, deadline)
+                        _wait_for_change(db, channel, member_id, marker, deadline)
                         continue
                     display_msgs = filtered
                 else:
@@ -2489,9 +2524,9 @@ def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: st
                             "UPDATE members SET last_read = ? WHERE id = ? AND channel = ?",
                             (current_watermark, member_id, channel))
                         db.commit()
-                    if time.time() >= deadline:
+                    if time.monotonic() >= deadline:
                         return json.dumps({"event": "no_new"})
-                    _wait_for_change(db, marker, deadline)
+                    _wait_for_change(db, channel, member_id, marker, deadline)
                     continue
 
                 # Apply mentions_only filter: keep broadcasts (empty mentions)
@@ -2639,14 +2674,14 @@ def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: st
                     db.commit()
                 return result
 
-            if time.time() >= deadline:
+            if time.monotonic() >= deadline:
                 nag = _sentinel_nag(member)
                 reminder = "No new messages, but stay connected."
                 if nag:
                     reminder += " " + nag
                 return json.dumps({"event": "no_new", "unread_count": 0, "reminder": reminder})
 
-            _wait_for_change(db, marker, deadline)
+            _wait_for_change(db, channel, member_id, marker, deadline)
     finally:
         db.close()
 
