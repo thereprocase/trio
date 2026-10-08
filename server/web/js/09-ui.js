@@ -14,7 +14,7 @@
   // Optional `action` = { label, onClick } or an array renders buttons (e.g. an
   // "Undo" affordance) that runs onClick and dismisses the toast. Back-compat:
   // existing callers pass no action and get a plain text toast.
-  function toast(message, timeout = 3500, action = null) {
+  function toast(message, timeout = 3500, action = null, options = {}) {
     let host = document.getElementById('trio-toasts');
     if (!host) { host = document.createElement('div'); host.id = 'trio-toasts'; host.className = 'toast-wrap'; document.body.append(host); }
     // Promote the host to the top layer so toasts paint ABOVE an open modal
@@ -29,7 +29,7 @@
     // Tap to dismiss. Toasts sit at the bottom of the screen, which on a phone
     // is the composer: a long message would otherwise cover Send and the mic
     // for its whole timeout.
-    node.addEventListener('click', event => { if (event.target === node) dismiss(); });
+    node.addEventListener('click', event => { if (event.target === node && options?.dismissible !== false) dismiss(); });
     for (const offer of (Array.isArray(action) ? action : [action])) {
       if (!offer?.label || typeof offer.onClick !== 'function') continue;
       const btn = document.createElement('button'); btn.type = 'button'; btn.className = 'toast-action'; btn.textContent = offer.label;
