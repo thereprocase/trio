@@ -37,6 +37,8 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -73,10 +75,36 @@ JWT_REFRESH_MARGIN_S = 3600
 PUSH_TTL_S = 12 * 3600           # how long a push service holds an undelivered push
 SEND_TIMEOUT_S = 10
 RECORD_SIZE = 4096
+# RFC 8030 push services accept at most 4096 octets of body. The aes128gcm
+# header is 86 octets (16 salt + 4 record size + 1 key length + 65 key), and
+# the record adds a 16-octet tag and the 0x02 delimiter, leaving this much
+# for the JSON payload.
+MAX_PUSH_BODY = 4096
+HEADER_LEN = 16 + 4 + 1 + 65
+MAX_PLAINTEXT = MAX_PUSH_BODY - HEADER_LEN - 16 - 1     # 3993
 MAX_ENDPOINT_LEN = 1024
 MAX_BODY_CHARS = 240
-MAX_SUBS_PER_MEMBER = 64
-MAX_SUBS_TOTAL = 5000
+MAX_TITLE_CHARS = 120
+
+# Subscription quotas, per tier. A self-declared guest gets a fresh member id
+# with every new cookie, so a per-member cap alone does not bound guests; the
+# guest pool is therefore small and SEPARATE, and nothing a guest does can
+# consume the room kept for the owner, local users and listed members.
+TIER_GUEST = "guest"
+TIER_TRUSTED = "trusted"
+TIER_QUOTAS = {               # tier -> (per member, whole tier)
+    TIER_GUEST: (8, 200),
+    TIER_TRUSTED: (64, 4800),
+}
+
+# Delivery bounds. Sends run in parallel and each tick stops taking new
+# messages once this many pushes are queued; the rest wait for the next tick.
+MAX_SENDS_PER_TICK = 256
+SEND_WORKERS = 16
+TRANSIENT_BACKOFF_S = 60
+MAX_CONSECUTIVE_REJECTS = 3   # 4xx in a row before a subscription is dropped
+BANG_RETRY_ATTEMPTS = 3
+MAX_RETRY_QUEUE = 500
 
 # Push services the browsers we target actually use. A subscription endpoint is
 # a URL the CLIENT supplies and the SERVER later POSTs to, so without this list
@@ -210,9 +238,9 @@ def encrypt_aes128gcm(plaintext: bytes, ua_public: bytes, auth_secret: bytes, *,
     cek = _hmac_sha256(prk, b"Content-Encoding: aes128gcm\x00\x01")[:16]
     nonce = _hmac_sha256(prk, b"Content-Encoding: nonce\x00\x01")[:12]
 
-    # A single record: the plaintext plus the 0x02 "last record" delimiter.
-    # 16 bytes of tag and the delimiter must fit inside the record size.
-    if len(plaintext) + 1 + 16 > record_size:
+    # A single record: the plaintext plus the 0x02 "last record" delimiter,
+    # and the whole body (header + record) within the push services' limit.
+    if len(plaintext) > MAX_PLAINTEXT or len(plaintext) + 1 + 16 > record_size:
         raise ValueError("push payload too large for one record")
     ciphertext = AESGCM(cek).encrypt(nonce, plaintext + b"\x02", None)
     header = salt + struct.pack("!IB", record_size, len(as_public)) + as_public
@@ -294,8 +322,7 @@ class VapidKeys:
                       now: Optional[float] = None) -> str:
         """The Authorization header value for a push to `endpoint`."""
         now = time.time() if now is None else now
-        parsed = urlparse(endpoint)
-        audience = f"{parsed.scheme}://{parsed.netloc}"
+        audience = vapid_audience(endpoint)
         with self._lock:
             cached = self._jwt_cache.get((audience, contact))
             if cached is None or cached[1] - now < JWT_REFRESH_MARGIN_S:
@@ -304,6 +331,18 @@ class VapidKeys:
                 cached = (token, exp)
                 self._jwt_cache[(audience, contact)] = cached
         return f"vapid t={cached[0]}, k={self.public_b64}"
+
+
+def vapid_audience(endpoint: str) -> str:
+    """The JWT `aud`: the push service origin in canonical form.
+
+    Built from the hostname alone (lower case, no trailing dot, no port) so an
+    endpoint spelled "https://FCM.googleapis.com.:443/..." signs for the origin
+    the push service actually checks. endpoint_allowed() admits only https on
+    the default port, so the scheme and port are fixed.
+    """
+    host = (urlparse(endpoint).hostname or "").lower().rstrip(".")
+    return f"https://{host}"
 
 
 def verify_jwt(token: str, public_bytes: bytes) -> Dict[str, Any]:
@@ -483,14 +522,37 @@ def build_payload(channel: str, decision: Decision,
                 "body": f"Latest from {decision.sender}" if decision.sender else ""}
     msg = msg or {}
     sender = msg.get("member_name") or msg.get("member_id") or "someone"
-    body = " ".join(str(msg.get("content") or "").split())
-    if len(body) > MAX_BODY_CHARS:
-        body = body[:MAX_BODY_CHARS - 1] + "…"
     where = "DM" if parse_recipients(msg.get("recipients")) else f"#{channel}"
     title = f"{where} — {sender}"
     if decision.kind == "bang":
         title = "Urgent: " + title
-    return {**base, "title": title, "body": body}
+    return {**base, "title": _clip(title, MAX_TITLE_CHARS),
+            "body": _clip(" ".join(str(msg.get("content") or "").split()), MAX_BODY_CHARS)}
+
+
+def _clip(text: str, limit: int) -> str:
+    return text if len(text) <= limit else text[:limit - 1] + "…"
+
+
+def encode_payload(payload: Dict[str, Any]) -> bytes:
+    """Serialise a payload so it always fits one push record.
+
+    UTF-8 rather than \\u escapes (an emoji costs 4 octets, not 12), and the
+    body is shortened until the whole thing fits MAX_PLAINTEXT.
+    """
+    payload = dict(payload)
+    while True:
+        raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        if len(raw) <= MAX_PLAINTEXT:
+            return raw
+        body, title = str(payload.get("body") or ""), str(payload.get("title") or "")
+        # Each step strictly shortens the field (len // 2 - 1 chars plus "…").
+        if len(body) > 1:
+            payload["body"] = body[:len(body) // 2 - 1] + "…"
+        elif len(title) > 1:
+            payload["title"] = title[:len(title) // 2 - 1] + "…"
+        else:
+            raise ValueError("push payload cannot be made to fit")
 
 
 # ───────── Subscription store (SQLite, next to the hub DB) ─────────
@@ -512,7 +574,16 @@ def ensure_push_table(db: sqlite3.Connection) -> None:
         " last_sent_at REAL NOT NULL DEFAULT 0,"
         " pending_count INTEGER NOT NULL DEFAULT 0,"
         " pending_sender TEXT NOT NULL DEFAULT '',"
+        " tier TEXT NOT NULL DEFAULT 'guest',"
+        " fail_count INTEGER NOT NULL DEFAULT 0,"
         " PRIMARY KEY (channel, endpoint))")
+    # Columns added after the table first shipped. A row written before `tier`
+    # existed counts as a guest: the smaller pool is the safe default.
+    have = {r[1] for r in db.execute("PRAGMA table_info(push_subscriptions)").fetchall()}
+    for column, ddl in (("tier", "TEXT NOT NULL DEFAULT 'guest'"),
+                        ("fail_count", "INTEGER NOT NULL DEFAULT 0")):
+        if column not in have:
+            db.execute(f"ALTER TABLE push_subscriptions ADD COLUMN {column} {ddl}")
     db.execute("CREATE INDEX IF NOT EXISTS idx_push_member "
                "ON push_subscriptions(member_id, channel)")
 
@@ -521,35 +592,54 @@ class SubscriptionLimit(Exception):
     pass
 
 
+class SubscriptionConflict(Exception):
+    """The endpoint is already subscribed to this channel by another identity."""
+
+
 def upsert_subscription(db: sqlite3.Connection, *, channel: str, endpoint: str,
                         p256dh: str, auth: str, member_id: str, member_name: str,
-                        mode: str, now: Optional[float] = None) -> None:
+                        mode: str, tier: str = TIER_GUEST,
+                        now: Optional[float] = None) -> None:
     """Store one device's subscription to one channel.
 
-    Keyed by (channel, endpoint): one browser has one endpoint, so re-subscribing
-    from it replaces its row -- including when that browser's identity changed,
-    since the endpoint follows the device, not the cookie.
+    Keyed by (channel, endpoint): one browser has one endpoint, so changing
+    mode from it replaces its row. A row belongs to the identity that created
+    it; another identity presenting the same endpoint is refused
+    (SubscriptionConflict) and the page answers by making a fresh endpoint.
+    Changing the mode clears any every5m count held under the old one.
     """
     if mode not in PUSH_MODES:
         raise ValueError("unknown mode")
+    if tier not in TIER_QUOTAS:
+        raise ValueError("unknown tier")
     now = time.time() if now is None else now
     ensure_push_table(db)
     existing = db.execute(
         "SELECT member_id FROM push_subscriptions WHERE channel = ? AND endpoint = ?",
         (channel, endpoint)).fetchone()
+    if existing is not None and existing[0] != member_id:
+        raise SubscriptionConflict("this device is subscribed under another identity")
     if existing is None:
+        per_member, per_tier = TIER_QUOTAS[tier]
         mine = db.execute("SELECT COUNT(*) FROM push_subscriptions WHERE member_id = ?",
                           (member_id,)).fetchone()[0]
-        total = db.execute("SELECT COUNT(*) FROM push_subscriptions").fetchone()[0]
-        if mine >= MAX_SUBS_PER_MEMBER or total >= MAX_SUBS_TOTAL:
+        pool = db.execute("SELECT COUNT(*) FROM push_subscriptions WHERE tier = ?",
+                          (tier,)).fetchone()[0]
+        if mine >= per_member or pool >= per_tier:
             raise SubscriptionLimit("too many push subscriptions")
     db.execute(
         "INSERT INTO push_subscriptions (channel, endpoint, member_id, member_name,"
-        " p256dh, auth, mode, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?)"
-        " ON CONFLICT(channel, endpoint) DO UPDATE SET member_id = excluded.member_id,"
+        " p256dh, auth, mode, created_at, updated_at, tier) VALUES (?,?,?,?,?,?,?,?,?,?)"
+        " ON CONFLICT(channel, endpoint) DO UPDATE SET"
         " member_name = excluded.member_name, p256dh = excluded.p256dh,"
-        " auth = excluded.auth, mode = excluded.mode, updated_at = excluded.updated_at",
-        (channel, endpoint, member_id, member_name, p256dh, auth, mode, now, now))
+        " auth = excluded.auth, updated_at = excluded.updated_at, fail_count = 0,"
+        " pending_count = CASE WHEN push_subscriptions.mode = excluded.mode"
+        "   THEN push_subscriptions.pending_count ELSE 0 END,"
+        " pending_sender = CASE WHEN push_subscriptions.mode = excluded.mode"
+        "   THEN push_subscriptions.pending_sender ELSE '' END,"
+        " mode = excluded.mode"
+        " WHERE push_subscriptions.member_id = excluded.member_id",
+        (channel, endpoint, member_id, member_name, p256dh, auth, mode, now, now, tier))
 
 
 def delete_subscription(db: sqlite3.Connection, *, member_id: str, endpoint: str,
@@ -562,6 +652,13 @@ def delete_subscription(db: sqlite3.Connection, *, member_id: str, endpoint: str
         cur = db.execute("DELETE FROM push_subscriptions WHERE member_id = ? AND "
                          "endpoint = ?", (member_id, endpoint))
     return cur.rowcount
+
+
+def delete_channel_subscriptions(db: sqlite3.Connection, channel: str) -> int:
+    """Forget every subscription to a channel that is being deleted."""
+    ensure_push_table(db)
+    return db.execute("DELETE FROM push_subscriptions WHERE channel = ?",
+                      (channel,)).rowcount
 
 
 def subscriptions_for(db: sqlite3.Connection, member_id: str,
@@ -591,7 +688,7 @@ def send_push(endpoint: str, p256dh: str, auth: str, payload: Dict[str, Any],
     """POST one encrypted push. Returns the HTTP status (0 = network error)."""
     if not endpoint_allowed(endpoint):
         return 0
-    body = encrypt_aes128gcm(json.dumps(payload).encode("utf-8"),
+    body = encrypt_aes128gcm(encode_payload(payload),
                              b64url_decode(p256dh), b64url_decode(auth))
     req = urllib.request.Request(endpoint, data=body, method="POST")
     req.add_header("Authorization", vapid.authorization(endpoint, contact))
@@ -616,6 +713,21 @@ def _host_of(endpoint: str) -> str:
         return "?"
 
 
+@dataclass
+class _Outgoing:
+    """One push about to be sent, with what is needed to undo or retry it."""
+    sub: Dict[str, Any]
+    decision: Decision
+    msg: Optional[Dict[str, Any]]
+    prior: SubState
+    attempt: int = 0
+    status: int = 0
+
+
+def _transient(status: int) -> bool:
+    return status == 0 or status == 429 or status >= 500
+
+
 class PushDispatcher(threading.Thread):
     """Watches the hub DB for new messages and sends the pushes they earn.
 
@@ -624,25 +736,37 @@ class PushDispatcher(threading.Thread):
     never replays history to anyone's phone. Runs on its own daemon thread and
     catches everything: a broken push service or a locked DB costs a backoff,
     never the web server.
+
+    `lease_check` is asked before every tick; when it answers False this hub no
+    longer drives the database, so the dispatcher stops rather than racing the
+    hub that took over (which would double-send every push).
     """
 
     def __init__(self, db_path: Path, state_dir: Path, *, poll_s: float = 2.0,
                  sender: Callable[..., int] = send_push,
-                 clock: Callable[[], float] = time.time):
+                 clock: Callable[[], float] = time.time,
+                 lease_check: Optional[Callable[[], bool]] = None):
         super().__init__(name="nth-push", daemon=True)
         self.db_path = Path(db_path)
         self.state_dir = Path(state_dir)
         self.poll_s = poll_s
         self._send = sender
         self._clock = clock
+        self._lease_check = lease_check
         self._stop = threading.Event()
         self.high_water: Optional[int] = None
-        # endpoint -> monotonic time before which we do not retry it
+        # endpoint -> monotonic time before which nothing is sent to it
         self._endpoint_backoff: Dict[str, float] = {}
+        # bangs whose send failed transiently, retried on later ticks
+        self._retry: "deque[_Outgoing]" = deque()
         self._last_error = ""
 
     def stop(self) -> None:
         self._stop.set()
+
+    @property
+    def stopped(self) -> bool:
+        return self._stop.is_set()
 
     def run(self) -> None:
         delay = self.poll_s
@@ -658,32 +782,50 @@ class PushDispatcher(threading.Thread):
                     self._last_error = msg
                 delay = min(max(delay * 2, self.poll_s), 60.0)
 
+    def _holds_lease(self) -> bool:
+        if self._stop.is_set():
+            return False
+        if self._lease_check is None:
+            return True
+        try:
+            held = bool(self._lease_check())
+        except Exception:
+            held = False
+        if not held:
+            sys.stderr.write("[nth_web push] this hub no longer holds the agent-control "
+                             "lease; phone notifications stop here\n")
+            self._stop.set()
+        return held
+
+    def _backed_off(self, endpoint: str) -> bool:
+        return self._endpoint_backoff.get(endpoint, 0) > time.monotonic()
+
     # One poll. Public so tests can drive it without a thread.
     def tick(self) -> int:
         """Process new messages and due digests. Returns pushes attempted.
 
         Three phases, so the hub DB is never locked while we wait on the
-        network: decide and record state in one short transaction, send with
-        no transaction open, then drop the subscriptions a push service
-        reported gone in a second short transaction. A push service taking its
-        full timeout must not make an agent's send hit "database is locked".
+        network: decide and record state in one short transaction, send in
+        parallel with no transaction open, then record the outcomes (drop gone
+        subscriptions, hand back undelivered summaries) in a second short one.
+        A push service taking its full timeout must not make an agent's send
+        hit "database is locked".
         """
+        if not self._holds_lease():
+            return 0
         outbox = self._plan()
-        gone = [endpoint for endpoint, status in
-                ((item[0]["endpoint"], self._deliver(*item)) for item in outbox)
-                if status in (404, 410)]
-        if gone:
-            db = sqlite3.connect(str(self.db_path), timeout=5)
-            try:
-                # The browser dropped these subscriptions; they never come back.
-                db.executemany("DELETE FROM push_subscriptions WHERE endpoint = ?",
-                               [(e,) for e in gone])
-                db.commit()
-            finally:
-                db.close()
+        if not outbox:
+            return 0
+        if not self._holds_lease():
+            return 0
+        workers = max(1, min(SEND_WORKERS, len(outbox)))
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="nth-push-send") as pool:
+            for item, status in zip(outbox, pool.map(self._deliver, outbox), strict=True):
+                item.status = status
+        self._record(outbox)
         return len(outbox)
 
-    def _plan(self) -> List[Tuple[Dict[str, Any], Decision, Optional[Dict[str, Any]]]]:
+    def _plan(self) -> List[_Outgoing]:
         """Decide every push this poll earns and persist the new state."""
         db = sqlite3.connect(str(self.db_path), timeout=5)
         db.row_factory = sqlite3.Row
@@ -693,74 +835,168 @@ class PushDispatcher(threading.Thread):
             top = int(db.execute("SELECT COALESCE(MAX(id), 0) FROM messages").fetchone()[0] or 0)
             if self.high_water is None:
                 self.high_water = top
+            # A channel deleted by any path (the MCP cleanup tool included)
+            # takes its subscriptions with it.
+            db.execute("DELETE FROM push_subscriptions WHERE channel NOT IN "
+                       "(SELECT code FROM channels)")
             subs = [dict(r) for r in db.execute(
                 "SELECT * FROM push_subscriptions WHERE mode != 'off'").fetchall()]
             if not subs:
                 self.high_water = top
+                self._retry.clear()
                 db.commit()
                 return []
+            by_key = {(s["channel"], s["endpoint"]): s for s in subs}
             by_channel: Dict[str, List[Dict[str, Any]]] = {}
             for s in subs:
                 by_channel.setdefault(s["channel"], []).append(s)
-            outbox = []
             now = self._clock()
+            outbox: List[_Outgoing] = self._due_retries(by_key)
+
             if top > self.high_water:
                 chans = sorted(by_channel)
                 marks = ",".join("?" for _ in chans)
-                limit = 200
                 rows = db.execute(
                     "SELECT id, channel, member_id, member_name, content, mentions, bangs, "
                     "recipients, retracted_at FROM messages "
                     f"WHERE id > ? AND id <= ? AND channel IN ({marks}) "
-                    "ORDER BY id ASC LIMIT ?",
-                    (self.high_water, top, *chans, limit)).fetchall()
+                    "ORDER BY id ASC LIMIT 200",
+                    (self.high_water, top, *chans)).fetchall()
+                done_through = self.high_water
+                deferred = False
                 for row in rows:
-                    msg = _row_message(row)
-                    for sub in by_channel.get(row["channel"], ()):
-                        d = decide(sub["mode"], msg, sub["member_id"], sub["member_name"],
-                                   _state_of(sub), now)
-                        if d.state != _state_of(sub):
-                            _save_state(db, sub, d.state)
-                        if d.send:
-                            outbox.append((sub, d, msg))
-                self.high_water = rows[-1]["id"] if len(rows) == limit else top
+                    if len(outbox) >= MAX_SENDS_PER_TICK:
+                        deferred = True      # the rest waits for the next tick
+                        break
+                    try:
+                        self._plan_message(db, row, by_channel, now, outbox)
+                    except Exception as exc:
+                        # One bad row is logged and skipped; it must never pin
+                        # the high-water mark and silence everything after it.
+                        sys.stderr.write(f"[nth_web push] skipped message {row['id']}: "
+                                         f"{type(exc).__name__}\n")
+                    done_through = row["id"]
+                if deferred or len(rows) == 200:
+                    self.high_water = done_through
+                else:
+                    self.high_water = top
             for sub in subs:
-                d = flush_due(sub["mode"], _state_of(sub), now)
+                if self._backed_off(sub["endpoint"]):
+                    continue                 # keep the summary until it can be delivered
+                prior = _state_of(sub)
+                d = flush_due(sub["mode"], prior, now)
                 if d.send:
                     _save_state(db, sub, d.state)
-                    outbox.append((sub, d, None))
+                    outbox.append(_Outgoing(sub, d, None, prior))
             db.commit()
             return outbox
         finally:
             db.close()
 
-    def _deliver(self, sub: Dict[str, Any], decision: Decision,
-                 msg: Optional[Dict[str, Any]]) -> int:
-        """Send one push; returns the HTTP status (0 = not sent)."""
+    def _plan_message(self, db, row, by_channel, now, outbox: List[_Outgoing]) -> None:
+        msg = _row_message(row)
+        for sub in by_channel.get(row["channel"], ()):
+            prior = _state_of(sub)
+            d = decide(sub["mode"], msg, sub["member_id"], sub["member_name"], prior, now)
+            if d.send and self._backed_off(sub["endpoint"]):
+                # A known-bad endpoint costs no request. A summary keeps
+                # counting; a bang waits in the retry queue; a plain message
+                # is dropped (the next one will reach the phone).
+                if d.kind == "digest":
+                    d = Decision(False, state=SubState(prior.last_sent_at, d.count, d.sender))
+                elif d.kind == "bang":
+                    self._queue_retry(_Outgoing(sub, d, msg, prior))
+                    d = Decision(False, state=prior)
+                else:
+                    d = Decision(False, state=d.state)
+            if d.state != prior:
+                _save_state(db, sub, d.state)
+            if d.send:
+                outbox.append(_Outgoing(sub, d, msg, prior))
+
+    def _queue_retry(self, item: _Outgoing) -> None:
+        if item.attempt < BANG_RETRY_ATTEMPTS and len(self._retry) < MAX_RETRY_QUEUE:
+            self._retry.append(item)
+
+    def _due_retries(self, by_key) -> List[_Outgoing]:
+        due, waiting = [], deque()
+        while self._retry:
+            item = self._retry.popleft()
+            key = (item.sub["channel"], item.sub["endpoint"])
+            current = by_key.get(key)
+            if current is None or current["mode"] == "off":
+                continue                     # unsubscribed meanwhile
+            if self._backed_off(item.sub["endpoint"]) or len(due) >= MAX_SENDS_PER_TICK:
+                waiting.append(item)
+                continue
+            item.sub = current
+            item.attempt += 1
+            due.append(item)
+        self._retry = waiting
+        return due
+
+    def _deliver(self, item: _Outgoing) -> int:
+        """Send one push; returns the HTTP status (0 = not sent). Runs on a
+        worker thread, so it touches no shared state."""
+        sub = item.sub
         endpoint = sub["endpoint"]
-        if self._endpoint_backoff.get(endpoint, 0) > time.monotonic():
-            return 0
-        payload = build_payload(sub["channel"], decision, msg)
-        urgency = "high" if decision.kind == "bang" else "normal"
+        payload = build_payload(sub["channel"], item.decision, item.msg)
+        urgency = "high" if item.decision.kind == "bang" else "normal"
         try:
-            status = self._send(endpoint, sub["p256dh"], sub["auth"], payload,
-                                vapid_for(self.state_dir), push_contact(),
-                                urgency=urgency)
+            return self._send(endpoint, sub["p256dh"], sub["auth"], payload,
+                              vapid_for(self.state_dir), push_contact(),
+                              urgency=urgency)
         except Exception as exc:
             # The type only: an endpoint is a bearer URL and must stay out of logs.
             sys.stderr.write(f"[nth_web push] send to {_host_of(endpoint)} failed: "
                              f"{type(exc).__name__}\n")
-            status = 0
-        if status in (404, 410):
-            self._endpoint_backoff.pop(endpoint, None)
-        elif status == 0 or status == 429 or status >= 500:
-            # Transient: rest this endpoint for a minute instead of hammering
-            # a push service that is already struggling.
-            self._endpoint_backoff[endpoint] = time.monotonic() + 60
-        elif status >= 400:
-            sys.stderr.write(f"[nth_web push] {_host_of(endpoint)} refused a push "
-                             f"(HTTP {status})\n")
-        return status
+            return 0
+
+    def _record(self, outbox: List[_Outgoing]) -> None:
+        """Apply send outcomes: prune dead rows, restore undelivered summaries."""
+        db = sqlite3.connect(str(self.db_path), timeout=5)
+        try:
+            db.execute("PRAGMA busy_timeout=2000")
+            for item in outbox:
+                sub, status = item.sub, item.status
+                endpoint, channel = sub["endpoint"], sub["channel"]
+                if 200 <= status < 300:
+                    self._endpoint_backoff.pop(endpoint, None)
+                    db.execute("UPDATE push_subscriptions SET fail_count = 0 WHERE "
+                               "channel = ? AND endpoint = ? AND fail_count != 0",
+                               (channel, endpoint))
+                elif status in (404, 410):
+                    # The browser dropped this subscription; it never comes back.
+                    db.execute("DELETE FROM push_subscriptions WHERE endpoint = ?", (endpoint,))
+                    self._endpoint_backoff.pop(endpoint, None)
+                elif _transient(status):
+                    self._endpoint_backoff[endpoint] = time.monotonic() + TRANSIENT_BACKOFF_S
+                    if item.decision.kind == "digest":
+                        # Hand the count back so the summary goes out later.
+                        db.execute(
+                            "UPDATE push_subscriptions SET pending_count = pending_count + ?, "
+                            "last_sent_at = ?, pending_sender = CASE WHEN pending_sender = '' "
+                            "THEN ? ELSE pending_sender END WHERE channel = ? AND endpoint = ?",
+                            (item.decision.count, item.prior.last_sent_at,
+                             item.decision.sender, channel, endpoint))
+                    elif item.decision.kind == "bang":
+                        self._queue_retry(item)
+                else:
+                    # A 4xx the service will repeat (bad keys, bad auth, too
+                    # large). Three in a row and the subscription goes.
+                    db.execute("UPDATE push_subscriptions SET fail_count = fail_count + 1 "
+                               "WHERE channel = ? AND endpoint = ?", (channel, endpoint))
+                    row = db.execute("SELECT fail_count FROM push_subscriptions WHERE "
+                                     "channel = ? AND endpoint = ?", (channel, endpoint)).fetchone()
+                    if row is not None and row[0] >= MAX_CONSECUTIVE_REJECTS:
+                        db.execute("DELETE FROM push_subscriptions WHERE channel = ? "
+                                   "AND endpoint = ?", (channel, endpoint))
+                        sys.stderr.write(f"[nth_web push] dropped a subscription after "
+                                         f"{row[0]} refusals from {_host_of(endpoint)} "
+                                         f"(HTTP {status})\n")
+            db.commit()
+        finally:
+            db.close()
 
 
 def _row_message(row: sqlite3.Row) -> Dict[str, Any]:

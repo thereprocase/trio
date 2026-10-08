@@ -24,6 +24,10 @@
     off: 'No phone notifications for this channel.',
   };
 
+  // Shown when the server reports that no hub process is sending pushes: a
+  // single-channel viewer, or a dashboard started with --no-agent-control.
+  const NOT_DELIVERING = 'Your choice is saved, but no hub is sending phone notifications right now. They are sent by the hub\'s main dashboard (nth_web.py started without a channel).';
+
   function supported() {
     return 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
   }
@@ -154,7 +158,7 @@
       return;
     }
     const why = blocker(status?.secure_url || '');
-    setHint(section, why);
+    setHint(section, why || (status && status.delivering === false ? NOT_DELIVERING : ''));
     disable(section, !!why);
     if (why) { showMode(section, 'off'); return; }
     let endpoint = '';
@@ -188,8 +192,19 @@
         setStatus(section, 'Notifications were not allowed, so nothing changed.');
         return;
       }
-      const sub = await browserSubscription(true);
-      await api.post('/api/push/subscribe', { subscription: sub.toJSON(), channel, mode }, false);
+      let sub = await browserSubscription(true);
+      try {
+        await api.post('/api/push/subscribe', { subscription: sub.toJSON(), channel, mode }, false);
+      } catch (e) {
+        // 409: this browser's endpoint already belongs to another identity
+        // (the cookie changed). Replace the browser subscription so this
+        // identity gets an endpoint of its own; the old rows then expire at
+        // the push service and the hub prunes them.
+        if (e?.status !== 409) throw e;
+        await sub.unsubscribe();
+        sub = await browserSubscription(true);
+        await api.post('/api/push/subscribe', { subscription: sub.toJSON(), channel, mode }, false);
+      }
       showMode(section, mode);
     } catch (e) {
       setStatus(section, e?.message || 'Could not change phone notifications.');

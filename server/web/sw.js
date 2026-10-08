@@ -50,7 +50,10 @@ function sameChannel(clientUrl, target) {
 self.addEventListener('notificationclick', event => {
   event.notification.close();
   const data = event.notification.data || {};
-  const target = new URL(data.url || '/', self.location.origin);
+  let target = new URL(data.url || '/', self.location.origin);
+  // A notification only ever opens this app. An absolute URL to anywhere
+  // else in the payload falls back to the app's home.
+  if (target.origin !== self.location.origin) target = new URL('/', self.location.origin);
   event.waitUntil((async () => {
     const windows = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
     const exact = windows.find(c => sameChannel(c.url, target));
