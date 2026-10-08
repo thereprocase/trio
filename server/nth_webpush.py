@@ -856,7 +856,7 @@ def record_test_outcome(db: sqlite3.Connection, *, channel: str, endpoint: str,
         db.execute("DELETE FROM push_subscriptions WHERE endpoint = ?", (endpoint,))
 
 
-# Hub-wide test budget per quota tier: (burst, tests per minute). A guest can
+# Per-process test budget per quota tier: (burst, tests per minute). A guest can
 # mint identities and endpoints freely, so the whole guest tier shares a small
 # budget of its own; exhausting it never touches the trusted tier's.
 TEST_PUSH_TIER_BUDGET = {
@@ -887,6 +887,9 @@ class TestPushLimiter:
                  clock: Callable[[], float] = time.monotonic):
         self.interval_s = interval_s
         self.budgets = dict(TEST_PUSH_TIER_BUDGET if budgets is None else budgets)
+        # The refill rate divides by per_minute.
+        if any(per_minute <= 0 for _, per_minute in self.budgets.values()):
+            raise ValueError('every tier needs a positive per-minute budget')
         self._clock = clock
         self._last: Dict[Tuple[str, ...], float] = {}
         # tier -> (tokens, refilled_at)
@@ -896,8 +899,7 @@ class TestPushLimiter:
     def take(self, *, member_id: str, endpoint: str, tier: str) -> float:
         """0 when the caller may send now (and every limit is charged), else
         the seconds until the tightest limit allows it."""
-        # An unknown tier draws on the guest bucket itself: neither an
-        # unlimited budget nor a fresh one of its own.
+        # An unknown tier shares the guest bucket, the smallest budget there is.
         if tier not in self.budgets:
             tier = TIER_GUEST
         burst, per_minute = self.budgets[tier]

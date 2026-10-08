@@ -344,9 +344,10 @@ tick it. Subscriptions from before this choice existed start with text hidden.
 last accepted a notification for this device on this channel ("Last
 delivered: 14:05", or "never"); the hub cannot see whether the phone then
 displayed it. A **Send test** button sends one test notification to this
-device only. Tests are limited to one every ten seconds per device, and the
-hub caps them in total per tier, so guests share a few per minute and members
-keep their own allowance. If the hub has stopped sending to this device (the
+device only. Tests are limited to one every ten seconds per device (two of your devices on
+the same push service share that wait), and each dashboard process caps them in
+total per tier: guests share a few per minute, and members share a separate,
+larger allowance. If the hub has stopped sending to this device (the
 push service refused it repeatedly or reported it gone, or a guest
 subscription went unused for 30 days), the panel says "This device no longer
 gets notifications" the next time you open it and offers **Turn back on**,
