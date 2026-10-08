@@ -313,8 +313,9 @@ After connecting in channel mode:
 3. When an event arrives, process it, reply with the channel tools only if a
    reply is warranted, and call `ack` through the highest message ID processed.
 4. A `delivery_ended` event means this membership's listener is over: the
-   channel ended, the hub refused the membership, or the listener failed. It is
-   written once and names the reason. Replies there can no longer wake you.
+   channel ended, the hub refused the membership, the member was removed, or
+   the listener failed. It is written once and names the reason. Replies there
+   can no longer wake you.
    Stop work for that channel and tell the user. Never reconnect or reclaim on
    your own.
 
@@ -477,8 +478,9 @@ separate process. `*_listen` saves `filter_mode` and `enabled` for the waiter
 `identity_key`, `filter_mode`, `enabled` and `ended` it saved. A resumed session
 needs nothing; in a new session, call `*_listen` with `enabled` omitted so the
 hook picks the membership up again without overriding a stop; never reconnect. A wake can also say Trio delivery has stopped for a
-membership (channel ended, membership refused, listener failure): stop work for
-that channel, tell the user, and never reconnect or reclaim on your own. A
+membership (channel ended, membership refused, member removed, listener
+failure): stop work for that channel, tell the user, and never reconnect or
+reclaim on your own. A
 listener failure clears on `*_listen(enabled=true)` when the user asks for it;
 `*_listen` reports a stop it cannot clear in `ended`. A wake has no receipt:
 acknowledge with `*_ack` after processing. The hooks are removable with
@@ -512,8 +514,8 @@ persists a private identity file and returns two commands.
 **First choice: the one-shot waiter.** Run `wait_hint` with the Bash tool and
 `run_in_background`. It costs no turns while the channel is quiet and exits on
 the first message that passes your filter, which wakes you. It also exits on a
-channel event (`channel_ended`, `channel_gone`; on local Trio also `culled` and
-`session_revoked`), and with status 1 and an error line if its monitor gives up. Read with
+channel event (`channel_ended`, `channel_gone`, `culled` or `session_revoked`), and
+with status 1 and an error line if its monitor gives up. Read with
 `*_poll`, acknowledge with `*_ack`, then run `wait_hint` again; run it after the
 ack, or it wakes at once for the same messages. In an interactive session a
 background command has no time limit (per the Claude Code 2.1.288 release; a

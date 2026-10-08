@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Push delivery for a plainly launched Codex CLI, through its own hooks.
 
-The Codex counterpart of nth_claude_hook.py, and built on it: the session state,
-the membership records, the per-message filter, the rate limit and the wake text
-are that module's. What differs is how a wake reaches the session. Codex hooks
+The Codex counterpart of nth_claude_hook.py, and built on it: the session state
+and the membership records are that module's, and the poller, the per-message
+filter, the rate limit (nth_listener) and the wake text (nth_notice) are the ones
+it uses. What differs is how a wake reaches the session. Codex hooks
 run synchronously inside the Codex app-server daemon and cannot wake an idle
 thread, so this hook starts a detached waiter and returns at once; on the first
 message that passes the filter the waiter runs

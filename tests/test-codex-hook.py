@@ -18,7 +18,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 SERVER_DIR = ROOT / 'server'
 sys.path.insert(0, str(SERVER_DIR))
-import nth_claude_channel as channel_module
+import nth_listener as listener_module
 import nth_claude_hook as core
 import nth_codex_hook as hook
 
@@ -119,7 +119,7 @@ class CodexHookTests(unittest.TestCase):
         self.fast = [patch.multiple(core, TICK_SECONDS=.02, STATUS_EVERY_SECONDS=.1, LOCK_RETRY_SECONDS=.02),
                      patch.multiple(hook, SETTLE_SECONDS=.4, LIFETIME_SECONDS=.6, LOCK_PATIENCE_SECONDS=.1,
                                     QUEUE_RETRY_SECONDS=.01),
-                     patch.object(channel_module, 'MIN_POLL_GAP_SECONDS', .02)]
+                     patch.object(listener_module, 'MIN_POLL_GAP_SECONDS', .02)]
         for fast in self.fast:
             fast.start()
 

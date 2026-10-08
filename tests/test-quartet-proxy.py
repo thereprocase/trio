@@ -106,7 +106,7 @@ class ProxyTests(unittest.TestCase):
         env.update(NTH_HOME=self.temp.name, TRIO_CODEX_HOME=self.temp.name, **environment)
         with patch.dict(os.environ, env, clear=True), \
              patch.object(proxy, 'MCPSSEClient', FakeHub), \
-             patch('nth_spoke_monitor.MCPSSEClient', FakeHub):
+             patch('nth_sse_client.MCPSSEClient', FakeHub):
             server, _, hub = proxy.create_server('http://hub.example/sse')
         if hub is not None:
             self.hubs.append(hub)
@@ -117,7 +117,7 @@ class ProxyTests(unittest.TestCase):
         request = types.CallToolRequest(method='tools/call',
                                         params=types.CallToolRequestParams(name=tool_name, arguments=arguments))
         with patch.dict(os.environ, self.environment, clear=True), \
-             patch('nth_spoke_monitor.MCPSSEClient', FakeHub):
+             patch('nth_sse_client.MCPSSEClient', FakeHub):
             return asyncio.run(server.request_handlers[types.CallToolRequest](request)).root
 
     def test_connect_rewrites_the_structured_result_as_well_as_the_text(self):

@@ -41,17 +41,17 @@ reply is warranted, then `quartet_ack` through the highest id you processed. The
 receipt; your ack is the confirmation.
 
 One other event can arrive: `delivery_ended`. The listener for that membership is over (the
-channel ended, the hub refused the membership, or the listener failed) and it says so once,
-with the reason. Nothing further will wake you for that channel. Stop work for it and tell the
-user; never reconnect or reclaim on your own.
+channel ended, the hub refused the membership, the member was removed, or the listener failed)
+and it says so once, with the reason. Nothing further will wake you for that channel. Stop work
+for it and tell the user; never reconnect or reclaim on your own.
 
 Companion to [SKILL.md](SKILL.md). Load when handling a specific event or recovering from a failure.
 
 ## Monitor Events
 
-In `monitor` mode, the one-shot waiter (`wait_hint`) prints exactly one line and exits: a `new_messages`, `channel_ended` or `channel_gone` event (or an `error` line if its monitor gives up). That line wakes you; run it again after you ack. Two Quartet cases wake nothing: a removal from the channel shows only as repeated `{"event": "error", "msg": "Member not found in channel."}` lines, which the waiter does not exit on, and a displaced or reaped session produces no line at all. If you have been quiet unusually long, check with `quartet_poll`; an `Invalid or revoked session_token.` reply means the session is over, so tell the user and never reconnect on your own. The Monitor fallback (`monitor_hint`, see [SKILL.md § Monitor](SKILL.md)) streams every event in the table below. With a Monitor, each line of stdout becomes a `<task-notification>` in your context — handle each event as it arrives, no relaunch dance.
+In `monitor` mode, the one-shot waiter (`wait_hint`) prints exactly one line and exits: a `new_messages`, `channel_ended`, `channel_gone`, `culled` or `session_revoked` event (or an `error` line if its monitor gives up). That line wakes you; run it again after you ack. A removal from the channel revokes your session token, so with the token the waiter passes it on as `session_revoked` with `reason: "refused"`, as it does a displaced or reaped session. The Monitor fallback (`monitor_hint`, see [SKILL.md § Monitor](SKILL.md)) streams every event in the table below. With a Monitor, each line of stdout becomes a `<task-notification>` in your context — handle each event as it arrives, no relaunch dance.
 
-Every Quartet identity uses `nth_spoke_monitor.py` (remote, SSE-only, no local DB) — it speaks MCP-over-SSE to the hub and emits the same JSON events as `nth_monitor.py`, except that it has no `culled` or `session_revoked` event: a removal shows in the `error` row, and a displaced or reaped session shows nothing. The connect response's `monitor_hint` carries the exact command. Inline `quartet_poll(..., wait_seconds=15)` loops remain the last-resort substitute when no monitor can run.
+Every Quartet identity uses `nth_spoke_monitor.py` (remote, SSE-only, no local DB) — it speaks MCP-over-SSE to the hub and emits the same JSON events as `nth_monitor.py`. The hub's poll reply cannot tell a removal from a reclaim or a reap once the token is revoked, so its `session_revoked` always carries `reason: "refused"`; `culled` fires only for a poll the hub answers with "You are not a member of this channel." (a monitor launched without a token). The connect response's `monitor_hint` carries the exact command. Inline `quartet_poll(..., wait_seconds=15)` loops remain the last-resort substitute when no monitor can run.
 
 | Event | Fires when | Action |
 |-------|-----------|--------|
@@ -59,7 +59,9 @@ Every Quartet identity uses `nth_spoke_monitor.py` (remote, SSE-only, no local D
 | `cadence` | You're in active mode, hold ≥1 claimed task, and haven't posted in >600s. Fires once per silence period. | Post a status update with confidence level. |
 | `channel_ended` | Another member called `quartet_end`. | Process final messages. Monitor exits on its own — no relaunch. |
 | `channel_gone` | Channel row was deleted entirely. | Surface to user. Monitor exits. |
-| `error` | Hub unreachable / member row missing (on Quartet this is also how a removal from the channel shows) / similar. | Surface to user and decide whether to reconnect. |
+| `culled` | You were removed from the channel. | Stop work for it and tell the user; never rejoin on your own. Monitor exits. |
+| `session_revoked` | The hub refused your session token (`reason: "refused"`): a removal, a reclaim or your own reconnect revoked it. | If you just reconnected, relaunch the monitor with the new token; otherwise tell the user and never reconnect or reclaim on your own. Monitor exits. |
+| `error` | Hub unreachable / member row missing / similar. | Surface to user and decide whether to reconnect. |
 
 ### Monitor adaptive modes
 

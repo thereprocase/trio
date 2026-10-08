@@ -11,7 +11,6 @@ from unittest.mock import patch
 
 SERVER_DIR = Path(__file__).resolve().parents[1] / 'server'
 sys.path.insert(0, str(SERVER_DIR))
-import nth_claude_channel as channel_module
 import nth_claude_hook as hook
 
 SESSION = 'c4244eb6-d069-4d02-9932-1ff0185e13c4'
@@ -202,6 +201,19 @@ class HookTests(unittest.TestCase):
         self.assertEqual(hook.membership_config(KEY)['ended'], 'channel ended')
         code2, said2, _ = self.run_wait([{'event': 'new_messages', 'messages': [message(3, mentioned=True)]}])
         self.assertEqual((code2, said2), (0, ''))
+
+    def test_a_culled_membership_wakes_once_as_removed_and_is_not_retried(self):
+        self.identity()
+        hook.register(self.connect_payload())
+        code, said, _ = self.run_wait([{'error': 'You are not a member of this channel.'}])
+        self.assertEqual(code, 2)
+        self.assertEqual(said.strip(), 'Trio delivery has stopped for member member in trio channel room: member '
+                                       'removed. No further wake will come for it. The hub no longer lists this '
+                                       'member in the channel: it was removed. Tell the user. Never reconnect or '
+                                       'reclaim it on your own.')
+        self.assertEqual(hook.membership_config(KEY)['ended'], 'member removed')
+        # A removal needs a person: enabling the listener again does not revive it.
+        self.assertEqual(hook.configure_membership(KEY, enabled=True)['ended'], 'member removed')
 
     # ---- listen in hook mode -------------------------------------------------------
 

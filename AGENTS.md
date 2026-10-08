@@ -18,7 +18,11 @@ CLI is woken by its own hooks (`nth_codex_hook.py`, sharing `nth_claude_hook.py`
 core), which queue a notice with `codex queue` once the user has trusted them. Never replace this with terminal typing or a second server
 attached to an already owned thread. A channel notification has no receipt:
 Claude status reports `written`, never `accepted`, and readiness is a separate
-check from joining for both providers.
+check from joining for both providers. Every delivery path shares three modules:
+`nth_listener.py` (the per-membership `Listener`, the per-message filter
+`select_messages` and the poll classifier `classify_poll`), `nth_notice.py` (wake
+text, built from integers and sanitized ids only) and `nth_sse_client.py` (the hub
+client). Change a filter or lifecycle rule there, once.
 
 `python setup.py install` is the native Claude/Codex installer. It must preserve
 unrelated settings and retain backups. It installs both skills with all their

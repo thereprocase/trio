@@ -43,9 +43,9 @@ reply is warranted, then `trio_ack` through the highest id you processed. The no
 receipt; your ack is the confirmation.
 
 One other event can arrive: `delivery_ended`. The listener for that membership is over (the
-channel ended, the hub refused the membership, or the listener failed) and it says so once,
-with the reason. Nothing further will wake you for that channel. Stop work for it and tell the
-user; never reconnect or reclaim on your own.
+channel ended, the hub refused the membership, the member was removed, or the listener failed)
+and it says so once, with the reason. Nothing further will wake you for that channel. Stop work
+for it and tell the user; never reconnect or reclaim on your own.
 
 ## Monitor Events
 

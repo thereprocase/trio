@@ -60,7 +60,8 @@ def run(identity, filter_mode):
                             filter_mode=filter_mode, _db_path=Path(identity['url']),
                             session_token=identity['session_token'])
     else:
-        from nth_spoke_monitor import MCPSSEClient, monitor
+        from nth_spoke_monitor import monitor
+        from nth_sse_client import MCPSSEClient
         client = MCPSSEClient(identity['url'])
         try:
             client.connect()

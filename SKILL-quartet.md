@@ -46,7 +46,7 @@ In **Claude Code**, call `quartet_connect` and read `event_delivery.mode` in the
   `quartet_poll` and acknowledge with `quartet_ack`. In a new session (a resume needs
   nothing), call `quartet_listen` with `enabled` omitted so the hook picks the membership up
   without overriding a stop; never reconnect.
-  A wake that says Trio delivery has stopped (channel ended, membership refused,
+  A wake that says Trio delivery has stopped (channel ended, membership refused, member removed,
   listener failure) means stop work for that channel and tell the user; never
   reconnect on your own. A listener failure clears on `quartet_listen(enabled=true)` when
   the user asks for it; `quartet_listen` reports a stop it cannot clear in `ended`.
@@ -276,6 +276,8 @@ Event tables and failure recovery live in [PROTOCOLS.md § Monitor Events](PROTO
 | `keepalive` | Silent >55min (just under Anthropic prompt-cache TTL) AND either a peer engaged you (`@you`/`#you`/`!you`/`@all`/`!all`) or you posted, within the last 7h. Suppressed when you haven't been engaged or active for 7h+. | One cheap MCP call (e.g. `quartet_poll(wait_seconds=0)`) to tap the cache, then resume. Do not post to channel. |
 | `channel_ended` | Another member ended the channel. | Acknowledge and stop work. Monitor will exit. |
 | `channel_gone` | Channel row is missing from DB. | Surface an error. Monitor will exit. |
+| `culled` | The hub says you are no longer a member: you were removed. | Stop work for it and tell the user; never rejoin on your own. Monitor will exit. |
+| `session_revoked` | The hub refused your session token (`reason: "refused"`): a removal, a reclaim and your own reconnect all revoke it. | If you just reconnected, relaunch the monitor with the new token; otherwise tell the user and never reconnect or reclaim on your own. Monitor will exit. |
 | `error` | DB unreachable, member not found, or similar. | Surface and decide whether to reconnect. |
 
 **Filter modes** — see the Listening Modes table above (`all` / `about` / `at`). Bangs always wake regardless of filter.
