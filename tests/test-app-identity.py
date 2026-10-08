@@ -143,10 +143,11 @@ with tempfile.TemporaryDirectory() as tmp:
     custom = png(192, 192, b"custom-192")
     (Path(tmp) / "icon-192.png").write_bytes(custom)
     (Path(tmp) / "apple-touch-icon.png").write_bytes(b"GIF89a not a png")
-    (Path(tmp) / "badge-96.PNG").write_bytes(png(96, 96))
+    (Path(tmp) / "badge-96.PNG").write_bytes(png(96, 96))  # misspelt: stays built-in
     (Path(tmp) / "icon-512.png").write_bytes(png(512, 512, b"\0" * (1024 * 1024 + 1)))
     (Path(tmp) / "icon-maskable-192.png").write_bytes(png(64, 64))
     os.mkfifo(Path(tmp) / "icon-maskable-512.png")
+    (Path(tmp) / "badge-96.png").mkdir()
     got, err = probe({"NTH_APP_ICON_DIR": tmp})
     check("a PNG of the right size replaces the built-in icon",
           got["icons"]["icon-192.png"] == hashlib.sha256(custom).hexdigest())
@@ -164,7 +165,8 @@ with tempfile.TemporaryDirectory() as tmp:
     check("a missing file keeps the built-in icon",
           got["icons"]["badge-96.png"] == sha(ICONS / "badge-96.png"))
     check("the start-up summary names custom and built-in icons, so a misspelt file shows",
-          "NTH_APP_ICON_DIR: custom icon-192.png; built-in" in err and "badge-96.png" in err, err)
+          "NTH_APP_ICON_DIR: custom icon-192.png; built-in icon-512.png, "
+          "icon-maskable-192.png, icon-maskable-512.png, apple-touch-icon.png, badge-96.png" in err, err)
     check("each rejected file is reported on stderr",
           all(s in err for s in ("apple-touch-icon.png: not a PNG",
                                  "icon-512.png: larger than 1 MB",
@@ -177,6 +179,24 @@ with tempfile.TemporaryDirectory() as tmp:
     got, _ = probe({"NTH_APP_ICON_DIR": tmp})
     check("a 180x180 Apple icon is accepted and served on /apple-touch-icon.png",
           got["route_apple"] == hashlib.sha256(apple).hexdigest())
+
+# A platform without O_NONBLOCK / O_NOCTTY (Windows) still loads custom icons.
+with tempfile.TemporaryDirectory() as tmp:
+    plain = png(192, 192, b"plain")
+    (Path(tmp) / "icon-192.png").write_bytes(plain)
+    env = {k: v for k, v in os.environ.items() if not k.startswith("NTH_APP_")}
+    env.update(NTH_QUIET="1", NTH_APP_ICON_DIR=tmp)
+    snippet = ("import os, sys, hashlib\n"
+               "for flag in ('O_NONBLOCK', 'O_NOCTTY'):\n"
+               "    if hasattr(os, flag): delattr(os, flag)\n"
+               "sys.path.insert(0, sys.argv[1])\n"
+               "import nth_web\n"
+               "print(hashlib.sha256(nth_web.PWA_ICONS['icon-192.png']).hexdigest())\n")
+    out = subprocess.run([sys.executable, "-c", snippet, str(SERVER)], env=env,
+                         capture_output=True, text=True, timeout=60)
+    check("custom icons load where O_NONBLOCK and O_NOCTTY do not exist",
+          out.returncode == 0 and out.stdout.strip().endswith(hashlib.sha256(plain).hexdigest()),
+          (out.returncode, out.stderr[-300:]))
 
 got, err = probe({"NTH_APP_ICON_DIR": "/nonexistent/app-icons"})
 check("an icon directory that does not exist is reported and changes nothing",
