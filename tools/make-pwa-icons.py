@@ -24,7 +24,8 @@ can tell two installed hubs apart. --preset recolours the tile and halo and
 --emblem adds a corner badge; render a set into its own directory and point
 that hub at it.
 
-Usage: python3 tools/make-pwa-icons.py [output_dir] [--preset NAME] [--emblem cross]
+Usage: python3 tools/make-pwa-icons.py [output_dir] [--preset NAME]
+                                      [--glyph bubble|cross|star] [--emblem cross]
 """
 import argparse
 import math
@@ -60,6 +61,16 @@ PRESETS = {
 # inside the safe zone: (fill, ring) of a disc low on the right of the bubble.
 EMBLEM_CENTRE, EMBLEM_RADIUS = (378, 362), 60
 EMBLEMS = ("none", "cross")
+
+# Whole-icon glyphs. "bubble" is the built-in four-voice speech bubble. The
+# others draw rays from the centre, one voice colour per ray, over a faint
+# copy of the bubble so every hub's icon still reads as a conversation:
+# (ray angles in degrees, ray length, ray width).
+GLYPHS = {
+    "bubble": None,
+    "cross": ((-90, 0, 90, 180), 150, 96),
+    "star": ((-90, -30, 30, 90, 150, 210), 160, 66),
+}
 
 RENDERS = (
     ("icon.svg", "icon-512.png", 512),
@@ -154,10 +165,41 @@ def emblem(kind):
             f'<path d="{cross}" fill="#fff"/>')
 
 
-def tile(rounded, scale=1.0, preset="gridline", emblem_kind="none"):
+def ray_glyph(glyph):
+    """(gradient defs, artwork) for a ray glyph: the bubble at low opacity,
+    then bloomed rays in the voice colours and the spark on top."""
+    angles, length, width = GLYPHS[glyph]
+    bubble_defs, bubble_art = colour_glyph()
+    grads, rays = [], []
+    for i, angle in enumerate(angles):
+        _a0, _a1, c0, c1 = ARCS[i % len(ARCS)]
+        x1, y1 = pt(angle, length)
+        grads.append(f'<linearGradient id="r{i}" gradientUnits="userSpaceOnUse" '
+                     f'x1="{CX}" y1="{CY}" x2="{x1:.0f}" y2="{y1:.0f}">'
+                     f'<stop offset="0" stop-color="{c0}"/>'
+                     f'<stop offset="1" stop-color="{c1}"/></linearGradient>')
+        rays.append(f'<line x1="{CX}" y1="{CY}" x2="{x1:.1f}" y2="{y1:.1f}" '
+                    f'stroke="url(#r{i})"/>')
+    body = f'<g stroke-width="{{w}}" stroke-linecap="round">{"".join(rays)}</g>'
+    art = (f'<g opacity="0.24">{bubble_art}</g>'
+           f'<g filter="url(#bloom)" opacity="0.9">{body.format(w=width + 6)}</g>'
+           f'{body.format(w=width)}'
+           f'<path d="{spark(CX, CY, 62, 13)}" fill="url(#sparkfill)"/>')
+    return bubble_defs + "".join(grads), art
+
+
+def mono_rays(glyph):
+    """A ray glyph as a white silhouette, for the notification badge."""
+    angles, length, width = GLYPHS[glyph]
+    lines = "".join(f'<line x1="{CX}" y1="{CY}" x2="{pt(a, length)[0]:.1f}" '
+                    f'y2="{pt(a, length)[1]:.1f}"/>' for a in angles)
+    return f'<g stroke="#fff" stroke-width="{width}" stroke-linecap="round">{lines}</g>'
+
+
+def tile(rounded, scale=1.0, preset="gridline", emblem_kind="none", glyph="bubble"):
     """The full icon: Gridline tile, halo, and the glyph scaled about the centre."""
     bg0, bg1, halo = PRESETS[preset]
-    defs, art = colour_glyph()
+    defs, art = colour_glyph() if GLYPHS[glyph] is None else ray_glyph(glyph)
     art += emblem(emblem_kind)
     grid = "".join(f'<path d="M {v} 0 V 512 M 0 {v} H 512"/>' for v in range(32, 512, 32))
     clip = f'<rect width="512" height="512" rx="{112 if rounded else 0}"/>'
@@ -196,18 +238,19 @@ def mono_emblem(kind):
             f'V {y + half:.1f} H {x - arm:.1f} Z" fill="#fff"/>')
 
 
-def badge(emblem_kind="none"):
+def badge(emblem_kind="none", glyph="bubble"):
     """The monochrome badge, scaled to keep the stroke ends inside the canvas.
     Android draws the badge from its alpha channel, so an emblem is cut out of
     the glyph with a mask (a painted black disc would show as solid)."""
     head = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">'
     place = '<g transform="translate(35.8 46.8) scale(0.86)">'
+    shape = mono_glyph() if GLYPHS[glyph] is None else mono_rays(glyph)
     if emblem_kind == "none":
-        return f'{head}{place}{mono_glyph()}</g></svg>'
+        return f'{head}{place}{shape}</g></svg>'
     (x, y), r = EMBLEM_CENTRE, EMBLEM_RADIUS
     cut = ('<defs><mask id="cut"><rect width="512" height="512" fill="#fff"/>'
            f'<circle cx="{x}" cy="{y}" r="{r + 14}" fill="#000"/></mask></defs>')
-    return (f'{head}{cut}{place}<g mask="url(#cut)">{mono_glyph()}</g>'
+    return (f'{head}{cut}{place}<g mask="url(#cut)">{shape}</g>'
             f'{mono_emblem(emblem_kind)}</g></svg>')
 
 
@@ -216,15 +259,16 @@ def main() -> None:
     parser.add_argument("output_dir", nargs="?", type=Path, default=DEFAULT_OUT)
     parser.add_argument("--preset", choices=sorted(PRESETS), default="gridline")
     parser.add_argument("--emblem", choices=EMBLEMS, default="none")
+    parser.add_argument("--glyph", choices=sorted(GLYPHS), default="bubble")
     args = parser.parse_args()
     out = args.output_dir
     out.mkdir(parents=True, exist_ok=True)
-    look = dict(preset=args.preset, emblem_kind=args.emblem)
+    look = dict(preset=args.preset, emblem_kind=args.emblem, glyph=args.glyph)
     sources = {
         "icon.svg": tile(True, **look),
         "icon-maskable.svg": tile(False, 0.78, **look),
         "apple-touch.svg": tile(False, 0.92, **look),
-        "badge.svg": badge(args.emblem),
+        "badge.svg": badge(args.emblem, args.glyph),
     }
     for name, svg in sources.items():
         (out / name).write_text(svg, encoding="utf-8")
