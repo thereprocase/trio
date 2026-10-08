@@ -702,6 +702,12 @@
           image.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') openHere(e); });
           image.addEventListener('error', () => { image.classList.add('error'); });
           link.append(image);
+          // The name says what the image shows; agents are asked to name theirs.
+          if (attachment.filename) {
+            const caption = document.createElement('span'); caption.className = 'message-attachment-caption';
+            caption.textContent = attachment.filename;
+            link.append(caption);
+          }
         }
         else {
           link.classList.add('message-attachment-file');

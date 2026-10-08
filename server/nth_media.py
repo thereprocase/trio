@@ -199,7 +199,7 @@ def image_dimensions(data: bytes) -> Optional[Tuple[int, int]]:
                     return None
                 w = int.from_bytes(data[24:27], "little") + 1
                 h = int.from_bytes(data[27:30], "little") + 1
-            elif chunk == b"VP8L" and data[20:21] == b"\x2f":
+            elif chunk == b"VP8L" and len(data) >= 25 and data[20:21] == b"\x2f":
                 bits = int.from_bytes(data[21:25], "little")
                 w, h = (bits & 0x3FFF) + 1, ((bits >> 14) & 0x3FFF) + 1
             elif chunk == b"VP8 " and data[23:26] == b"\x9d\x01\x2a":
@@ -385,12 +385,40 @@ def _decoded_size(compact: str) -> int:
     return len(compact) * 3 // 4 - (len(compact) - len(compact.rstrip("=")))
 
 
+# Agents name what they attach so a reader can decide from the name alone
+# whether to fetch it. These words say nothing about what an image shows.
+_GENERIC_NAME_WORDS = {
+    "image", "images", "img", "screenshot", "screenshots", "screen", "shot", "snapshot",
+    "capture", "screencap", "untitled", "file", "photo", "pic", "picture", "download",
+    "clipboard", "paste", "pasted", "attachment", "upload", "output", "out", "temp", "tmp",
+    "test", "new", "copy", "scan", "figure", "fig", "graph", "chart", "plot", "diagram",
+    "export", "frame", "render", "result", "at", "am", "pm",
+}
+_HEXISH = re.compile(r"[0-9a-f]{8}(-?[0-9a-f]{4}){3}-?[0-9a-f]{12}|[0-9a-f]{8,}")
+NAME_EXAMPLE = "headlights-option-A-segmented.png"
+
+
+def require_descriptive_name(name: str) -> str:
+    """The name, when it says what the image shows; else RichContentError.
+    Generic words (image, screenshot, untitled, file, ...), dates, numbers, a
+    bare hash or a UUID leave nothing descriptive, so such a name is refused."""
+    stem = Path(name.strip()).stem.lower() if name and name.strip() else ""
+    words = [w for w in re.findall(r"[a-z]+", stem)
+             if len(w) >= 3 and w not in _GENERIC_NAME_WORDS]
+    if not stem or _HEXISH.fullmatch(stem) or not words:
+        raise RichContentError(
+            f"attachment name {name!r} does not describe the image; pass a `filename` "
+            f"that says what it shows, such as {NAME_EXAMPLE!r}")
+    return name.strip()
+
+
 def _items(items: Any) -> List[Dict[str, Any]]:
     """The attachment list, shape-checked and normalised: path items keep
     `path`, data items carry their base64 without whitespace or a data: URL
-    prefix as `data`. The base64 items' decoded total is checked against the
-    per-message cap here, before anything is decoded; path items count against
-    it as they are read."""
+    prefix as `data`, and every item carries its descriptive `filename` (the
+    given one, else the path's basename). Names and the base64 items' decoded
+    total are checked here, before anything is read or decoded; path items
+    count against the per-message cap as they are read."""
     if items is None:
         return []
     if not isinstance(items, list):
@@ -410,8 +438,15 @@ def _items(items: Any) -> List[Dict[str, Any]]:
         if not isinstance(name, str):
             raise RichContentError("attachment `filename` must be a string")
         if has_path:
+            given = item["path"] if isinstance(item["path"], str) else ""
+            name = require_descriptive_name(name or os.path.basename(given.strip()))
             out.append({"path": item["path"], "filename": name})
             continue
+        if not name.strip():
+            raise RichContentError(
+                "each `data_base64` attachment needs a `filename` that says what the "
+                f"image shows, such as {NAME_EXAMPLE!r}")
+        name = require_descriptive_name(name)
         compact = _compact_base64(item["data_base64"])
         total += _decoded_size(compact)
         if total > MAX_MESSAGE_ATTACH_BYTES:
@@ -459,16 +494,13 @@ def inline_local_paths(items: Any, roots: Optional[List[str]] = None) -> Optiona
     out = []
     for item in normal:
         if "path" in item:
-            data, base = read_local_file(item["path"], agent_file_limit(), roots)
+            data, _base = read_local_file(item["path"], agent_file_limit(), roots)
             budget.spend(len(data))
-            name = item["filename"] or base
-            _require_image(data, name)
-            out.append({"data_base64": base64.b64encode(data).decode("ascii"), "filename": name})
+            _require_image(data, item["filename"])
+            out.append({"data_base64": base64.b64encode(data).decode("ascii"),
+                        "filename": item["filename"]})
         else:
-            entry = {"data_base64": item["data"]}
-            if item["filename"]:
-                entry["filename"] = item["filename"]
-            out.append(entry)
+            out.append({"data_base64": item["data"], "filename": item["filename"]})
     return out
 
 
@@ -504,9 +536,9 @@ def prepare_attachments(items: Any, *, read_paths: bool,
                     "this server cannot read files on your machine; send the bytes as "
                     "`data_base64` with a `filename`. The Quartet frontend installed by "
                     "setup.py converts `path` items for you.")
-            data, base = read_local_file(item["path"], limit, roots)
+            data, _base = read_local_file(item["path"], limit, roots)
             budget.spend(len(data))
-            raw_name = item["filename"] or base
+            raw_name = item["filename"]
         else:
             data = _decode_base64(item["data"], limit)
             raw_name = item["filename"]
@@ -571,22 +603,21 @@ def unlink_quietly(paths) -> None:
             pass
 
 
-# ── Images delivered to a model on poll ──────────────────────────────────
-# An image block the model API refuses stays in the receiving agent's history
-# and fails every later request, so poll sends only images the API accepts:
+# ── Images fetched by a model ─────────────────────────────────────────────
+# Agents fetch images one at a time with the image tool; poll only lists them.
+# An image block the model API refuses stays in the agent's history and fails
+# every later request, so the tool returns only images the API accepts:
 #   * at most 3.75 MB raw, which is 5 MB once base64-encoded, the API's
 #     per-image limit;
 #   * at most 2000 pixels on a side, the API's limit for a request carrying
 #     more than 20 images, which a long session with images reaches;
 #   * with dimensions read from the header: an image whose size cannot be
 #     read is one the API may refuse.
-# One poll carries at most 3.75 MB of images, so one response stays under
-# 5 MB of base64. The API also caps a whole request at 32 MB, which a long
-# session full of images can still reach; that total is the receiving
-# client's to manage, and the hub cannot see it.
+# The API also caps a whole request at 32 MB, which a long session that
+# fetches many images can still reach; that total is the receiving client's
+# to manage, and the hub cannot see it.
 MAX_MODEL_IMAGE_BYTES = 3_750_000
 MAX_MODEL_IMAGE_SIDE = 2000
-MAX_POLL_IMAGE_BYTES = 3_750_000
 TOO_LARGE_FOR_MODEL = "too_large_for_model"
 UNREADABLE_IMAGE = "unreadable_image"
 

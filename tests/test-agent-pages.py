@@ -39,6 +39,13 @@ import nth_web as web        # noqa: E402
 
 failures = []
 
+# Remove this run's database, attachments and files at exit: the images are
+# megabytes each, and repeated runs otherwise fill a size-limited /tmp.
+import atexit  # noqa: E402
+import shutil  # noqa: E402
+atexit.register(lambda: [shutil.rmtree(d, ignore_errors=True) for d in _CLEANUP])
+_CLEANUP = [_tmp]
+
 
 def check(name, cond):
     print(("PASS" if cond else "FAIL") + f": {name}")

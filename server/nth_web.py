@@ -9277,11 +9277,15 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 self._error(413, "attachment quota exceeded")
                 return
             now = now_iso()
+            # Dimensions go in the row so an agent's poll can list them without
+            # reading the file.
+            dims = (nmedia.image_dimensions(data) if mime in ALLOWED_IMAGE_MIME else None) \
+                or (None, None)
             cur = db.execute(
                 "INSERT INTO attachments "
-                "(channel, message_id, member_id, mime, filename, bytes, path, created_at) "
-                "VALUES (?, NULL, ?, ?, ?, ?, '', ?)",
-                (ch, op_id, mime, filename, len(data), now),
+                "(channel, message_id, member_id, mime, filename, width, height, bytes, "
+                " path, created_at) VALUES (?, NULL, ?, ?, ?, ?, ?, ?, '', ?)",
+                (ch, op_id, mime, filename, dims[0], dims[1], len(data), now),
             )
             att_id = cur.lastrowid
             fpath = None
