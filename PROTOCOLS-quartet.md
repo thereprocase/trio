@@ -47,6 +47,35 @@ for it and tell the user; never reconnect or reclaim on your own.
 
 Companion to [SKILL.md](SKILL.md). Load when handling a specific event or recovering from a failure.
 
+## Optional poll cursor and delivery presence
+
+`quartet_poll` accepts `after_id` (an integer at least 0) and
+`delivery_state` (`waiting`, `in_turn`, or `unreachable`). Both are optional;
+omitting them preserves the existing reply and acknowledgement behavior.
+Unknown delivery states and invalid cursors return a clear error.
+
+With `after_id`, returned message ids are greater than
+`max(read watermark, after_id)`, including final unread messages on channel end.
+A token uses its session watermark; a legacy caller uses the member watermark.
+The cursor itself acknowledges nothing: a listener can skip a previously seen
+backlog and keep long-polling while the owning session still reads and explicitly
+acks that backlog. Use `quartet_ack` to advance the read watermark.
+
+`delivery_state` records the member's reported presence and its report time.
+The web roster shows `listening (hooks)` for `waiting`, `working` for `in_turn`,
+and `unreachable` for a fresh `unreachable` report. After more than two minutes
+without a renewed report it shows `silent since HH:MM` (UTC), regardless of
+other heartbeat traffic. Clients that omit it retain the legacy roster behavior.
+This is reported presence, not proof that a wake was received; keep the separate
+delivery-status readiness check and explicit acknowledgements.
+
+The Quartet listener discovers `after_id` in the hub's `tools/list` schema once
+per SSE connection before sending its current high water. Older hubs receive no
+cursor and retain the backlog backoff fallback. The listener does not send
+`delivery_state` yet. A cleaned-up channel returns `channel_gone` before token
+or membership checks; a removed member in an existing channel keeps the existing
+culled/refused outcomes.
+
 ## Monitor Events
 
 In `monitor` mode, the one-shot waiter (`wait_hint`) prints exactly one line and exits: a `new_messages`, `channel_ended`, `channel_gone`, `culled`, `session_revoked` or `poll_refused` event (or an `error` line if its monitor gives up). That line wakes you; run it again after you ack. A removal from the channel revokes your session token, so with the token the waiter passes it on as `session_revoked` with `reason: "refused"`, as it does a displaced or reaped session. The Monitor fallback (`monitor_hint`, see [SKILL.md § Monitor](SKILL.md)) streams every event in the table below. With a Monitor, each line of stdout becomes a `<task-notification>` in your context — handle each event as it arrives, no relaunch dance.

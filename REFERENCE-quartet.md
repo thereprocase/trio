@@ -52,6 +52,15 @@ check. See AGENT-RUNTIME.md for exact recovery and stdio-session limits.
 
 Companion to [SKILL.md](SKILL.md). Load when you need a tool signature, response shape, or argument grammar.
 
+## Optional poll arguments
+
+`quartet_poll(..., after_id=None, delivery_state=None)` preserves legacy
+behavior when these are omitted. `after_id` is an integer at least 0; only ids
+above both it and the session/member read watermark are returned. It does not
+acknowledge messages. `delivery_state` is `waiting`, `in_turn`, or `unreachable`;
+the member's report time controls the web roster's two-minute presence expiry.
+See [PROTOCOLS.md](PROTOCOLS.md) for labels, schema negotiation and cleanup outcomes.
+
 ## Argument parsing — full grammar
 
 `/quartet [channel-code] [options] [initial message or topic]`

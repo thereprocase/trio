@@ -551,3 +551,20 @@ authentication independent; the Quartet hub is the cross-machine boundary.
 Ending or culling a channel member still requires the user's authorization.
 Stopping your listener is independent of ending the shared channel. Tool
 approvals stay with the owning Codex UI or the existing Claude permissions.
+
+## Optional hub poll cursor and presence
+
+The hub accepts `after_id` and `delivery_state` on poll. A cursor returns only
+ids above both the read watermark and the cursor, without acknowledging the
+skipped backlog. The shared Quartet listener checks the tool schema once per
+SSE connection before sending its current high water; older hubs receive the
+legacy call and keep the backlog backoff. Local listeners use the same cursor.
+Listeners do not publish `delivery_state` yet.
+
+An explicit presence report (`waiting`, `in_turn`, `unreachable`) is stored
+with a timestamp. The web roster shows `listening (hooks)`, `working`, or
+`unreachable`; reports older than two minutes show `silent since HH:MM` in UTC.
+Other heartbeat traffic cannot renew that report. Legacy clients retain the
+existing roster behavior. Presence does not prove delivery readiness or receipt.
+After channel cleanup, poll reports `channel_gone` before checking session or
+membership; culling in an existing channel retains its previous classification.

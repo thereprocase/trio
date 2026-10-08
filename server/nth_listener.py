@@ -438,6 +438,7 @@ class Listener:
             started = time.monotonic()
             try:
                 poll = self.poll({
+                    'after_id': self.high_water,
                     'channel': b['channel'], 'member_id': b['member_id'],
                     'session_token': b['session_token'], 'auto_ack': False,
                     # The first poll returns at once: it proves the membership, so
@@ -526,7 +527,8 @@ def quartet_poll_factory(binding):
     never share the tool-call connection."""
     import nth_sse_client                     # looked up per call, so a test can stand in for it
     client = nth_sse_client.MCPSSEClient(binding['url'])
-    state = {'started': False, 'failures': 0}
+    state = {'started': False, 'failures': 0, 'schema_checked': False,
+             'endpoint': None, 'after_id': False}
 
     def poll(arguments):
         try:
@@ -536,7 +538,27 @@ def quartet_poll_factory(binding):
                 # would leave one more thread behind for each retry of an outage.
                 state['started'] = True
                 client.connect()
-            result = client.call_tool('quartet_poll', arguments,
+            endpoint = client.endpoint_url
+            if not state['schema_checked'] or state['endpoint'] != endpoint:
+                # FastMCP can silently discard unknown arguments. A successful
+                # poll is therefore not evidence of cursor support. Discover it
+                # once per SSE connection, again after a reconnect/hub upgrade.
+                cursor = None
+                supports_after_id = False
+                while True:
+                    schema = client.call('tools/list', {'cursor': cursor} if cursor else {})
+                    for tool in schema.get('tools', []):
+                        if tool.get('name') == 'quartet_poll':
+                            supports_after_id = 'after_id' in tool.get('inputSchema', {}).get('properties', {})
+                    cursor = schema.get('nextCursor')
+                    if not cursor:
+                        break
+                state.update(schema_checked=True, endpoint=client.endpoint_url,
+                             after_id=supports_after_id)
+            wire_arguments = dict(arguments)
+            if not state['after_id']:
+                wire_arguments.pop('after_id', None)
+            result = client.call_tool('quartet_poll', wire_arguments,
                                       timeout=arguments['wait_seconds'] + 30)
             state['failures'] = 0
             return result

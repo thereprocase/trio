@@ -231,15 +231,14 @@ class RealHubRepliesTests(unittest.TestCase):
         self.assertEqual(nl.classify_poll(reply), nl.ENDED)
         self.assertIn('unread_count', reply)
 
-    def test_a_cleaned_up_channel_reads_as_culled_today(self):
-        # nth_cleanup deletes the member rows with the channel, and nth_poll checks the
-        # member before the channel, so the real deletion path never says channel_gone.
-        # Known item for PR 7: check the channel first in nth_poll; this becomes GONE.
+    def test_a_cleaned_up_channel_reads_as_gone(self):
+        # Before PR 7, cleanup was misclassified as CULLED because poll checked
+        # membership first. Channel existence now precedes token and member checks.
         member, token = self.join('rules-gone', 'Stayer')
         self.srv.nth_end(channel='rules-gone', member_id=member)
         self.assertTrue(json.loads(self.srv.nth_cleanup(channel='rules-gone')).get('ok'))
-        self.assertEqual(nl.classify_poll(self.poll('rules-gone', member)), nl.CULLED)
-        self.assertEqual(nl.classify_poll(self.poll('rules-gone', member, token)), nl.CULLED)
+        self.assertEqual(nl.classify_poll(self.poll('rules-gone', member)), nl.GONE)
+        self.assertEqual(nl.classify_poll(self.poll('rules-gone', member, token)), nl.GONE)
 
     def test_a_wrong_token_is_a_token_refusal(self):
         member, _ = self.join('rules-token', 'Holder')

@@ -1430,6 +1430,23 @@ def _agent_is_live(is_running: bool, heartbeat_fresh: bool, working: bool,
         nsup.ST_SLEEPING, nsup.ST_STOPPED, nsup.ST_ERRORED)
 
 
+def delivery_presence(state: Optional[str], reported_at: Optional[str]) -> Optional[Tuple[str, str]]:
+    """Roster bucket and label from an explicit poll report; unknown is legacy.
+
+    Other traffic may refresh last_seen, but cannot renew a delivery report.
+    Times in labels are UTC, matching the stored report's timestamp.
+    """
+    stamp = _iso_secs(reported_at)
+    if state not in ("waiting", "in_turn", "unreachable") or stamp is None:
+        return None
+    if datetime.now(timezone.utc).timestamp() - stamp > 120:
+        since = datetime.fromtimestamp(stamp, timezone.utc).strftime("%H:%M")
+        return "stale", f"silent since {since}"
+    if state == "unreachable":
+        return "stale", "unreachable"
+    return ("idle", "listening (hooks)") if state == "waiting" else ("working", "working")
+
+
 def member_status(last_seen_iso: Optional[str], status_text: str,
                   session_activity_iso: Optional[str] = None,
                   last_turn_end_iso: Optional[str] = None,
@@ -2334,6 +2351,8 @@ class EventHub:
         except sqlite3.Error:
             _agent_cols = set()
         has_agent_avatar = "avatar_name" in _agent_cols
+        member_cols = {row[1] for row in db.execute("PRAGMA table_info(members)")}
+        has_delivery = {"delivery_state", "delivery_state_at"} <= member_cols
 
         def _roster_sql(turn: bool, v72: bool, kind: bool) -> str:
             cols = [
@@ -2342,6 +2361,8 @@ class EventHub:
                 "m.messenger_heartbeat AS messenger_heartbeat",
                 "m.watchdog_heartbeat AS watchdog_heartbeat",
             ]
+            if has_delivery:
+                cols += ["m.delivery_state AS delivery_state", "m.delivery_state_at AS delivery_state_at"]
             # Its own tier for the same reason the others have theirs: a DB
             # predating this column must not also lose filter_mode and the
             # context %, which is what folding it into v72 would do.
@@ -2450,6 +2471,9 @@ class EventHub:
             aname, aemoji = avatars.get(r["id"], animal_for(r["id"]))
             buddy_name = ((r["avatar_name"]
                            if "avatar_name" in keys else "") or "")
+            delivery = delivery_presence(
+                r["delivery_state"] if has_delivery else None,
+                r["delivery_state_at"] if has_delivery else None)
             out.append({
                 "id": r["id"],
                 "name": r["name"] or r["id"],
@@ -2484,7 +2508,7 @@ class EventHub:
                 # invariant (nth_connect mints a single session per member id).
                 # If multi-session members are reintroduced, pair both values
                 # from the newest-last_seen session instead.
-                "status": member_status(
+                "status": delivery[0] if delivery else member_status(
                     effective_last_seen, r["status_text"] or "",
                     session_activity_iso=(r["session_last_seen"] or None),
                     last_turn_end_iso=s_turn_end,
@@ -2510,6 +2534,10 @@ class EventHub:
                 "avatar_url": (avatar_url(buddy_name)
                                if buddy_name in BUDDY_AVATARS else ""),
             })
+            if delivery:
+                out[-1].update(delivery_state=r["delivery_state"],
+                               delivery_state_at=r["delivery_state_at"],
+                               delivery_label=delivery[1])
         return out
 
     def _stalled_members(self, db: sqlite3.Connection) -> Dict[str, Any]:
@@ -2758,7 +2786,7 @@ def _ctx_change_key(sessions: List[Dict[str, Any]]) -> str:
 # / blocked_since / stalled (real activity), context_pct. Those change only
 # when something actually happened, which is exactly when a broadcast is
 # warranted.
-_ROSTER_VOLATILE = ("last_seen",)
+_ROSTER_VOLATILE = ("last_seen", "delivery_state_at")
 
 # Under `context["harness"]`, a subtree that drifts with wall-clock rather
 # than with anything the room did. rate_limits is a ROLLING window
