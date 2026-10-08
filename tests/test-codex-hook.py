@@ -219,6 +219,35 @@ class CodexHookTests(unittest.TestCase):
         self.assertEqual((code, self.calls()), (0, []))
         self.assertEqual(core.load_session(SESSION)['high_water'][KEY], 2)
 
+    def test_a_culled_membership_queues_one_removed_notice_and_is_marked_ended(self):
+        self.join()
+
+        class CulledHub:
+            polled = 0
+
+            def factory(self, identity):
+                def poll(arguments):
+                    CulledHub.polled += 1
+                    return {'error': 'You are not a member of this channel.'}
+                return poll, None
+
+        code = self.run_waiter(CulledHub())
+        self.assertEqual(code, 2)
+        calls = self.calls()
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][:4], ['queue', '--thread', SESSION, '--message'])
+        self.assertEqual(calls[0][4],
+                         'Trio delivery has stopped for member member in quartet channel room on MCP server '
+                         'nth_qweb: member removed. No further wake will come for it. The hub no longer lists '
+                         'this member in the channel: it was removed. Tell the user. Never reconnect or '
+                         'reclaim it on your own.')
+        self.assertEqual(core.membership_config(KEY)['ended'], 'member removed')
+        self.assertEqual(CulledHub.polled, 1)
+        # A removal needs a person: the next waiter leaves the membership alone.
+        self.assertEqual(self.run_waiter(CulledHub()), 0)
+        self.assertEqual(CulledHub.polled, 1)
+        self.assertEqual(len(self.calls()), 1)
+
     def test_a_burst_gives_one_wake(self):
         # The second message lands one poll after the first: inside the settle window.
         self.join()
