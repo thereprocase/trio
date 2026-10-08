@@ -36,6 +36,7 @@ from __future__ import annotations
 import argparse
 import getpass
 import gzip
+import html
 import http.cookies
 import io
 import ipaddress
@@ -9800,7 +9801,58 @@ def _compose_index_html() -> str:
     return _strip_test_hook(page)
 
 
-INDEX_HTML = _compose_index_html()
+# ───────── Per-hub app identity ─────────
+# One phone can install the dashboard of several hubs (a home hub and a shared
+# one). Each hub is its own origin, so each install is its own app, but with
+# the built-in name and icon they are indistinguishable on the home screen and
+# in a notification. These settings give each hub its own name, colour and
+# icons; the defaults reproduce the built-in identity exactly.
+DEFAULT_APP_NAME = "nth — agent workspace"
+DEFAULT_APP_SHORT_NAME = "nth"
+DEFAULT_APP_THEME = "#3d7a63"
+APP_ICON_MAX_BYTES = 1024 * 1024
+_PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+
+
+def _env_label(name: str, default: str, limit: int) -> str:
+    """Printable text from the environment, clipped to `limit` characters; the
+    default when unset or blank. Control characters are dropped because the
+    value lands in HTML, JSON and launcher labels."""
+    raw = os.environ.get(name, "")
+    text = "".join(ch for ch in raw if ch.isprintable()).strip()
+    return text[:limit] if text else default
+
+
+def _env_color(name: str, default: str) -> str:
+    raw = os.environ.get(name, "").strip()
+    return raw if re.fullmatch(r"#[0-9a-fA-F]{6}", raw) else default
+
+
+APP_NAME = _env_label("NTH_APP_NAME", DEFAULT_APP_NAME, 60)
+# The launcher label under the icon; Android and iOS truncate past ~12 characters.
+APP_SHORT_NAME = _env_label("NTH_APP_SHORT_NAME", DEFAULT_APP_SHORT_NAME, 24)
+APP_THEME = _env_color("NTH_APP_THEME", DEFAULT_APP_THEME)
+
+
+def _apply_app_identity(page: str) -> str:
+    """Put this hub's name and colour into the page head. The markers are the
+    built-in values, so a page that lost one fails loudly instead of quietly
+    keeping the default name."""
+    for old, new in (
+            ("<title>nth — chat with your agents</title>",
+             "<title>nth — chat with your agents</title>" if APP_NAME == DEFAULT_APP_NAME
+             else f"<title>{html.escape(APP_NAME)}</title>"),
+            ('<meta name="theme-color" content="#3d7a63">',
+             f'<meta name="theme-color" content="{APP_THEME}">'),
+            ('<meta name="apple-mobile-web-app-title" content="nth">',
+             f'<meta name="apple-mobile-web-app-title" content="{html.escape(APP_SHORT_NAME, quote=True)}">')):
+        if old not in page:
+            raise RuntimeError(f"server/web/index.html lost its app identity marker: {old}")
+        page = page.replace(old, new, 1)
+    return page
+
+
+INDEX_HTML = _apply_app_identity(_compose_index_html())
 
 
 # ───────── Installable web app (PWA) assets ─────────
@@ -9825,8 +9877,39 @@ PWA_ICON_NAMES = (
     "icon-192.png", "icon-512.png", "icon-maskable-192.png",
     "icon-maskable-512.png", "apple-touch-icon.png", "badge-96.png",
 )
-PWA_ICONS = {name: _read_web_bytes(f"icons/{name}") for name in PWA_ICON_NAMES}
-PWA_MANIFEST = _read_web_bytes("manifest.webmanifest")
+
+
+def _app_icon(name: str) -> bytes:
+    """This hub's icon from NTH_APP_ICON_DIR when that directory holds a PNG of
+    the same name, else the built-in one. A missing, oversized or non-PNG file
+    falls back with a warning, so a half-filled icon set still installs."""
+    icon_dir = os.environ.get("NTH_APP_ICON_DIR", "").strip()
+    builtin = _read_web_bytes(f"icons/{name}")
+    if not icon_dir:
+        return builtin
+    path = Path(icon_dir) / name
+    try:
+        if path.stat().st_size > APP_ICON_MAX_BYTES:
+            raise ValueError("larger than 1 MB")
+        data = path.read_bytes()
+        if not data.startswith(_PNG_MAGIC):
+            raise ValueError("not a PNG")
+        return data
+    except FileNotFoundError:
+        return builtin
+    except (OSError, ValueError) as exc:
+        sys.stderr.write(f"[nth_web] NTH_APP_ICON_DIR {name}: {exc}; using the built-in icon\n")
+        return builtin
+
+
+def _app_manifest() -> bytes:
+    manifest = json.loads(_read_web_bytes("manifest.webmanifest"))
+    manifest.update(name=APP_NAME, short_name=APP_SHORT_NAME, theme_color=APP_THEME)
+    return json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8")
+
+
+PWA_ICONS = {name: _app_icon(name) for name in PWA_ICON_NAMES}
+PWA_MANIFEST = _app_manifest()
 PWA_SERVICE_WORKER = _read_web_bytes("sw.js")
 # Static, identical for every viewer, and fetched by the browser without the
 # page's cookies (a manifest request is credentials-less by default), so these
