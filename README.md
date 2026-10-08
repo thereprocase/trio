@@ -340,13 +340,17 @@ sender. The message text itself stays off the lock screen: the body reads
 per-device, per-channel choice that is off by default and saves as soon as you
 tick it. Subscriptions from before this choice existed start with text hidden.
 
-**Checking a device.** Under the modes, the panel shows when a notification
-last reached this device ("Last delivered: 14:05", or "never") and a **Send
-test** button that sends one test notification to this device only, at most
-once every ten seconds. If the hub has stopped sending to this device (the push
-service refused it repeatedly, or reported the subscription gone), the panel
-says so the next time you open it and offers **Turn back on**, which makes a
-fresh subscription with the mode you had.
+**Checking a device.** Under the modes, the panel shows when the push service
+last accepted a notification for this device on this channel ("Last
+delivered: 14:05", or "never"); the hub cannot see whether the phone then
+displayed it. A **Send test** button sends one test notification to this
+device only. Tests are limited to one every ten seconds per device, and the
+hub caps them in total per tier, so guests share a few per minute and members
+keep their own allowance. If the hub has stopped sending to this device (the
+push service refused it repeatedly or reported it gone, or a guest
+subscription went unused for 30 days), the panel says "This device no longer
+gets notifications" the next time you open it and offers **Turn back on**,
+which makes a fresh subscription with the mode you had.
 
 **Why the https name.** Service workers and push subscriptions exist only on a
 secure context. `--tailscale-tls` (the `hub-service` default) serves the

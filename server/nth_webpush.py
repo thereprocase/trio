@@ -92,8 +92,10 @@ MAX_TITLE_CHARS = 120
 # opted in to showing message text. A lock screen is readable by anyone
 # holding the phone, so the text stays inside the app unless asked for.
 HIDDEN_BODY = "New message"
-# A device's "Send test" button. Bounded per endpoint so the button cannot be
-# used to hammer a push service (or a phone) from the hub.
+# A device's "Send test" button: at most one press per endpoint, and per
+# member per push-service host, in this interval. Endpoints are chosen by the
+# caller, so these alone do not bound the hub's outbound requests; the
+# per-tier budget below (TestPushLimiter) does.
 TEST_PUSH_INTERVAL_S = 10.0
 
 # Subscription quotas, per tier. A self-declared guest gets a fresh member id
@@ -787,8 +789,11 @@ def move_endpoint(db: sqlite3.Connection, *, member_id: str, old_endpoint: str,
                 db.execute("DELETE FROM push_subscriptions WHERE channel = ? AND endpoint = ?",
                            (channel, old_endpoint))
                 continue
+            # last_ok_at described the old endpoint; nothing has been
+            # delivered to the new one yet. The text choice carries over.
             db.execute("UPDATE push_subscriptions SET endpoint = ?, p256dh = ?, auth = ?, "
-                       "updated_at = ?, fail_count = 0 WHERE channel = ? AND endpoint = ?",
+                       "updated_at = ?, fail_count = 0, last_ok_at = 0 "
+                       "WHERE channel = ? AND endpoint = ?",
                        (new_endpoint, p256dh, auth, now, channel, old_endpoint))
             moved.append(channel)
     except BaseException:
@@ -851,34 +856,71 @@ def record_test_outcome(db: sqlite3.Connection, *, channel: str, endpoint: str,
         db.execute("DELETE FROM push_subscriptions WHERE endpoint = ?", (endpoint,))
 
 
-class TestPushLimiter:
-    """At most one test push per endpoint per interval, in this process.
+# Hub-wide test budget per quota tier: (burst, tests per minute). A guest can
+# mint identities and endpoints freely, so the whole guest tier shares a small
+# budget of its own; exhausting it never touches the trusted tier's.
+TEST_PUSH_TIER_BUDGET = {
+    TIER_GUEST: (5, 5.0),
+    TIER_TRUSTED: (30, 30.0),
+}
 
-    In memory on purpose: the button is a convenience, a hub restart resetting
-    it costs nothing, and keeping it out of the DB keeps the test path from
-    taking the write lock just to say no.
+
+class TestPushLimiter:
+    """Bounds the test pushes this process sends.
+
+    Three limits, all of which must allow a press before any is charged:
+      * one press per endpoint per TEST_PUSH_INTERVAL_S;
+      * one press per (member, push-service host) per interval, so one
+        identity cycling fresh endpoints on the same service gains nothing;
+      * a token bucket per quota tier (TEST_PUSH_TIER_BUDGET), which is what
+        caps the hub's outbound requests no matter how many identities and
+        endpoints a caller creates.
+
+    Callers must check ownership first, so nobody can spend another device's
+    allowance. In memory on purpose: the button is a convenience, a restart
+    resetting it costs nothing, and keeping it out of the DB keeps the test
+    path from taking the write lock just to say no.
     """
 
     def __init__(self, interval_s: float = TEST_PUSH_INTERVAL_S,
+                 budgets: Optional[Dict[str, Tuple[int, float]]] = None,
                  clock: Callable[[], float] = time.monotonic):
         self.interval_s = interval_s
+        self.budgets = dict(TEST_PUSH_TIER_BUDGET if budgets is None else budgets)
         self._clock = clock
-        self._last: Dict[str, float] = {}
+        self._last: Dict[Tuple[str, ...], float] = {}
+        # tier -> (tokens, refilled_at)
+        self._buckets: Dict[str, Tuple[float, float]] = {}
         self._lock = threading.Lock()
 
-    def take(self, key: str) -> float:
-        """0 when the caller may send now (and the slot is taken), else the
-        seconds left to wait."""
+    def take(self, *, member_id: str, endpoint: str, tier: str) -> float:
+        """0 when the caller may send now (and every limit is charged), else
+        the seconds until the tightest limit allows it."""
+        # An unknown tier draws on the guest bucket itself: neither an
+        # unlimited budget nor a fresh one of its own.
+        if tier not in self.budgets:
+            tier = TIER_GUEST
+        burst, per_minute = self.budgets[tier]
+        keys = (("endpoint", endpoint),
+                ("member-host", member_id, _host_of(endpoint).lower().rstrip(".")))
         with self._lock:
             now = self._clock()
             # Forget expired entries so the map stays as small as the set of
-            # devices that pressed the button in the last interval.
+            # presses in the last interval.
             for k in [k for k, t in self._last.items() if now - t >= self.interval_s]:
                 del self._last[k]
-            last = self._last.get(key)
-            if last is not None:
-                return self.interval_s - (now - last)
-            self._last[key] = now
+            wait = max((self.interval_s - (now - self._last[k]) for k in keys
+                        if k in self._last), default=0.0)
+            tokens, at = self._buckets.get(tier, (float(burst), now))
+            tokens = min(float(burst), tokens + (now - at) * per_minute / 60.0)
+            self._buckets[tier] = (tokens, now)
+            if tokens < 1.0:
+                wait = max(wait, (1.0 - tokens) * 60.0 / per_minute)
+            if wait > 0:
+                return wait
+            self._buckets[tier] = (tokens - 1.0, now)
+            for k in keys:
+                self._last[k] = now
             return 0.0
 
 
@@ -904,8 +946,9 @@ def subscriptions_of(db: sqlite3.Connection, member_id: str) -> List[Dict[str, s
 def subscriptions_for(db: sqlite3.Connection, member_id: str,
                       channel: str) -> List[Dict[str, Any]]:
     """This identity's subscriptions to one channel, with what the page shows
-    for its own device: the text choice and when a push last got through
-    (None = never)."""
+    for its own device: the text choice, and when the push service last
+    accepted a notification for it on this channel (None = never). Acceptance
+    is all the hub can know; whether the phone displayed it is not reported."""
     ensure_push_table(db)
     rows = db.execute("SELECT endpoint, mode, show_text, last_ok_at FROM push_subscriptions "
                       "WHERE member_id = ? AND channel = ?", (member_id, channel)).fetchall()

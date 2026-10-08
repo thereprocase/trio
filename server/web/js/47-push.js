@@ -28,11 +28,13 @@
   // single-channel viewer, or a dashboard started with --no-agent-control.
   const NOT_DELIVERING = 'Your choice is saved, but no hub is sending phone notifications right now. They are sent by the hub\'s main dashboard (nth_web.py started without a channel).';
 
-  // The hub deletes a subscription the push service keeps refusing, and
-  // nothing tells the phone. The page therefore remembers, per channel, that
-  // this device was subscribed and with which mode, so it can notice the row
-  // has gone and offer to restore it.
-  const DROPPED = 'Notifications to this device stopped after repeated delivery failures. Turn them back on?';
+  // The hub deletes a subscription when the push service keeps refusing it or
+  // reports it gone, when a guest's row sits idle for a month, and nothing
+  // tells the phone. The page therefore remembers, per channel, that this
+  // device was subscribed and with which mode, so it can notice the row has
+  // gone and offer to restore it. The wording names no cause, because the
+  // page cannot tell which one it was.
+  const dropped = channel => `This device no longer gets notifications for #${channel}. Turn them back on?`;
   const REMEMBER_PREFIX = 'nth.push.subscribed.';
   function remembered(channel) {
     try { return localStorage.getItem(REMEMBER_PREFIX + channel) || ''; } catch { return ''; }
@@ -136,7 +138,7 @@
       `<button type="button" class="btn sm push-mode" data-push-mode="${id}" aria-pressed="false">${esc(label)}</button>`).join('');
     section.innerHTML = '<h3>Phone notifications</h3>'
       + '<p class="push-hint" hidden></p>'
-      + `<div class="push-dropped" hidden><p>${esc(DROPPED)}</p><button type="button" class="btn sm push-resubscribe">Turn back on</button> <button type="button" class="btn sm push-dismiss">Not now</button></div>`
+      + `<div class="push-dropped" hidden><p>${esc(dropped(channel))}</p><button type="button" class="btn sm push-resubscribe">Turn back on</button> <button type="button" class="btn sm push-dismiss">Not now</button></div>`
       + `<div class="push-modes" role="group" aria-label="Phone notifications for #${esc(channel)}">${buttons}</div>`
       + '<label class="push-option"><input type="checkbox" class="push-show-text"><span>Show message text on the lock screen</span></label>'
       + '<div class="push-device" hidden><span class="push-last"></span><button type="button" class="btn sm push-test">Send test</button></div>'
@@ -149,6 +151,7 @@
     section.querySelector('.push-show-text')?.addEventListener('change', () => toggleText(section, channel));
     section.querySelector('.push-test')?.addEventListener('click', () => sendTest(section, channel));
     showDropped(section, false);
+    textKnown.set(section, false);
     showDevice(section, null);
     refresh(section, channel);
   }
@@ -181,13 +184,19 @@
     if (el) el.hidden = !on;
   }
   // This device's row on this channel (null when not subscribed): the text
-  // choice it carries, and when a push last got through. Without a row the
-  // checkbox still works, and its value goes with the next subscribe.
+  // choice it carries, and when the push service last accepted a notification
+  // for it here. Without a row the checkbox still works, and its value goes
+  // with the next subscribe.
   const deviceRows = new WeakMap();
+  // Whether the checkbox reflects something real: a row the hub reported, or
+  // the person's own tick. Until then a subscribe leaves show_text out, so a
+  // tap made before the status loads (or after it failed) cannot overwrite a
+  // stored "show" with the unticked default.
+  const textKnown = new WeakMap();
   function showDevice(section, row) {
     deviceRows.set(section, row);
     const box = section.querySelector('.push-show-text');
-    if (box && row) box.checked = !!row.show_text;
+    if (box && row) { box.checked = !!row.show_text; textKnown.set(section, true); }
     const device = section.querySelector('.push-device');
     if (device) device.hidden = !row;
     const last = section.querySelector('.push-last');
@@ -276,15 +285,17 @@
         setStatus(section, 'Notifications were not allowed, so nothing changed.');
         return;
       }
-      const showText = !!section.querySelector('.push-show-text')?.checked;
-      const body = s => ({ subscription: s.toJSON(), channel, mode, show_text: showText });
+      const box = section.querySelector('.push-show-text');
+      const body = s => ({ subscription: s.toJSON(), channel, mode,
+                           ...(box && textKnown.get(section) ? { show_text: !!box.checked } : {}) });
+      let result = null;
       let note = '';
       // Nothing to replace when the browser no longer holds a subscription.
       let replace = fresh && !!(await browserSubscription(false).catch(() => null));
       let sub = await browserSubscription(true);
       if (!replace) {
         try {
-          await api.post('/api/push/subscribe', body(sub), false);
+          result = await api.post('/api/push/subscribe', body(sub), false);
         } catch (e) {
           // 409: this browser's endpoint already belongs to another identity
           // (the cookie changed). Replace the browser subscription so this
@@ -298,13 +309,16 @@
         const oldEndpoint = sub.endpoint;
         await sub.unsubscribe();
         sub = await browserSubscription(true);
-        await api.post('/api/push/subscribe', body(sub), false);
+        result = await api.post('/api/push/subscribe', body(sub), false);
         note = await moveOtherChannels(channel, oldEndpoint, sub);
       }
       remember(channel, mode);
       showDropped(section, false);
       showMode(section, mode);
-      showDevice(section, { mode, show_text: showText, last_ok_at: deviceRows.get(section)?.last_ok_at || null });
+      // The hub answers with the stored choice, which is what an omitted
+      // show_text kept.
+      const showText = typeof result?.show_text === 'boolean' ? result.show_text : !!box?.checked;
+      showDevice(section, { mode, show_text: showText, last_ok_at: replace ? null : deviceRows.get(section)?.last_ok_at || null });
       if (note) setStatus(section, section.querySelector('.push-status').textContent + ' ' + note);
     } catch (e) {
       setStatus(section, e?.message || 'Could not change phone notifications.');
@@ -319,6 +333,7 @@
     const box = section.querySelector('.push-show-text');
     if (!box) return;
     const want = !!box.checked;
+    textKnown.set(section, true);
     const row = deviceRows.get(section);
     if (!row) {
       setStatus(section, want ? 'Message text will show once notifications are on for this device.'
