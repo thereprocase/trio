@@ -94,10 +94,26 @@ def sha(path):
 
 builtin_manifest = json.loads((SERVER / "web" / "manifest.webmanifest").read_text())
 
+
+def unversioned(manifest):
+    """The manifest with each icon URL's ?v= content version removed."""
+    out = dict(manifest)
+    out["icons"] = [dict(i, src=i["src"].split("?", 1)[0]) for i in manifest.get("icons", [])]
+    return out
+
+
+def icon_version(path):
+    import hashlib as _h
+    return _h.sha256(Path(path).read_bytes()).hexdigest()[:12]
+
 # 1. Defaults reproduce the built-in identity.
 got, _ = probe({})
-check("default manifest equals the built-in file", got["manifest"] == builtin_manifest,
+check("default manifest equals the built-in file apart from icon versions",
+      unversioned(got["manifest"]) == builtin_manifest,
       (got["manifest"].get("name"), got["manifest"].get("short_name")))
+check("each manifest icon URL carries the version of the bytes it serves",
+      all(i["src"].endswith("?v=" + icon_version(ICONS / i["src"].split("?")[0].rsplit("/", 1)[-1]))
+          for i in got["manifest"]["icons"]))
 check("default page title is unchanged", got["title"] == "nth — chat with your agents", got["title"])
 check("default Home Screen title is unchanged", got["apple_title"] == "nth", got["apple_title"])
 check("default theme colour is unchanged", got["theme_meta"] == "#3d7a63", got["theme_meta"])
@@ -124,7 +140,7 @@ check("manifest name override, control characters dropped", m["name"] == "Field 
 check("manifest short_name override", m["short_name"] == 'Fi"eld', m["short_name"])
 check("manifest theme_color override", m["theme_color"] == "#C0392B", m["theme_color"])
 check("manifest keeps every other field",
-      {k: v for k, v in m.items() if k not in ("name", "short_name", "theme_color")}
+      {k: v for k, v in unversioned(m).items() if k not in ("name", "short_name", "theme_color")}
       == {k: v for k, v in builtin_manifest.items() if k not in ("name", "short_name", "theme_color")})
 check("page title escaped", got["title"] == "Field &lt;b&gt;Hub&lt;/b&gt;", got["title"])
 check("Home Screen title escaped", got["apple_title"] == "Fi&quot;eld", got["apple_title"])
@@ -151,6 +167,9 @@ with tempfile.TemporaryDirectory() as tmp:
     got, err = probe({"NTH_APP_ICON_DIR": tmp})
     check("a PNG of the right size replaces the built-in icon",
           got["icons"]["icon-192.png"] == hashlib.sha256(custom).hexdigest())
+    check("a replaced icon's manifest URL carries its own version, so phones fetch the new art",
+          any(i["src"] == "/icons/icon-192.png?v=" + hashlib.sha256(custom).hexdigest()[:12]
+              for i in got["manifest"]["icons"]))
     check("the replaced icon is what /icons/ serves",
           got["route_icon"] == hashlib.sha256(custom).hexdigest())
     check("a non-PNG keeps the built-in icon, also on /apple-touch-icon.png",
