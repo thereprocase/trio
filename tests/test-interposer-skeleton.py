@@ -52,6 +52,9 @@ class InterposerCase(unittest.TestCase):
             env.pop(field, None)
         self.env = patch.dict(os.environ, env, clear=True)
         self.env.start()
+        from interposer_test_dns import fixture_dns
+        self.dns = patch.object(socket,"getaddrinfo",side_effect=fixture_dns)
+        self.dns.start()
         self.processes = []
         self.user_runtime = patch.object(wire, '_user_runtime_dir', return_value=self.root / 'no-user-runtime')
         self.user_runtime.start()
@@ -65,6 +68,7 @@ class InterposerCase(unittest.TestCase):
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait(timeout=3)
+        self.dns.stop()
         self.env.stop()
         self.user_runtime.stop()
         self.tmp.cleanup()
@@ -72,6 +76,12 @@ class InterposerCase(unittest.TestCase):
     def start(self, idle=60, *, activated=False):
         command = [sys.executable, str(ROOT / 'server' / 'nth_interposer.py'), 'serve',
                    '--idle-seconds', str(idle)]
+        bootstrap = ('import sys,runpy; from pathlib import Path; '
+                     'sys.path.insert(0,str(Path(sys.argv[1]).parents[1]/"tests")); '
+                     'from interposer_test_dns import install; install(); '
+                     'sys.path.insert(0,str(Path(sys.argv[1]).parent)); '
+                     'sys.argv=sys.argv[1:]; runpy.run_path(sys.argv[0],run_name="__main__")')
+        command = [sys.executable,'-c',bootstrap,*command[1:]]
         if activated:
             wire.private_dir(wire.socket_path().parent)
             sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -135,8 +145,8 @@ class SkeletonTests(InterposerCase):
             self.assertEqual(wire.encode_frame(value), expected)
             self.assertEqual(wire.read_frame(io.BytesIO(expected)), value)
         self.assertEqual(wire.encode_frame({'v': 1, 'id': 7, 'ok': {}}), b'{"v":1,"id":7,"ok":{}}\n')
-        self.assertEqual(wire.encode_frame({'v': 1, 'id': 7, 'error': 'unknown op'}),
-                         b'{"v":1,"id":7,"error":"unknown op"}\n')
+        self.assertEqual(wire.encode_frame({'v': 1, 'id': 7, 'error': {'code': 'invalid_request', 'message': 'unknown op'}}),
+                         b'{"v":1,"id":7,"error":{"code":"invalid_request","message":"unknown op"}}\n')
 
     def test_frame_size_boundary_and_oversize(self):
         frame = wire.encode_frame({'x': ''})
@@ -146,7 +156,7 @@ class SkeletonTests(InterposerCase):
         with self.assertRaisesRegex(wire.WireError, '64 KiB'):
             wire.encode_frame({'x': limit['x'] + 'a'})
         self.start()
-        self.assertIn('64 KiB', self.raw(b'a' * 65537 + b'\n')['error'])
+        self.assertIn('64 KiB', self.raw(b'a' * 65537 + b'\n')['error']['message'])
 
     def test_bad_json(self):
         self.start()
@@ -161,25 +171,25 @@ class SkeletonTests(InterposerCase):
         self.start()
         for value in (None, True, -1, 1.5, '7', 1 << 63):
             reply = self.raw(wire.encode_frame(dict(v=1, id=value, op='hello')))
-            self.assertIn('id must', reply['error'])
+            self.assertIn('id must', reply['error']['message'])
             self.assertIsNone(reply['id'])
 
     def test_unknown_op(self):
         self.start()
         reply = self.raw(b'{"v":1,"id":7,"op":"unknown"}\n')
-        self.assertEqual(reply, {'v': 1, 'id': 7, 'error': 'unknown op'})
+        self.assertEqual(reply, {'v': 1, 'id': 7, 'error': {'code': 'invalid_request', 'message': 'unknown op'}})
 
     def test_hello_version_mismatch(self):
         self.start()
         for version in (2, True, '1', None):
             reply = self.raw(wire.encode_frame(dict(v=version, id=7, op='hello')))
-            self.assertIn('protocol version mismatch', reply['error'])
-            self.assertIn('restart trio-interposer', reply['error'])
+            self.assertIn('protocol version mismatch', reply['error']['message'])
+            self.assertIn('restart trio-interposer', reply['error']['message'])
 
     def test_hello_must_be_first(self):
         self.start()
         reply = self.raw(b'{"v":1,"id":7,"op":"list"}\n')
-        self.assertEqual(reply['error'], 'first frame must be hello')
+        self.assertEqual(reply['error']['message'], 'first frame must be hello')
 
     def test_client_checks_reply_id(self):
         sock = Mock()
@@ -199,7 +209,7 @@ class SkeletonTests(InterposerCase):
 
     def test_unimplemented_ops_and_identity_validation(self):
         self.start()
-        for op in sorted(EXPECTED_OPS - {'hello', 'hub.announce', 'list', 'status'}):
+        for op in sorted({'wait', 'subscribe', 'delivered'}):
             with wire.connect() as client:
                 with self.assertRaisesRegex(wire.WireError, '^not implemented in this version$'):
                     client.call(op)
@@ -208,7 +218,7 @@ class SkeletonTests(InterposerCase):
                               ({'key': 'not-a-key'}, 'bad identity'),
                               ({'session_token': 'synthetic-secret'}, 'credentials')):
             reply = self.raw(wire.encode_frame(dict(v=1, id=1, op='hello', **fields)))
-            self.assertIn(error, reply['error'])
+            self.assertIn(error, reply['error']['message'])
 
     def test_private_socket_and_directories(self):
         self.start()
@@ -386,14 +396,14 @@ class SkeletonTests(InterposerCase):
             self.assertEqual(tables, {'hubs', 'memberships', 'sessions', 'holdings', 'deliveries', 'appserver_spool', 'meta'})
             self.assertEqual(store.db.execute('PRAGMA journal_mode').fetchone()[0], 'wal')
             self.assertEqual(store.db.execute('PRAGMA synchronous').fetchone()[0], 2)
-            self.assertEqual(store.db.execute('PRAGMA user_version').fetchone()[0], 2)
+            self.assertEqual(store.db.execute('PRAGMA user_version').fetchone()[0], storage.SCHEMA_VERSION)
             for table, columns in {
                 'memberships': {'key','source','url','channel','member_id','filter','enabled','ended',
-                    'owner_session','announced_through','acked_through','poll_state','poll_error','last_ok'},
+                    'owner_session','announced_through','acked_through','poll_state','poll_error','last_ok','shadow_notices','shadow_ids','shadow_filter','shadow_enabled','shadow_ended','shadow_announced_through','shadow_acked_through'},
                 'sessions': {'session','client','sink','host_pid','host_stamp','state','host_ok','problem',
                     'registered','last_wake','wakes_hour'},
-                'hubs': {'server','url','announced_at','state','since','error','pending_url','trust'},
-                'holdings': {'session','key','server','joined'},
+                'hubs': {'server','url','announced_at','state','since','error','pending_url','trust','approved','config_url','config_pending_url'},
+                'holdings': {'session','key','server','joined','attached'},
                 'deliveries': {'id','session','sink','body','ranges','state','created','done'},
                 'appserver_spool': {'key','message_id','payload','state','turn_id'},
             }.items():
@@ -509,7 +519,7 @@ class SkeletonTests(InterposerCase):
                     reply = wire.read_frame(reader)
                     expected = ('credentials must not cross' if any(k in fields for k in ('token','session_token','authkey'))
                                 else 'bad hub server name' if fields.get('server') == '../bad' else 'bad hub URL')
-                    self.assertIn(expected, reply['error'])
+                    self.assertIn(expected, reply['error']['message'])
                     self.assertEqual(reply['id'], 7)
                     sock.sendall(b'{"v":1,"id":8,"op":"list"}\n')
                     self.assertEqual(wire.read_frame(reader)['ok']['hubs'], [])

@@ -181,7 +181,7 @@ class FixTests(cases.InterposerCase):
                 stop.set()
         server.handle_request.side_effect = tick
         with patch.object(service,'Store',return_value=store), patch.object(service,'Server',return_value=server), \
-             patch.object(service.time,'monotonic',side_effect=lambda:now[0]):
+             patch.object(service.time,'monotonic',side_effect=lambda:now[0]),patch('nth_interposer_runtime.Runtime'):
             service.serve(stop=stop)
         self.assertEqual(storage.HOOKS_IMPORT_INTERVAL, 60)
         self.assertEqual(store.import_hooks.call_count, 3)  # start, 60, 120
@@ -392,12 +392,12 @@ class FixTests(cases.InterposerCase):
             self.assertEqual(changed['url'],first['url'])
             self.assertEqual(changed['pending_url'],'https://other.example/sse')
             self.assertEqual(store.snapshot()['hubs'][0],changed)
-            for number in range(31):
+            for number in range(7):
                 store.announce('nth-demo-' + str(number),'https://hub.example/sse')
-            with self.assertRaisesRegex(wire.WireError,'maximum 32'):
+            with self.assertRaisesRegex(wire.WireError,'maximum 8'):
                 store.announce('nth-overflow','https://hub.example/sse')
             self.assertEqual(store.announce('nth-demo',first['url'])['url'],first['url'])
-            self.assertEqual(len(store.snapshot()['hubs']),32)
+            self.assertEqual(len(store.snapshot()['hubs']),8)
             accepted = 'https://hub.example/' + 'x'*(512-len('https://hub.example/'))
             wire.validate_hub('nth-demo',accepted)
             with self.assertRaisesRegex(wire.WireError,'bad hub URL'):
@@ -421,7 +421,7 @@ class FixTests(cases.InterposerCase):
                     sock.sendall(wire.encode_frame(dict(v=1,id=request_id,op='hub.announce',server='nth-demo',url=url)))
                     reply = wire.read_frame(reader)
                     self.assertEqual(reply['id'],request_id)
-                    self.assertTrue(reply['error'].startswith(('bad hub URL','loopback, link-local')))
+                    self.assertTrue(reply['error']['message'].startswith(('bad hub URL','loopback, link-local')))
             sock.sendall(wire.encode_frame(dict(v=1,id=100,op='hub.announce',server='nth-demo',url='https://hub.example/sse')))
             self.assertEqual(wire.read_frame(reader)['ok']['url'],'https://hub.example/sse')
             sock.sendall(b'{"v":1,"id":101,"op":"list"}\n')
@@ -610,7 +610,7 @@ class FixTests(cases.InterposerCase):
                 with sock.makefile('rb') as reader:
                     reply = wire.read_frame(reader)
                     self.assertEqual(reply,{'v':1,'id':None,'error':
-                        'frame exceeds 64 KiB' if len(frame)>65536 else 'bad JSON'})
+                        {'code':'invalid_request','message':'frame exceeds 64 KiB' if len(frame)>65536 else 'bad JSON'}})
                     try:
                         with self.assertRaises(EOFError):
                             wire.read_frame(reader)
@@ -621,17 +621,17 @@ class FixTests(cases.InterposerCase):
 
     def test_exact_frame_and_response_boundaries(self):
         self.start()
-        request = {'v':1,'id':7,'op':'hello','padding':''}
+        request = {'v':1,'id':7,'op':'hello','version':''}
         size = len(wire.encode_frame(request))
-        request['padding'] = 'x'*(65536-size)
+        request['version'] = 'x'*(65536-size)
         accepted = wire.encode_frame(request)
         self.assertEqual(len(accepted.rstrip(b'\n')),65535)
         self.assertIn('ok',self.raw(accepted))
         # Build independently of the capped encoder for the over-limit case.
-        request['padding'] += 'x'
+        request['version'] += 'x'
         refused = (json.dumps(request,separators=(',',':'))+'\n').encode()
         self.assertEqual(len(refused.rstrip(b'\n')),65536)
-        self.assertEqual(self.raw(refused),{'v':1,'id':None,'error':'frame exceeds 64 KiB'})
+        self.assertEqual(self.raw(refused),{'v':1,'id':None,'error':{'code':'invalid_request','message':'frame exceeds 64 KiB'}})
         reply = {'v':1,'id':7,'ok':''}
         reply['ok'] = 'x'*(65536-len(wire.encode_frame(reply)))
         self.assertEqual(len(wire.encode_frame(reply)),65536)
@@ -649,7 +649,7 @@ class FixTests(cases.InterposerCase):
             sock.sendall(b'{"v":1,"id":7,"op":"list"}\n')
             reply = wire.read_frame(reader)
             self.assertEqual(reply,{'v':1,'id':7,'error':
-                'response exceeds 64 KiB; use status with a key or session'})
+                {'code':'frame_too_large','message':'response exceeds 64 KiB; use status with a key or session'}})
             self.assertLess(len(wire.encode_frame(reply)),65536)
             sock.sendall(wire.encode_frame(dict(v=1,id=8,op='status',key=OTHER_KEY)))
             self.assertEqual(wire.read_frame(reader)['ok']['memberships'],[])
@@ -666,7 +666,7 @@ class FixTests(cases.InterposerCase):
                 expected = 'exactly one' if ('ok' in reply)==('error' in reply) else 'invalid reply id'
                 with self.assertRaisesRegex(wire.WireError,expected):
                     client.call('hello')
-        for reply,expected in (({'v':1,'id':None,'error':'frame exceeds 64 KiB'},'frame exceeds 64 KiB'),
+        for reply,expected in (({'v':1,'id':None,'error':{'code':'invalid_request','message':'frame exceeds 64 KiB'}},'frame exceeds 64 KiB'),
                                ({'v':1,'id':0,'error':{}},'service error')):
             sock = Mock()
             sock.makefile.return_value = io.BytesIO(wire.encode_frame(reply))
@@ -678,7 +678,7 @@ class FixTests(cases.InterposerCase):
         process = self.start()
         with wire.connect() as client:
             self.assertEqual(client.hello,{'version':'8.3.0-beta.4','protocol_min':1,'protocol_max':1,
-                                         'schema_version':2,'pid':process.pid,'activation':'fallback'})
+                                         'schema_version':storage.SCHEMA_VERSION,'pid':process.pid,'activation':'fallback'})
         good = {'version':'test-service','protocol_min':1,'protocol_max':1,'schema_version':2,'pid':4242}
         payloads = [[],None,{'protocol_min':2,'protocol_max':2},{'protocol_min':0,'protocol_max':0}]
         payloads += [dict(good,**{field:value}) for field,values in (
@@ -707,14 +707,14 @@ class FixTests(cases.InterposerCase):
                         with self.assertRaisesRegex(wire.WireError,error):
                             wire.validate_request(request)
                         sock.sendall(wire.encode_frame(request))
-                        self.assertEqual(wire.read_frame(reader),{'v':1,'id':7,'error':error})
+                        self.assertEqual(wire.read_frame(reader),{'v':1,'id':7,'error':{'code':'invalid_request','message':error}})
             for sid in ('a'*6,'a'*80):
                 wire.validate_request(dict(v=1,id=0,op='status',session=sid))
             for request_id in (0,(1 << 63)-1):
                 sock.sendall(wire.encode_frame(dict(v=1,id=request_id,op='status',session=None,key=KEY)))
                 self.assertEqual(wire.read_frame(reader)['id'],request_id)
             sock.sendall(b'{"v":1,"id":9,"op":"unknown"}\n')
-            self.assertEqual(wire.read_frame(reader),{'v':1,'id':9,'error':'unknown op'})
+            self.assertEqual(wire.read_frame(reader),{'v':1,'id':9,'error':{'code':'invalid_request','message':'unknown op'}})
             sock.sendall(b'{"v":1,"id":10,"op":"list"}\n')
             self.assertIn('ok',wire.read_frame(reader))
 
@@ -807,17 +807,18 @@ class FixTests(cases.InterposerCase):
 
     def test_schema_types_primary_keys_defaults_and_behavior(self):
         declarations = {
-            'hubs':'server:TEXT:1 url:TEXT announced_at:REAL state:TEXT since:REAL error:TEXT pending_url:TEXT trust:TEXT',
+            'hubs':'server:TEXT:1 url:TEXT announced_at:REAL state:TEXT since:REAL error:TEXT pending_url:TEXT trust:TEXT approved:INT config_url:TEXT config_pending_url:TEXT',
             'memberships':'key:TEXT:1 source:TEXT url:TEXT channel:TEXT member_id:TEXT filter:TEXT enabled:INT ended:TEXT '
-                'owner_session:TEXT announced_through:INT acked_through:INT poll_state:TEXT poll_error:TEXT last_ok:REAL',
+                'owner_session:TEXT announced_through:INT acked_through:INT poll_state:TEXT poll_error:TEXT last_ok:REAL shadow_filter:TEXT shadow_enabled:INT shadow_ended:TEXT '
+                'shadow_announced_through:INT shadow_acked_through:INT shadow_notices:INT shadow_ids:INT',
             'sessions':'session:TEXT:1 client:TEXT sink:TEXT host_pid:INT host_stamp:INT state:TEXT host_ok:INT problem:TEXT '
                 'registered:REAL last_wake:REAL wakes_hour:INT',
-            'holdings':'session:TEXT:1 key:TEXT:2 server:TEXT joined:REAL',
+            'holdings':'session:TEXT:1 key:TEXT:2 server:TEXT joined:REAL attached:INT',
             'deliveries':'id:INTEGER:1 session:TEXT sink:TEXT body:TEXT ranges:TEXT state:TEXT created:REAL done:REAL',
             'appserver_spool':'key:TEXT:1 message_id:INT:2 payload:TEXT state:TEXT turn_id:TEXT',
             'meta':'key:TEXT:1 value:TEXT'}
-        defaults = {'memberships':{'filter':"'about'",'enabled':'1','ended':"''",'announced_through':'0','acked_through':'0'},
-                    'hubs':{'pending_url':"''",'trust':"'announced'"}}
+        defaults = {'memberships':{'filter':"'about'",'enabled':'1','ended':"''",'announced_through':'0','acked_through':'0','shadow_announced_through':'0','shadow_acked_through':'0','shadow_notices':'0','shadow_ids':'0'},
+                    'hubs':{'pending_url':"''",'trust':"'announced'",'approved':'0','config_url':"''",'config_pending_url':"''"},'holdings':{'attached':'0'}}
         store = storage.Store()
         try:
             for table,declaration in declarations.items():
@@ -861,7 +862,7 @@ class FixTests(cases.InterposerCase):
         fake_store.live_sessions.side_effect = [1,1,0,0]
         fake_server.handle_request.side_effect = lambda:now.__setitem__(0,now[0]+10)
         with patch.object(service,'Store',return_value=fake_store),patch.object(service,'Server',return_value=fake_server), \
-             patch.object(service.time,'monotonic',side_effect=lambda:now[0]):
+             patch.object(service.time,'monotonic',side_effect=lambda:now[0]),patch('nth_interposer_runtime.Runtime'):
             service.serve(idle_seconds=20)
         self.assertEqual(fake_server.handle_request.call_count,4)
 
@@ -1010,7 +1011,7 @@ class FixTests(cases.InterposerCase):
                              ('https://hub.example/sse','pending','announced',''))
             store.import_hooks()
             self.assertEqual(store.db.execute('SELECT * FROM meta').fetchall(),[])
-            self.assertEqual(store.db.execute('PRAGMA user_version').fetchone()[0],2)
+            self.assertEqual(store.db.execute('PRAGMA user_version').fetchone()[0],storage.SCHEMA_VERSION)
         finally:
             store.close()
 

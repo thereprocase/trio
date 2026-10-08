@@ -1,0 +1,30 @@
+[
+  {
+    "request": "{\"v\":1,\"id\":7,\"op\":\"session.register\",\"session\":\"session-alpha\",\"client\":\"claude\",\"host_pid\":null,\"sink\":\"rewake\",\"host_ok\":true,\"problem\":\"\"}\n",
+    "reply": "{\"v\":1,\"id\":7,\"ok\":{\"session\":\"session-alpha\",\"state\":\"idle\"}}\n"
+  },
+  {
+    "request": "{\"v\":1,\"id\":7,\"op\":\"membership.attach\",\"session\":\"session-alpha\",\"key\":\"0123456789abcdef01234567\",\"server\":\"nth-trio\",\"via\":\"connect\"}\n",
+    "reply": "{\"v\":1,\"id\":7,\"ok\":{\"key\":\"0123456789abcdef01234567\",\"owner\":\"session-alpha\"}}\n"
+  },
+  {
+    "request": "{\"v\":1,\"id\":7,\"op\":\"membership.configure\",\"key\":\"0123456789abcdef01234567\",\"filter\":\"at\",\"enabled\":false}\n",
+    "reply": "{\"v\":1,\"id\":7,\"ok\":{\"key\":\"0123456789abcdef01234567\",\"filter\":\"at\",\"enabled\":false}}\n"
+  },
+  {
+    "request": "{\"v\":1,\"id\":7,\"op\":\"ack.seen\",\"session\":\"session-alpha\",\"key\":\"0123456789abcdef01234567\",\"through_id\":12}\n",
+    "reply": "{\"v\":1,\"id\":7,\"ok\":{}}\n"
+  },
+  {
+    "request": "{\"v\":1,\"id\":7,\"op\":\"turn\",\"session\":\"session-alpha\",\"phase\":\"started\"}\n",
+    "reply": "{\"v\":1,\"id\":7,\"ok\":{\"state\":\"in_turn\"}}\n"
+  },
+  {
+    "request": "{\"v\":1,\"id\":7,\"op\":\"turn\",\"session\":\"session-alpha\",\"phase\":\"ended\"}\n",
+    "reply": "{\"v\":1,\"id\":7,\"ok\":{\"state\":\"idle\"}}\n"
+  },
+  {
+    "request": "{\"v\":1,\"id\":7,\"op\":\"session.end\",\"session\":\"session-alpha\"}\n",
+    "reply": "{\"v\":1,\"id\":7,\"ok\":{}}\n"
+  }
+]

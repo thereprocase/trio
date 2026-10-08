@@ -567,7 +567,7 @@ def mcp_overrides(endpoint):
             arguments += ['--url', config['quartet_url']]
         values = {'command': sys.executable, 'args': arguments,
                   'env': {'TRIO_NATIVE_CLIENT': 'codex', 'TRIO_CODEX_ENDPOINT': endpoint,
-                          'NTH_HOME': str(home()), 'NTH_QUIET': '1'}}
+                          'NTH_HOME': str(home()), 'NTH_QUIET': '1', 'NTH_SERVER_NAME': name}}
         for key, value in values.items():
             if isinstance(value, dict):
                 for env_name, env_value in value.items():
@@ -695,7 +695,11 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest='command', required=True)
     interposer = sub.add_parser('interposer', help='Inspect and control the spoke interposer')
-    interposer.add_argument('action', choices=['status', 'restart', 'logs'])
+    interposer.add_argument('--since', type=float)
+    interposer.add_argument('--json', action='store_true', dest='as_json')
+    interposer.add_argument('action', choices=['status', 'restart', 'logs', 'shadow-diff', 'approve'])
+    interposer.add_argument('server', nargs='?')
+    interposer.add_argument('url', nargs='?')
     sub.add_parser('start', help='Start the local event service')
     sub.add_parser('status', help='Show Codex delivery health without credentials (Claude channel '
                                   'listeners live inside the Claude session: ask the agent to call '
@@ -732,6 +736,35 @@ def main(argv=None):
         parser.error('unrecognized arguments: ' + ' '.join(extra))
     os.umask(0o077)
     if args.command == 'interposer':
+        if args.action == 'approve':
+            from nth_interposer_store import Store
+            try:
+                if not args.server or not args.url:
+                    raise ValueError('approve requires a server and exact URL')
+                store = Store()
+                try:
+                    print(json.dumps(store.approve(args.server,args.url)))
+                finally:
+                    store.close()
+                return 0
+            except (ValueError, OSError, sqlite3.Error):
+                print('Hub approval failed; provide a pending nth-* server and its exact URL.', file=sys.stderr)
+                return 1
+        if args.action == 'shadow-diff':
+            from nth_interposer_shadow import compare
+            if args.since is not None and (args.since < 0 or not __import__('math').isfinite(args.since)):
+                parser.error('--since must be finite and nonnegative')
+            result = compare(args.since)
+            if args.as_json:
+                print(json.dumps(result, indent=2))
+            else:
+                print('Shadow comparison: '+str(result['window']))
+                for direction in ('missing_in_would','missing_in_actual'):
+                    for span in result[direction]:
+                        print(f"{direction}: {span['key']} ids {span['first']} to {span['last']}")
+                print('Notice counts: '+json.dumps(result['sessions']))
+                print('Median release delay: '+str(result['median_release_delay']))
+            return int(bool(result['missing_in_would'] or result['missing_in_actual']))
         return interposer_control(args.action)
     elif args.command == 'status':
         print(json.dumps({'listeners': public_status(),

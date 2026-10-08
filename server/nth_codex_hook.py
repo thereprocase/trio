@@ -438,6 +438,8 @@ class QueueSink:
         if result == 'unknown':
             self.outcome = {'note': 'codex queue timed out: the wake may not have been queued, and its '
                                     'messages count as announced'}
+        if result in ('queued', 'unknown'):
+            core.shadow_actual(self)
         return result in ('queued', 'unknown')
 
 
@@ -507,19 +509,29 @@ def main(argv=None):
         with core.session_update(session_id) as state:
             if state is not None:
                 state['ended'] = True
+        core.shadow_event('session.end', session_id)
         return 0
     host, problem = codex_host()
     if host and host == trio_server_pid():
         return 0                                     # `trio codex`: the event service delivers
     if args.event == 'tool':
-        core.register(payload, tools=HOOK_TOOLS, client='codex')
+        core.register(payload, tools=HOOK_TOOLS, client='codex', shadow_host=(host, problem), observe=False)
     if args.event == 'start':
         if payload.get('source') not in ('startup', 'resume'):
             return 0
         with core.session_update(session_id) as state:
             if state is not None and state['memberships']:
                 state['ended'] = False
+    if args.event == 'stop':
+        core.shadow_event('turn', session_id, phase='ended')
     arm(session_id, host, problem)
+    if args.event == 'tool':
+        core.shadow_tool(payload,'codex',HOOK_TOOLS,(host,problem))
+    if args.event == 'start':
+        try:
+            core.shadow_register(session_id,'codex',(host,problem),resume=payload.get('source')=='resume')
+        except Exception:
+            pass
     return 0
 
 

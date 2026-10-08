@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Per-user spoke interposer skeleton: storage and IPC, no polling or delivery."""
+"""Per-user spoke interposer: IPC and shadow observation, without live delivery."""
 import argparse
 from contextlib import contextmanager
 import logging
@@ -97,7 +97,7 @@ class PrivateRotatingHandler(RotatingFileHandler):
         return os.fdopen(descriptor, 'a', encoding='utf-8')
 
 
-def dispatch(store, request, *, activated=False, log=None):
+def dispatch(store, request, runtime=None, *, activated=False, log=None):
     op = validate_request(request)
     if op == 'hello':
         return {'version': NTH_VERSION, 'protocol_min': PROTOCOL_VERSION,
@@ -110,7 +110,30 @@ def dispatch(store, request, *, activated=False, log=None):
     if op in ('list', 'status'):
         return store.snapshot(request.get('key') if op == 'status' else None,
                               request.get('session') if op == 'status' else None)
-    raise WireError('not implemented in this version')
+    if op == 'session.register':
+        result = store.register(request)
+    elif op == 'membership.attach':
+        result = store.attach(request)
+    elif op == 'membership.configure':
+        result = store.configure(request)
+    elif op == 'ack.seen':
+        result = store.ack(request)
+    elif op == 'turn':
+        result = store.turn(request)
+        if runtime and request['phase'] == 'ended':
+            runtime.release(request['session'], force=True)
+    elif op == 'session.end':
+        result = store.end(request['session'])
+    else:
+        raise WireError('not implemented in this version')
+    if runtime:
+        runtime.reconcile()
+    return result
+
+
+def deadline_frame(sock, seconds=10):
+    from nth_interposer_wire import deadline_frame as read_deadline
+    return read_deadline(sock, time.monotonic() + seconds)
 
 
 class Handler(socketserver.StreamRequestHandler):
@@ -124,7 +147,7 @@ class Handler(socketserver.StreamRequestHandler):
             except EOFError:
                 return
             except WireError as exc:
-                self.reply(None, error=str(exc))
+                self.reply(None, error=exc.payload())
                 return  # Only framing failures leave the stream ambiguous.
             except TimeoutError:
                 self.server.timeout_notice()
@@ -136,12 +159,12 @@ class Handler(socketserver.StreamRequestHandler):
                 op = validate_request(request)
                 if not greeted and op != 'hello':
                     raise WireError('first frame must be hello')
-                payload = dispatch(self.server.store, request, activated=self.server.activated,
+                payload = dispatch(self.server.store, request, self.server.runtime, activated=self.server.activated,
                                    log=self.server.log)
                 reply = {'v': PROTOCOL_VERSION, 'id': request_id, 'ok': payload}
                 greeted = True
             except WireError as exc:
-                reply = {'v': PROTOCOL_VERSION, 'id': request_id, 'error': str(exc)}
+                reply = {'v': PROTOCOL_VERSION, 'id': request_id, 'error': exc.payload()}
                 self.server.log.info('request refused: WireError')
             except (OSError, ValueError, TypeError) as exc:
                 self.server.log.warning('request failed: %s', type(exc).__name__)
@@ -157,7 +180,7 @@ class Handler(socketserver.StreamRequestHandler):
                 frame = encode_frame(reply)
             except WireError:
                 frame = encode_frame({'v': PROTOCOL_VERSION, 'id': reply['id'],
-                                      'error': 'response exceeds 64 KiB; use status with a key or session'})
+                                      'error': {'code': 'frame_too_large', 'message': 'response exceeds 64 KiB; use status with a key or session'}})
             self.wfile.write(frame)
             return True
         except OSError:
@@ -170,6 +193,7 @@ class Server(socketserver.ThreadingUnixStreamServer):
 
     def __init__(self, path, store, log, inherited=None):
         self.store, self.log = store, log
+        self.runtime = None
         self.activated = inherited is not None
         self.connection_slots = threading.BoundedSemaphore(MAX_CONNECTIONS)
         self.connection_lock = threading.Lock()
@@ -280,14 +304,24 @@ def serve(*, idle_seconds=1800, stop=None):
         with service_log() as log:
             store = Store()
             server = None
+            runtime = None
             try:
                 store.import_hooks(log=log)
+                store.import_hubs(log=log)
+                from nth_interposer_runtime import Runtime
+                runtime = Runtime(store, log)
+                runtime.drain()
                 server = Server(path, store, log, inherited)
+                server.runtime = runtime
                 log.info('service started: protocol=%d schema=%d', PROTOCOL_VERSION, SCHEMA_VERSION)
                 idle_since = time.monotonic()
                 next_import = idle_since + HOOKS_IMPORT_INTERVAL
                 while not stop.is_set():
                     server.handle_request()
+                    try:
+                        runtime.tick()
+                    except Exception as exc:
+                        log.warning('shadow tick failed: %s', type(exc).__name__)
                     if time.monotonic() >= next_import:
                         store.import_hooks(log=log)
                         next_import = time.monotonic() + HOOKS_IMPORT_INTERVAL
@@ -297,6 +331,8 @@ def serve(*, idle_seconds=1800, stop=None):
                         log.info('service idle exit')
                         break
             finally:
+                if runtime is not None:
+                    runtime.close()
                 if server is not None:
                     server.server_close()
                     if inherited is None:
