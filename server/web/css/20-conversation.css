@@ -11,6 +11,14 @@
 .message.own .message-role { background:color-mix(in srgb,var(--bubble-me-ink,#fff) 20%,transparent); color:var(--bubble-me-ink,#fff); }
 .role-human { background:var(--accent-tint); color:var(--accent-strong); }
 .message-head time { margin-left:auto; white-space:nowrap; }
+/* Message times (09-time.js): fixed-width digits so ticking seconds do not
+   shift the row; tap copies the UTC instant, so no iOS long-press callout. */
+.msg-time[datetime] { font-variant-numeric:tabular-nums; white-space:nowrap; cursor:copy; -webkit-touch-callout:none; border-radius:4px; }
+.msg-time[datetime]:focus-visible { outline:2px solid var(--focus); outline-offset:1px; }
+.msg-time.copied { color:var(--accent-strong); }
+/* iOS Safari only delivers a tap on a non-interactive element to the
+   document-level listener when the element reads as clickable. */
+@media (hover:none) { .msg-time[datetime] { cursor:pointer; } }
 .message-id { display:none; }
 body.message-numbers .message-id { display:inline; }
 .message-actions-menu { display:flex; gap:6px; justify-content:flex-end; margin-top:6px; }

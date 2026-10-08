@@ -9642,6 +9642,7 @@ WEB_CSS_FILES = (
 #   05-loader                  standalone
 #   06-core                    requires store + api; defines boot()
 #   07-lifecycle / 08-sidebar  mount machinery
+#   09-time                    message time formatting + copy-on-tap
 #   09-ui                      toasts, modals, confirmations
 #   10-markdown … 14-lightbox  rendering; read core, api and ui
 #   20-workspace … 46-data     features; read everything above
@@ -9662,7 +9663,7 @@ WEB_CSS_FILES = (
 WEB_JS_FILES = (
     "js/01-store.js", "js/02-api.js", "js/03-router.js", "js/04-events.js",
     "js/05-loader.js", "js/06-core.js", "js/07-lifecycle.js",
-    "js/08-sidebar.js", "js/09-ui.js", "js/10-markdown.js",
+    "js/08-sidebar.js", "js/09-time.js", "js/09-ui.js", "js/10-markdown.js",
     "js/11-conversation.js", "js/12-composer.js", "js/13-file-links.js",
     "js/14-lightbox.js", "js/20-workspace.js", "js/30-agents.js",
     "js/40-preferences.js", "js/41-gameboy-controls.js", "js/42-ipod-controls.js",
