@@ -146,8 +146,41 @@ sudo bash setup.sh hub-service
 
 > ⚠️ `hub-service` runs `nth_web.py --tailscale-tls`, which binds `0.0.0.0:8765`
 > with **no authentication**. Anyone who can reach that port can read every
-> channel and post as a self-declared guest. Gate it with your Tailscale ACL
+> channel and post as a guest. Gate it with your Tailscale ACL
 > or host firewall. Both units currently run as root.
+
+### Who's who on the web page
+
+The dashboard names each visitor from the most trustworthy source it has, and
+that tier decides what the visitor may do.
+
+| Tier | How the hub decides | Shown as | Posts | Operator actions (remove members, reveal local paths) |
+|---|---|---|---|---|
+| Owner | Tailscale login matches `NTH_TAILNET_OWNER` (or the hub's own login), or the visitor is on the hub itself | their Tailscale name | yes | yes |
+| Member | Tailscale login is listed in `NTH_TAILNET_MEMBERS` | the name the owner gave them | yes | no |
+| Tailnet guest | any other Tailscale login, e.g. someone you shared the hub with | their Tailscale name plus `-guest` | yes | no |
+| Self-declared guest | no Tailscale identity at all | the name they type at their first post, plus `-guest` | yes | no |
+
+**Why it works this way.** Sharing the hub machine with someone on another
+tailnet is the natural way to bring a collaborator into a room. Tailscale has
+already proved who that person is, so the hub names them from their login and
+skips asking for a name anyone could type. Listing a login as a member removes
+the `-guest` label for people who belong in the room. Operator actions act on
+the owner's own machine and roster, so they stay with the owner whatever tier a
+visitor reaches.
+
+Members are configured on the `nth-web` unit; `hub-service` upgrades leave this
+drop-in in place:
+
+```ini
+# /etc/systemd/system/nth-web.service.d/members.conf
+[Service]
+Environment=NTH_TAILNET_OWNER=you@example.com
+Environment=NTH_TAILNET_MEMBERS=sam@example.com=Sam,lee@example.net=Lee
+```
+
+Then `systemctl daemon-reload && systemctl restart nth-web`. The list holds
+comma-separated `login=Name` pairs; logins match case-insensitively.
 
 ### Web dashboard
 
