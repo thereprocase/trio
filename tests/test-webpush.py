@@ -237,15 +237,47 @@ check("payload: the test notification never replaces a real one (own tag)",
       tp["tag"] != npush.build_payload("ops", d4)["tag"])
 
 # The test button's limiter, on a hand-driven clock.
+FCM, MOZ = "https://fcm.googleapis.com/fcm/send/", "https://updates.push.services.mozilla.com/wpush/v2/"
+G, TR = npush.TIER_GUEST, npush.TIER_TRUSTED
 _lt = [100.0]
 lim = npush.TestPushLimiter(interval_s=10.0, clock=lambda: _lt[0])
-check("test limit: the first press goes through", lim.take("ep-a") == 0)
-check("test limit: a second press inside 10 s waits", 9.9 < lim.take("ep-a") <= 10.0)
-check("test limit: another device is not held up", lim.take("ep-b") == 0)
+check("test limit: the first press goes through",
+      lim.take(member_id="m1", endpoint=FCM + "a", tier=TR) == 0)
+check("test limit: a second press inside 10 s waits",
+      9.9 < lim.take(member_id="m1", endpoint=FCM + "a", tier=TR) <= 10.0)
+check("test limit: the same member on a fresh endpoint at the same service waits too",
+      lim.take(member_id="m1", endpoint=FCM + "a-fresh", tier=TR) > 9.9)
+check("test limit: a trailing-dot spelling of the host is the same service",
+      lim.take(member_id="m1", endpoint="https://FCM.googleapis.com./fcm/send/x", tier=TR) > 9.9)
+check("test limit: the same member at another push service is not held up",
+      lim.take(member_id="m1", endpoint=MOZ + "a", tier=TR) == 0)
+check("test limit: another member is not held up",
+      lim.take(member_id="m2", endpoint=FCM + "b", tier=TR) == 0)
 _lt[0] += 4
-check("test limit: the wait counts down", 5.9 < lim.take("ep-a") <= 6.0)
+check("test limit: the wait counts down",
+      5.9 < lim.take(member_id="m1", endpoint=FCM + "a", tier=TR) <= 6.0)
 _lt[0] += 6
-check("test limit: allowed again once the interval has passed", lim.take("ep-a") == 0)
+check("test limit: allowed again once the interval has passed",
+      lim.take(member_id="m1", endpoint=FCM + "a", tier=TR) == 0)
+
+# Churn: a guest minting identities and endpoints still meets the guest tier's
+# budget, and the trusted tier keeps its own.
+_lt = [100.0]
+lim = npush.TestPushLimiter(clock=lambda: _lt[0])
+g_burst, g_rate = npush.TEST_PUSH_TIER_BUDGET[G]
+taken = [lim.take(member_id=f"_op_g_churn{i}_x", endpoint=f"{FCM}churn{i}", tier=G)
+         for i in range(g_burst + 3)]
+check(f"test limit: guests churning endpoints get {g_burst} tests, then wait",
+      taken[:g_burst] == [0.0] * g_burst and all(w > 0 for w in taken[g_burst:]), str(taken))
+check("test limit: the trusted tier is unaffected by an exhausted guest tier",
+      lim.take(member_id="_op_t_owner", endpoint=FCM + "owner", tier=TR) == 0)
+check("test limit: an unknown tier gets the guest budget, never an unlimited one",
+      lim.take(member_id="_op_q_x", endpoint=FCM + "q", tier="mystery") > 0)
+_lt[0] += 60.0 / g_rate
+check("test limit: the guest budget refills over time",
+      lim.take(member_id="_op_g_late_x", endpoint=FCM + "late", tier=G) == 0)
+check("test limit: a refused press is not charged (the refill bought exactly one)",
+      lim.take(member_id="_op_g_later_x", endpoint=FCM + "later", tier=G) > 0)
 
 if not npush.available():
     print()
@@ -1239,6 +1271,15 @@ check(f"move: a member at its quota keeps every channel ({moved})",
       + [("c5", E2, "Y", "all")])
 check("move: another identity's row on the old endpoint is untouched",
       ("c5", E1, "X", "all") in rows)
+E3, E4 = f"{EP}E3", f"{EP}E4"
+npush.upsert_subscription(mconn, channel="cz", endpoint=E3, p256dh=UA_PUBLIC, auth=UA_AUTH,
+                          member_id="Z", member_name="z", mode="all", show_text=True)
+mconn.execute("UPDATE push_subscriptions SET last_ok_at = 777 WHERE endpoint = ?", (E3,))
+npush.move_endpoint(mconn, member_id="Z", old_endpoint=E3, new_endpoint=E4,
+                    p256dh=UA_PUBLIC, auth=UA_AUTH)
+check("move: the text choice travels to the new endpoint, the last delivery does not",
+      mconn.execute("SELECT show_text, last_ok_at FROM push_subscriptions WHERE endpoint = ?",
+                    (E4,)).fetchone() == (1, 0.0))
 mconn.close()
 
 # ───────── Device controls: show_text, last delivery ─────────
@@ -1678,9 +1719,11 @@ try:
         st, _hd, _raw = call(port, "POST", "/api/push/subscribe",
                              {"subscription": DEV, "channel": CH, "mode": "all", "show_text": True})
         check("subscribe: show_text true is stored", my_row()["show_text"] is True)
-        call(port, "POST", "/api/push/subscribe", {"subscription": DEV, "channel": CH, "mode": "mentions"})
+        st, _hd, raw = call(port, "POST", "/api/push/subscribe",
+                            {"subscription": DEV, "channel": CH, "mode": "mentions"})
         check("subscribe: the page's quiet renewal (no show_text) keeps the choice",
               my_row() == srow(DEV_EP, "mentions", show_text=True))
+        check("subscribe: the reply reports the stored choice", as_json(raw).get("show_text") is True)
         st, _hd, raw = call(port, "POST", "/api/push/settings", {**TARGET, "show_text": False})
         check("settings: the owner turns message text off without re-subscribing",
               st == 200 and as_json(raw).get("show_text") is False
@@ -1740,6 +1783,54 @@ try:
             st, _hd, raw = call(port, "POST", "/api/push/test", TARGET)
             check("test: an expired subscription answers 410 and is forgotten",
                   st == 410 and my_row() is None)
+
+            # A row an older build stored for a host the allowlist now refuses.
+            LEGACY_EP = "https://push.example.com/old/device"
+            _c = sqlite3.connect(str(srv.DB_PATH))
+            _c.execute("INSERT INTO push_subscriptions (channel, endpoint, member_id, p256dh, auth, "
+                       "mode, created_at, updated_at, tier) VALUES (?, ?, ?, ?, ?, 'all', 1, 1, 'guest')",
+                       (CH, LEGACY_EP, ident.member_id, UA_PUBLIC, UA_AUTH))
+            _c.commit()
+            _c.close()
+            n_before = len(sends.calls)
+            test_clock[0] += npush.TEST_PUSH_INTERVAL_S
+            st, _hd, raw = call(port, "POST", "/api/push/test", {"endpoint": LEGACY_EP, "channel": CH})
+            check("test: an endpoint off the allowlist gets its own message, not 'check your connection'",
+                  st == 422 and b"not one the hub sends to" in raw and b"connection" not in raw
+                  and len(sends.calls) == n_before, f"{st} {raw[:160]!r}")
+
+            pending_v = web.OperatorIdentity(member_id="_op_p_v", name="", source=web.IDENTITY_SOURCE_PENDING)
+            web.NthWebHandler._resolve_identity = lambda self, _i=pending_v: (None, _i, False)
+            st_set, _hd, _raw = call(port, "POST", "/api/push/settings", {**TARGET, "show_text": True})
+            st_test, _hd, _raw = call(port, "POST", "/api/push/test", TARGET)
+            check("settings: a pending visitor is refused (403)", st_set == 403)
+            check("test: a pending visitor is refused (403), nothing sent",
+                  st_test == 403 and len(sends.calls) == n_before)
+
+            # Guests churning identities and endpoints meet the guest tier's
+            # budget; the owner's test still goes out.
+            npush.TEST_LIMITER = npush.TestPushLimiter(clock=lambda: test_clock[0])
+            burst = npush.TEST_PUSH_TIER_BUDGET[npush.TIER_GUEST][0]
+            churn = []
+            for i in range(burst + 2):
+                g = web.OperatorIdentity(member_id=f"_op_g_ch{i}_x", name=f"ch{i}",
+                                         source=web.IDENTITY_SOURCE_GUEST)
+                web.NthWebHandler._resolve_identity = lambda self, _i=g: (None, _i, False)
+                ep = {**GOOD_SUB, "endpoint": f"{GOOD_SUB['endpoint']}-churn{i}"}
+                call(port, "POST", "/api/push/subscribe", {"subscription": ep, "channel": CH, "mode": "all"})
+                churn.append(call(port, "POST", "/api/push/test",
+                                  {"endpoint": ep["endpoint"], "channel": CH})[0])
+            check(f"test: guests churning endpoints are cut off after the tier budget ({churn})",
+                  churn[:burst] == [200] * burst and set(churn[burst:]) == {429})
+            boss = web.OperatorIdentity(member_id="_op_t_boss", name="boss",
+                                        source=web.IDENTITY_SOURCE_TAILSCALE)
+            web.NthWebHandler._resolve_identity = lambda self, _i=boss: (None, _i, False)
+            BOSS = {**GOOD_SUB, "endpoint": GOOD_SUB["endpoint"] + "-boss"}
+            call(port, "POST", "/api/push/subscribe", {"subscription": BOSS, "channel": CH, "mode": "all"})
+            st, _hd, raw = call(port, "POST", "/api/push/test",
+                                {"endpoint": BOSS["endpoint"], "channel": CH})
+            check("test: the trusted tier still sends while the guest tier is exhausted",
+                  st == 200, f"{st} {raw[:120]!r}")
         finally:
             npush.send_push, npush.TEST_LIMITER = _real_send, _real_limiter
             web.NthWebHandler._resolve_identity = lambda self, _i=ident: (None, _i, False)

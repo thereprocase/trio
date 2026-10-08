@@ -147,8 +147,9 @@ const click = el => (el._listeners.click || []).forEach(fn => fn({ type: 'click'
     const post = calls.find(c => c.url === '/api/push/subscribe');
     assert.ok(post, 'no subscribe request');
     assert.strictEqual(post.method, 'POST');
-    // show_text false: message text stays off the lock screen until asked for.
-    assert.deepStrictEqual(post.body, { subscription: { endpoint: ENDPOINT, keys: { p256dh: 'BPUB', auth: 'AUTH' } }, channel: 'ops', mode: 'mentions', show_text: false });
+    // No show_text: nobody touched the checkbox and no row says otherwise,
+    // so the hub's default (hidden) applies.
+    assert.deepStrictEqual(post.body, { subscription: { endpoint: ENDPOINT, keys: { p256dh: 'BPUB', auth: 'AUTH' } }, channel: 'ops', mode: 'mentions' });
     assert.deepStrictEqual(pressed(section), ['mentions']);
     assert.match(section.querySelector('.push-status').textContent, /Mentions/);
   });
@@ -354,9 +355,10 @@ const click = el => (el._listeners.click || []).forEach(fn => fn({ type: 'click'
       if (url === '/api/push/subscribe') {
         const prior = state.rows.find(r => r.endpoint === body.subscription.endpoint);
         state.rows = state.rows.filter(r => r.endpoint !== body.subscription.endpoint);
-        state.rows.push({ endpoint: body.subscription.endpoint, mode: body.mode,
-                          show_text: body.show_text ?? prior?.show_text ?? false, last_ok_at: prior?.last_ok_at ?? null });
-        return reply(200, { ok: true });
+        const row = { endpoint: body.subscription.endpoint, mode: body.mode,
+                      show_text: body.show_text ?? prior?.show_text ?? false, last_ok_at: prior?.last_ok_at ?? null };
+        state.rows.push(row);
+        return reply(200, { ok: true, show_text: row.show_text });
       }
       if (url === '/api/push/settings') {
         const row = state.rows.find(r => r.endpoint === body.endpoint);
@@ -479,7 +481,7 @@ const click = el => (el._listeners.click || []).forEach(fn => fn({ type: 'click'
       await settle();
       const notice = again.querySelector('.push-dropped');
       assert.ok(visible(notice), 'no notice after the hub dropped the device');
-      assert.match(notice.textContent, /stopped after repeated delivery failures\. Turn them back on\?/);
+      assert.match(notice.textContent, /This device no longer gets notifications for #dev\. Turn them back on\?/);
       assert.deepStrictEqual(pressed(again), ['off']);
       // The resubscribe replaces the browser endpoint the push service refused.
       const fresh = { ...subscription, endpoint: ENDPOINT + '-fresh', toJSON() { return { endpoint: ENDPOINT + '-fresh', keys: { p256dh: 'BPUB', auth: 'AUTH' } }; } };
@@ -500,6 +502,65 @@ const click = el => (el._listeners.click || []).forEach(fn => fn({ type: 'click'
       current = subscription;
       pushManager.subscribe = opts => { subscription.options.applicationServerKey = opts.applicationServerKey.buffer; current = subscription; return Promise.resolve(current); };
     }
+  });
+
+  await check('a tap before the status loads leaves show_text out, so a stored "show" survives', async () => {
+    devicePhone();
+    current = subscription;
+    const server = deviceServer();
+    server.rows = [{ endpoint: ENDPOINT, mode: 'all', show_text: true, last_ok_at: null }];
+    const realDeviceFetch = win.fetch;
+    // The status request fails; every other call reaches the fake hub.
+    win.fetch = async (url, init) => {
+      if (url.startsWith('/api/push/status')) {
+        const text = JSON.stringify({ error: 'hub busy' });
+        return { ok: false, status: 503, text: async () => text, json: async () => JSON.parse(text) };
+      }
+      return realDeviceFetch(url, init);
+    };
+    try {
+      const s = new FakeElement('section');
+      push.render(s, 'dev');
+      await settle();
+      assert.strictEqual(s.querySelector('.push-show-text').checked, false, 'unknown state shows unticked');
+      server.calls.length = 0;
+      click(button(s, 'mentions'));
+      await settle();
+      const post = server.calls.find(c => c.url === '/api/push/subscribe');
+      assert.ok(post, 'no subscribe');
+      assert.ok(!('show_text' in post.body), 'an unknown checkbox state was sent: ' + JSON.stringify(post.body));
+      assert.strictEqual(server.rows[0].show_text, true, 'stored choice overwritten');
+      assert.strictEqual(s.querySelector('.push-show-text').checked, true, 'the page shows the stored choice afterwards');
+    } finally { win.fetch = realFetchForDevice; }
+  });
+
+  await check('a loaded row or a touched checkbox does go out with the subscribe', async () => {
+    devicePhone();
+    current = subscription;
+    const server = deviceServer();
+    server.rows = [{ endpoint: ENDPOINT, mode: 'all', show_text: true, last_ok_at: null }];
+    try {
+      const s = new FakeElement('section');
+      push.render(s, 'dev');
+      await settle();
+      server.calls.length = 0;
+      click(button(s, 'mentions'));
+      await settle();
+      assert.strictEqual(server.calls.find(c => c.url === '/api/push/subscribe').body.show_text, true, 'loaded row');
+      // Not subscribed, status loaded, checkbox touched: the tick is sent.
+      server.rows = [];
+      const t = new FakeElement('section');
+      push.render(t, 'dev');
+      await settle();
+      const box = t.querySelector('.push-show-text');
+      box.checked = true;
+      fire(box, 'change');
+      await settle();
+      server.calls.length = 0;
+      click(button(t, 'all'));
+      await settle();
+      assert.strictEqual(server.calls.find(c => c.url === '/api/push/subscribe').body.show_text, true, 'touched');
+    } finally { win.fetch = realFetchForDevice; }
   });
 
   await check('no dropped notice on a channel this device never subscribed to, even with a browser subscription', async () => {

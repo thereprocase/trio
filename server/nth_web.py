@@ -6609,7 +6609,8 @@ class NthWebHandler(BaseHTTPRequestHandler):
             "modes": list(npush.PUSH_MODES),
             # The caller's own endpoints only; they match them against their
             # browser's subscription to show which mode this device is on,
-            # whether it shows message text, and when a push last got through.
+            # whether it shows message text, and when the push service last
+            # accepted a notification for it on this channel.
             "subscriptions": subs,
             # Every channel this identity subscribes to, so a page that has to
             # replace its browser endpoint can move all of them across.
@@ -6654,6 +6655,11 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 member_id=ident.member_id, member_name=ident.display_name, mode=mode,
                 tier=_push_tier(ident), show_text=show_text)
             db.commit()
+            # Read back, because an omitted show_text kept whatever was stored
+            # and the page shows the device's real choice, not a guess.
+            stored = npush.own_subscription(db, member_id=ident.member_id,
+                                            endpoint=endpoint, channel=channel)
+            db.commit()
         except npush.SubscriptionLimit as exc:
             self._error(429, str(exc))
             return
@@ -6667,7 +6673,8 @@ class NthWebHandler(BaseHTTPRequestHandler):
             return
         finally:
             db.close()
-        self._json({"ok": True, "channel": channel, "mode": mode})
+        self._json({"ok": True, "channel": channel, "mode": mode,
+                    "show_text": bool(stored and stored["show_text"])})
 
     def _handle_push_move(self) -> None:
         """Move the caller's subscriptions from an old browser endpoint to a new
@@ -6781,7 +6788,17 @@ class NthWebHandler(BaseHTTPRequestHandler):
         if sub is None:
             self._error(404, f"this device is not subscribed to notifications for #{channel}")
             return
-        wait = npush.TEST_LIMITER.take(endpoint)
+        if not npush.endpoint_allowed(endpoint):
+            # A row written by an older build, naming a host the allowlist no
+            # longer admits. Nothing is sent to it, by this button or by the
+            # dispatcher, and the network is not the problem.
+            self._error(422, "this device's push service is not one the hub sends to, so "
+                             "no notification can reach it; turn notifications off and on "
+                             "again, and if this persists the browser's push service is "
+                             "not supported")
+            return
+        wait = npush.TEST_LIMITER.take(member_id=ident.member_id, endpoint=endpoint,
+                                       tier=_push_tier(ident))
         if wait > 0:
             self._error(429, f"wait {max(1, int(wait + 0.999))} s before sending another test")
             return
