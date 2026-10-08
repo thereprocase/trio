@@ -105,6 +105,8 @@ def dispatch(store, request, *, activated=False, log=None):
                 'activation': 'systemd' if activated else 'fallback'}
     if op == 'hub.announce':
         return store.announce(request['server'], request['url'], log=log)
+    if op == 'status' and request.get('skips'):
+        return store.skip_status()
     if op in ('list', 'status'):
         return store.snapshot(request.get('key') if op == 'status' else None,
                               request.get('session') if op == 'status' else None)
@@ -267,8 +269,8 @@ def serve(*, idle_seconds=1800, stop=None):
     if idle_seconds <= 0:
         raise ValueError('idle timeout must be positive')
     stop = stop if stop is not None else threading.Event()
+    path = socket_path()  # Validate a test guard before creating any runtime paths.
     with service_lease():
-        path = socket_path()
         private_dir(path.parent)
         inherited = activated_socket()
         if inherited is None:

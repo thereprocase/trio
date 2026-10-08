@@ -10,6 +10,8 @@ state. Polling and delivery use the existing runtime; an answering `hello`
 does not establish listener readiness. See AGENT-RUNTIME.md.
 Status/list include `legacy_import_skips`; hub rows include `pending_url` and
 trust. Legacy files are refreshed every 60 seconds until a future explicit cutover.
+`status(skips=true)` without key/session filters returns only `skips` (up to 32
+files) and `skipped_total`; doctor uses this bounded summary.
 
 Codex launchers serialize simultaneous shared-server startup. A startup failure may
 fall back to plain Codex with a no-push warning; joining still requires a separate

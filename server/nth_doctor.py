@@ -218,10 +218,13 @@ def interposer_check():
             return ('interposer', WARN, detail)
         # Diagnosis may trigger socket activation, but never spawns a fallback.
         with connect(timeout=2) as client:
-            skipped = client.call('list').get('legacy_import_skips', [])
+            summary = client.call('status', skips=True)
+            skipped = summary.get('skips', [])
             if skipped:
+                remainder = summary.get('skipped_total', len(skipped)) - len(skipped)
                 return ('interposer', WARN, 'legacy import skipped: ' +
-                        '; '.join(row['basename'] + ': ' + row['reason'] for row in skipped))
+                        '; '.join(row['basename'] + ': ' + row['reason'] for row in skipped) +
+                        (f'; {remainder} additional skipped files' if remainder > 0 else ''))
             return ('interposer', OK, 'hello answered; protocol ' + str(client.hello['protocol_max']))
     except (OSError, ValueError, EOFError, WireError) as exc:
         return ('interposer', FAIL, 'hello failed: ' + type(exc).__name__)

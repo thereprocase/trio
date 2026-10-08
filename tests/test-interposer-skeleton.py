@@ -46,8 +46,9 @@ class InterposerCase(unittest.TestCase):
         self.runtime.mkdir(mode=0o700)
         env = dict(os.environ, HOME=str(self.root), NTH_HOME=str(self.root / 'nth'),
                    XDG_RUNTIME_DIR=str(self.runtime), CODEX_HOME=str(self.root / 'codex'),
-                   TRIO_CODEX_HOME=str(self.root / 'codex'), PYTHONDONTWRITEBYTECODE='1')
-        for field in ('LISTEN_PID', 'LISTEN_FDS', 'LISTEN_FDNAMES'):
+                   TRIO_CODEX_HOME=str(self.root / 'codex'), PYTHONDONTWRITEBYTECODE='1',
+                   NTH_INTERPOSER_TEST_RUNTIME=str(self.root))
+        for field in ('LISTEN_PID', 'LISTEN_FDS', 'LISTEN_FDNAMES', 'NTH_INTERPOSER_SOCKET'):
             env.pop(field, None)
         self.env = patch.dict(os.environ, env, clear=True)
         self.env.start()
@@ -521,7 +522,7 @@ class SkeletonTests(InterposerCase):
         self.assertTrue(setup.install_interposer_units(self.root, '/venv/bin/python', '/install/server', '/runtime'))
         directory = self.root / '.config' / 'systemd' / 'user'
         socket_unit = (directory / 'trio-interposer.socket').read_text()
-        for line in ('ListenStream="' + str(wire.socket_path()) + '"', 'SocketMode=0600', 'DirectoryMode=0700',
+        for line in ('ListenStream=' + str(wire.socket_path()), 'SocketMode=0600', 'DirectoryMode=0700',
                      'WantedBy=sockets.target', 'RemoveOnStop=yes'):
             self.assertIn(line, socket_unit)
         unit = (directory / 'trio-interposer.service').read_text()
@@ -549,8 +550,10 @@ class SkeletonTests(InterposerCase):
         self.assertNotIn(['--user', 'restart', 'trio-interposer.service'], self.calls())
         self.command_log.unlink()
         os.environ['SYSTEMCTL_AVAILABLE'] = '1'
-        self.assertEqual(setup.install_interposer_units(self.root, '/python', '/server', '/runtime'),
-                         'failed: CalledProcessError')
+        error = io.StringIO()
+        with patch('sys.stderr',error):
+            self.assertFalse(setup.install_interposer_units(self.root, '/python', '/server', '/runtime'))
+        self.assertEqual(error.getvalue(),'')
         self.assertEqual(self.calls(), [['--user', 'show-environment']])
 
     def test_setup_install_skip_flag(self):

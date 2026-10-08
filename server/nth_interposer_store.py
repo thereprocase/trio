@@ -133,6 +133,14 @@ class Store:
         with self.lock:
             return self.db.execute("SELECT COUNT(*) FROM sessions WHERE state IN ('waiting','in_turn')").fetchone()[0]
 
+    def skip_status(self):
+        with self.lock:
+            # Doctor needs only a bounded summary, not a potentially huge list of
+            # memberships/sessions. Bound long basenames as well as row count.
+            return {'skips': [{'basename': row['basename'][:160], 'reason': row['reason']}
+                              for row in self.import_skips[:32]],
+                    'skipped_total': len(self.import_skips)}
+
     def import_hooks(self, directory=None, log=None):
         directory = Path(directory) if directory is not None else self.path.parent / 'hooks'
         with self.lock, self.db:
@@ -151,11 +159,13 @@ class Store:
                     ('session-', SESSION_ID, self._import_session)):
                 for path in sorted(directory.glob(prefix + '*.json')):
                     identity = path.name[len(prefix):-len('.json')]
+                    # The legacy waiter also writes session-<id>.status.json.
+                    # It is telemetry, not session state; ignore it before SQL.
+                    if not validator.fullmatch(identity):
+                        continue
                     reason = 'invalid legacy state'
                     self.db.execute('SAVEPOINT legacy_file')
                     try:
-                        if not validator.fullmatch(identity):
-                            raise ValueError('bad legacy filename')
                         importer(identity, _json_file(path))
                     except (ValueError, TypeError, OSError, OverflowError, RecursionError):
                         self.db.execute('ROLLBACK TO legacy_file')

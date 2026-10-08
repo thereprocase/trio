@@ -158,10 +158,13 @@ def systemd_available(target_home, platform=None):
         return False
     # A systemctl binary alone says nothing about a working user manager (WSL,
     # containers and ssh sessions can have the binary but no user systemd).
-    subprocess.run(['systemctl', '--user', 'show-environment'],
-                   env=dict(os.environ, HOME=str(target_home)), check=True,
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
-    return True
+    try:
+        result = subprocess.run(['systemctl', '--user', 'show-environment'],
+                                env=dict(os.environ, HOME=str(target_home)),
+                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+        return result.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
 
 
 def _unit_quote(value, *, expand_dollar=True):
@@ -172,6 +175,16 @@ def _unit_quote(value, *, expand_dollar=True):
     if expand_dollar:
         value = value.replace('$', '$$')
     return '"' + value.replace('\\', '\\\\').replace('"', '\\"').replace('%', '%%') + '"'
+
+
+def _listen_stream(path, manager_runtime):
+    # ListenStream does not use ExecStart/Environment's quoted-string syntax.
+    value = str(path)
+    if any(c.isspace() or not c.isprintable() or c in '\'"\\' for c in value):
+        raise ValueError('unsafe ListenStream path: whitespace, quotes, backslashes or controls')
+    if path == manager_runtime / 'trio' / 'interposer.sock':
+        return '%t/trio/interposer.sock'
+    return value.replace('%', '%%')
 
 
 def install_interposer_units(target_home, python, server, runtime, platform=None):
@@ -189,9 +202,9 @@ def _install_interposer_units(target_home, python, server, runtime, platform=Non
     if target_home != Path.home().resolve() or not systemd_available(target_home, platform):
         return False
     sys.path.insert(0, str(ROOT / 'server'))
-    from nth_interposer_wire import socket_path, stop_fallback
+    from nth_interposer_wire import socket_path, stop_fallback, _user_runtime_dir
     selected_socket = socket_path(runtime)
-    selected_runtime = str(selected_socket.parent.parent) if selected_socket.parent.name == 'trio' else ''
+    listen_stream = _listen_stream(selected_socket, _user_runtime_dir())
     directory = target_home / '.config' / 'systemd' / 'user'
     directory.mkdir(parents=True, exist_ok=True)
     socket_unit = '''[Unit]
@@ -205,12 +218,12 @@ RemoveOnStop=yes
 
 [Install]
 WantedBy=sockets.target
-'''.format(socket_path=_unit_quote(selected_socket, expand_dollar=False))
+'''.format(socket_path=listen_stream)
     service_unit = ('[Unit]\nDescription=Trio spoke interposer\n\n[Service]\n' +
                     'ExecStart=' + _unit_quote(python) + ' ' +
                     _unit_quote(Path(server) / 'nth_interposer.py') + ' serve\n' +
                     'Environment=' + _unit_quote('NTH_HOME=' + str(runtime), expand_dollar=False) + '\n' +
-                    'Environment=' + _unit_quote('XDG_RUNTIME_DIR=' + selected_runtime, expand_dollar=False) + '\n' +
+                    'Environment=' + _unit_quote('NTH_INTERPOSER_SOCKET=' + str(selected_socket), expand_dollar=False) + '\n' +
                     'Restart=on-failure\nRestartSec=2\nRestartPreventExitStatus=75\n' +
                     'NoNewPrivileges=yes\nUMask=0077\nLockPersonality=yes\nRestrictRealtime=yes\n')
     # PrivateTmp requires filesystem namespaces for an unprivileged user unit.
@@ -228,7 +241,12 @@ WantedBy=sockets.target
     subprocess.run(['systemctl', '--user', 'daemon-reload'], env=env, check=True, timeout=15)
     # The fallback owns a different socket inode. End it before systemd binds;
     # hello alone is not sufficient authority to signal an arbitrary process.
-    stop_fallback(timeout=5, path=selected_socket)
+    try:
+        stop_fallback(timeout=5, path=selected_socket)
+    except (EOFError, OSError) as exc:
+        # An IPC outage must not prevent enabling the replacement socket unit.
+        print('Warning: interposer fallback stop unavailable: ' + type(exc).__name__ +
+              '; continuing socket setup', file=sys.stderr)
     subprocess.run(['systemctl', '--user', 'enable', '--now', 'trio-interposer.socket'],
                    env=env, check=True, timeout=15)
     running = subprocess.run(['systemctl', '--user', 'is-active', '--quiet', 'trio-interposer.service'],

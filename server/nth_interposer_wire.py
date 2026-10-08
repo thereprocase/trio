@@ -6,6 +6,8 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
+import shutil
 import signal
 import socket
 import stat
@@ -67,20 +69,48 @@ def _safe_runtime(path, *, exact_mode=False):
             and (stat.S_IMODE(info.st_mode) == 0o700 if exact_mode else not info.st_mode & 0o022))
 
 
-def socket_path(nth_home=None):
-    runtime = os.environ.get('XDG_RUNTIME_DIR')
-    if runtime and _safe_runtime(Path(runtime)):
-        directory = Path(runtime) / 'trio'
-    elif _safe_runtime(_user_runtime_dir(), exact_mode=True):
-        directory = _user_runtime_dir() / 'trio'
-    else:
-        directory = (Path(nth_home) if nth_home is not None else home()) / 'run'
-    path = directory / 'interposer.sock'
+def _test_runtime_root():
+    value = os.environ.get('NTH_INTERPOSER_TEST_RUNTIME')
+    if value is None:
+        return None
+    root = Path(value)
+    if not _safe_runtime(root):
+        raise WireError('test interposer runtime must remain an owned, private absolute directory')
+    return root.resolve()
+
+
+def _inside_test_runtime(path, root):
+    if root is None:
+        return True
+    if not path.is_absolute() or not path.is_relative_to(root):
+        return False  # Do not even resolve/stat a real user runtime in tests.
+    return path.resolve().is_relative_to(root)
+
+
+def _checked_socket_path(path, root):
     if not path.is_absolute():
         raise WireError('interposer socket path must be absolute')
+    if not _inside_test_runtime(path, root):
+        raise WireError('interposer socket is outside the guarded test runtime')
     if len(os.fsencode(path)) >= 104:
         raise WireError('interposer socket path must be under 104 bytes')
     return path
+
+
+def socket_path(nth_home=None):
+    root = _test_runtime_root()
+    explicit = os.environ.get('NTH_INTERPOSER_SOCKET')
+    if explicit:
+        return _checked_socket_path(Path(explicit), root)
+    runtime = os.environ.get('XDG_RUNTIME_DIR')
+    if runtime and _inside_test_runtime(Path(runtime), root) and _safe_runtime(Path(runtime)):
+        directory = Path(runtime) / 'trio'
+    elif (_inside_test_runtime(_user_runtime_dir(), root)
+          and _safe_runtime(_user_runtime_dir(), exact_mode=True)):
+        directory = _user_runtime_dir() / 'trio'
+    else:
+        directory = (Path(nth_home) if nth_home is not None else home()) / 'run'
+    return _checked_socket_path(directory / 'interposer.sock', root)
 
 
 @contextmanager
@@ -139,7 +169,11 @@ def read_frame(reader):
 
 
 class SocketFrameReader:
-    """Bound a complete frame's wall time, including slow byte-at-a-time senders."""
+    """Bound a frame's wall time, including idle time before its first byte.
+
+    A persistent connection therefore also expires after ten seconds between
+    frames; clients reconnect for subsequent operations.
+    """
     def __init__(self, sock, timeout=FRAME_TIMEOUT):
         self.socket, self.timeout = sock, timeout
         self.buffer = bytearray()
@@ -192,6 +226,10 @@ def validate_request(value):
             raise WireError('bad identity key')
     if op == 'hub.announce':
         validate_hub(value.get('server'), value.get('url'))
+    if 'skips' in value:
+        if (op != 'status' or type(value['skips']) is not bool
+                or (value['skips'] and any(field in value for field in ('key', 'session')))):
+            raise WireError('skips must be a status boolean without key or session filters')
     return op
 
 
@@ -299,6 +337,9 @@ def _connect(timeout, path=None):
 def _spawn():
     # An inherited systemd activation fd belongs only to the service systemd starts.
     env = dict(os.environ)
+    # Pin selection before launch. In tests this validates the guard before cwd
+    # creation, and the child can never rediscover a real user runtime directory.
+    env['NTH_INTERPOSER_SOCKET'] = str(socket_path())
     for field in ('LISTEN_FDS', 'LISTEN_PID', 'LISTEN_FDNAMES', 'PYTHONPATH', 'PYTHONHOME'):
         env.pop(field, None)
     # -I excludes cwd/PYTHONPATH; bootstrap only the installed sibling directory.
@@ -316,15 +357,32 @@ def _spawn():
     return process
 
 
-def service_process(pid, proc_root=Path('/proc')):
+def _ps_command():
+    # Production uses the OS utility, never a caller-controlled PATH command.
+    # Tests may substitute a fake ps only within their explicit temporary guard.
+    root = _test_runtime_root()
+    fake = shutil.which('ps') if root is not None else None
+    if fake and _inside_test_runtime(Path(fake), root):
+        return fake
+    return '/bin/ps'
+
+
+def service_process(pid, proc_root=Path('/proc'), *, platform=None):
     if type(pid) is not int or pid <= 1 or pid == os.getpid():
         return False
     try:
-        with (proc_root / str(pid) / 'cmdline').open('rb') as stream:
-            arguments = stream.read(8192).split(b'\0')
-    except OSError:
+        if (platform or sys.platform).startswith('linux'):
+            with (proc_root / str(pid) / 'cmdline').open('rb') as stream:
+                arguments = [os.fsdecode(arg) for arg in stream.read(8192).split(b'\0')]
+        else:
+            result = subprocess.run([_ps_command(), '-o', 'command=', '-p', str(pid)],
+                                    capture_output=True, text=True, timeout=1)
+            if result.returncode != 0:
+                return False
+            arguments = shlex.split(result.stdout.strip())
+    except (OSError, ValueError, subprocess.SubprocessError):
         return False
-    return any(Path(os.fsdecode(arg)).name == 'nth_interposer.py' and arguments[index + 1] == b'serve'
+    return any(Path(arg).name == 'nth_interposer.py' and arguments[index + 1] == 'serve'
                for index, arg in enumerate(arguments[:-1]))
 
 
