@@ -222,6 +222,14 @@
     return next;
   }
   function diagnostics() { const note = typeof Notification !== 'undefined' ? Notification.permission : 'unavailable'; return { online: navigator.onLine ? 'yes' : 'no', channel: (Trio.store ? Trio.store.get('session.channel') : Trio.state.channel) || '', theme: readFromStorage().theme, agents: ((Trio.store ? Trio.store.get('agents.list') : Trio.state.agents) || []).length, notifications: note, stt: Trio.state.sttHealth || 'checking' }; }
+  // The Hub engine's option text for a /api/stt/health answer (null = unknown).
+  function hubOptionLabel(health) {
+    if (health?.available === false) {
+      return /not installed/i.test(health.detail || '') ? 'Hub — not installed on this hub' : 'Hub — not working on this hub';
+    }
+    if (health?.available && health.remote) return "Hub (this hub's speech service)";
+    return 'Hub (Whisper on this hub)';
+  }
   function renderPage(panel) {
     panel._themeLayoutObserver?.disconnect();
     panel.replaceChildren();
@@ -256,12 +264,22 @@
     historySelect.addEventListener('change', () => save({ staleThreadDays: Number(historySelect.value) }));
     historyRow.append(historyText, historySelect); behavior.append(historyRow);
     const sttRow = document.createElement('div'); sttRow.className = 'pref-row';
-    const sttText = document.createElement('div'); sttText.className = 'pr-txt'; sttText.innerHTML = '<div class="l">Speech-to-text engine</div><div class="d">Local runs Whisper on the hub and keeps audio off the network. Browser uses your browser\'s built-in speech recognition (routed through its vendor\'s cloud service). Auto uses Local when the hub has it and Browser otherwise.</div>';
-    // Say on the option itself when the hub cannot run Local, so the choice
-    // is not discovered by tapping the mic. The composer owns the check.
-    const hubLocal = Trio.composer?.sttHealthNow?.()?.available;
+    const sttText = document.createElement('div'); sttText.className = 'pr-txt'; sttText.innerHTML = '<div class="l">Speech-to-text engine</div><div class="d">Hub sends your audio to this hub, which transcribes it with Whisper or with the speech service its operator set up; it never goes to your browser vendor. Browser uses your browser\'s built-in speech recognition (routed through its vendor\'s cloud service). Auto uses Hub when it is available and Browser otherwise.</div><div class="d stt-hub-note" hidden></div>';
     const sttSelect = document.createElement('select'); sttSelect.className = 'pref-select'; sttSelect.setAttribute('aria-label', 'Speech-to-text engine');
-    [['auto','Auto (Local when available, else Browser)'],['local', hubLocal === false ? 'Local (Whisper) — not installed on this hub' : 'Local (Whisper, on the hub)'],['web','Browser (built-in speech recognition)']].forEach(([value,label]) => { const opt = document.createElement('option'); opt.value = value; opt.textContent = label; if (p.sttMode === value) opt.selected = true; sttSelect.append(opt); });
+    let hubOption = null;
+    [['auto','Auto (Hub when available, else Browser)'],['local','Hub'],['web','Browser (built-in speech recognition)']].forEach(([value,label]) => { const opt = document.createElement('option'); opt.value = value; opt.textContent = label; if (p.sttMode === value) opt.selected = true; if (value === 'local') hubOption = opt; sttSelect.append(opt); });
+    // Say on the Hub option itself what this hub can do, so the choice is not
+    // discovered by tapping the mic. The composer owns the check; when this
+    // page asked first (composer not mounted yet) the answer arrives later,
+    // so the label is filled in again when it does.
+    const labelHub = health => {
+      const note = sttText.querySelector('.stt-hub-note');
+      hubOption.textContent = hubOptionLabel(health);
+      if (note) { note.hidden = !(health?.available && health.remote); note.textContent = "On this hub, audio goes to this hub's speech service."; }
+    };
+    const cached = Trio.composer?.sttHealthNow?.();
+    labelHub(cached);
+    if (!cached || cached.available == null) Trio.composer?.refreshSttHealth?.().then(labelHub).catch(() => {});
     sttSelect.addEventListener('change', () => save({ sttMode: sttSelect.value }));
     sttRow.append(sttText, sttSelect); behavior.append(sttRow);
     const notifyGroup = document.createElement('section'); notifyGroup.className = 'pref-group';
@@ -315,5 +333,5 @@
   function init() { apply(); }
   function mount() { init(); }
   function unmount() {}
-  Trio.preferences = { init, mount, unmount, apply, save, selectTheme, toggle, reset, read, diagnostics, renderPage, themeGridColumns, themes, lightThemes, darkThemes, inspiredThemes, defaultTheme: hubTheme };
+  Trio.preferences = { hubOptionLabel, init, mount, unmount, apply, save, selectTheme, toggle, reset, read, diagnostics, renderPage, themeGridColumns, themes, lightThemes, darkThemes, inspiredThemes, defaultTheme: hubTheme };
 })();
