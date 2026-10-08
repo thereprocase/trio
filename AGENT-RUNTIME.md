@@ -19,26 +19,41 @@ socket, and restarts the service only if it is already active. Use
 `--skip-systemd` to skip this integration. A staged `--home` never controls the
 caller's systemd. Other Unix installations can spawn the service on demand.
 
-The socket is `XDG_RUNTIME_DIR/trio/interposer.sock`, or
-`NTH_HOME/run/interposer.sock` when no runtime directory is configured. Its
+The socket uses `XDG_RUNTIME_DIR/trio/interposer.sock` when that runtime directory
+is absolute, owned by the user and not writable by group or others. Otherwise
+it uses `/run/user/<uid>/trio/interposer.sock` if that directory is owned by the
+user with mode 0700, then falls back to `NTH_HOME/run/interposer.sock`. Socket
+paths must be under 104 bytes. The installer pins the selected path in its units. Its
 directory is 0700, the socket is 0600, and Linux additionally checks peer uid.
 The service holds `run/lease.lock`, serializes SQLite writes to
-`events/interposer.sqlite` (WAL, FULL synchronization), and exits after 30 minutes
+`events/interposer.sqlite` (schema 2, WAL, FULL synchronization), and exits after 30 minutes
 without a live registered session. Windows named pipes are deferred.
 
-IPC uses protocol 1 JSON lines, at most 64 KiB including the newline, with an
+IPC allows at most 32 concurrent connections and gives each complete frame a
+10-second read deadline. Timeout logs are rate limited; `interposer.log` rotates
+at 1 MiB with one `.1` backup. Protocol 1 uses JSON lines, at most 64 KiB including the newline, with an
 integer request id echoed in every reply. `hello` must come first and reports the
 software version and supported protocol range. `hub.announce` stores an
 `nth-*` server and credential-free HTTP(S) URL; `list` returns stored control
 state; `status` optionally filters it by identity key and session. Other design
-ops return `not implemented in this version`. Tokens stay in identity files.
+ops return `not implemented in this version`. Operation refusals leave the
+connection usable; framing failures close it. Tokens stay in identity files.
+Hub announcements cannot repoint existing URLs: changed URLs appear as
+`pending_url`. New hubs are pending and untrusted, with limits of 32 hubs and
+512 characters per URL. Loopback, link-local and metadata hosts are refused.
 
-At first start the store imports `events/hooks/session-*.json` and
-`membership-*.json` in one transaction, preserving maximum announced and acked
-watermarks, filters, stopped listeners and ended states. Imported live-looking
+At every start and every 60 seconds the store imports
+`events/hooks/session-*.json` and `membership-*.json`, preserving maximum announced
+and acked watermarks. Legacy filters, stopped settings and ended marks overwrite
+stored values while the legacy waiters are authoritative. The future
+`hooks_import_cutover` marker is never set in this phase. Imported live-looking
 sessions are `idle_unreachable` until registration can verify their host in a
-later PR. Corrupt legacy state aborts startup and leaves the migration retryable;
-logs record exception classes rather than file content or tokens.
+later PR. A corrupt legacy file is skipped without changing it; valid files still
+import. `legacy_import_skips` in status/list and doctor report its basename and a
+fixed reason. Logs omit file contents and tokens. Fallback shutdown removes only
+the inode it bound. Restart verifies the pid's process command before signalling.
+Lease losers exit with code 75, which systemd will not restart. Manager failures
+warn and appear in the install result while the native installation completes.
 
 ## Codex
 

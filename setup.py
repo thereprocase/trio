@@ -158,58 +158,86 @@ def systemd_available(target_home, platform=None):
         return False
     # A systemctl binary alone says nothing about a working user manager (WSL,
     # containers and ssh sessions can have the binary but no user systemd).
-    try:
-        return subprocess.run(['systemctl', '--user', 'show-environment'],
-                              env=dict(os.environ, HOME=str(target_home)),
-                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                              timeout=10).returncode == 0
-    except (OSError, subprocess.TimeoutExpired):
-        return False
+    subprocess.run(['systemctl', '--user', 'show-environment'],
+                   env=dict(os.environ, HOME=str(target_home)), check=True,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+    return True
 
 
-def _unit_quote(value):
+def _unit_quote(value, *, expand_dollar=True):
     # ExecStart and Environment use systemd's quoting, not shell quoting.
-    return '"' + str(value).replace('\\', '\\\\').replace('"', '\\"').replace('%', '%%') + '"'
+    value = str(value)
+    if any(ord(c) < 32 or 127 <= ord(c) <= 159 for c in value):
+        raise ValueError('control characters are forbidden in unit paths')
+    if expand_dollar:
+        value = value.replace('$', '$$')
+    return '"' + value.replace('\\', '\\\\').replace('"', '\\"').replace('%', '%%') + '"'
 
 
 def install_interposer_units(target_home, python, server, runtime, platform=None):
+    try:
+        return _install_interposer_units(target_home, python, server, runtime, platform)
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        # A service-manager outage must not throw away a completed native install.
+        failure = 'failed: ' + type(exc).__name__
+        print('Warning: interposer systemd setup ' + failure, file=sys.stderr)
+        return failure
+
+
+def _install_interposer_units(target_home, python, server, runtime, platform=None):
     target_home = Path(target_home).resolve()
     if target_home != Path.home().resolve() or not systemd_available(target_home, platform):
         return False
+    sys.path.insert(0, str(ROOT / 'server'))
+    from nth_interposer_wire import socket_path, stop_fallback
+    selected_socket = socket_path(runtime)
+    selected_runtime = str(selected_socket.parent.parent) if selected_socket.parent.name == 'trio' else ''
     directory = target_home / '.config' / 'systemd' / 'user'
     directory.mkdir(parents=True, exist_ok=True)
     socket_unit = '''[Unit]
 Description=Trio spoke interposer socket
 
 [Socket]
-ListenStream=%t/trio/interposer.sock
+ListenStream={socket_path}
 SocketMode=0600
 DirectoryMode=0700
 RemoveOnStop=yes
 
 [Install]
 WantedBy=sockets.target
-'''
+'''.format(socket_path=_unit_quote(selected_socket, expand_dollar=False))
     service_unit = ('[Unit]\nDescription=Trio spoke interposer\n\n[Service]\n' +
                     'ExecStart=' + _unit_quote(python) + ' ' +
                     _unit_quote(Path(server) / 'nth_interposer.py') + ' serve\n' +
-                    'Environment=' + _unit_quote('NTH_HOME=' + str(runtime)) + '\n' +
-                    'Restart=on-failure\nRestartSec=2\nNoNewPrivileges=yes\nPrivateTmp=yes\n')
+                    'Environment=' + _unit_quote('NTH_HOME=' + str(runtime), expand_dollar=False) + '\n' +
+                    'Environment=' + _unit_quote('XDG_RUNTIME_DIR=' + selected_runtime, expand_dollar=False) + '\n' +
+                    'Restart=on-failure\nRestartSec=2\nRestartPreventExitStatus=75\n' +
+                    'NoNewPrivileges=yes\nUMask=0077\nLockPersonality=yes\nRestrictRealtime=yes\n')
+    # PrivateTmp requires filesystem namespaces for an unprivileged user unit.
+    # Omit it so installations work when user namespaces are disabled.
     for name, body in (('trio-interposer.socket', socket_unit), ('trio-interposer.service', service_unit)):
         path = directory / name
+        if path.exists() and path.read_bytes() == body.encode('utf-8'):
+            continue
         backup(path)
         temporary = path.with_name(name + '.tmp-' + STAMP)
         temporary.write_text(body, encoding='utf-8')
         temporary.chmod(0o600)
         temporary.replace(path)
     env = dict(os.environ, HOME=str(target_home))
-    for arguments in (['daemon-reload'], ['enable', '--now', 'trio-interposer.socket']):
-        subprocess.run(['systemctl', '--user', *arguments], env=env, check=True, timeout=15)
+    subprocess.run(['systemctl', '--user', 'daemon-reload'], env=env, check=True, timeout=15)
+    # The fallback owns a different socket inode. End it before systemd binds;
+    # hello alone is not sufficient authority to signal an arbitrary process.
+    stop_fallback(timeout=5, path=selected_socket)
+    subprocess.run(['systemctl', '--user', 'enable', '--now', 'trio-interposer.socket'],
+                   env=env, check=True, timeout=15)
     running = subprocess.run(['systemctl', '--user', 'is-active', '--quiet', 'trio-interposer.service'],
                              env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
     if running.returncode == 0:
         subprocess.run(['systemctl', '--user', 'restart', 'trio-interposer.service'],
                        env=env, check=True, timeout=15)
+    elif running.returncode != 3:
+        raise subprocess.CalledProcessError(running.returncode, running.args)
     return True
 
 

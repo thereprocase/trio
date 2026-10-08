@@ -1,19 +1,24 @@
 """Private JSON-lines IPC for the spoke interposer (no MCP dependencies)."""
 from contextlib import contextmanager
 import errno
+import ipaddress
 import json
 import os
 from pathlib import Path
 import re
+import signal
 import socket
 import stat
 import subprocess
 import sys
+import threading
 import time
 from urllib.parse import urlsplit
 
 PROTOCOL_VERSION = 1
 MAX_FRAME = 64 * 1024  # Includes the newline, so readers never buffer an unbounded line.
+FRAME_TIMEOUT = 10
+LEASE_EXIT_STATUS = 75
 SESSION_ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9_-]{5,79}\Z')
 IDENTITY_KEY = re.compile(r'[0-9a-f]{24}\Z')
 OPS = frozenset(('hello', 'hub.announce', 'session.register', 'membership.attach',
@@ -47,9 +52,35 @@ def run_dir():
     return private_dir(home() / 'run')
 
 
-def socket_path():
+def _user_runtime_dir():
+    return Path('/run/user') / str(os.getuid())
+
+
+def _safe_runtime(path, *, exact_mode=False):
+    if not path.is_absolute():
+        return False
+    try:
+        info = path.lstat()
+    except OSError:
+        return False
+    return (stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid()
+            and (stat.S_IMODE(info.st_mode) == 0o700 if exact_mode else not info.st_mode & 0o022))
+
+
+def socket_path(nth_home=None):
     runtime = os.environ.get('XDG_RUNTIME_DIR')
-    return (Path(runtime) / 'trio' if runtime else home() / 'run') / 'interposer.sock'
+    if runtime and _safe_runtime(Path(runtime)):
+        directory = Path(runtime) / 'trio'
+    elif _safe_runtime(_user_runtime_dir(), exact_mode=True):
+        directory = _user_runtime_dir() / 'trio'
+    else:
+        directory = (Path(nth_home) if nth_home is not None else home()) / 'run'
+    path = directory / 'interposer.sock'
+    if not path.is_absolute():
+        raise WireError('interposer socket path must be absolute')
+    if len(os.fsencode(path)) >= 104:
+        raise WireError('interposer socket path must be under 104 bytes')
+    return path
 
 
 @contextmanager
@@ -107,6 +138,33 @@ def read_frame(reader):
     return value
 
 
+class SocketFrameReader:
+    """Bound a complete frame's wall time, including slow byte-at-a-time senders."""
+    def __init__(self, sock, timeout=FRAME_TIMEOUT):
+        self.socket, self.timeout = sock, timeout
+        self.buffer = bytearray()
+
+    def readline(self, limit):
+        deadline = time.monotonic() + self.timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError('frame read deadline exceeded')
+            newline = self.buffer.find(b'\n', 0, limit)
+            size = newline + 1 if newline >= 0 else min(len(self.buffer), limit)
+            if newline >= 0 or size == limit:
+                frame = bytes(self.buffer[:size])
+                del self.buffer[:size]
+                return frame
+            self.socket.settimeout(remaining)
+            chunk = self.socket.recv(min(4096, limit - len(self.buffer)))
+            if not chunk:
+                frame = bytes(self.buffer)
+                self.buffer.clear()
+                return frame
+            self.buffer.extend(chunk)
+
+
 def _bad_constant(value):
     raise ValueError('nonfinite JSON number')
 
@@ -142,13 +200,33 @@ def validate_hub(server, url):
         raise WireError('bad hub server name')
     try:
         parts = urlsplit(url) if isinstance(url, str) else None
-        if (not parts or parts.scheme not in ('http', 'https') or not parts.hostname
+        if (not parts or len(url) > 512 or parts.scheme not in ('http', 'https') or not parts.hostname
                 or parts.username is not None or parts.password is not None
                 or parts.query or parts.fragment or any(ord(c) < 33 for c in url)):
             raise ValueError
         parts.port  # Reject malformed ports before saving an allowlist entry.
     except ValueError:
         raise WireError('bad hub URL; credentials, query and fragment are forbidden') from None
+    host = parts.hostname.rstrip('.').lower()
+    if (host == 'localhost' or host.endswith('.localhost') or host in
+            ('metadata.google.internal', 'metadata.goog', 'instance-data.ec2.internal', 'metadata.azure.internal',
+             'metadata', 'instance-data', '100.100.100.200', 'fd00:ec2::254')):
+        raise WireError('loopback, link-local and metadata hub hosts are forbidden')
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        address = None
+        # Refuse alternate numeric loopback spellings resolved by the OS (127.1,
+        # decimal/octal/hex IPv4). inet_aton is local parsing, never a DNS lookup.
+        try:
+            address = ipaddress.ip_address(socket.inet_aton(host))
+        except (OSError, UnicodeError):
+            pass
+    if address is not None:
+        address = getattr(address, 'ipv4_mapped', None) or address
+        if (address.is_loopback or address.is_link_local or address.is_unspecified
+                or str(address) in ('100.100.100.200', 'fd00:ec2::254')):
+            raise WireError('loopback, link-local and metadata hub hosts are forbidden')
 
 
 class Client:
@@ -166,6 +244,9 @@ class Client:
         validate_request(request)
         self.socket.sendall(encode_frame(request))
         reply = read_frame(self.reader)
+        if (reply.get('id') is None and 'error' in reply and 'ok' not in reply
+                and type(reply.get('v')) is int and reply['v'] == PROTOCOL_VERSION):
+            raise WireError(reply['error'] if isinstance(reply['error'], str) else 'service error')
         if (reply.get('v') != PROTOCOL_VERSION or type(reply.get('v')) is not int
                 or not valid_id(reply.get('id')) or reply['id'] != request_id):
             raise WireError('invalid reply id or protocol version; restart trio-interposer')
@@ -186,18 +267,26 @@ class Client:
         self.close()
 
 
-def _connect(timeout):
+def _connect(timeout, path=None):
+    deadline = time.monotonic() + timeout
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     sock.settimeout(timeout)
     try:
-        sock.connect(str(socket_path()))
+        sock.connect(str(path if path is not None else socket_path()))
+        sock.settimeout(max(.001, deadline - time.monotonic()))
         client = Client(sock)
         try:
             client.hello = client.call('hello', client='cli', pid=os.getpid())
             if (not isinstance(client.hello, dict)
+                    or type(client.hello.get('protocol_min')) is not int
+                    or type(client.hello.get('protocol_max')) is not int
                     or not client.hello.get('protocol_min', 2) <= PROTOCOL_VERSION
                     <= client.hello.get('protocol_max', 0)):
                 raise WireError('hello protocol version mismatch; restart trio-interposer')
+            if (not isinstance(client.hello.get('version'), str) or not client.hello['version']
+                    or type(client.hello.get('schema_version')) is not int or client.hello['schema_version'] < 1
+                    or type(client.hello.get('pid')) is not int or client.hello['pid'] <= 1):
+                raise WireError('bad hello metadata; restart trio-interposer')
             return client
         except BaseException:
             client.close()
@@ -210,35 +299,79 @@ def _connect(timeout):
 def _spawn():
     # An inherited systemd activation fd belongs only to the service systemd starts.
     env = dict(os.environ)
-    for field in ('LISTEN_FDS', 'LISTEN_PID', 'LISTEN_FDNAMES'):
+    for field in ('LISTEN_FDS', 'LISTEN_PID', 'LISTEN_FDNAMES', 'PYTHONPATH', 'PYTHONHOME'):
         env.pop(field, None)
-    return subprocess.Popen([sys.executable, str(Path(__file__).with_name('nth_interposer.py')), 'serve'],
+    # -I excludes cwd/PYTHONPATH; bootstrap only the installed sibling directory.
+    script = Path(__file__).resolve().with_name('nth_interposer.py')
+    bootstrap = ('import runpy,sys; from pathlib import Path; '
+                 'sys.path.insert(0,str(Path(sys.argv[1]).parent)); '
+                 'p=sys.argv.pop(1); runpy.run_path(p,run_name="__main__")')
+    process = subprocess.Popen([sys.executable, '-I', '-c', bootstrap, str(script), 'serve'],
                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL, close_fds=True, start_new_session=True, env=env)
+                            stderr=subprocess.DEVNULL, close_fds=True, start_new_session=True,
+                            cwd=run_dir(), env=env)
+    # The starter can be long-lived. Reap this child when it exits, even when no
+    # subsequent connect occurs; do not leave zombie cleanup to Popen's GC.
+    threading.Thread(target=process.wait, daemon=True, name='interposer-reaper').start()
+    return process
 
 
-def connect(spawn=False, *, timeout=10):
+def service_process(pid, proc_root=Path('/proc')):
+    if type(pid) is not int or pid <= 1 or pid == os.getpid():
+        return False
+    try:
+        with (proc_root / str(pid) / 'cmdline').open('rb') as stream:
+            arguments = stream.read(8192).split(b'\0')
+    except OSError:
+        return False
+    return any(Path(os.fsdecode(arg)).name == 'nth_interposer.py' and arguments[index + 1] == b'serve'
+               for index, arg in enumerate(arguments[:-1]))
+
+
+def stop_fallback(*, timeout=5, path=None):
+    try:
+        with connect(timeout=min(1, timeout), path=path) as client:
+            if client.hello.get('activation') == 'systemd':
+                return False
+            pid = client.hello.get('pid')
+    except (FileNotFoundError, ConnectionRefusedError):
+        return False
+    if not service_process(pid):
+        raise WireError('refusing to signal an unverified interposer pid')
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return True
+    deadline = time.monotonic() + timeout
+    while service_process(pid):
+        if time.monotonic() >= deadline:
+            raise TimeoutError('interposer did not stop within 5 seconds')
+        time.sleep(min(.05, max(0, deadline - time.monotonic())))
+    return True
+
+
+def connect(spawn=False, *, timeout=10, path=None):
     """Handshake without activating a fallback unless explicitly requested."""
     deadline = time.monotonic() + timeout
     try:
-        return _connect(timeout)
+        return _connect(timeout, path)
     except OSError as exc:
         if not spawn or exc.errno not in (errno.ENOENT, errno.ECONNREFUSED):
             raise
     with file_lock(run_dir() / 'spawn.lock', timeout=max(0, deadline - time.monotonic())):
         try:
-            return _connect(max(.01, deadline - time.monotonic()))
+            return _connect(max(.001, deadline - time.monotonic()), path)
         except OSError as exc:
             if exc.errno not in (errno.ENOENT, errno.ECONNREFUSED):
                 raise
         process = _spawn()
         while time.monotonic() < deadline:
             try:
-                return _connect(max(.01, deadline - time.monotonic()))
+                return _connect(max(.001, deadline - time.monotonic()), path)
             except OSError as exc:
                 if exc.errno not in (errno.ENOENT, errno.ECONNREFUSED):
                     raise
             if process.poll() is not None:
                 raise WireError('interposer failed to start; see trio interposer logs')
-            time.sleep(.05)
+            time.sleep(min(.05, max(0, deadline - time.monotonic())))
     raise TimeoutError('interposer did not start within the connect timeout')

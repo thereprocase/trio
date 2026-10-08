@@ -28,7 +28,7 @@ def settings():
 
 
 def interposer_control(action):
-    from nth_interposer_wire import connect, home as interposer_home, WireError
+    from nth_interposer_wire import connect, home as interposer_home, WireError, stop_fallback
     try:
         if action == 'logs':
             path = interposer_home() / 'logs' / 'interposer.log'
@@ -46,25 +46,7 @@ def interposer_control(action):
                 subprocess.run(['systemctl', '--user', 'restart', 'trio-interposer.service'],
                                check=True, timeout=15)
             else:
-                try:
-                    with connect(timeout=2) as client:
-                        pid = client.hello['pid']
-                    if type(pid) is not int or pid <= 1 or pid == os.getpid():
-                        raise WireError('invalid service pid')
-                    os.kill(pid, signal.SIGTERM)
-                    deadline = time.monotonic() + 10
-                    while time.monotonic() < deadline:
-                        try:
-                            with connect(timeout=.5) as client:
-                                if client.hello['pid'] != pid:
-                                    break
-                        except (OSError, EOFError):
-                            break
-                        time.sleep(.05)
-                    else:
-                        raise WireError('interposer did not stop within 10 seconds')
-                except (FileNotFoundError, ConnectionRefusedError, ProcessLookupError):
-                    pass
+                stop_fallback(timeout=5)
             with connect(spawn=True) as client:
                 print(json.dumps({'restarted': True, 'hello': client.hello}, indent=2))
             return 0
