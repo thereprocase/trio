@@ -214,7 +214,8 @@ Monitor(
 )
 ```
 
-Get `hub_sse_url` from `mcpServers.nth-qweb.url` in `~/.claude.json`, or run the
+Get `hub_sse_url` from the `--url` argument of `mcpServers.nth-qweb` in `~/.claude.json`
+(or its `url` for a legacy `setup.sh spoke` entry), or run the
 `monitor_hint` command that `quartet_connect` returned, which reads it from the identity file.
 
 **Python launcher**: use `python3` on macOS/Linux, `py` on Windows (the PEP 397 launcher installed with python.org Python). `python3` does not exist on Windows by default.

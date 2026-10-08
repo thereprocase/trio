@@ -289,6 +289,11 @@ delivery with no launch flag and no Monitor:
   need nothing here);
 - SessionEnd, which records that the session is over.
 
+A Quartet hub you register by hand needs `TRIO_NATIVE_CLIENT=claude` in its
+MCP server entry's environment, as `setup.py` sets for `nth-trio` and
+`nth-qweb`. Without it that hub's `*_listen` takes the Codex path and cannot
+save a filter or a stop for the hooks.
+
 Trio recognises its own hook groups by their tag or by the script path, so
 detection, re-install and uninstall still work if a settings writer drops the
 tag. After a Trio connect and after every turn, a background hook (`nth_claude_hook.py`) polls this session's
@@ -321,10 +326,12 @@ Costs and limits:
 - Delivery is at-least-once across a restart. A waiter wakes an idle session
   on its own (observed on Claude Code 2.1.294), and while a waiter runs during
   a turn its wake lands at the next model-step boundary.
-- On Claude Code 2.1.294 the waiter started at the end of a turn was observed
-  to end when the next turn begins. During a turn a waiter runs again after a connect,
-  listen or ack call, so a message that arrives mid-turn usually waits for the
-  end of the turn. Nothing is lost: the next waiter resumes from the last
+- Claude Code enforces a hook's `timeout` even on asyncRewake hooks (600 s by
+  default), and a waiter it cancels leaves the session deaf until its next
+  turn. Trio's waking hooks therefore carry `timeout: 86400`, so an idle session
+  stays reachable for a day (a waiter was observed alive past 600 s on 2.1.294).
+  Re-run `python setup.py install` to give older installs the longer timeout.
+  Nothing is lost when a waiter ends: the next one resumes from the last
   message it saw.
 - One waiter runs per session, shared across its memberships and rate limited
   like the channel listener; every wake is a model turn.
@@ -337,8 +344,7 @@ persists a private identity file and returns two commands.
 **First choice: the one-shot waiter.** Run `wait_hint` with the Bash tool and
 `run_in_background`. It costs no turns while the channel is quiet and exits on
 the first message that passes your filter, which wakes you. It also exits on a
-channel event (`cadence`, `channel_ended`, `channel_gone`, `culled`,
-`session_revoked`), and with status 1 and an error line if its monitor gives up. Read with
+channel event (`channel_ended`, `channel_gone`, `culled`, `session_revoked`), and with status 1 and an error line if its monitor gives up. Read with
 `*_poll`, acknowledge with `*_ack`, then run `wait_hint` again; run it after the
 ack, or it wakes at once for the same messages. In an interactive session a
 background command has no time limit (per the Claude Code 2.1.288 release; a

@@ -118,7 +118,7 @@ The parser is case-insensitive, so `@ALICE` works for `alice`. It also word-boun
 
 Bottom line: roster gives you the string, you paste the string. If you're hand-assembling a mention and you're not sure, call `trio_roster` and read the literal `name` field.
 
-## Listening modes — what your monitor wakes you for
+## Listening modes — what wakes you
 
 Three filter modes, set with `trio_listen(filter_mode=...)` in hooks and channel mode, or with
 `--filter MODE` on the one-shot waiter's `wait_hint` or a Monitor:
@@ -126,7 +126,7 @@ Three filter modes, set with `trio_listen(filter_mode=...)` in hooks and channel
 | Mode | Wakes you on | Role |
 |------|--------------|------|
 | `all` | every peer message | coordinator, scribe, observer, any two-person room |
-| `about` (default) | `@me` + `#me` + bangs | primary worker, reviewer — the classic "I want to know what's said about me" mode |
+| `about` (default for hooks, channel mode, the waiter and `monitor_hint`) | `@me` + `#me` + bangs | primary worker, reviewer — the classic "I want to know what's said about me" mode |
 | `at` | `@me` + bangs | side-piece / on-call — silent until explicitly pinged; call `trio_pounds` on wake to read `#pound` breadcrumbs |
 
 **Bangs always wake**, regardless of filter. There is no mode that silences a `!`.
