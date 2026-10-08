@@ -398,19 +398,24 @@ Environment="NTH_APP_ICON_DIR=/var/lib/quartet-hub/app-icons"
 ```
 
 Quote each line: systemd splits an unquoted `Environment=` value at spaces.
-`NTH_APP_SHORT_NAME` is the label under the icon; keep it to about 12
-characters. `NTH_APP_BACKGROUND` is the splash screen colour while the app
-starts. `NTH_APP_ICON_DIR` holds PNGs named like the built-in set
-(`icon-192.png`, `icon-512.png`, `icon-maskable-192.png`,
-`icon-maskable-512.png`, `apple-touch-icon.png`, `badge-96.png`) at the sizes
-in their names (the Apple icon is 180x180); a file it lacks, or one that is
-not a PNG of that size, stays built-in and is reported in the `nth-web` log. `python3 tools/make-pwa-icons.py DIR --preset ember
---emblem cross` renders a recoloured set with a corner badge (presets:
-`gridline`, `ember`, `dusk`, `ocean`); the emblem also marks the status-bar
-badge. `--glyph cross` or `--glyph star` replaces the speech bubble with a
-whole different shape in the same voice colours, over a faint bubble. A phone keeps the icon and name it installed with, and browsers cache
-icons for a day, so clear the site's data (or wait a day) and reinstall the app
-after changing them.
+`NTH_APP_SHORT_NAME` is the label under the icon (up to 24 characters; keep
+it to about 12, since launchers truncate), and `NTH_APP_NAME` takes up to 60.
+`NTH_APP_BACKGROUND` is the splash screen colour while the app starts.
+`NTH_APP_ICON_DIR` holds PNGs named like the built-in set: `icon-192.png`,
+`icon-512.png`, `icon-maskable-192.png`, `icon-maskable-512.png`,
+`apple-touch-icon.png` (180x180) and `badge-96.png`, each at the size in its
+name and at most 1 MB. Any other file, or a missing one, stays built-in; at
+start the `nth-web` log lists which icons are custom and which are built-in,
+and names each file it refused.
+
+`python3 tools/make-pwa-icons.py DIR --preset ember --glyph cross` renders a
+set. `--preset` picks the tile colours (`gridline`, `ember`, `dusk`,
+`ocean`), `--glyph cross` or `--glyph star` replaces the speech bubble with a
+whole different shape in the same voice colours over a faint bubble, and
+`--emblem cross` adds a corner badge; the status-bar badge follows the glyph
+and emblem. A phone keeps the icon and name it installed with, and browsers
+cache icons for a day, so clear the site's data (or wait a day) and reinstall
+the app after changing them.
 
 **Modes**, chosen per channel on each device:
 
