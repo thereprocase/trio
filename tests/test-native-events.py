@@ -335,14 +335,15 @@ class NativeTests(unittest.TestCase):
         with patch.dict(os.environ, {'TRIO_NATIVE_CLIENT': 'claude', 'CLAUDE_CONFIG_DIR': str(self.root)}):
             result = native_connect_response(dict(identity))
             status = delivery_status('room', 'm', 't')
-        # Mode is still 'monitor' (no channel hub), but the guidance is hook delivery.
+        # No channel hub, but the hooks deliver: the mode says so and agrees with the guidance.
+        self.assertEqual(result['event_delivery']['mode'], 'hooks')
         self.assertEqual(result['monitor_hint'], '')
         self.assertIn('delivery hooks are installed', result['instructions'])
         self.assertIn('Do NOT launch a Monitor', result['instructions'])
         self.assertEqual(status['state'], 'hooks')
         self.assertIn('do not launch a Monitor', status['hint'])
         # Remove them again and the monitor guidance returns.
-        self.assertEqual(nth_claude_hook.uninstall_hooks(settings), 3)
+        self.assertEqual(nth_claude_hook.uninstall_hooks(settings), len(nth_claude_hook.HOOK_EVENTS))
         (self.root / 'settings.json').write_text(json.dumps(settings), encoding='utf-8')
         with patch.dict(os.environ, {'TRIO_NATIVE_CLIENT': 'claude', 'CLAUDE_CONFIG_DIR': str(self.root)}):
             self.assertTrue(native_connect_response(dict(identity))['monitor_hint'])

@@ -11,6 +11,11 @@ import time
 import unittest
 from unittest.mock import patch
 
+# These tests describe a plain Claude without Trio's delivery hooks. Point Claude's
+# config at an empty directory so the result never depends on whether the machine
+# running the suite has the hooks installed in its own ~/.claude/settings.json.
+os.environ['CLAUDE_CONFIG_DIR'] = tempfile.mkdtemp(prefix='trio-test-claude-config-')
+
 SERVER_DIR = Path(__file__).resolve().parents[1] / 'server'
 sys.path.insert(0, str(SERVER_DIR))
 import nth_claude_channel as channel_module

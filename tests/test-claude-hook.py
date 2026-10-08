@@ -203,6 +203,91 @@ class HookTests(unittest.TestCase):
         code2, said2, _ = self.run_wait([{'event': 'new_messages', 'messages': [message(3, mentioned=True)]}])
         self.assertEqual((code2, said2), (0, ''))
 
+    # ---- listen in hook mode -------------------------------------------------------
+
+    def hook_mode(self):
+        """A plain Claude with the hooks installed, as nth_event_access sees it."""
+        settings = {}
+        hook.install_hooks(settings, sys.executable, SERVER_DIR / 'nth_claude_hook.py', self.home)
+        (self.home / 'settings.json').write_text(json.dumps(settings), encoding='utf-8')
+        return patch.dict(os.environ, {'TRIO_NATIVE_CLIENT': 'claude', 'CLAUDE_CONFIG_DIR': str(self.home)})
+
+    def listen(self, **changes):
+        import nth_event_access
+        with self.hook_mode():
+            return nth_event_access.listen('room', 'member', TOKEN, **changes)
+
+    def test_listen_in_hook_mode_saves_the_filter_and_switch_for_the_waiter(self):
+        self.identity()
+        result = self.listen(filter_mode='at')
+        self.assertEqual((result['state'], result['identity_key'], result['filter_mode']), ('hooks', KEY, 'at'))
+        self.assertEqual(hook.membership_config(KEY)['filter'], 'at')
+        self.assertFalse(self.listen(enabled=False)['enabled'])
+        config = hook.membership_config(KEY)
+        self.assertEqual((config['filter'], config['enabled']), ('at', False))   # a stop keeps the filter
+        self.assertTrue(self.listen(enabled=True)['enabled'])
+        self.assertEqual(hook.membership_config(KEY)['filter'], 'at')           # a start keeps it too
+        self.assertIn('error', self.listen(filter_mode='loud'))
+
+    def test_a_stop_racing_the_waiters_ended_mark_survives(self):
+        import threading
+        inside, release = threading.Event(), threading.Event()
+
+        def waiter_marks_ended():
+            with hook.membership_update(KEY) as config:
+                inside.set()
+                release.wait(5)                      # hold the read-modify-write open
+                config['ended'] = 'channel ended'
+
+        marker = threading.Thread(target=waiter_marks_ended)
+        marker.start()
+        self.assertTrue(inside.wait(5))
+        stopper = threading.Thread(target=hook.configure_membership, args=(KEY,), kwargs={'enabled': False})
+        stopper.start()
+        stopper.join(.3)
+        self.assertTrue(stopper.is_alive())          # the stop waits for the lock
+        release.set()
+        marker.join(5)
+        stopper.join(5)
+        config = hook.membership_config(KEY)
+        self.assertEqual((config['ended'], config['enabled']), ('channel ended', False))
+
+    def test_a_hooks_dir_open_to_others_is_refused(self):
+        if os.name == 'nt':
+            self.skipTest('POSIX permissions')
+        path = hook.hooks_dir()
+        os.chmod(path, 0o755)
+        try:
+            with self.assertRaises(PermissionError):
+                hook.hooks_dir()
+        finally:
+            os.chmod(path, 0o700)
+
+    def test_listen_in_hook_mode_needs_a_saved_identity(self):
+        self.assertIn('error', self.listen(filter_mode='all'))
+
+    def test_the_waiter_applies_the_filter_listen_saved(self):
+        self.identity()
+        hook.register(self.connect_payload())
+        unaddressed = [{'event': 'new_messages', 'messages': [message(2)]}]
+        self.assertEqual(self.run_wait(unaddressed)[0], 0)            # about (default) declines it
+        self.listen(filter_mode='all')
+        code, said, _ = self.run_wait([{'event': 'new_messages', 'messages': [message(3)]}])
+        self.assertEqual(code, 2)                                      # all takes it
+        self.assertIn('id 3', said)
+        self.listen(enabled=False)
+        code, said, polls = self.run_wait([{'event': 'new_messages', 'messages': [message(4, mentioned=True)]}])
+        self.assertEqual((code, said, polls.calls), (0, '', []))       # stopped: no listener at all
+
+    def test_listen_after_a_restart_takes_the_membership_back(self):
+        # A new session id: the restarted Claude holds no membership until listen.
+        self.identity(source='quartet')
+        restarted = '0d1e2f30-4050-4607-8809-0a0b0c0d0e0f'
+        result = self.listen(enabled=True)
+        hook.register({'session_id': restarted, 'tool_name': 'mcp__nth-team__quartet_listen',
+                       'tool_response': json.dumps({'result': json.dumps(result)})})
+        self.assertEqual(list(hook.load_session(restarted)['memberships']), [KEY])
+
     # ---- main (dispatch + guards) ------------------------------------------------
 
     def run_main(self, event, payload, home=None):
@@ -224,6 +309,48 @@ class HookTests(unittest.TestCase):
             code, waited = self.run_main('stop', payload)
             self.assertEqual(code, 0)
             waited.assert_not_called()
+
+    def test_a_connect_through_any_nth_server_records_the_membership(self):
+        # A user-added Quartet hub (here nth-team) is a membership like nth-qweb's.
+        self.identity(source='quartet')
+        hook.register(self.connect_payload(tool='mcp__nth-team__quartet_connect'))
+        self.assertEqual(list(hook.load_session(SESSION)['memberships']), [KEY])
+
+    def test_tools_outside_the_nth_servers_are_ignored(self):
+        self.identity()
+        for tool in ('mcp__other__trio_connect', 'mcp__nth-x__y__trio_connect', 'mcp__nth-trio__trio_send'):
+            hook.register(self.connect_payload(tool=tool))
+        self.assertIsNone(hook.load_session(SESSION))
+
+    def test_a_resume_takes_an_ended_session_back_and_waits(self):
+        self.identity()
+        hook.register(self.connect_payload())
+        with patch('sys.stdin', io.StringIO(json.dumps({'session_id': SESSION}))), \
+             patch.object(sys, 'stderr', io.StringIO()):
+            hook.main(['end'])
+        self.assertTrue(hook.load_session(SESSION)['ended'])
+        resume = {'session_id': SESSION, 'hook_event_name': 'SessionStart', 'source': 'resume'}
+        with patch('sys.stdin', io.StringIO(json.dumps(resume))), \
+             patch.object(sys, 'stderr', io.StringIO()), \
+             patch.object(hook, 'wait', return_value=0) as waited:
+            self.assertEqual(hook.main(['start']), 0)
+        self.assertFalse(hook.load_session(SESSION)['ended'])
+        waited.assert_called_once_with(SESSION)
+
+    def test_a_fresh_start_or_clear_does_not_revive_an_ended_session(self):
+        self.identity()
+        hook.register(self.connect_payload())
+        with patch('sys.stdin', io.StringIO(json.dumps({'session_id': SESSION}))), \
+             patch.object(sys, 'stderr', io.StringIO()):
+            hook.main(['end'])
+        for source in ('startup', 'clear', 'compact'):
+            payload = {'session_id': SESSION, 'hook_event_name': 'SessionStart', 'source': source}
+            with patch('sys.stdin', io.StringIO(json.dumps(payload))), \
+                 patch.object(sys, 'stderr', io.StringIO()), \
+                 patch.object(hook, 'wait', return_value=0) as waited:
+                self.assertEqual(hook.main(['start']), 0)
+            waited.assert_not_called()
+        self.assertTrue(hook.load_session(SESSION)['ended'])
 
     def test_main_end_marks_the_session_over(self):
         self.identity()
@@ -258,11 +385,42 @@ class RegistrationTests(unittest.TestCase):
     def test_uninstall_removes_only_trios_hooks(self):
         settings = self.install({'hooks': {'Stop': [{'hooks': [{'type': 'command', 'command': 'other.sh'}]}]}})
         removed = hook.uninstall_hooks(settings)
-        self.assertEqual(removed, 3)
+        self.assertEqual(removed, len(hook.HOOK_EVENTS))
         self.assertEqual(settings['hooks']['Stop'], [{'hooks': [{'type': 'command', 'command': 'other.sh'}]}])
         self.assertNotIn('PostToolUse', settings['hooks'])
         # Nothing of ours left: a second uninstall removes nothing.
         self.assertEqual(hook.uninstall_hooks(settings), 0)
+
+    def test_groups_that_lost_their_tag_are_still_trios(self):
+        # A settings writer that drops unknown keys leaves our groups untagged.
+        settings = self.install({})
+        for groups in settings['hooks'].values():
+            for group in groups:
+                group.pop(hook.HOOK_TAG)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'settings.json'
+            path.write_text(json.dumps(settings), encoding='utf-8')
+            with patch.object(hook, 'settings_files', return_value=[path]):
+                self.assertTrue(hook.delivery_hooks_installed())
+        self.install(settings)                       # re-install replaces, never duplicates
+        for event, _, _ in hook.HOOK_EVENTS:
+            self.assertEqual(len(settings['hooks'][event]), 1, event)
+        self.assertEqual(hook.uninstall_hooks(settings), len(hook.HOOK_EVENTS))
+        self.assertNotIn('hooks', settings)
+
+    def test_resume_is_registered_as_a_waking_session_start_hook(self):
+        settings = self.install({})
+        group = settings['hooks']['SessionStart'][0]
+        self.assertEqual(group['matcher'], 'resume')
+        self.assertEqual(group['hooks'][0]['args'][-1], 'start')
+        self.assertTrue(group['hooks'][0]['asyncRewake'])
+
+    def test_the_tool_matcher_covers_any_nth_server(self):
+        import re
+        matcher = [m for e, _, m in hook.HOOK_EVENTS if e == 'PostToolUse'][0]
+        for tool in ('mcp__nth-trio__trio_connect', 'mcp__nth-qweb__quartet_ack', 'mcp__nth-team__quartet_listen'):
+            self.assertTrue(re.fullmatch(matcher, tool), tool)
+        self.assertFalse(re.fullmatch(matcher, 'mcp__nth-team__quartet_send'))
 
     def test_uninstall_of_a_clean_settings_is_a_no_op(self):
         self.assertEqual(hook.uninstall_hooks({}), 0)

@@ -6,9 +6,11 @@ when it exits with code 2, wakes the model and shows it the hook's stderr as a
 system reminder. This script is that hook. `setup.py` registers it in Claude's
 user settings for three events:
 
-    tool   PostToolUse on the Trio/Quartet connect, listen and ack tools:
-           note which membership this session holds, then wait
+    tool   PostToolUse on the Trio/Quartet connect, listen and ack tools of any
+           nth-* server: note which membership this session holds, then wait
     stop   Stop, after every turn: wait again if this session holds memberships
+    start  SessionStart on resume: a resumed session takes its memberships back
+           and waits again, with no tool call needed
     end    SessionEnd: this session is over, its waiter leaves
 
 Waiting means one process per session that long-polls the session's memberships
@@ -34,7 +36,9 @@ import tempfile
 import threading
 import time
 
-HOOK_TOOLS = re.compile(r'^mcp__nth-(trio|qweb)__(trio|quartet)_(connect|listen|ack)$')
+# Any nth-* server: setup.py registers nth-trio and nth-qweb, and users add more
+# Quartet hubs under their own names (nth-team, ...). Server names never contain "__".
+HOOK_TOOLS = re.compile(r'^mcp__(nth-[A-Za-z0-9-]+)__(trio|quartet)_(connect|listen|ack)$')
 SESSION_ID = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_-]{5,79}$')
 IDENTITY_KEY = re.compile(r'^[0-9a-f]{24}$')
 FILTERS = ('all', 'about', 'at')
@@ -67,8 +71,27 @@ def name(value, limit=64):
 # Marks a hook group as Trio's own, so re-installing replaces it and an uninstall
 # finds it, without disturbing hooks the user or another tool registered.
 HOOK_TAG = 'nth-trio-delivery'
-HOOK_EVENTS = (('PostToolUse', 'tool', r'mcp__nth-(trio|qweb)__(trio|quartet)_(connect|listen|ack)'),
-               ('Stop', 'stop', None), ('SessionEnd', 'end', None))
+HOOK_EVENTS = (('PostToolUse', 'tool', r'mcp__nth-[A-Za-z0-9-]+__(trio|quartet)_(connect|listen|ack)'),
+               ('Stop', 'stop', None), ('SessionStart', 'start', 'resume'), ('SessionEnd', 'end', None))
+HOOK_SCRIPT = 'nth_claude_hook.py'
+
+
+def is_trio_group(group):
+    """Whether a settings hook group is Trio's own. The tag is the primary mark, but a
+    settings writer may drop keys it does not know, so a group whose command runs this
+    script counts as Trio's too: detection, re-install and uninstall all rely on it."""
+    if not isinstance(group, dict):
+        return False
+    if group.get(HOOK_TAG):
+        return True
+    for entry in group.get('hooks') or []:
+        if not isinstance(entry, dict):
+            continue
+        parts = [entry.get('command')] + list(entry.get('args') or [])
+        if any(isinstance(part, str) and part.replace('\\', '/').endswith('/' + HOOK_SCRIPT)
+               or part == HOOK_SCRIPT for part in parts):
+            return True
+    return False
 
 
 def settings_files():
@@ -90,7 +113,7 @@ def delivery_hooks_installed():
             continue
         hooks = data.get('hooks') if isinstance(data, dict) else None
         if isinstance(hooks, dict) and any(
-                isinstance(group, dict) and group.get(HOOK_TAG)
+                is_trio_group(group)
                 for groups in hooks.values() if isinstance(groups, list) for group in groups):
             return True
     return False
@@ -107,8 +130,7 @@ def install_hooks(settings, python, script, runtime):
     """
     hooks = settings.setdefault('hooks', {})
     for event, action, matcher in HOOK_EVENTS:
-        groups = [group for group in hooks.get(event, [])
-                  if not (isinstance(group, dict) and group.get(HOOK_TAG))]
+        groups = [group for group in hooks.get(event, []) if not is_trio_group(group)]
         entry = {'type': 'command', 'command': str(python),
                  'args': [str(script), '--home', str(runtime), action]}
         if action != 'end':                          # SessionEnd only records; it never wakes
@@ -127,8 +149,7 @@ def uninstall_hooks(settings):
     if not isinstance(hooks, dict):
         return 0
     for event in list(hooks):
-        kept = [group for group in hooks[event]
-                if not (isinstance(group, dict) and group.get(HOOK_TAG))]
+        kept = [group for group in hooks[event] if not is_trio_group(group)]
         removed += len(hooks[event]) - len(kept)
         if kept:
             hooks[event] = kept
@@ -143,6 +164,14 @@ def hooks_dir():
     from nth_event_service import state_dir
     path = state_dir() / 'hooks'
     path.mkdir(mode=0o700, exist_ok=True)
+    if os.name != 'nt':
+        # Its files decide what this session listens to: refuse a directory someone else
+        # could have planted (a symlink, another owner, or open to the group/world).
+        info = os.lstat(path)
+        import stat
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode) \
+                or info.st_uid != os.getuid() or info.st_mode & 0o077:
+            raise PermissionError(f'{path} must be a directory owned by this user with mode 0700')
     return path
 
 
@@ -376,6 +405,46 @@ def register(payload):
                         state[field][key] = max(int(state[field].get(key) or 0), int(state[field].pop(other)))
 
 
+def identity_key_for(channel, member_id, session_token):
+    """The key of this installation's saved identity for these credentials, or None."""
+    try:
+        paths = sorted(identities_dir().glob('*.json'))
+    except OSError:
+        return None
+    for path in paths:
+        if not IDENTITY_KEY.match(path.stem):
+            continue
+        identity = read_json(path) or {}
+        if (identity.get('channel'), identity.get('member_id'), identity.get('session_token')) \
+                == (channel, member_id, session_token):
+            return path.stem
+    return None
+
+
+@contextmanager
+def membership_update(key):
+    """Read, change and write a membership's saved config under a lock. listen() and the
+    waiter's ended mark both write it; unlocked, one could revert the other and undo a stop."""
+    path = membership_path(key)
+    with file_lock(path.with_suffix('.lock'), blocking=True):
+        config = dict(read_json(path) or {})
+        yield config
+        write_json(path, config)
+
+
+def configure_membership(key, filter_mode=None, enabled=None):
+    """Save a listen call's filter and on/off switch where the waiter reads them; an
+    omitted value keeps what is saved. Returns the resulting membership_config."""
+    if filter_mode is not None and filter_mode not in FILTERS:
+        raise ValueError(f'filter_mode must be one of {sorted(FILTERS)}')
+    with membership_update(key) as config:
+        if filter_mode is not None:
+            config['filter'] = filter_mode
+        if enabled is not None:
+            config['enabled'] = bool(enabled)
+    return membership_config(key)
+
+
 def membership_config(key):
     config = read_json(membership_path(key)) or {}
     chosen = config.get('filter')
@@ -579,7 +648,8 @@ def _wait_locked(session_id):
         lines, ended = list(wake.lines), dict(wake.ended)
     for key, reason in ended.items():
         # Said once. A membership that is over is not announced again at every re-arm.
-        write_json(membership_path(key), dict(read_json(membership_path(key)) or {}, ended=reason))
+        with membership_update(key) as config:
+            config['ended'] = reason
     write_json(session_path(session_id, '.status.json'),
                {'pid': 0, 'claude_pid': supervisor, 'heartbeat': time.time(), 'listeners': {}})
     SAY.write('\n'.join(lines) + '\n')
@@ -606,7 +676,7 @@ def main(argv=None):
     global SAY
     parser = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
     parser.add_argument('--home', help='Trio runtime directory (NTH_HOME) of this installation')
-    parser.add_argument('event', choices=['tool', 'stop', 'end'])
+    parser.add_argument('event', choices=['tool', 'stop', 'start', 'end'])
     args = parser.parse_args(argv)
     # A session launched with `trio claude` has listeners inside its frontends.
     if os.environ.get('TRIO_CLAUDE_CHANNEL') == '1':
@@ -631,6 +701,14 @@ def main(argv=None):
         return 0
     if args.event == 'tool':
         register(payload)
+    if args.event == 'start':
+        # Only a resume continues a session that held memberships; a fresh start,
+        # /clear and compaction need nothing here (compaction never ended it).
+        if payload.get('source') != 'resume':
+            return 0
+        with session_update(session_id) as state:
+            if state is not None and state['memberships']:
+                state['ended'] = False
     if not session_path(session_id).exists():
         return 0                                     # a session that never joined: nothing to do
     return wait(session_id)
