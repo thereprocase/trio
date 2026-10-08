@@ -368,7 +368,7 @@ tokens in `server/web/css/00-tokens.css`.
 The dashboard composer has a mic button. **Preferences → Speech-to-text engine** picks how it transcribes:
 
 - **Auto** (default): Hub when the hub reports a working speech engine, otherwise Browser, decided at the moment you tap.
-- **Hub**: the audio goes to the machine running `nth_web.py`, which transcribes it with a Whisper sidecar or, when its operator configured one, forwards it to a speech service (then `/api/stt/health` reports `remote: true` and Preferences says the audio goes to this hub's speech service). Either way it never goes to your browser vendor. If the hub cannot transcribe, the mic says so before recording and offers Browser for that one recording; it never switches on its own. (The stored preference value is still `local`.)
+- **Hub**: the audio goes to the machine running `nth_web.py`, which transcribes it with a Whisper sidecar or, when its operator configured one, forwards it to a [speech service](#dictation-backend) (then `/api/stt/health` reports `remote: true` and Preferences says the audio goes to this hub's speech service). Either way it never goes to your browser vendor. If the hub cannot transcribe, the mic says so before recording and offers Browser for that one recording; it never switches on its own. (The stored preference value is still `local`.)
 - **Browser**: the browser's own speech recognition, which sends audio to your browser vendor.
 
 Spoken sigils: say **“hey Name”** for `@Name`, **“hashtag Name”** for `#Name`, **“bang Name”** for `!Name` and **“bang all”** for `!all`. Names are matched against the current channel's members, tolerating case, punctuation, a name spoken as several words (“codex sol” for `codex-sol`) and a misheard letter in longer names; names of four letters or fewer must be heard exactly. When no member is a clear match the words stay as spoken, so an ordinary “hey, can you…” is left alone. A bang wakes everyone it names whatever their filter, so it is stricter: one word after “bang”, no comma or full stop after “bang”, and “all” only at the end of what you said or before punctuation (“they bang all night” stays a sentence). Only final text is rewritten, and the sigils sit in the box for you to check before sending.
@@ -392,6 +392,54 @@ If they're missing, the dashboard runs as usual: Auto uses browser dictation, an
 | `NTH_STT_LANG` | `en` | Language code; `""` auto-detects |
 | `NTH_STT_MAX_CONCURRENT` | `2` | Simultaneous transcriptions |
 | `NTH_STT_SILENCE_RMS` | `0.002` | Below this RMS a clip counts as silence |
+| `NTH_STT_URL` | unset | Base URL of a speech service; see [Dictation backend](#dictation-backend) |
+| `NTH_STT_TOKEN_FILE` | unset | File holding that service's bearer token |
+| `NTH_STT_TIMEOUT` | `60` | Seconds allowed per clip on the speech service |
+
+### Dictation backend
+
+A hub on Linux or any machine without Apple silicon can hand dictation to a
+speech service on your network. Set two variables in the hub's environment:
+
+```bash
+export NTH_STT_URL=http://stt.example:10400
+export NTH_STT_TOKEN_FILE=~/.config/nth/stt-token
+```
+
+With `NTH_STT_URL` set, the hub sends each dictation clip to that service and
+uses its transcript; the mlx sidecar is never started. The audio leaves the hub
+and travels to the service, so point it at a machine you trust, and use an
+`https://` URL if the path between them crosses a network you do not control.
+
+The service needs two routes, both requiring `Authorization: Bearer <token>`:
+
+- `GET /health` returns `{"ok": true, "model": "...", "warm": true}`.
+- `POST /transcribe` takes the raw audio as the body (any format ffmpeg reads;
+  the browser's WebM/Opus works as recorded) and returns
+  `{"ok": true, "text": "...", "seconds": 0.9}`. Errors are
+  `{"ok": false, "error": "..."}` with status 401, 413, 422 or 500.
+
+The token file holds the token on one line. The hub reads it once at startup
+and refuses a file that other users can access, so create it private:
+
+```bash
+install -m 600 /dev/null ~/.config/nth/stt-token
+printf '%s\n' 'your-token' > ~/.config/nth/stt-token
+```
+
+The hub follows no redirects; set `NTH_STT_URL` to the service's final
+address. Any problem with the URL, the token file or the service makes
+`GET /api/stt/health` report the engine unavailable, with the reason in its
+`detail` field; Auto then uses browser dictation, and the rest of the
+dashboard runs as usual. The hub checks the service's
+health at most once a minute while it is up and every 10 seconds while it is
+down, so phones polling the status do not load it.
+
+**Running a speech service.** A small HTTP wrapper around
+[onnx-asr](https://github.com/istupakov/onnx-asr) with NVIDIA's Parakeet TDT
+0.6B v2 model, int8-quantized, runs well on CPU alone: about 1 second to
+transcribe a 10-second clip on an 8-core laptop CPU. Give the service its own
+token and keep it listening on your LAN or tailnet.
 
 ## Phone notifications
 
