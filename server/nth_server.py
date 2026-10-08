@@ -24,7 +24,7 @@ import hashlib
 import string
 import threading
 from datetime import datetime, timedelta, timezone
-from typing import Any, List, Optional, Tuple
+from typing import Annotated, Any, List, Literal, Optional, Tuple
 from pathlib import Path
 
 # Add server/ to sys.path so nth_constants can be imported when MCP spawns this
@@ -1639,7 +1639,8 @@ def nth_connect(
         # Set watermark to current latest message
         latest_id = recent[0]["id"] if recent else 0
         db.execute(
-            "UPDATE members SET last_read = ? WHERE id = ? AND channel = ?",
+            "UPDATE members SET last_read = ?, delivery_state = NULL, delivery_state_at = NULL "
+            "WHERE id = ? AND channel = ?",
             (latest_id, member_id, channel),
         )
 
@@ -2550,8 +2551,15 @@ def _attachment_meta(channel: str, a) -> dict:
     return item
 
 
+class _PollCursor:
+    """Strict wire integer metadata for the SDK, without additional imports."""
+
+    def __get_pydantic_core_schema__(self, source_type, handler):
+        return dict(handler(source_type), strict=True, ge=0, lt=2**53)
+
+
 @mcp.tool(name=f"{TOOL_PREFIX}_poll")
-def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: str = "", session_token: str = "", auto_ack: bool = True, mentions_only: bool = False, monitor_heartbeat: bool = False, monitor_filter: str = "", monitor_context: str = "", after_id: Optional[int] = None, delivery_state: Optional[str] = None) -> Any:
+def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: str = "", session_token: str = "", auto_ack: bool = True, mentions_only: bool = False, monitor_heartbeat: bool = False, monitor_filter: str = "", monitor_context: str = "", after_id: Optional[Annotated[int, _PollCursor()]] = None, delivery_state: Optional[Literal["waiting", "in_turn", "unreachable"]] = None) -> Any:
     """Check for new messages since your last read. Blocks up to wait_seconds.
 
     Returns all unread messages, or "no_new" if nothing arrived.
@@ -2577,17 +2585,23 @@ def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: st
         member_id: Your member ID (from nth_connect)
         wait_seconds: How long to wait for new messages (default 15, max 30)
         from_name: If set, only return messages from members whose name contains this string
-        after_id: Optional nonnegative cursor; return ids above both it and the read watermark
-        delivery_state: Optional presence report: waiting, in_turn or unreachable
+        after_id: Optional integer cursor, 0 <= after_id < 2**53; disables legacy auto-ack
+        delivery_state: Optional presence report: waiting, in_turn or unreachable; requires session_token
     """
     err = validate_channel_code(channel)
     if err:
         return json.dumps({"error": err})
 
-    if after_id is not None and (type(after_id) is not int or after_id < 0):
-        return json.dumps({"error": "after_id must be an integer at least 0."})
+    if after_id is not None and (type(after_id) is not int or not 0 <= after_id < 2**53):
+        return json.dumps({"error": "after_id must be an integer with 0 <= after_id < 2**53."})
     if delivery_state is not None and delivery_state not in ("waiting", "in_turn", "unreachable"):
         return json.dumps({"error": "delivery_state must be waiting, in_turn or unreachable."})
+    if delivery_state is not None and not session_token:
+        return json.dumps({"error": "delivery_state requires a valid session_token for this member."})
+    if after_id is not None and not session_token:
+        # A cursor describes what was seen, not what was acknowledged. Even
+        # default legacy callers must leave the entire skipped range unread.
+        auto_ack = False
 
     wait_seconds = min(max(wait_seconds, 0), 30)
     from_name_lower = from_name.strip().lower() if from_name else ""
@@ -2637,9 +2651,12 @@ def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: st
             if sess_row is not None:
                 # Re-read sessions row in case an ack bumped it between iterations
                 fresh = _get_session(db, channel, session_token)
+                if delivery_state is not None and fresh is None:
+                    return json.dumps({"error": "Invalid or revoked session_token."})
                 current_watermark = fresh["last_read"] if fresh else sess_row["last_read"]
             else:
                 current_watermark = member["last_read"]
+            read_watermark = current_watermark
             if after_id is not None:
                 current_watermark = max(current_watermark, after_id)
 
@@ -2649,7 +2666,7 @@ def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: st
                     "SELECT id, member_id, member_name, content, recipients, "
                     "created_at FROM messages WHERE channel = ? AND id > ? "
                     "ORDER BY id",
-                    (channel, current_watermark),
+                    (channel, read_watermark),
                 ).fetchall()
                 unread = [m for m in unread
                           if can_see(member_id, "agent", m["member_id"],
@@ -2668,7 +2685,7 @@ def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: st
                     "unread": [
                         {"id": m["id"], "from": m["member_name"] or m["member_id"],
                          "content": m["content"], "at": m["created_at"]}
-                        for m in unread
+                        for m in unread if m["id"] > current_watermark
                     ],
                 })
 

@@ -102,8 +102,11 @@ Full parameter lists and return shapes are in [REFERENCE.md](REFERENCE.md).
 
 Poll accepts an optional `after_id` cursor and `delivery_state` report; see
 [PROTOCOLS.md](PROTOCOLS.md). The Quartet delivery listener uses the cursor after
-checking hub schema support and does not send presence reports yet. These
-arguments do not replace the readiness check or explicit acknowledgements.
+checking hub schema support and does not send presence reports yet. A
+presence report requires the member's session token. A cursor disables legacy
+auto-ack and must be a strict integer below `2**53`. Delivery hints supplement
+status prose and respect stronger lifecycle states and the Local/UTC clock
+preference. These arguments do not replace readiness checks or explicit acks.
 
 ## Sigils — how to address people
 

@@ -1430,18 +1430,21 @@ def _agent_is_live(is_running: bool, heartbeat_fresh: bool, working: bool,
         nsup.ST_SLEEPING, nsup.ST_STOPPED, nsup.ST_ERRORED)
 
 
-def delivery_presence(state: Optional[str], reported_at: Optional[str]) -> Optional[Tuple[str, str]]:
+def delivery_presence(state: Optional[str], reported_at: Optional[str],
+                      last_seen: Optional[str] = None) -> Optional[Tuple[str, str]]:
     """Roster bucket and label from an explicit poll report; unknown is legacy.
 
-    Other traffic may refresh last_seen, but cannot renew a delivery report.
-    Times in labels are UTC, matching the stored report's timestamp.
+    A newer heartbeat supersedes an expired report. The browser formats the
+    report timestamp in its selected zone when no newer liveness is known.
     """
     stamp = _iso_secs(reported_at)
     if state not in ("waiting", "in_turn", "unreachable") or stamp is None:
         return None
     if datetime.now(timezone.utc).timestamp() - stamp > 120:
-        since = datetime.fromtimestamp(stamp, timezone.utc).strftime("%H:%M")
-        return "stale", f"silent since {since}"
+        seen = _iso_secs(last_seen)
+        if seen is not None and seen > stamp:
+            return None
+        return "stale", "silent since"
     if state == "unreachable":
         return "stale", "unreachable"
     return ("idle", "listening (hooks)") if state == "waiting" else ("working", "working")
@@ -2351,6 +2354,7 @@ class EventHub:
         except sqlite3.Error:
             _agent_cols = set()
         has_agent_avatar = "avatar_name" in _agent_cols
+        agent_presence_cols = {"state", "archived_at"} & _agent_cols
         member_cols = {row[1] for row in db.execute("PRAGMA table_info(members)")}
         has_delivery = {"delivery_state", "delivery_state_at"} <= member_cols
 
@@ -2363,6 +2367,8 @@ class EventHub:
             ]
             if has_delivery:
                 cols += ["m.delivery_state AS delivery_state", "m.delivery_state_at AS delivery_state_at"]
+                for col in sorted(agent_presence_cols):
+                    cols.append(f"a.{col} AS agent_{col}")
             # Its own tier for the same reason the others have theirs: a DB
             # predating this column must not also lose filter_mode and the
             # context %, which is what folding it into v72 would do.
@@ -2394,7 +2400,7 @@ class EventHub:
                     "    COALESCE(s.last_tool_name,'') || char(31) || "
                     "    COALESCE(s.last_tool_target,'')) AS session_tool_packed")
             agent_join = ("LEFT JOIN agents a ON a.id = m.id "
-                          if has_agent_avatar else "")
+                          if has_agent_avatar or (has_delivery and agent_presence_cols) else "")
             return ("SELECT " + ", ".join(cols) + " FROM members m "
                     + agent_join +
                     "LEFT JOIN sessions s "
@@ -2473,7 +2479,23 @@ class EventHub:
                            if "avatar_name" in keys else "") or "")
             delivery = delivery_presence(
                 r["delivery_state"] if has_delivery else None,
-                r["delivery_state_at"] if has_delivery else None)
+                r["delivery_state_at"] if has_delivery else None,
+                effective_last_seen)
+            normal_status = member_status(
+                effective_last_seen, r["status_text"] or "",
+                session_activity_iso=(r["session_last_seen"] or None),
+                last_turn_end_iso=s_turn_end, blocked_since_iso=s_blocked)
+            # Presence is an extra hint. It cannot hide a state that requires
+            # operator attention or a supervisor lifecycle decision.
+            if has_delivery and r["delivery_state"]:
+                agent_state = r["agent_state"] if "agent_state" in keys else ""
+                archived = r["agent_archived_at"] if "agent_archived_at" in keys else None
+                stronger = ("archived" if archived else
+                            "blocked" if s_blocked and _iso_secs(s_blocked) is not None else
+                            "errored" if agent_state in ("error", "errored") or stalled.get(r["id"]) else
+                            agent_state if agent_state in ("sleeping", "compacting") else None)
+                if stronger:
+                    normal_status, delivery = stronger, None
             out.append({
                 "id": r["id"],
                 "name": r["name"] or r["id"],
@@ -2508,11 +2530,7 @@ class EventHub:
                 # invariant (nth_connect mints a single session per member id).
                 # If multi-session members are reintroduced, pair both values
                 # from the newest-last_seen session instead.
-                "status": delivery[0] if delivery else member_status(
-                    effective_last_seen, r["status_text"] or "",
-                    session_activity_iso=(r["session_last_seen"] or None),
-                    last_turn_end_iso=s_turn_end,
-                    blocked_since_iso=s_blocked),
+                "status": delivery[0] if delivery else normal_status,
                 # What the member is doing right now, from nth_activity_hook.
                 # Empty strings when the hook is not installed, so a hook-less
                 # deployment renders exactly as before.

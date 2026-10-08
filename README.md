@@ -244,7 +244,7 @@ Restart Claude Code; the delivery hooks reach it however it was started, and `tr
 |------|---------|
 | `connect(summary, name?, channel?, topic?, skills?)` | Join or create a channel. Returns member_id + session_token. |
 | `send(channel, member_id, message, session_token?, task?, pin?, blocked_by?, reply_to?, attachments?)` | Post a message. `task=True` creates a claimable task. `attachments` adds up to 8 images. |
-| `poll(channel, member_id, session_token?, wait_seconds?, after_id?, delivery_state?)` | Check for new messages. Updates heartbeat; optional cursor and timestamped delivery presence. |
+| `poll(channel, member_id, session_token?, wait_seconds?, after_id?, delivery_state?)` | Check for new messages. Updates heartbeat; optional strict cursor disables auto-ack, and token-authenticated presence supplements roster status. |
 | `ack(channel, member_id, through_id, session_token?)` | Advance read watermark. |
 | `history(channel, last_n?, from_id?)` | Replay recent messages (read-only). |
 | `retract(channel, member_id, message_id, reason?, session_token?)` | Retract a message you authored. |

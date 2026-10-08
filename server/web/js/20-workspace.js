@@ -1558,7 +1558,7 @@
   // Saving "Hide old threads" already broadcasts this event. The rail reads
   // that preference when it groups channels and DMs, so repaint immediately
   // instead of leaving the old grouping visible until the 15-second refresh.
-  function onPreferencesChanged() { renderRail(); }
+  function onPreferencesChanged() { renderRail(); refreshDrawerMembers(); }
   function onRoute(route) {
     if (!route) return;
     if (route.name === 'channel') {
@@ -1717,9 +1717,14 @@
     // it is not a live member that happens to be down: say so before any
     // liveness heuristic gets a chance to call it "Offline".
     if (member?.archived) return 'archived';
-    if (member?.delivery_label) {
-      return member.status === 'stale' ? 'offline' : member.status;
-    }
+    const strongerStatus = String(member?.status || '').toLowerCase();
+    const supervisorState = String(member?.state || '').toLowerCase();
+    if (strongerStatus === 'archived') return 'archived';
+    if (strongerStatus === 'blocked') return 'blocked';
+    if (['error','errored'].includes(strongerStatus) || ['error','errored'].includes(supervisorState)) return 'errored';
+    if (['sleeping','compacting'].includes(supervisorState)) return supervisorState;
+    if (['sleeping','compacting'].includes(strongerStatus)) return strongerStatus;
+    if (member?.delivery_label) return member.status === 'stale' ? 'offline' : member.status;
     // Agent roster objects carry {state, live, busy} from the supervisor —
     // the same source as the Agent roster page. Prefer those when present so
     // the details panel agrees with the roster instead of falling back to the
@@ -1758,7 +1763,7 @@
     return ['working','blocked','errored','sleeping','active','idle','offline','compacting','archived'].includes(raw) ? raw : 'offline';
   }
   function channelStatusLabel(status) { return status === 'errored' ? 'Errored' : status[0].toUpperCase() + status.slice(1); }
-  function channelStatusChip(status, label) { return `<span class="channel-status-chip ${status}"><span class="dot"></span>${esc(label || channelStatusLabel(status))}</span>`; }
+  function channelStatusChip(status) { return `<span class="channel-status-chip ${status}"><span class="dot"></span>${esc(channelStatusLabel(status))}</span>`; }
   // Live "what are they doing" hint sourced from sessions.last_tool_name/
   // last_tool_target (nth_activity_hook) — only meaningful while `working`,
   // since a finished turn's last tool call is stale trivia otherwise.
@@ -1793,11 +1798,13 @@
   function detailMember(member) {
     const name = member.name || member.id || 'Unknown member';
     const status = channelStatus(member);
-    const deliveryLabel = status === 'archived' ? '' : member.delivery_label;
+    let deliveryLabel = ['blocked','errored','archived','sleeping','compacting'].includes(status) ? '' : member.delivery_label;
+    if (deliveryLabel === 'silent since') deliveryLabel += ' ' + Trio.time.clock(member.delivery_state_at);
+    const delivery = deliveryLabel ? `<div class="channel-member-delivery">${esc(deliveryLabel)}</div>` : '';
     // An archived agent's last status_text ("idle — standing by") is stale and
     // reads as if it were still working; the archive fact outranks it.
     const statusText = status === 'archived' ? 'Archived — restore to rejoin'
-      : (deliveryLabel || member.status_text || member.statusText
+      : (member.status_text || member.statusText
          || (status === 'active' ? 'Active in this channel' : channelStatusLabel(status)));
     const hint = toolSuffix(member, status).replace(/^ — /, '');
     const tool = hint ? `<div class="channel-member-tool">${esc(hint)}</div>` : '';
@@ -1811,7 +1818,7 @@
     const opId = state.operator?.id || state.meta?.operator?.id;
     const isAgent = member.kind !== 'human' && member.id !== opId;
     const subagents = isAgent ? `<div class="channel-member-subagents" data-subagents-for="${esc(member.id)}"></div>` : '';
-    return `<div class="channel-member${status === 'archived' ? ' is-archived' : ''}">${avatarFor(member, status)}<div class="channel-member-copy"><div class="channel-member-name">${esc(name)}</div><div class="channel-member-status">${esc(statusText)}</div>${tool}${subagents}</div>${contextBadge(member)}${channelStatusChip(status, deliveryLabel)}${removeBtn}</div>`;
+    return `<div class="channel-member${status === 'archived' ? ' is-archived' : ''}">${avatarFor(member, status)}<div class="channel-member-copy"><div class="channel-member-name">${esc(name)}</div><div class="channel-member-status">${esc(statusText)}</div>${delivery}${tool}${subagents}</div>${contextBadge(member)}${channelStatusChip(status)}${removeBtn}</div>`;
   }
   // Subagent list under an agent's drawer row. "Recent spawns" — tool_events
   // records Task/Agent starts only (no completion), so this is honestly labelled

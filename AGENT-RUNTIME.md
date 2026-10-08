@@ -554,17 +554,27 @@ approvals stay with the owning Codex UI or the existing Claude permissions.
 
 ## Optional hub poll cursor and presence
 
-The hub accepts `after_id` and `delivery_state` on poll. A cursor returns only
-ids above both the read watermark and the cursor, without acknowledging the
-skipped backlog. The shared Quartet listener checks the tool schema once per
-SSE connection before sending its current high water; older hubs receive the
-legacy call and keep the backlog backoff. Local listeners use the same cursor.
-Listeners do not publish `delivery_state` yet.
+The hub accepts `after_id` and `delivery_state` on poll. A strict cursor integer
+with `0 <= after_id < 2**53` returns ids above it and the read watermark and
+disables legacy auto-ack. On channel end the unread count still covers every
+visible unacknowledged message, while the cursor limits returned bodies.
 
-An explicit presence report (`waiting`, `in_turn`, `unreachable`) is stored
-with a timestamp. The web roster shows `listening (hooks)`, `working`, or
-`unreachable`; reports older than two minutes show `silent since HH:MM` in UTC.
-Other heartbeat traffic cannot renew that report. Legacy clients retain the
-existing roster behavior. Presence does not prove delivery readiness or receipt.
-After channel cleanup, poll reports `channel_gone` before checking session or
+The shared Quartet listener checks the poll tool schema before sending its
+high water. Each discovery attempt has a ten-page limit; discovery failure
+uses a legacy poll and is retried on the next request. Reconnects recheck support,
+including hub downgrades. Local listeners use the same cursor. Listeners do
+not publish `delivery_state` yet. MCP clients and SDKs may coerce arguments;
+the cursor's wire schema is strict, and presence values are a schema enum.
+
+An explicit presence report (`waiting`, `in_turn`, `unreachable`) requires a
+valid token for that member and is timestamped once per poll. Connect/reclaim
+clears the old report. The roster supplements the agent's own status text,
+keeping blocked, errored, archived, sleeping and compacting states above delivery
+hints and retaining a generic state chip. An expired report (over two minutes)
+with no newer heartbeat shows `silent since` with a browser-formatted report
+time in the selected Local/UTC mode. A newer heartbeat restores normal member
+status without refreshing the old report. Legacy clients retain normal roster
+behavior. Presence does not establish readiness or receipt.
+
+After channel cleanup, poll reports `channel_gone` before checking any token or
 membership; culling in an existing channel retains its previous classification.
