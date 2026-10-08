@@ -4,6 +4,42 @@ Trio runs locally. Local channels use the local database; Quartet calls pass
 through Trio's stdio frontend to the configured hub. Channel identity, sigils,
 privacy, task claims and acknowledgement rules are the same for both clients.
 
+## Spoke interposer skeleton
+
+`trio interposer status` handshakes with the interposer and prints stored hubs,
+memberships, sessions and holdings as JSON. `trio interposer restart` uses the
+installed systemd user service on Linux, or stops and spawns the fallback service.
+`trio interposer logs` prints the last 100 lines of `NTH_HOME/logs/interposer.log`.
+The doctor reports socket presence and a successful `hello` separately from
+listener delivery readiness. The skeleton has no hub polling or delivery sinks.
+
+`python setup.py install` writes `trio-interposer.socket` and `.service` under
+`~/.config/systemd/user` on Linux with an available user manager, enables the
+socket, and restarts the service only if it is already active. Use
+`--skip-systemd` to skip this integration. A staged `--home` never controls the
+caller's systemd. Other Unix installations can spawn the service on demand.
+
+The socket is `XDG_RUNTIME_DIR/trio/interposer.sock`, or
+`NTH_HOME/run/interposer.sock` when no runtime directory is configured. Its
+directory is 0700, the socket is 0600, and Linux additionally checks peer uid.
+The service holds `run/lease.lock`, serializes SQLite writes to
+`events/interposer.sqlite` (WAL, FULL synchronization), and exits after 30 minutes
+without a live registered session. Windows named pipes are deferred.
+
+IPC uses protocol 1 JSON lines, at most 64 KiB including the newline, with an
+integer request id echoed in every reply. `hello` must come first and reports the
+software version and supported protocol range. `hub.announce` stores an
+`nth-*` server and credential-free HTTP(S) URL; `list` returns stored control
+state; `status` optionally filters it by identity key and session. Other design
+ops return `not implemented in this version`. Tokens stay in identity files.
+
+At first start the store imports `events/hooks/session-*.json` and
+`membership-*.json` in one transaction, preserving maximum announced and acked
+watermarks, filters, stopped listeners and ended states. Imported live-looking
+sessions are `idle_unreachable` until registration can verify their host in a
+later PR. Corrupt legacy state aborts startup and leaves the migration retryable;
+logs record exception classes rather than file content or tokens.
+
 ## Codex
 
 Launch with `trio codex` (CLI) or `trio desktop --app PATH` (app). This starts or

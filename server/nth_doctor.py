@@ -206,9 +206,23 @@ def _http_json(url):
         return None, None, type(e).__name__
 
 
+def interposer_check():
+    from nth_interposer_wire import connect, socket_path, WireError
+    if not hasattr(socket, 'AF_UNIX'):
+        return ('interposer', SKIP, 'Unix sockets unavailable on this platform')
+    if not socket_path().exists():
+        return ('interposer', WARN, 'socket absent; service starts on demand')
+    try:
+        # Diagnosis may trigger socket activation, but never spawns a fallback.
+        with connect(timeout=2) as client:
+            return ('interposer', OK, 'hello answered; protocol ' + str(client.hello['protocol_max']))
+    except (OSError, ValueError, EOFError, WireError) as exc:
+        return ('interposer', FAIL, 'hello failed: ' + type(exc).__name__)
+
+
 def run_checks(hub_override=None):
     """Return (checks, fleet_rows). checks = [(label, level, detail)]."""
-    checks = []
+    checks = [interposer_check()]
     stdio, hub_url = _read_registration()
     if hub_override:
         hub_url = hub_override.rstrip("/")

@@ -58,6 +58,13 @@ Use the executable declared by the installed package (the tested Windows package
 
 The installer copies the runtime, both skills and their companion documents into each selected client's skill directory, registers `nth-trio` and `nth-qweb`, backs up changed files and settings, and creates the local Python environment and launcher.
 
+The spoke interposer skeleton is also installed. On Linux with a user systemd,
+`setup.py` enables its private socket and restarts an already running interposer;
+`--skip-systemd` skips that step. `trio interposer status`, `restart`, and `logs`
+inspect or control it. This skeleton stores hub announcements and imports legacy
+hook watermarks and settings once; polling and delivery still use the existing
+runtime. See [AGENT-RUNTIME.md](AGENT-RUNTIME.md#spoke-interposer-skeleton).
+
 `trio status` shows subscriptions; `trio start` starts the local service. `*_listen(filter_mode="all"|"about"|"at")` changes a Codex listener and `*_listen(enabled=false)` stops it. For an already exposed owning server, `trio attach --endpoint LOCAL_ENDPOINT` enables observation; an ordinary stdio Codex server picks up delivery on its next launch through Trio. See [native runtime instructions](AGENT-RUNTIME.md) and [delivery protocol and recovery](CODEX-EVENT-RELAY.md).
 
 ## Architecture

@@ -154,7 +154,8 @@ def staged_import(label: str, installed: set) -> None:
         if web_copied:                  # only if setup.sh actually says to
             shutil.copytree(SERVER / "web", dest / "web")
 
-        env = dict(os.environ, NTH_HOME=str(staging / "home"),
+        env = dict(os.environ, HOME=str(staging / "home"), NTH_HOME=str(staging / "home"),
+                   XDG_RUNTIME_DIR=str(staging / "home"),
                    PYTHONPATH=str(dest))
         proc = subprocess.run([sys.executable, "-c", "import nth_web"],
                               capture_output=True, text=True, timeout=120,
@@ -182,6 +183,7 @@ staged_import("hub/spoke", hub_spoke)
 # missing fails.
 DELIVERY_ENTRY_POINTS = (
     "nth_sse_client", "nth_listener", "nth_notice",
+    "nth_interposer", "nth_interposer_wire", "nth_interposer_store",
     "nth_claude_hook", "nth_codex_hook", "nth_spoke_monitor", "nth_watch",
     "nth_event_sources", "nth_codex_relay", "nth_event_service",
     "nth_claude_channel", "nth_quartet_proxy",
@@ -207,7 +209,8 @@ print(json.dumps(report))
 
 
 def entry_points_import(label: str, tree: Path, home: Path) -> None:
-    env = dict(os.environ, NTH_HOME=str(home), NTH_QUIET="1", PYTHONPATH=str(tree))
+    env = dict(os.environ, HOME=str(home), NTH_HOME=str(home),
+               XDG_RUNTIME_DIR=str(home), NTH_QUIET="1", PYTHONPATH=str(tree))
     proc = subprocess.run([sys.executable, "-c", ENTRY_POINT_PROBE, ",".join(OPTIONAL_PACKAGES),
                            *DELIVERY_ENTRY_POINTS],
                           capture_output=True, text=True, timeout=120, env=env, cwd=str(home))

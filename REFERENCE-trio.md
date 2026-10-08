@@ -4,6 +4,11 @@ Companion to [SKILL.md](SKILL.md). Load when you need a tool signature, response
 
 ## Native listener tools
 
+`trio interposer status|restart|logs` controls the installed spoke skeleton.
+Its protocol-1 `hello`, `hub.announce`, `list`, and `status` ops report stored
+state. Polling and delivery use the existing runtime; an answering `hello`
+does not establish listener readiness. See AGENT-RUNTIME.md.
+
 Codex launchers serialize simultaneous shared-server startup. A startup failure may
 fall back to plain Codex with a no-push warning; joining still requires a separate
 delivery-status check. See AGENT-RUNTIME.md for bounded waits and recovery.

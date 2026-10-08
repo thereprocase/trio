@@ -43,7 +43,7 @@ def copy_file(source, destination):
 
 def install(target_home, *, quartet_url='', clients=('claude', 'codex'),
             skip_dependencies=False, register_codex=True, codex_binary=None, codex_app=None,
-            claude_binary=None):
+            claude_binary=None, skip_systemd=False):
     target_home = Path(target_home).resolve()
     claude_home = target_home / '.claude'
     codex_home = Path(os.environ.get('CODEX_HOME', str(target_home / '.codex')))
@@ -145,9 +145,72 @@ def install(target_home, *, quartet_url='', clients=('claude', 'codex'),
         launcher.chmod(0o755)
     result = {'launcher': str(launcher), 'python': str(python), 'server': str(server),
               'runtime': str(runtime), 'clients': list(clients)}
+    # A staged --home is never permission to control the caller's user manager.
+    if not skip_systemd and target_home == Path.home().resolve():
+        result['interposer_systemd'] = install_interposer_units(target_home, python, server, runtime)
     if codex_hooks:
         result.update(codex_hooks)
     return result
+
+
+def systemd_available(target_home, platform=None):
+    if not (platform or sys.platform).startswith('linux') or not shutil.which('systemctl'):
+        return False
+    # A systemctl binary alone says nothing about a working user manager (WSL,
+    # containers and ssh sessions can have the binary but no user systemd).
+    try:
+        return subprocess.run(['systemctl', '--user', 'show-environment'],
+                              env=dict(os.environ, HOME=str(target_home)),
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                              timeout=10).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def _unit_quote(value):
+    # ExecStart and Environment use systemd's quoting, not shell quoting.
+    return '"' + str(value).replace('\\', '\\\\').replace('"', '\\"').replace('%', '%%') + '"'
+
+
+def install_interposer_units(target_home, python, server, runtime, platform=None):
+    target_home = Path(target_home).resolve()
+    if target_home != Path.home().resolve() or not systemd_available(target_home, platform):
+        return False
+    directory = target_home / '.config' / 'systemd' / 'user'
+    directory.mkdir(parents=True, exist_ok=True)
+    socket_unit = '''[Unit]
+Description=Trio spoke interposer socket
+
+[Socket]
+ListenStream=%t/trio/interposer.sock
+SocketMode=0600
+DirectoryMode=0700
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target
+'''
+    service_unit = ('[Unit]\nDescription=Trio spoke interposer\n\n[Service]\n' +
+                    'ExecStart=' + _unit_quote(python) + ' ' +
+                    _unit_quote(Path(server) / 'nth_interposer.py') + ' serve\n' +
+                    'Environment=' + _unit_quote('NTH_HOME=' + str(runtime)) + '\n' +
+                    'Restart=on-failure\nRestartSec=2\nNoNewPrivileges=yes\nPrivateTmp=yes\n')
+    for name, body in (('trio-interposer.socket', socket_unit), ('trio-interposer.service', service_unit)):
+        path = directory / name
+        backup(path)
+        temporary = path.with_name(name + '.tmp-' + STAMP)
+        temporary.write_text(body, encoding='utf-8')
+        temporary.chmod(0o600)
+        temporary.replace(path)
+    env = dict(os.environ, HOME=str(target_home))
+    for arguments in (['daemon-reload'], ['enable', '--now', 'trio-interposer.socket']):
+        subprocess.run(['systemctl', '--user', *arguments], env=env, check=True, timeout=15)
+    running = subprocess.run(['systemctl', '--user', 'is-active', '--quiet', 'trio-interposer.service'],
+                             env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+    if running.returncode == 0:
+        subprocess.run(['systemctl', '--user', 'restart', 'trio-interposer.service'],
+                       env=env, check=True, timeout=15)
+    return True
 
 
 def install_codex_hooks(codex_home, python, script, runtime):
@@ -236,6 +299,7 @@ def main():
     parser.add_argument('--claude-binary', help='Save a Claude Code executable for trio claude (default: claude on PATH)')
     parser.add_argument('--skip-dependencies', action='store_true', help='Use current Python for an isolated staging test')
     parser.add_argument('--no-register-codex', action='store_true', help='Stage files without changing Codex MCP settings')
+    parser.add_argument('--skip-systemd', action='store_true', help='Skip user interposer socket/service installation')
     args = parser.parse_args()
     clients = tuple(args.clients.split(','))
     if not clients or any(c not in ('claude', 'codex') for c in clients):
@@ -244,7 +308,7 @@ def main():
     result = install(args.home, quartet_url=args.quartet_url, clients=clients,
         skip_dependencies=args.skip_dependencies, register_codex=not args.no_register_codex,
         codex_binary=args.codex_binary, codex_app=args.codex_app,
-        claude_binary=args.claude_binary)
+        claude_binary=args.claude_binary, skip_systemd=args.skip_systemd)
     print(json.dumps(result, indent=2))
     # On stderr: stdout stays the machine-readable result.
     print(next_steps(result), file=sys.stderr)
