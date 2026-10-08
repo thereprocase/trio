@@ -765,6 +765,7 @@ class ChannelTests(unittest.TestCase):
             def __init__(self, url):
                 self.connects = self.reconnects = self.closed = 0
                 self.healthy = False
+                self.endpoint_url = None
                 FlakyClient.instances.append(self)
 
             def connect(self):
@@ -775,6 +776,11 @@ class ChannelTests(unittest.TestCase):
                 if not self.healthy:
                     raise RuntimeError('Not connected (no SSE endpoint)')
                 return {'event': 'no_new', 'messages': [], 'timeout': timeout}
+
+            def call(self, method, params):
+                if not self.healthy:
+                    raise RuntimeError('Not connected (no SSE endpoint)')
+                return {'tools': []}
 
             def force_reconnect(self):
                 self.reconnects += 1

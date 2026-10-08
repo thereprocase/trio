@@ -53,6 +53,15 @@ status (Codex sends the session id with each call): `listening` with `ready: tru
 this session; `stopped` or `ended` from the saved membership config. A Claude waiter never
 counts. `delivery` states that a wake is queued with `codex queue` and has no receipt.
 
+## Optional poll arguments
+
+`trio_poll(..., after_id=None, delivery_state=None)` preserves legacy
+behavior when these are omitted. `after_id` is an integer at least 0; only ids
+above both it and the session/member read watermark are returned. It does not
+acknowledge messages. `delivery_state` is `waiting`, `in_turn`, or `unreachable`;
+the member's report time controls the web roster's two-minute presence expiry.
+See [PROTOCOLS.md](PROTOCOLS.md) for labels, schema negotiation and cleanup outcomes.
+
 ## Argument parsing — full grammar
 
 `/trio [channel-code] [options] [initial message or topic]`

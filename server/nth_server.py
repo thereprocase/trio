@@ -24,7 +24,7 @@ import hashlib
 import string
 import threading
 from datetime import datetime, timedelta, timezone
-from typing import Any, List, Tuple
+from typing import Any, List, Optional, Tuple
 from pathlib import Path
 
 # Add server/ to sys.path so nth_constants can be imported when MCP spawns this
@@ -478,6 +478,9 @@ def get_db() -> sqlite3.Connection:
         # ambient message will actually be heard before spending the tokens
         # to post it. Not security — agents can lie. Etiquette signal only.
         ("filter_mode", "members", "TEXT NOT NULL DEFAULT 'all'"),
+        # Optional poller-reported delivery presence. Legacy clients leave it NULL.
+        ("delivery_state", "members", "TEXT"),
+        ("delivery_state_at", "members", "TEXT"),
         # The operator's REQUESTED listening mode — the spec, where
         # filter_mode above is the status. Nullable on purpose: NULL means "no
         # override, use whatever the monitor was launched with".
@@ -2548,7 +2551,7 @@ def _attachment_meta(channel: str, a) -> dict:
 
 
 @mcp.tool(name=f"{TOOL_PREFIX}_poll")
-def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: str = "", session_token: str = "", auto_ack: bool = True, mentions_only: bool = False, monitor_heartbeat: bool = False, monitor_filter: str = "", monitor_context: str = "") -> Any:
+def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: str = "", session_token: str = "", auto_ack: bool = True, mentions_only: bool = False, monitor_heartbeat: bool = False, monitor_filter: str = "", monitor_context: str = "", after_id: Optional[int] = None, delivery_state: Optional[str] = None) -> Any:
     """Check for new messages since your last read. Blocks up to wait_seconds.
 
     Returns all unread messages, or "no_new" if nothing arrived.
@@ -2574,16 +2577,30 @@ def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: st
         member_id: Your member ID (from nth_connect)
         wait_seconds: How long to wait for new messages (default 15, max 30)
         from_name: If set, only return messages from members whose name contains this string
+        after_id: Optional nonnegative cursor; return ids above both it and the read watermark
+        delivery_state: Optional presence report: waiting, in_turn or unreachable
     """
     err = validate_channel_code(channel)
     if err:
         return json.dumps({"error": err})
+
+    if after_id is not None and (type(after_id) is not int or after_id < 0):
+        return json.dumps({"error": "after_id must be an integer at least 0."})
+    if delivery_state is not None and delivery_state not in ("waiting", "in_turn", "unreachable"):
+        return json.dumps({"error": "delivery_state must be waiting, in_turn or unreachable."})
 
     wait_seconds = min(max(wait_seconds, 0), 30)
     from_name_lower = from_name.strip().lower() if from_name else ""
     db = get_db()
     # Fleet liveness rides on poll traffic, rate-limited to one write/minute.
     _checkin_self_node(db)
+
+    # Cleanup removes members along with the channel. Report the
+    # missing channel before either credential or membership checks, including
+    # when a poll races cleanup while it is waiting below.
+    if not _get_channel(db, channel):
+        db.close()
+        return json.dumps({"event": "channel_gone"})
 
     # v6: resolve session_token up front. If provided, watermark lives in
     # sessions.last_read (per-session) and auto_ack defaults to False.
@@ -2606,8 +2623,12 @@ def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: st
         deadline = time.monotonic() + wait_seconds
         _ctx_relayed = False
         _last_beat = None
+        _delivery_recorded = False
         while True:
             marker = _change_marker(db, channel, member_id, session_token)
+            ch = _get_channel(db, channel)
+            if not ch:
+                return json.dumps({"event": "channel_gone"})
             member = _get_member(db, channel, member_id)
             if not member:
                 return json.dumps({"error": "You are not a member of this channel."})
@@ -2619,10 +2640,9 @@ def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: st
                 current_watermark = fresh["last_read"] if fresh else sess_row["last_read"]
             else:
                 current_watermark = member["last_read"]
+            if after_id is not None:
+                current_watermark = max(current_watermark, after_id)
 
-            ch = _get_channel(db, channel)
-            if not ch:
-                return json.dumps({"event": "channel_gone"})
             if ch["status"] == "ended":
                 # Return any unread messages before reporting end
                 unread = db.execute(
@@ -2654,6 +2674,13 @@ def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: st
 
             # Liveness: _poll_heartbeat, at most every POLL_HEARTBEAT_SECONDS.
             now = now_iso()
+            if delivery_state is not None and not _delivery_recorded:
+                db.execute(
+                    "UPDATE members SET delivery_state = ?, delivery_state_at = ? "
+                    "WHERE id = ? AND channel = ?",
+                    (delivery_state, now, member_id, channel),
+                )
+                _delivery_recorded = True
             # Statusline relay: the monitor ships its session's context
             # snapshot so every nth_web instance (hub included) can render
             # rings + full drill-downs for this member. Size-capped and

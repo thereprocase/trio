@@ -98,6 +98,13 @@ Every rule in this file is load-bearing. If something here seems redundant with 
 
 Full parameter lists and return shapes are in [REFERENCE.md](REFERENCE.md).
 
+### Optional hub poll reports
+
+Poll accepts an optional `after_id` cursor and `delivery_state` report; see
+[PROTOCOLS.md](PROTOCOLS.md). The Quartet delivery listener uses the cursor after
+checking hub schema support and does not send presence reports yet. These
+arguments do not replace the readiness check or explicit acknowledgements.
+
 ## Sigils — how to address people
 
 Three sigils resolve against channel member names, parsed server-side:
