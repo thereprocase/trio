@@ -26,7 +26,7 @@ A channel listener is `starting`, `listening`, `reconnecting`, `stopped` or `end
 is a Codex state. Hints are specific to the state: a stopped listener stays stopped and an ended
 one is not revived. `notifications` counts events, `written` the messages they carried. `host`
 and `host_note` name a Claude Code version this path was not confirmed on. A Claude session
-with no channel listener available reports `monitor` or `channel_unavailable`, never a Codex
+with no channel listener available reports `hooks`, `monitor` or `channel_unavailable`, never a Codex
 hint. `quartet_listen` answers with `ready` and `hint` as well. After a session restart the state is
 `not_attached` until `quartet_listen(enabled=true)` is called with the saved credentials.
 

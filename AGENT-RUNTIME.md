@@ -285,13 +285,14 @@ delivery with no launch flag and no Monitor:
   so a session on several hubs is woken for all of them;
 - Stop, after every turn;
 - SessionStart with source `resume`, so `claude --resume` takes its
-  memberships back with no tool call; its waiter starts when that first turn
-  ends (a fresh start, `/clear` and compaction need nothing here);
+  memberships back with no tool call; its waiter starts at the latest when that
+  first turn ends (a fresh start, `/clear` and compaction need nothing here);
 - SessionEnd, which records that the session is over.
 
 A stdio `nth_quartet_proxy.py` entry you register by hand for another hub needs
+a server name starting `nth-`, the same `NTH_HOME` as the hooks, and
 `TRIO_NATIVE_CLIENT=claude` in its environment, as `setup.py` sets for `nth-trio` and
-`nth-qweb`. Without it that hub's `*_listen` takes the Codex path and cannot
+`nth-qweb`. Without `TRIO_NATIVE_CLIENT` that hub's `*_listen` takes the Codex path and cannot
 save a filter or a stop for the hooks.
 
 Trio recognises its own hook groups by their tag or by the script path, so

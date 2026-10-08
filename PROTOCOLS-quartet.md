@@ -29,7 +29,9 @@ message id you processed. A channel event has no receipt, so that ack is the onl
 The frontend supplies your session token when a call for a membership it holds omits it; the
 token never appears in an event. Do not start a Monitor or an idle polling loop. Server footers
 that mention a Monitor are adapted for sessions that do not run one. The Monitor Events and
-TaskStop procedures below apply only to a Claude session launched as plain `claude`.
+TaskStop procedures below apply only in `monitor` mode: a plain `claude` without the
+delivery hooks. With the hooks (the default), a plain `claude` is woken by them and starts
+no Monitor.
 
 One other event can arrive: `delivery_ended`. The listener for that membership is over (the
 channel ended, the hub refused the membership, or the listener failed) and it says so once,
@@ -40,7 +42,7 @@ Companion to [SKILL.md](SKILL.md). Load when handling a specific event or recove
 
 ## Monitor Events
 
-After `quartet_connect` you launched one persistent `Monitor` process (see [SKILL.md § Monitor](SKILL.md)). Each line of stdout from that process becomes a `<task-notification>` in your context — handle each event as it arrives, no relaunch dance.
+In `monitor` mode, the one-shot waiter (`wait_hint`) and the Monitor fallback (`monitor_hint`, see [SKILL.md § Monitor](SKILL.md)) print the same event lines. With the waiter, the line that ends it wakes you; run it again after you ack. With a Monitor, each line of stdout becomes a `<task-notification>` in your context — handle each event as it arrives, no relaunch dance.
 
 On a spoke (remote, SSE-only, no local DB) run `nth_spoke_monitor.py` instead of `nth_monitor.py` — it speaks MCP-over-SSE to the hub and emits the same JSON events, so everything below applies unchanged. The connect response's `monitor_hint` carries the exact command. Inline `quartet_poll(..., wait_seconds=15)` loops remain the last-resort substitute when no monitor can run.
 

@@ -32,11 +32,11 @@ In **Claude Code**, call `trio_connect` and read `event_delivery.mode` in the re
   including while you are idle. Do **not** start a Monitor or a polling loop; you would
   be woken twice for every message. The reminder carries no message text: read with
   `trio_poll` and acknowledge with `trio_ack`. After a session restart, call `trio_listen`
-  with `enabled=true`; never reconnect.
+  with `enabled=true` unless a stop was reported to you; never reconnect.
   A wake that says Trio delivery has stopped (channel ended, membership refused,
   listener failure) means stop work for that channel and tell the user; never
-  reconnect on your own. A listener failure clears on `*_listen(enabled=true)` when
-  the user asks for it; `*_listen` reports a stop it cannot clear in `ended`.
+  reconnect on your own. A listener failure clears on `trio_listen(enabled=true)` when
+  the user asks for it; `trio_listen` reports a stop it cannot clear in `ended`.
 - `channel` (launched with `trio claude`): messages arrive on their own as `<channel>`
   events. Do not start a Monitor. Claim background availability only when
   `trio_delivery_status` reports `ready: true`.
