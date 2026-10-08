@@ -510,6 +510,113 @@
     if (!baseline) return spoken;
     return /\s$/.test(baseline) ? baseline + spoken : baseline + ' ' + spoken;
   }
+  // ── Spoken sigils ──
+  // "hey Bones" → @Bones, "hashtag Bones" → #Bones, "bang Bones" → !Bones,
+  // "bang all" → !all. Applied to FINAL text only, so words never flicker
+  // into sigils mid-sentence, and dictation only ever fills the box: the
+  // user sees every sigil before sending, which matters because a bang is an
+  // unfilterable emergency wake.
+  //
+  // "hey" is ordinary speech ("hey, can you check this"), so nothing changes
+  // without a confident match against the channel's own members:
+  //   - the 1-3 words after the trigger are joined and compared with each
+  //     name, ignoring case, spaces and punctuation ("boat man" = BOATman,
+  //     "codex sol" = codex-sol), with number words read as digits;
+  //   - similarity is normalized Levenshtein, which tolerates one misheard
+  //     letter in a five-letter name ("bonds" → Bones) but rejects the
+  //     prefix overlaps Jaro-Winkler rewards ("big bang theory" must not wake
+  //     a member called Theo);
+  //   - the best match must clear SIGIL_MIN_SCORE and beat the runner-up
+  //     member by SIGIL_MARGIN, so "hey claude" with claude-1 and claude-2 in
+  //     the room is left as spoken;
+  //   - "all" is accepted for bang only, and only when heard exactly.
+  const SIGIL_MIN_SCORE = 0.75;
+  const SIGIL_MARGIN = 0.1;
+  const NUMBER_WORDS = { zero: '0', one: '1', two: '2', three: '3', four: '4', five: '5', six: '6', seven: '7', eight: '8', nine: '9', ten: '10' };
+  const sigilKey = s => String(s || '').toLowerCase().normalize('NFKD').replace(/[̀-ͯ]/g, '').replace(/[^\p{L}\p{N}]/gu, '');
+  function levenshteinSimilarity(a, b) {
+    if (!a.length || !b.length) return 0;
+    let row = Array.from({ length: b.length + 1 }, (_, j) => j);
+    for (let i = 1; i <= a.length; i++) {
+      const next = [i];
+      for (let j = 1; j <= b.length; j++) {
+        next[j] = Math.min(row[j] + 1, next[j - 1] + 1, row[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+      }
+      row = next;
+    }
+    return 1 - row[b.length] / Math.max(a.length, b.length);
+  }
+  // A word that can be part of a spoken name: starts with a letter or digit
+  // (so a literal "@Bones" the recogniser wrote is never re-sigiled), and may
+  // end in punctuation, which then ends the name.
+  const NAME_WORD = /^[\p{L}\p{N}][\p{L}\p{N}'’_-]*([,.!?:;]*)$/u;
+  function spokenTrigger(word, next) {
+    const w = word.toLowerCase().replace(/[,.!?:;]+$/, '');
+    if (w === 'hey') return { sigil: '@', words: 1 };
+    if (w === 'bang') return { sigil: '!', words: 1 };
+    if (w === 'hashtag') return { sigil: '#', words: 1 };
+    if (w === 'hash' && /^tag[,.!?:;]*$/i.test(next || '')) return { sigil: '#', words: 2 };
+    return null;
+  }
+  // The confident member for the words after a trigger, or null.
+  function matchSpokenName(words, sigil, names) {
+    const candidates = names.map(name => ({ name, key: sigilKey(name), exactOnly: false })).filter(c => c.key);
+    if (sigil === '!') candidates.push({ name: 'all', key: 'all', exactOnly: true });
+    const best = new Map(); // name -> { score, n }
+    const heard = [];
+    for (let n = 1; n <= Math.min(3, words.length); n++) {
+      const m = words[n - 1].match(NAME_WORD);
+      if (!m) break;
+      heard.push(words[n - 1].replace(/[,.!?:;]+$/, ''));
+      const spoken = [sigilKey(heard.join('')), sigilKey(heard.map(w => NUMBER_WORDS[w.toLowerCase()] || w).join(''))];
+      for (const c of candidates) {
+        const score = Math.max(...spoken.map(s => (c.exactOnly ? (s === c.key ? 1 : 0) : levenshteinSimilarity(s, c.key))));
+        const prior = best.get(c.name);
+        if (!prior || score > prior.score) best.set(c.name, { score, n });
+      }
+      if (m[1]) break; // punctuation after this word ends the name
+    }
+    const ranked = [...best.entries()].map(([name, r]) => ({ name, ...r })).sort((a, b) => b.score - a.score);
+    const [top, runnerUp] = ranked;
+    if (!top || top.score < SIGIL_MIN_SCORE) return null;
+    if (runnerUp && top.score - runnerUp.score < SIGIL_MARGIN) return null;
+    return top;
+  }
+  // Rewrites spoken triggers in `text` as sigils for the given member names.
+  // Pure: the composer passes the current channel's names.
+  function applySpokenSigils(text, names) {
+    const source = String(text || '');
+    const words = [...source.matchAll(/\S+/g)].map(m => ({ raw: m[0], start: m.index, end: m.index + m[0].length }));
+    let out = '', cursor = 0, i = 0;
+    while (i < words.length) {
+      const trigger = spokenTrigger(words[i].raw, words[i + 1]?.raw);
+      const first = i + (trigger?.words || 0);
+      const match = trigger && matchSpokenName(words.slice(first, first + 3).map(w => w.raw), trigger.sigil, names || []);
+      if (!match) { i++; continue; }
+      const last = words[first + match.n - 1];
+      // Keep the name's closing punctuation ("@Bones?"), except the comma
+      // that only separated the name from the rest of the sentence.
+      const trail = last.raw.match(/[,.!?:;]*$/)[0].replace(/^,/, '');
+      out += source.slice(cursor, words[i].start) + trigger.sigil + match.name + trail;
+      cursor = last.end;
+      i = first + match.n;
+    }
+    return out + source.slice(cursor);
+  }
+  // Names a spoken sigil may resolve to: the current channel's members, less
+  // the operator (you cannot address yourself), each as a single token so
+  // the result is a sigil the server parses.
+  function spokenSigilNames() {
+    const self = state.operator?.id;
+    const names = [];
+    for (const m of (state.members?.values() || [])) {
+      if (!m || (self && m.id === self)) continue;
+      const name = m.name && /^\S+$/.test(m.name) ? m.name : m.id;
+      if (name) names.push(name);
+    }
+    return names;
+  }
+  const finalizeSpeech = text => applySpokenSigils(text, spokenSigilNames());
   // Turns a SpeechRecognition session into composer text.
   //
   // Two things bit us, in this order.
@@ -533,7 +640,10 @@
   // fresh list mid-session. Finals are immutable in the spec, so a final that
   // vanishes, or turns into unrelated text, means the list was replaced: the
   // previous finals are carried forward instead of dropped.
-  function makeSpeechAccumulator(baseline) {
+  //
+  // `finalize` rewrites FINAL text only (spoken sigils). The interim tail is
+  // shown as heard, so a half-spoken "hey bo…" never flickers into a sigil.
+  function makeSpeechAccumulator(baseline, finalize = text => text) {
     let carried = '';
     let previousFinals = [];
     return function absorb(results) {
@@ -549,7 +659,14 @@
       });
       if (replaced) carried = collapseSpeech([carried, ...previousFinals]);
       previousFinals = list.map(r => (r.isFinal ? r.text : null));
-      return withBaseline(baseline, collapseSpeech([carried, ...list.map(r => r.text)]));
+      const heard = collapseSpeech([carried, ...list.map(r => r.text)]);
+      const finals = collapseSpeech([carried, ...list.filter(r => r.isFinal).map(r => r.text)]);
+      // The interim tail normally follows the finals; when an interim
+      // restates them instead, show it as heard until its final arrives.
+      const spoken = finals && speechKey(heard).startsWith(speechKey(finals))
+        ? joinSpeech(finalize(finals), heard.slice(finals.length).trim())
+        : heard;
+      return withBaseline(baseline, spoken);
     };
   }
   // These messages run to ~200 characters and name an action. The 3500ms
@@ -798,7 +915,7 @@
     recognition.lang = /*__STT_LANG__*/'en-US';
     // Baseline captured BEFORE start: every event rewrites the box from it
     // rather than appending to the box's own contents (see the accumulator).
-    const absorb = makeSpeechAccumulator(inputValue());
+    const absorb = makeSpeechAccumulator(inputValue(), finalizeSpeech);
     // A session's events only count while it is the live one, or after the
     // user's Stop (recognition === null), when the last final arrives late.
     // Without the check, a quick Stop-then-start let the OLD session's late
@@ -886,7 +1003,7 @@
             ? 'Nothing was picked up — try again and start speaking right after you tap the mic.'
             : 'That was too quiet to transcribe. Move closer to the mic and try again.',
             DICTATION_TOAST_MS);
-        } else applyDictatedText(withBaseline(inputValue(), text));
+        } else applyDictatedText(withBaseline(inputValue(), finalizeSpeech(text)));
       } catch (error) {
         // This runs AFTER the user has stopped speaking. The old code
         // responded by starting browserDictation() right here — which
@@ -1203,5 +1320,5 @@
   // around them need a live MediaRecorder and SpeechRecognition, which the
   // harness deliberately does not fake, but the decisions they encode are the
   // part that regressed and they are testable on their own.
-  Trio.composer = { init, mount, unmount, render: renderTargets, refresh, send, setTargets, insertTarget, targetOrder, toggleTarget, clearTargets, toggleAllTargets, upload, toggleDictation, stopDictation, buildSendPayload, syncReadOnly, setDictationButtonState, speechErrorMessage, hasBrowserDictation, makeSpeechAccumulator, unavailableReason, humanEngineError, chooseDictationEngine, collapseSpeech, sttHealthNow, refreshSttHealth };
+  Trio.composer = { init, mount, unmount, render: renderTargets, refresh, send, setTargets, insertTarget, targetOrder, toggleTarget, clearTargets, toggleAllTargets, upload, toggleDictation, stopDictation, buildSendPayload, syncReadOnly, setDictationButtonState, speechErrorMessage, hasBrowserDictation, makeSpeechAccumulator, unavailableReason, humanEngineError, chooseDictationEngine, collapseSpeech, sttHealthNow, refreshSttHealth, applySpokenSigils };
 })();
