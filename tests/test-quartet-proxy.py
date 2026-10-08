@@ -102,7 +102,8 @@ class ProxyTests(unittest.TestCase):
 
     def serve(self, **environment):
         env = {k: v for k, v in os.environ.items() if not k.startswith(('TRIO_', 'NTH_'))}
-        env.update(NTH_HOME=self.temp.name, **environment)
+        # An empty Codex home: whether this machine has Trio's Codex hooks must not decide the mode.
+        env.update(NTH_HOME=self.temp.name, TRIO_CODEX_HOME=self.temp.name, **environment)
         with patch.dict(os.environ, env, clear=True), \
              patch.object(proxy, 'MCPSSEClient', FakeHub), \
              patch('nth_spoke_monitor.MCPSSEClient', FakeHub):

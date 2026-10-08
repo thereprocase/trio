@@ -124,10 +124,16 @@ def install(target_home, *, quartet_url='', clients=('claude', 'codex'),
             arguments = [str(server / script)]
             if name == 'nth-qweb':
                 arguments += ['--url', quartet_url]
+            # Codex passes an MCP server only a few variables of its own, CODEX_HOME not
+            # among them: TRIO_CODEX_HOME tells the server where the delivery hooks live.
             subprocess.run([str(executable), 'mcp', 'add', name,
                             '--env', 'TRIO_NATIVE_CLIENT=codex', '--env', 'NTH_HOME=' + str(runtime),
+                            '--env', 'TRIO_CODEX_HOME=' + str(codex_home),
                             '--', str(python), *arguments],
                            env=dict(os.environ, CODEX_HOME=str(codex_home)), check=True)
+        codex_hooks = install_codex_hooks(codex_home, python, server / 'nth_codex_hook.py', runtime)
+    else:
+        codex_hooks = None
     bin_dir = target_home / '.local' / 'bin'
     bin_dir.mkdir(parents=True, exist_ok=True)
     launcher = bin_dir / ('trio.cmd' if os.name == 'nt' else 'trio')
@@ -137,8 +143,31 @@ def install(target_home, *, quartet_url='', clients=('claude', 'codex'),
     else:
         launcher.write_text('#!/bin/sh\nexec ' + shlex.join([str(python), str(server / 'nth_cli.py')]) + ' "$@"\n')
         launcher.chmod(0o755)
-    return {'launcher': str(launcher), 'python': str(python), 'server': str(server),
-            'runtime': str(runtime), 'clients': list(clients)}
+    result = {'launcher': str(launcher), 'python': str(python), 'server': str(server),
+              'runtime': str(runtime), 'clients': list(clients)}
+    if codex_hooks:
+        result.update(codex_hooks)
+    return result
+
+
+def install_codex_hooks(codex_home, python, script, runtime):
+    """Register the Codex delivery hooks in CODEX_HOME/hooks.json, keeping every other hook.
+
+    hooks.json rather than config.toml: Python has no TOML writer in its standard
+    library, and rewriting config.toml would drop the user's comments. Codex loads
+    both forms; it only warns when one layer uses both."""
+    sys.path.insert(0, str(ROOT / 'server'))
+    import nth_codex_hook
+    path = nth_codex_hook.hooks_file(codex_home)
+    try:
+        data = nth_codex_hook.load_hooks_file(path)
+    except ValueError as exc:
+        raise RuntimeError(f'{path} is not valid hooks JSON ({exc}); fix or move it, then install again')
+    before = json.dumps(data, sort_keys=True)
+    nth_codex_hook.install_hooks(data, python, script, runtime)
+    if json.dumps(data, sort_keys=True) != before:
+        nth_codex_hook.save_hooks_file(path, data, STAMP)
+    return {'codex_hooks': str(path), 'codex_toml_hooks': nth_codex_hook.toml_hooks_present(codex_home)}
 
 
 def next_steps(result, platform=None):
@@ -179,6 +208,20 @@ def next_steps(result, platform=None):
         '   development-channels flag at each launch: accept it. AGENT-RUNTIME.md explains what',
         '   that grants. To undo, delete the two functions from the profile.',
     ]
+    if result.get('codex_hooks'):
+        lines += [
+            '',
+            'Codex delivery hooks were registered in ' + result['codex_hooks'] + '.',
+            'ONE-TIME STEP: Codex runs new or changed hooks only after you trust them. Start `codex`;',
+            'at "Hooks need review" choose "Trust all and continue" (or review them in /hooks).',
+            'Until then a plainly launched Codex is not woken. Re-run this step after any reinstall',
+            'that changes the hook commands. Only the shared Codex daemon is woken, and a session pauses',
+            'after TRIO_CODEX_UNATTENDED_WAKES wakes (default 10) with nobody typing, until you type in it.',
+            'Remove the hooks with `trio hooks-uninstall`.',
+        ]
+        if result.get('codex_toml_hooks'):
+            lines.append('Note: config.toml also declares hooks. Codex loads both and warns at startup '
+                         'that one layer uses two forms.')
     return '\n'.join(lines)
 
 

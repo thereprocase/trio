@@ -25,7 +25,9 @@ class NativeTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
-        self.env = patch.dict(os.environ, {'NTH_HOME': str(self.root), 'NTH_QUIET': '1'})
+        # TRIO_CODEX_HOME: an empty Codex home, so this machine's own Codex hooks never decide a mode.
+        self.env = patch.dict(os.environ, {'NTH_HOME': str(self.root), 'NTH_QUIET': '1',
+                                           'TRIO_CODEX_HOME': str(self.root)})
         self.env.start()
         self.binding = dict(endpoint='unix:///tmp/native-test.sock', thread_id='thread-1',
             source='quartet', url='http://localhost:8000/sse', channel='room',

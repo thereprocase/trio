@@ -153,6 +153,14 @@ def create_server(url):
         listed.append(types.Tool(name='quartet_listen', description='Start, change or stop this session\'s event listener. An omitted filter_mode or enabled leaves that setting as it is. enabled=true restarts it from these credentials after a session restart.', inputSchema=schema))
         return listed
 
+    def caller_session():
+        """The Codex session of this call, from the request's `_meta`, or None."""
+        try:
+            from nth_event_access import caller_session as from_meta
+            return from_meta(server.request_context.meta)
+        except Exception:  # noqa: BLE001 - optional detail; status must not depend on it
+            return None
+
     def host_info():
         try:
             info = server.request_context.session.client_params.clientInfo
@@ -163,7 +171,7 @@ def create_server(url):
     @server.call_tool()
     async def call_tool(name, arguments):
         if name in LOCAL_TOOLS:
-            options = {'hub': hub}
+            options = {'hub': hub, 'session': caller_session()}
             if name == 'quartet_delivery_status' and hub is not None:
                 options['host'] = host_info()
             callback = delivery_status if name == 'quartet_delivery_status' else listen
