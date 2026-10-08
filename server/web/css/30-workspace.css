@@ -72,7 +72,7 @@
 
 .toast-wrap{position:fixed;z-index:var(--z-toast);inset:auto;top:auto;right:auto;bottom:24px;left:50%;transform:translateX(-50%);margin:0;padding:0;border:0;background:transparent;overflow:visible;width:max-content;max-width:calc(100vw - 32px);display:grid;gap:8px;justify-items:center}.toast{padding:11px 18px;border-radius:14px;background:var(--ink);color:var(--ink-inv);box-shadow:var(--shadow-pop);font-size:13.5px;font-weight:600}
 /* Inline action (e.g. Undo) inside a toast. */
-.toast:has(.toast-action){display:inline-flex;align-items:center;gap:12px}
+.toast:has(.toast-action){display:inline-flex;flex-wrap:wrap;align-items:center;gap:12px}
 .toast-action{border:0;background:transparent;color:var(--accent);font:inherit;font-weight:800;cursor:pointer;padding:0;text-decoration:underline;text-underline-offset:2px}
 dialog#trio-archives{width:min(520px,calc(100% - 32px));border:1px solid var(--line);border-radius:var(--r-xl);background:var(--surface);color:var(--ink);box-shadow:var(--shadow-lg)}#trio-archives::backdrop{background:rgba(30,25,20,.35)}#trio-archives ul{padding-left:18px}#trio-archives li{margin:10px 0}.modal-close{float:right}
 .directory-avatar[src]{padding:8px;object-fit:contain}

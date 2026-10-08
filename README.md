@@ -386,7 +386,11 @@ The dashboard composer has a mic button. **Preferences → Speech-to-text engine
 
 Spoken sigils: say **“hey Name”** for `@Name`, **“hashtag Name”** for `#Name`, **“bang Name”** for `!Name` and **“bang all”** for `!all`. Names are matched against the current channel's members, tolerating case, punctuation, a name spoken as several words (“codex sol” for `codex-sol`) and a misheard letter in longer names; names of four letters or fewer must be heard exactly. When no member is a clear match the words stay as spoken, so an ordinary “hey, can you…” is left alone. A bang wakes everyone it names whatever their filter, so it is stricter: one word after “bang”, no comma or full stop after “bang”, and “all” only at the end of what you said or before punctuation (“they bang all night” stays a sentence). An unpunctuated final “bang all” stays literal while interim text follows. Only final text is rewritten, and the sigils sit in the box for you to check before sending.
 
-Browser dictation stops by itself after a few seconds of silence (Android Chrome does this even in continuous mode); the text stays in the box and another tap carries on after it. Dictation only fills the box. Nothing is sent until you press Send. Hub transcription requires the same operator or owner-listed member identity as attachment uploads; self-declared guests cannot use it. A transcription request times out after 75 seconds and clears the busy state. While it is pending, its processing status stays visible across conversation switches and the mic refuses new Hub or Browser recordings until it settles. On phones, that status wraps on its own row so the 44 px controls and full Send button remain inside the composer. On timeout, tap the mic and say the words again, or use browser dictation. Leaving the composer cancels starts still waiting for health or microphone permission, including a rejected microphone request.
+Browser dictation stops by itself after a few seconds of silence (Android Chrome does this even in continuous mode); the text stays in the box and another tap carries on after it. Dictation only fills the box. Nothing is sent until you press Send.
+
+Hub transcription requires the same operator or owner-listed member identity as attachment uploads. Health reports Hub unavailable to guests: Auto uses Browser, and explicit Hub explains the restriction before opening the mic. The client uses the server's `deadline_s` plus 15 seconds, or 75 seconds for an older hub without that field, with an AbortController fallback for browsers lacking AbortSignal.timeout. The local budget includes upload, bounded queueing, cold worker startup and inference, even when the last health snapshot was warm; `NTH_STT_TIMEOUT` governs inference on both backends.
+
+After a timeout or failure, the audio stays in memory behind a persistent **Retry** offer alongside **Use browser dictation**. Retry resends the same clip and keeps its original conversation; it does not open the microphone. These offers refuse to interrupt a current recording. Reloading the page discards the clip. While transcription is pending, its processing status stays visible across conversation switches and the mic refuses new starts. On phones, status wraps on its own row so the 44 px controls and full Send button remain inside the composer. A recorder that fails to deliver its stop event is released after five seconds. Leaving the composer cancels pending starts, and failures after the mic was granted release it without automatically starting Browser.
 
 The on-hub Whisper engine needs two extra packages on the machine serving the dashboard, installed separately from `setup.sh`:
 
@@ -407,7 +411,7 @@ If they're missing, the dashboard runs as usual: Auto uses browser dictation, an
 | `NTH_STT_SILENCE_RMS` | `0.002` | Below this RMS a clip counts as silence |
 | `NTH_STT_URL` | unset | Base URL of a speech service; see [Dictation backend](#dictation-backend) |
 | `NTH_STT_TOKEN_FILE` | unset | File holding that service's bearer token |
-| `NTH_STT_TIMEOUT` | `60` | Seconds allowed per clip on the speech service |
+| `NTH_STT_TIMEOUT` | `60` | Seconds allowed per clip on the speech service or local inference |
 
 ### Dictation backend
 

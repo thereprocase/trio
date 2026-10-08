@@ -215,7 +215,7 @@ def format_event(prefix, channel, member_id, messages, more_unread=0):
         if sender and sender not in senders:
             senders.append(sender)
     # Host contract: meta keys are identifiers and values are strings.
-    meta = {'channel': attribute(channel), 'member_id': attribute(member_id),
+    meta = {'event': 'new_messages', 'channel': attribute(channel), 'member_id': attribute(member_id),
             'message_id': str(last), 'first_message_id': str(first), 'count': str(count),
             'more_unread': str(more_unread), 'event_id': attribute(event_id),
             'sender': ','.join(senders)[:200], 'truncated': str(bool(shortened)).lower()}

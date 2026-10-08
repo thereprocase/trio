@@ -21,6 +21,8 @@ For hook delivery failures, `nth-doctor` checks hook and shared module imports
 and names a failing or missing module in its `hook import` row.
 Wake notices accept only `new_messages` and `delivery_ended` events; other
 event types are ignored.
+The Listener tags message metadata with `event: "new_messages"`; delivery text
+is unchanged. Doctor reports probe failures separately and continues its checks.
 
 See [AGENT-RUNTIME.md](AGENT-RUNTIME.md) for the Claude/Codex runtime split.
 `trio_delivery_status(channel, member_id, session_token)` returns only this

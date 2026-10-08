@@ -114,7 +114,7 @@ function deferred() { let resolve, reject; const promise = new Promise((yes, no)
     check('deadline: abort clears transcribing and processing', p.C.dictationState() === ''
       && !p.cx.document.getElementById('dictate-btn').classList.contains('processing'));
     check('deadline: abort shows the exact recovery wording and browser offer', p.toasts.some(t =>
-      t.message === 'Hub dictation timed out. Tap the mic and say it again, or use browser dictation.' && t.action));
+      t.message === 'Hub dictation timed out. Retry this recording, or use browser dictation.' && t.action));
     check('deadline: abort does not reopen browser dictation', p.sessions.length === 0);
   }
   // A pending transcription owns the shared recorder state until it settles.
