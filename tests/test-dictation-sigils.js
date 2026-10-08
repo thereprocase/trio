@@ -15,6 +15,12 @@ const { load } = require('./dom-harness');
 
 const failures = [];
 let passed = 0;
+// An await that never settles lets Node exit 0 with no summary, which would
+// read as a pass. Treat stopping before the summary as a failure.
+let finished = false;
+process.on('exit', code => {
+  if (!finished && code === 0) { console.log('FAIL: stopped before finishing (a promise never settled)'); process.exitCode = 1; }
+});
 function check(name, cond) {
   if (cond) { passed++; console.log('PASS: ' + name); }
   else { failures.push(name); console.log('FAIL: ' + name); }
@@ -26,7 +32,7 @@ const C = Trio.composer;
 const sig = C.applySpokenSigils;
 check('applySpokenSigils is exported', typeof sig === 'function');
 
-const room = ['Bones', 'BOATman', 'codex-sol', 'Theo'];
+const room = ['Bones', 'BOATman', 'codex-sol', 'Theo', 'Sol'];
 const eq = (spoken, names, want) => sig(spoken, names) === want;
 
 // ── hits ──
@@ -34,7 +40,8 @@ check('hey + exact name -> @Name', eq('hey bones check this', room, '@Bones chec
 check('hashtag + name -> #Name', eq('hashtag bones is done', room, '#Bones is done'));
 check('"hash tag" as two words -> #Name', eq('hash tag Theo is done', room, '#Theo is done'));
 check('bang + name -> !Name', eq('bang bones now', room, '!Bones now'));
-check('bang all -> !all', eq('bang all the servers are down', room, '!all the servers are down'));
+check('bang all at the end -> !all', eq('the servers are down, bang all', room, 'the servers are down, !all'));
+check('bang all before punctuation -> !all', eq('bang all, the servers are down', room, '!all the servers are down'));
 check('several in one utterance all apply',
       eq('hey Bones and hashtag theo, also bang all', room, '@Bones and #Theo also !all'));
 check('the mention mid-sentence keeps the words around it',
@@ -59,6 +66,20 @@ check('a prefix overlap is not a match: "big bang theory" wakes nobody',
       eq('the big bang theory', room, 'the big bang theory'));
 check('"all" for bang must be heard exactly ("bang hall")', eq('bang hall', room, 'bang hall'));
 check('"all" is a bang target only ("hey all" is not @all)', eq('hey all', room, 'hey all'));
+
+// ── bang is held to more: a false bang wakes the whole room ──
+check('"they bang all night" is a sentence', eq('they bang all night', room, 'they bang all night'));
+check('"bang, all of it": a trigger with a comma is a sentence', eq('bang, all of it', room, 'bang, all of it'));
+check('"bang. all": a trigger with a full stop is a sentence', eq('bang. all', room, 'bang. all'));
+check('"bang them" does not wake Theo', eq('bang them', room, 'bang them'));
+check('bang takes a single word only ("bang codex sol")', eq('bang codex sol', room, 'bang codex sol'));
+check('bang with a single-word name still works', eq('bang bones now', room, '!Bones now'));
+
+// ── short names need an exact hearing ──
+check('"hey sole" does not become @Sol', eq('hey sole', room, 'hey sole'));
+check('"hashtag sole" does not become #Sol', eq('hashtag sole', room, 'hashtag sole'));
+check('"hey sol" exactly still becomes @Sol', eq('hey sol check', room, '@Sol check'));
+check('"hey thea" does not become @Theo', eq('hey thea', room, 'hey thea'));
 
 // ── the margin rule ──
 check('two equally close members: left as spoken',
@@ -156,8 +177,10 @@ check('text typed before dictation is never rewritten',
 
   console.log('');
   if (failures.length) {
+    finished = true;
     console.log(failures.length + ' FAILED: ' + failures.join(', '));
     process.exit(1);
   }
+  finished = true;
   console.log(passed + ' spoken sigil checks passed');
 })().catch(error => { console.log('FAIL: async section threw: ' + error.stack); process.exit(1); });

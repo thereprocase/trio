@@ -471,7 +471,7 @@
     // a weak signal produces this too, and leading with a lecture about
     // Chromium forks buries the thing the user can actually go fix.
     // (LOTC/Frodo)
-    'network': "Speech recognition couldn't reach its speech server. Check your connection and try again. If you're on a Chromium browser that isn't Chrome (Dia, Brave, Vivaldi) it can never work — switch dictation to Local (Whisper) in Preferences.",
+    'network': "Speech recognition couldn't reach its speech server. Check your connection and try again. If you're on a Chromium browser that isn't Chrome (Dia, Brave, Vivaldi) it can never work — switch dictation to Hub in Preferences.",
     'aborted': '',   // user pressed stop; not a failure worth a toast
     'language-not-supported': 'This browser cannot transcribe the configured language.',
   };
@@ -483,10 +483,20 @@
     return CJK.test(a.slice(-1)) && CJK.test(b[0]) ? a + b : a + ' ' + b;
   }
   const speechKey = s => s.toLowerCase();
-  // One piece "repeats" another when it equals it or starts with it — the two
-  // shapes Android Chrome produces (a duplicated final, or a cumulative final
-  // that restates everything said so far and adds the new words).
-  const repeats = (piece, earlier) => !!earlier && speechKey(piece).startsWith(speechKey(earlier));
+  // One piece "repeats" another when it equals it or starts with it as whole
+  // words — the two shapes Android Chrome produces (a duplicated final, or a
+  // cumulative final that restates everything said so far and adds to it).
+  // Whole words: a raw string prefix turned "no" + "nobody came" into
+  // "nobody came", and "so" + "some people" into "some people". CJK text has
+  // no spaces between words, so any boundary counts there.
+  function repeats(piece, earlier) {
+    if (!earlier) return false;
+    const p = speechKey(piece), e = speechKey(earlier);
+    if (!p.startsWith(e)) return false;
+    if (p.length === e.length) return true;
+    const next = p[e.length];
+    return /[\s\p{P}]/u.test(next) || CJK.test(next) || CJK.test(e.slice(-1));
+  }
   // Collapses a run of transcript pieces into text. A piece that repeats the
   // whole text so far, or just the previous piece, REPLACES it; anything else
   // is appended. Trade-off: someone who says "Yes." and then, as a separate
@@ -522,6 +532,9 @@
   //   - the 1-3 words after the trigger are joined and compared with each
   //     name, ignoring case, spaces and punctuation ("boat man" = BOATman,
   //     "codex sol" = codex-sol), with number words read as digits;
+  //   - names of four letters or fewer need an exact or near-exact hearing
+  //     (SHORT_NAME_SCORE): one wrong letter in "sol" is a different word
+  //     ("hey sole"), where one wrong letter in "bones" is a mishearing;
   //   - similarity is normalized Levenshtein, which tolerates one misheard
   //     letter in a five-letter name ("bonds" → Bones) but rejects the
   //     prefix overlaps Jaro-Winkler rewards ("big bang theory" must not wake
@@ -530,10 +543,19 @@
   //     member by SIGIL_MARGIN, so "hey claude" with claude-1 and claude-2 in
   //     the room is left as spoken;
   //   - "all" is accepted for bang only, and only when heard exactly.
+  //
+  // "bang" is held to more, because a false bang is an unfilterable wake of
+  // the whole room: only a single following word counts, the trigger may not
+  // carry a comma or full stop ("bang, all of it" is a sentence, while
+  // "Bang! all" is how recognisers write the command), and "all" counts only
+  // at the end of the utterance or before punctuation ("they bang all
+  // night" is a sentence).
   const SIGIL_MIN_SCORE = 0.75;
   const SIGIL_MARGIN = 0.1;
+  const SHORT_NAME_LETTERS = 4;
+  const SHORT_NAME_SCORE = 0.9;
   const NUMBER_WORDS = { zero: '0', one: '1', two: '2', three: '3', four: '4', five: '5', six: '6', seven: '7', eight: '8', nine: '9', ten: '10' };
-  const sigilKey = s => String(s || '').toLowerCase().normalize('NFKD').replace(/[̀-ͯ]/g, '').replace(/[^\p{L}\p{N}]/gu, '');
+  const sigilKey = s => String(s || '').toLowerCase().normalize('NFKD').replace(/[\u0300-\u036f]/g, '').replace(/[^\p{L}\p{N}]/gu, '');
   function levenshteinSimilarity(a, b) {
     if (!a.length || !b.length) return 0;
     let row = Array.from({ length: b.length + 1 }, (_, j) => j);
@@ -553,7 +575,7 @@
   function spokenTrigger(word, next) {
     const w = word.toLowerCase().replace(/[,.!?:;]+$/, '');
     if (w === 'hey') return { sigil: '@', words: 1 };
-    if (w === 'bang') return { sigil: '!', words: 1 };
+    if (w === 'bang') return /^bang!?$/i.test(word) ? { sigil: '!', words: 1 } : null;
     if (w === 'hashtag') return { sigil: '#', words: 1 };
     if (w === 'hash' && /^tag[,.!?:;]*$/i.test(next || '')) return { sigil: '#', words: 2 };
     return null;
@@ -564,13 +586,17 @@
     if (sigil === '!') candidates.push({ name: 'all', key: 'all', exactOnly: true });
     const best = new Map(); // name -> { score, n }
     const heard = [];
-    for (let n = 1; n <= Math.min(3, words.length); n++) {
+    const maxWords = sigil === '!' ? 1 : 3;
+    for (let n = 1; n <= Math.min(maxWords, words.length); n++) {
       const m = words[n - 1].match(NAME_WORD);
       if (!m) break;
       heard.push(words[n - 1].replace(/[,.!?:;]+$/, ''));
       const spoken = [sigilKey(heard.join('')), sigilKey(heard.map(w => NUMBER_WORDS[w.toLowerCase()] || w).join(''))];
       for (const c of candidates) {
-        const score = Math.max(...spoken.map(s => (c.exactOnly ? (s === c.key ? 1 : 0) : levenshteinSimilarity(s, c.key))));
+        let score = Math.max(...spoken.map(s => (c.exactOnly ? (s === c.key ? 1 : 0) : levenshteinSimilarity(s, c.key))));
+        if (c.key.length <= SHORT_NAME_LETTERS && score < SHORT_NAME_SCORE) score = 0;
+        // "all" only as the whole command: last word, or followed by punctuation.
+        if (c.key === 'all' && c.exactOnly && !(m[1] || words.length === n)) score = 0;
         const prior = best.get(c.name);
         if (!prior || score > prior.score) best.set(c.name, { score, n });
       }
@@ -616,7 +642,13 @@
     }
     return names;
   }
-  const finalizeSpeech = text => applySpokenSigils(text, spokenSigilNames());
+  // Sigils for a dictation started in conversation `startedIn`: matched
+  // against that conversation's roster, taken live while it is still open
+  // and as captured at the start once the user has moved elsewhere.
+  function sigilFinalizer(startedIn) {
+    const namesAtStart = spokenSigilNames();
+    return text => applySpokenSigils(text, conversationId() === startedIn ? spokenSigilNames() : namesAtStart);
+  }
   // Turns a SpeechRecognition session into composer text.
   //
   // Two things bit us, in this order.
@@ -698,7 +730,7 @@
   function humanEngineError(raw) {
     const message = String(raw || '');
     if (/mlx_whisper\) not installed|not installed/i.test(message)) {
-      return "Local dictation isn't installed on this machine. Use browser dictation, or install it on the hub.";
+      return "This hub's speech engine isn't installed. Use browser dictation, or install it on the hub.";
     }
     if (/worker|pipe|malformed/i.test(message)) {
       return 'Dictation stopped working on the server. Restarting the dashboard usually fixes it.';
@@ -749,7 +781,10 @@
         // A failed check keeps the last real answer; it only restarts the clock.
         const available = h && typeof h.available === 'boolean' ? h.available : (sttHealthCache?.available ?? null);
         const detail = h ? (h.detail || '') : (sttHealthCache?.detail || '');
-        sttHealthCache = { available, detail, at: Date.now() };
+        // remote: the hub forwards audio to a speech service its operator
+        // configured. Absent means the engine runs on the hub itself.
+        const remote = h ? h.remote === true : !!sttHealthCache?.remote;
+        sttHealthCache = { available, detail, remote, at: Date.now() };
         if (h) {
           state.sttHealth = available ? 'ready' : 'unavailable';
           state.secureUrl = h.secure_url || '';
@@ -768,10 +803,13 @@
   function awaitSttHealth(ms) {
     return Promise.race([refreshSttHealth(), new Promise(resolve => setTimeout(() => resolve(sttHealthCache), ms))]);
   }
+  // The 'local' preference value is the HUB engine: Whisper on the hub, or a
+  // speech service the hub's operator configured. Either way the audio goes
+  // to the hub, never to the browser vendor, so both read as "Hub".
   function localUnavailableMessage(detail) {
     return /not installed/i.test(detail || '')
-      ? "Local Whisper isn't installed on this hub."
-      : `Local Whisper isn't working on this hub (${detail || 'no reason given'}).`;
+      ? "This hub's speech engine isn't installed."
+      : `This hub's speech engine isn't working (${detail || 'no reason given'}).`;
   }
   // Which engine a tap should start. Pure, so the decision is testable.
   //   mode            'auto' | 'local' | 'web' (the preference)
@@ -786,10 +824,12 @@
   // is still unknown, because the browser engine cannot lose a recording and
   // waiting for the answer would cost the gesture.
   //
-  // An explicit Local choice is never switched to the browser engine behind
-  // the user's back: Local is the "audio stays on my hub" setting. When it
-  // cannot work, say so before recording and offer the browser engine as a
-  // button, which is a choice the user makes for that one recording.
+  // An explicit Hub choice ('local') is never switched to the browser engine
+  // behind the user's back: Hub is the "my audio never goes to the browser
+  // vendor" setting. When it cannot work, say so before recording and offer
+  // the browser engine as a button, a choice made for that one recording.
+  // A hub that forwards to an operator-configured speech service (health
+  // `remote: true`) counts as the hub's engine for both Auto and Hub.
   function chooseDictationEngine({ mode, hubLocal, detail, canRecord, canRecognise }) {
     if (mode === 'web') {
       return canRecognise ? { engine: 'web' }
@@ -797,14 +837,14 @@
     }
     if (mode === 'local') {
       if (hubLocal === false) return { engine: 'none', message: localUnavailableMessage(detail), offerBrowser: canRecognise };
-      if (!canRecord) return { engine: 'none', message: "This browser can't record audio for local Whisper.", offerBrowser: canRecognise };
+      if (!canRecord) return { engine: 'none', message: "This browser can't record audio for the hub's speech engine.", offerBrowser: canRecognise };
       return { engine: 'local' };
     }
     if (hubLocal === true && canRecord) return { engine: 'local' };
     if (canRecognise) return { engine: 'web' };
     if (hubLocal === null && canRecord) return { engine: 'local' };
     return { engine: 'none', message: hubLocal === false
-      ? "Local Whisper isn't installed on this hub, and this browser has no speech recognition. Chrome, Edge or Safari can dictate here."
+      ? localUnavailableMessage(detail) + ' This browser has no speech recognition either; Chrome, Edge or Safari can dictate here.'
       : unavailableReason() };
   }
   function sttMode() {
@@ -915,15 +955,23 @@
     recognition.lang = /*__STT_LANG__*/'en-US';
     // Baseline captured BEFORE start: every event rewrites the box from it
     // rather than appending to the box's own contents (see the accumulator).
-    const absorb = makeSpeechAccumulator(inputValue(), finalizeSpeech);
+    const startedIn = conversationId();
+    const absorb = makeSpeechAccumulator(inputValue(), sigilFinalizer(startedIn));
     // A session's events only count while it is the live one, or after the
     // user's Stop (recognition === null), when the last final arrives late.
     // Without the check, a quick Stop-then-start let the OLD session's late
     // onend null out the NEW session and reset the button mid-recording. The
-    // conversation check keeps a late final out of a thread opened since.
-    const startedIn = conversationId();
-    const mine = () => (recognition === rec || recognition === null) && conversationId() === startedIn;
-    recognition.onresult = event => { if (mine()) applyDictatedText(absorb(event.results, event.resultIndex)); };
+    // Words heard after the user moved to another conversation belong to the
+    // one they were spoken in: they go into that thread's draft, and a
+    // session still running there is stopped, so the mic is never left
+    // listening for a box it can no longer write to.
+    recognition.onresult = event => {
+      if (recognition !== rec && recognition !== null) return;
+      const text = absorb(event.results, event.resultIndex);
+      if (conversationId() === startedIn) { applyDictatedText(text); return; }
+      state.drafts[startedIn] = text;
+      if (recognition === rec) stopDictation();
+    };
     // Android Chrome ends a session by itself after a few seconds of silence,
     // continuous=true or not. We let it end: the button goes back to the mic,
     // and the text stays in the box for the user to send or extend with
@@ -980,13 +1028,19 @@
     // `chunks` array between two live recorders.
     if (starting) return;
     starting = true;
+    const myGen = dictationGen, startedIn = conversationId();
+    const finalize = sigilFinalizer(startedIn);
     try {
       stream = await window.navigator.mediaDevices.getUserMedia({ audio: true }); chunks = [];
     } finally { starting = false; }
+    // The permission prompt can sit open for a while. If the user stopped or
+    // moved to another conversation meanwhile, release the mic and stop here.
+    if (dictationGen !== myGen || conversationId() !== startedIn) { stopTracks(); return; }
     recorder = new window.MediaRecorder(stream);
     recorder.ondataavailable = event => { if (event.data.size) chunks.push(event.data); };
     recorder.onstop = async () => {
-      setDictationButtonState(false, { processing: true, statusText: 'Transcribing (local Whisper)…' });
+      setDictationButtonState(false, { processing: true,
+        statusText: sttHealthCache?.remote ? "Transcribing (hub's speech service)…" : 'Transcribing (Whisper on the hub)…' });
       try {
         const audio = new Blob(chunks, { type: recorder.mimeType || 'audio/webm' });
         const result = await fetch(apiUrl('/api/stt/transcribe'), { method: 'POST', headers: { 'Content-Type': audio.type || 'audio/webm' }, body: audio });
@@ -1003,7 +1057,15 @@
             ? 'Nothing was picked up — try again and start speaking right after you tap the mic.'
             : 'That was too quiet to transcribe. Move closer to the mic and try again.',
             DICTATION_TOAST_MS);
-        } else applyDictatedText(withBaseline(inputValue(), finalizeSpeech(text)));
+        } else if (conversationId() === startedIn) {
+          applyDictatedText(withBaseline(inputValue(), finalize(text)));
+        } else {
+          // The user switched threads while this was transcribing. Keep the
+          // words with the conversation they were spoken in rather than
+          // dropping them, and say where they went.
+          state.drafts[startedIn] = withBaseline(state.drafts[startedIn] || '', finalize(text));
+          Trio.ui.toast('Your dictation was added to the draft of the conversation you recorded it in.', DICTATION_TOAST_MS);
+        }
       } catch (error) {
         // This runs AFTER the user has stopped speaking. The old code
         // responded by starting browserDictation() right here — which
@@ -1035,7 +1097,7 @@
       }
     };
     // No statusText while actively recording (see browserDictation) — the
-    // "Transcribing (local Whisper)…" text right after IS still useful,
+    // "Transcribing (…on the hub)…" text right after IS still useful,
     // since that's invisible processing time the waveform can't represent.
     recorder.start(); document.body.classList.add('dictating'); setDictationButtonState(true);
     startMeter(stream);
@@ -1054,8 +1116,12 @@
     // all waits for an unknown answer. Everything else decides right now,
     // inside the tap — no await may come before browserDictation() here.
     if (health?.available == null && canRecord && (mode === 'local' || (mode === 'auto' && !canRecognise))) {
+      const myGen = dictationGen, startedIn = conversationId();
+      // Up to 3 s: show it, so a second tap meets a visibly busy button.
       starting = true;
-      try { health = await awaitSttHealth(3000); } finally { starting = false; }
+      setDictationButtonState(false, { processing: true, statusText: 'Checking the hub…' });
+      try { health = await awaitSttHealth(3000); } finally { starting = false; setDictationButtonState(false); }
+      if (dictationGen !== myGen || conversationId() !== startedIn) return;
     }
     const choice = chooseDictationEngine({ mode, hubLocal: health?.available ?? null, detail: health?.detail, canRecord, canRecognise });
     if (choice.engine === 'web') return browserDictation();

@@ -367,15 +367,15 @@ tokens in `server/web/css/00-tokens.css`.
 
 The dashboard composer has a mic button. **Preferences → Speech-to-text engine** picks how it transcribes:
 
-- **Auto** (default): Local when the hub reports a working Whisper engine, otherwise Browser, decided at the moment you tap.
-- **Local**: a sidecar process on the machine running `nth_web.py` transcribes the audio, and the audio stays on that machine. If the hub cannot run it, the mic says so before recording and offers Browser for that one recording; it never switches on its own.
+- **Auto** (default): Hub when the hub reports a working speech engine, otherwise Browser, decided at the moment you tap.
+- **Hub**: the audio goes to the machine running `nth_web.py`, which transcribes it with a Whisper sidecar or, when its operator configured one, forwards it to a speech service (then `/api/stt/health` reports `remote: true` and Preferences says the audio goes to this hub's speech service). Either way it never goes to your browser vendor. If the hub cannot transcribe, the mic says so before recording and offers Browser for that one recording; it never switches on its own. (The stored preference value is still `local`.)
 - **Browser**: the browser's own speech recognition, which sends audio to your browser vendor.
 
-Spoken sigils: say **“hey Name”** for `@Name`, **“hashtag Name”** for `#Name`, **“bang Name”** for `!Name` and **“bang all”** for `!all`. Names are matched against the current channel's members, tolerating case, punctuation, a name spoken as several words (“codex sol” for `codex-sol`) and a misheard letter; when no member is a clear match the words stay as spoken, so an ordinary “hey, can you…” is left alone. Only final text is rewritten, and the sigils sit in the box for you to check before sending.
+Spoken sigils: say **“hey Name”** for `@Name`, **“hashtag Name”** for `#Name`, **“bang Name”** for `!Name` and **“bang all”** for `!all`. Names are matched against the current channel's members, tolerating case, punctuation, a name spoken as several words (“codex sol” for `codex-sol`) and a misheard letter in longer names; names of four letters or fewer must be heard exactly. When no member is a clear match the words stay as spoken, so an ordinary “hey, can you…” is left alone. A bang wakes everyone it names whatever their filter, so it is stricter: one word after “bang”, no comma or full stop after “bang”, and “all” only at the end of what you said or before punctuation (“they bang all night” stays a sentence). Only final text is rewritten, and the sigils sit in the box for you to check before sending.
 
 Browser dictation stops by itself after a few seconds of silence (Android Chrome does this even in continuous mode); the text stays in the box and another tap carries on after it. Dictation only fills the box. Nothing is sent until you press Send.
 
-Local mode needs two extra packages on the machine serving the dashboard, installed separately from `setup.sh`:
+The on-hub Whisper engine needs two extra packages on the machine serving the dashboard, installed separately from `setup.sh`:
 
 ```bash
 pip install mlx-whisper     # Apple silicon only — built on MLX
@@ -384,7 +384,7 @@ brew install ffmpeg         # the engine shells out to ffmpeg to decode audio
 
 The model (~1.5 GB) downloads on first use and is cached afterwards.
 
-If they're missing, the dashboard runs as usual: Auto uses browser dictation, and the Local option in Preferences is marked as not installed on this hub. `GET /api/stt/health` reports exactly which piece is missing (its `detail` field).
+If they're missing, the dashboard runs as usual: Auto uses browser dictation, and the Hub option in Preferences is marked as not installed on this hub. `GET /api/stt/health` reports exactly which piece is missing (its `detail` field).
 
 | Variable | Default | Purpose |
 |----------|---------|---------|

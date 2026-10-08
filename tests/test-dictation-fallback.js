@@ -30,6 +30,12 @@ const { load } = require('./dom-harness');
 
 const failures = [];
 let passed = 0;
+// An await that never settles lets Node exit 0 with no summary, which would
+// read as a pass. Treat stopping before the summary as a failure.
+let finished = false;
+process.on('exit', code => {
+  if (!finished && code === 0) { console.log('FAIL: stopped before finishing (a promise never settled)'); process.exitCode = 1; }
+});
 function check(name, cond) {
   if (cond) { passed++; console.log('PASS: ' + name); }
   else { failures.push(name); console.log('FAIL: ' + name); }
@@ -80,8 +86,8 @@ check('network names the server it could not reach',
       /server|reach/i.test(network));
 check('network names the not-Chrome-Chromium cause',
       /chromium/i.test(network));
-check('network points at the local engine as the way out',
-      /local/i.test(network));
+check('network points at the hub engine as the way out',
+      /hub/i.test(network));
 // Order matters, not just content. A phone on a weak signal gets this too,
 // and leading with a lecture about Chromium forks buries the one thing that
 // user can actually go and check. (LOTC/Frodo)
@@ -295,6 +301,23 @@ check('a final revised shorter is not duplicated',
         [[['hello', true]], 0],
       ]) === 'hello');
 
+// A shorter piece is only a repeat of a longer one at a word boundary. A raw
+// string prefix ate real words, on desktop as well as Android.
+check('"no" then "nobody came" keeps both', play('', [
+  [[['no', true]], 0], [[['no', true], ['nobody came', true]], 0]]) === 'no nobody came');
+check('"I" then "In the morning" keeps both', play('', [
+  [[['I', true], [' In the morning', true]], 1]]) === 'I In the morning');
+check('"so" then "some people" keeps both (desktop shape)', play('', [
+  [[['so', true]], 0], [[['so', true], [' some people', true]], 1]]) === 'so some people');
+check('a whole-word restatement still collapses', play('', [
+  [[['so', true]], 0], [[['so', true], ['so we went', true]], 0]]) === 'so we went');
+check('a restatement after punctuation still collapses', play('', [
+  [[['Hello.', true]], 0], [[['Hello.', true], ['Hello. Again', true]], 0]]) === 'Hello. Again');
+check('Japanese cumulative finals collapse without spaces', play('', [
+  [[['今日は', true]], 0], [[['今日は', true], ['今日は晴れです', true]], 0]]) === '今日は晴れです');
+check('collapseSpeech is exported and applies the same rule',
+      C.collapseSpeech(['no', 'nobody came']) === 'no nobody came');
+
 // ── 3c. desktop sequences still produce the right text ──
 check('desktop: two finals with Chrome\'s leading space',
       play('', [
@@ -397,12 +420,17 @@ check('auto + health not known yet -> browser (cannot lose a recording)',
       choose({ mode: 'auto', hubLocal: null, ...caps }).engine === 'web');
 check('auto + hub without local + no browser engine -> nothing, with a reason',
       (r => r.engine === 'none' && /isn't installed/.test(r.message))(
-        choose({ mode: 'auto', hubLocal: false, canRecord: true, canRecognise: false })));
+        choose({ mode: 'auto', hubLocal: false, detail: 'speech engine (mlx_whisper) not installed', canRecord: true, canRecognise: false })));
+// The Auto message follows the hub's own reason, rather than always claiming
+// "not installed" when the engine is installed but broken.
+check('auto + broken hub engine + no browser engine names the real reason',
+      (r => r.engine === 'none' && /ffmpeg/.test(r.message) && !/isn't installed/.test(r.message))(
+        choose({ mode: 'auto', hubLocal: false, detail: 'ffmpeg not found', canRecord: true, canRecognise: false })));
 const explicitDead = choose({ mode: 'local', hubLocal: false,
   detail: 'speech engine (mlx_whisper) not installed', ...caps });
 check('explicit local + hub without it -> does not record', explicitDead.engine === 'none');
 check('...says so in one short sentence',
-      /^Local Whisper isn't installed on this hub\.$/.test(explicitDead.message));
+      /^This hub's speech engine isn't installed\.$/.test(explicitDead.message));
 check('...and offers the browser engine as a choice, not a switch', explicitDead.offerBrowser === true);
 check('explicit local + other health failure names the reason',
       /ffmpeg/.test(choose({ mode: 'local', hubLocal: false, detail: 'ffmpeg not found', ...caps }).message));
@@ -448,7 +476,7 @@ check('explicit web without a browser engine -> a reason, not a crash',
     await C.toggleDictation();
     check('explicit local on a hub without Whisper records nothing', micOpens === 0 && started.length === 0);
     check('...and says so before recording',
-          toasts.length === 1 && /isn't installed on this hub/.test(toasts[0].message));
+          toasts.length === 1 && /speech engine isn't installed/.test(toasts[0].message));
     check('...with a button for the browser engine', toasts[0].action?.label === 'Use browser dictation');
     toasts[0].action.onClick();
     check('the button starts the browser engine', started.length === 1);
@@ -478,12 +506,26 @@ check('explicit web without a browser engine -> a reason, not a crash',
   check('a legacy stored web stays web', stored({ sttMode: 'web' }) === 'web');
   P.save({ sttMode: 'local' });
   check('local chosen after the change survives a reload', P.apply().sttMode === 'local');
-  check('an unknown stored value falls back to auto', stored({ sttMode: 'cloud', sttModeVersion: 2 }) === 'auto');
+  check('an unknown stored value falls back to auto', stored({ format: 2, sttMode: 'cloud' }) === 'auto');
+  // Storage is sparse (format: 2) since the per-hub theme work: only changed
+  // keys are written. A 'local' in that format was chosen on purpose.
+  check('a format:2 stored local survives a reload', stored({ format: 2, sttMode: 'local' }) === 'local');
+  check('a format:2 stored web survives a reload', stored({ format: 2, sttMode: 'web' }) === 'web');
+  check('an old full save holding the old default local becomes auto',
+        stored({ theme: 'light-1', lightTheme: 'light-1', darkTheme: 'dark-3', sttMode: 'local' }) === 'auto');
+  check('an old full save holding web keeps web',
+        stored({ theme: 'light-1', lightTheme: 'light-1', darkTheme: 'dark-3', sttMode: 'web' }) === 'web');
+  P.save({ sttMode: 'local' }); P.apply(); P.apply();
+  check('explicit local survives repeated reloads', P.apply().sttMode === 'local');
+  P.save({ sttMode: 'web' });
+  check('explicit web survives a reload', P.apply().sttMode === 'web');
 
   console.log('');
   if (failures.length) {
+    finished = true;
     console.log(failures.length + ' FAILED: ' + failures.join(', '));
     process.exit(1);
   }
+  finished = true;
   console.log(passed + ' dictation fallback checks passed');
 })().catch(error => { console.log('FAIL: async section threw: ' + error.stack); process.exit(1); });
