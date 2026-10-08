@@ -19,11 +19,15 @@
        leave the default theme showing over a saved choice. With no saved theme
        the <html> tag already carries this hub's default (nth_web writes it from
        NTH_APP_DEFAULT_THEME), so there is nothing to swap and no flash. Mirrors
-       40-preferences readFromStorage()'s legacy mapping; preferences.mount()
+       40-preferences readFromStorage()'s legacy mapping, and skips the
+       'light-1' that an old full save holds without anyone choosing it (the
+       one-time migration in storedRaw() drops it at boot); preferences.mount()
        re-applies later. */
     try {
       var __p = JSON.parse(localStorage.getItem('trio.preferences.v1') || '{}');
       var __t = __p.theme === 'dark' ? 'dark-3' : __p.theme === 'light' ? 'light-1' : __p.theme;
+      var __full = __p.format === undefined && 'lightTheme' in __p && 'darkTheme' in __p;
+      if (__full && __t === 'light-1') __t = null;
       if (__t) document.documentElement.dataset.theme = __t;
       if (__p.font) document.documentElement.dataset.font = __p.font;
     } catch (e) {}
