@@ -110,6 +110,8 @@ def channel_hub(url):
 
 
 def create_server(url):
+    from nth_interposer_wire import tell
+    tell('hub.announce', server=os.environ.get('NTH_SERVER_NAME', 'nth-qweb'), url=url)
     server = Server('nth-qweb')
     client = MCPSSEClient(url)
     # Claude channel mode: this process owns the only path into the session, so

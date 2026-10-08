@@ -527,6 +527,7 @@ def quartet_poll_factory(binding):
     never share the tool-call connection."""
     import nth_sse_client                     # looked up per call, so a test can stand in for it
     client = nth_sse_client.MCPSSEClient(binding['url'])
+    client.connection_guard = binding.get('connection_guard')
     state = {'started': False, 'failures': 0, 'schema_checked': False,
              'endpoint': None, 'after_id': False}
 

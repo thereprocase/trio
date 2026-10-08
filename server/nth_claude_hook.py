@@ -384,7 +384,7 @@ def identity_for(body):
     return key, identity
 
 
-def register(payload, tools=None, client='claude'):
+def register(payload, tools=None, client='claude', shadow_host=None, observe=True):
     """Note what a successful connect, listen or ack says about this session.
 
     `tools` matches the tool names this client reports, with the server name as
@@ -407,6 +407,8 @@ def register(payload, tools=None, client='claude'):
                 if (membership.get('channel') == arguments.get('channel')
                         and membership.get('member_id') == arguments.get('member_id')):
                     state['acked'][key] = max(int(state['acked'].get(key) or 0), through)
+        if observe:
+            shadow_tool(payload, client, tools or HOOK_TOOLS, shadow_host)
         return
     found = identity_for(body)
     if found is None:
@@ -431,6 +433,73 @@ def register(payload, tools=None, client='claude'):
                 for field in ('high_water', 'acked'):
                     if other in state[field]:
                         state[field][key] = max(int(state[field].get(key) or 0), int(state[field].pop(other)))
+
+    if observe:
+        shadow_tool(payload, client, tools or HOOK_TOOLS, shadow_host)
+
+
+def shadow_register(session_id, client='claude', host_info=None, resume=False):
+    from nth_interposer_wire import tell
+    if client == 'codex':
+        from nth_codex_hook import codex_host
+        pid, problem = host_info if host_info is not None else codex_host()
+    else:
+        pid, problem = claude_pid(), ''
+    tell('session.register', session=session_id, client=client, host_pid=pid,
+         sink='queue' if client == 'codex' else 'rewake', host_ok=not bool(problem), problem=problem[:200], resume=resume)
+
+
+def shadow_tool(payload, client, tools, host_info=None):
+    try:
+        from nth_interposer_wire import observation
+        with observation():
+            _shadow_tool(payload, client, tools, host_info)
+    except Exception:
+        pass
+
+
+def _shadow_tool(payload, client, tools, host_info):
+    """Only successful legacy registration is mirrored; observer failures stay private."""
+    try:
+        from nth_interposer_wire import tell
+        match = tools.match(str(payload.get('tool_name') or ''))
+        body = tool_body(payload.get('tool_response'))
+        if not match or not body or body.get('error'):
+            return
+        session = payload['session_id']
+        if match.group(3) == 'ack':
+            arguments = payload.get('tool_input') or {}
+            state = load_session(session) or {}
+            keys = [key for key, membership in state.get('memberships', {}).items()
+                    if membership.get('channel') == arguments.get('channel')
+                    and membership.get('member_id') == arguments.get('member_id')]
+        else:
+            found = identity_for(body)
+            keys = [found[0]] if found else []
+        if not keys:
+            return
+        shadow_register(session, client, host_info)
+        for key in keys:
+            tell('membership.attach', session=session, key=key, server=match.group(1), via=match.group(3))
+            if match.group(3) == 'listen':
+                config = membership_config(key)
+                tell('membership.configure', key=key, filter=config['filter'], enabled=config['enabled'])
+            if match.group(3) == 'ack':
+                through = body.get('acked_through', body.get('through_id', body.get('watermark')))
+                if type(through) is int and through >= 0:
+                    tell('ack.seen', session=session, key=key, through_id=through)
+    except Exception:
+        pass
+
+
+def shadow_event(op, session_id, **fields):
+    try:
+        from nth_interposer_wire import tell
+        if op=='turn' and not (load_session(session_id) or {}).get('memberships'):
+            return
+        tell(op, session=session_id, **fields)
+    except Exception:
+        pass
 
 
 def identity_key_for(channel, member_id, session_token):
@@ -509,6 +578,8 @@ class Wake:
         self.fired = threading.Event()
         self.lines = []
         self.ended = {}
+        self.shadow_ranges = []
+        self.shadow_ended = []
 
     def delay(self):
         """Seconds until a wake may be written; 0 when one may go now."""
@@ -530,6 +601,7 @@ class WakeFor:
         # Several hubs share the tool names (quartet_poll on each), so a sink that
         # names servers says which one this membership belongs to.
         self.wake, self.key, self.prefix, self.server = wake, key, prefix, server
+        self.observed = None
 
     def push(self, content, meta, cancelled=None):
         del content                                  # peer text: never used here
@@ -547,6 +619,21 @@ class WakeFor:
                 self.wake.ended[self.key] = notice.ended
             self.wake.tokens -= 1
             self.wake.lines.append(notice.line)
+            # Metadata projection only; observational failures cannot change wakes.
+            try:
+                from nth_interposer_shadow import ranges_for
+                if notice.ended:
+                    self.wake.shadow_ended.append({'key': self.key, 'reason': notice.ended})
+                elif self.observed is not None:
+                    server = getattr(self, 'log_server', None) or self.server or 'nth-trio'
+                    self.wake.shadow_ranges.extend(ranges_for(self.key, server, self.observed))
+                else:
+                    self.wake.shadow_ranges.append(dict(key=self.key, server=getattr(self, 'log_server', None) or self.server or 'nth-trio',
+                        first=int(meta['first_message_id']), last=int(meta['message_id']),
+                        count=int(meta['count']) + int(meta.get('more_unread') or 0),
+                        addressed='true' in (meta.get('mentioned'), meta.get('banged'))))
+            except Exception:
+                pass
         self.wake.fired.set()
         return True
 
@@ -567,12 +654,18 @@ def poll_factory(identity):
     return quartet_poll_factory({'url': identity['url']})
 
 
-def make_listener(wake, key, identity, config, high_water, server=None):
+def make_listener(wake, key, identity, config, high_water, server=None, log_server=None):
     class WaitingListener(Listener):
         # One bucket for the session: every wake is a model turn, whichever
         # membership it is for.
         def _push_delay(self):
             return wake.delay()
+
+        def _deliver(self, fresh, selected):
+            # The legacy meta caps its displayed batch at 20. Keep full integer
+            # ranges for comparison without changing that meta or rendered bytes.
+            self.hub.observed = [{k: m.get(k) for k in ('id', 'mentioned', 'banged')} for m in selected]
+            return super()._deliver(fresh, selected)
 
     prefix = 'trio' if identity['source'] == 'local' else 'quartet'
     binding = {'source': identity['source'], 'url': identity['url'], 'channel': identity['channel'],
@@ -580,6 +673,7 @@ def make_listener(wake, key, identity, config, high_water, server=None):
                'filter': config['filter']}
     poll, close = poll_factory(identity)
     listener = WaitingListener(WakeFor(wake, key, prefix, server), binding, poll, close, high_water=high_water)
+    listener.hub.log_server = log_server or server
     listener.start()
     return listener
 
@@ -623,9 +717,20 @@ class StderrSink:
         return ''
 
     def deliver(self, lines):
+        shadow_actual(self)
         SAY.write('\n'.join(lines) + '\n')
         SAY.flush()
         return True
+
+
+def shadow_actual(sink):
+    try:
+        from nth_interposer_shadow import append
+        session, ranges, ended, lines = sink.shadow_record
+        append('actual', session, sink.client, 'queue' if sink.client == 'codex' else 'rewake',
+               ranges, ended, lines)
+    except Exception:
+        pass
 
 
 LOCK_RETRY_SECONDS = .5
@@ -700,7 +805,7 @@ def _wait_locked(session_id, sink):
                     server = state['servers'].get(key) if sink.name_servers else None
                     listeners[key] = make_listener(wake, key, identity, config,
                                                    max(int(state['high_water'].get(key) or 0), marks.get(key, 0)),
-                                                   server)
+                                                   server, state['servers'].get(key))
             if not listeners:
                 return 0                             # nothing is enabled: a later hook re-arms
             report = {key: (listener.state, listener.error, filters[key]) for key, listener in listeners.items()}
@@ -723,6 +828,7 @@ def _wait_locked(session_id, sink):
             _status(session_id, sink, 0, {})
     with wake.lock:
         lines, ended = list(wake.lines), dict(wake.ended)
+        shadow_ranges, shadow_ended = list(wake.shadow_ranges), list(wake.shadow_ended)
     state = load_session(session_id)
     # A session that ended while the listeners settled is not woken, and nothing is
     # marked seen: a resumed session hears it from its next waiter.
@@ -730,6 +836,7 @@ def _wait_locked(session_id, sink):
             or (supervisor and process_stamp(supervisor) != stamp) or sink.standing_down())
     if not gone:
         _status(session_id, sink, os.getpid(), {}, delivering=True)
+    sink.shadow_record = (session_id, shadow_ranges, shadow_ended, len(lines))
     delivered = not gone and sink.deliver(lines)
     if delivered:
         _remember(session_id, marks, wake, woke=True)
@@ -856,22 +963,28 @@ def main(argv=None):
         with session_update(session_id) as state:
             if state is not None:
                 state['ended'] = True
+        shadow_event('session.end', session_id)
         return 0
     if args.event == 'tool':
-        register(payload)
+        register(payload,observe=False)
     if args.event == 'start':
-        # Only a resume continues a session that held memberships; a fresh start,
-        # /clear and compaction need nothing here (compaction never ended it). It
-        # does not wait here: Claude's first response may wait for SessionStart
-        # hooks, so the Stop hook after that turn starts the waiter.
         if payload.get('source') == 'resume':
             with session_update(session_id) as state:
                 if state is not None and state['memberships']:
                     state['ended'] = False
+        try:
+            shadow_register(session_id,resume=payload.get('source')=='resume')
+        except Exception:
+            pass
         return 0
     if not session_path(session_id).exists():
         return 0                                     # a session that never joined: nothing to do
-    return wait(session_id)
+    result = wait(session_id)
+    if args.event == 'tool':
+        shadow_tool(payload,'claude',HOOK_TOOLS)
+    if args.event == 'stop':
+        shadow_event('turn', session_id, phase='ended')
+    return result
 
 
 if __name__ == '__main__':

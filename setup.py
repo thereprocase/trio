@@ -99,7 +99,10 @@ def install(target_home, *, quartet_url='', clients=('claude', 'codex'),
             if name == 'nth-qweb':
                 arguments += ['--url', quartet_url]
             servers[name] = {'type': 'stdio', 'command': str(python), 'args': arguments,
-                             'env': {'TRIO_NATIVE_CLIENT': 'claude', 'NTH_HOME': str(runtime)}}
+                             'env': {'TRIO_NATIVE_CLIENT': 'claude', 'NTH_HOME': str(runtime), 'NTH_SERVER_NAME': name}}
+        for registered, entry in servers.items():
+            if isinstance(entry,dict) and registered.startswith('nth-') and any('nth_quartet_proxy' in str(a) for a in entry.get('args',[])):
+                entry.setdefault('env',{})['NTH_SERVER_NAME']=registered
         write_json(path, config)
         settings_path = claude_home / 'settings.json'
         settings = json.loads(settings_path.read_text(encoding='utf-8-sig')) if settings_path.exists() else {}
@@ -127,13 +130,23 @@ def install(target_home, *, quartet_url='', clients=('claude', 'codex'),
             # Codex passes an MCP server only a few variables of its own, CODEX_HOME not
             # among them: TRIO_CODEX_HOME tells the server where the delivery hooks live.
             subprocess.run([str(executable), 'mcp', 'add', name,
-                            '--env', 'TRIO_NATIVE_CLIENT=codex', '--env', 'NTH_HOME=' + str(runtime),
+                            '--env', 'TRIO_NATIVE_CLIENT=codex', '--env', 'NTH_SERVER_NAME=' + name, '--env', 'NTH_HOME=' + str(runtime),
                             '--env', 'TRIO_CODEX_HOME=' + str(codex_home),
                             '--', str(python), *arguments],
                            env=dict(os.environ, CODEX_HOME=str(codex_home)), check=True)
         codex_hooks = install_codex_hooks(codex_home, python, server / 'nth_codex_hook.py', runtime)
     else:
         codex_hooks = None
+    # Trust only operator MCP configuration. Never promote a frontend announcement.
+    sys.path.insert(0, str(ROOT / 'server'))
+    from nth_interposer_store import Store
+    trust_store = Store(runtime / 'events' / 'interposer.sqlite')
+    try:
+        trust_store.import_hubs(target_home)
+        if quartet_url and ('claude' in clients or ('codex' in clients and register_codex)):
+            trust_store.setup_hub('nth-qweb', quartet_url)
+    finally:
+        trust_store.close()
     bin_dir = target_home / '.local' / 'bin'
     bin_dir.mkdir(parents=True, exist_ok=True)
     launcher = bin_dir / ('trio.cmd' if os.name == 'nt' else 'trio')

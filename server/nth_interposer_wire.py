@@ -2,6 +2,7 @@
 from contextlib import contextmanager
 import errno
 import ipaddress
+import secrets
 import json
 import os
 from pathlib import Path
@@ -15,6 +16,7 @@ import subprocess
 import sys
 import threading
 import time
+import io
 from urllib.parse import urlsplit
 
 PROTOCOL_VERSION = 1
@@ -30,6 +32,16 @@ OPS = frozenset(('hello', 'hub.announce', 'session.register', 'membership.attach
 
 class WireError(ValueError):
     """A fixed, non-secret error suitable for sending to an IPC client."""
+    def __init__(self, message, code='invalid_request'):
+        super().__init__(message)
+        self.code = code
+
+    def payload(self):
+        return {'code': self.code, 'message': str(self)}
+
+
+class ServiceRefused(WireError):
+    """A definitive response; retrying this operation could apply it twice."""
 
 
 def home():
@@ -224,8 +236,43 @@ def validate_request(value):
     if 'key' in value:
         if not isinstance(value['key'], str) or not IDENTITY_KEY.fullmatch(value['key']):
             raise WireError('bad identity key')
+    fields = {
+        'hello': ({}, {'client', 'pid', 'version'}),
+        'hub.announce': ({'server', 'url'}, set()),
+        'list': (set(), set()), 'status': (set(), {'key', 'session', 'host_pid', 'skips'}),
+        'session.register': ({'session', 'client', 'host_pid', 'sink', 'host_ok', 'problem'}, {'resume'}),
+        'membership.attach': ({'session', 'key', 'server', 'via'}, set()),
+        'membership.configure': ({'key'}, {'filter', 'enabled'}),
+        'ack.seen': ({'session', 'key', 'through_id'}, set()),
+        'turn': ({'session', 'phase'}, set()), 'session.end': ({'session'}, set()),
+    }
+    if op not in fields:
+        raise WireError('not implemented in this version')
+    required, optional = fields[op]
+    if required - value.keys() or value.keys() - required - optional - {'v', 'id', 'op'}:
+        raise WireError('missing or unknown fields')
+    if 'session' in required and value.get('session') is None:
+        raise WireError('bad session id')
+    for field, choices in {'client': ('claude', 'codex'), 'sink': ('rewake', 'queue'),
+                           'via': ('connect', 'listen', 'ack'), 'filter': ('all', 'about', 'at'),
+                           'phase': ('started', 'ended')}.items():
+        if field in value and op != 'hello' and value[field] not in choices:
+            raise WireError('bad ' + field)
+    for field in ('host_ok', 'enabled', 'resume'):
+        if field in value and type(value[field]) is not bool:
+            raise WireError('bad ' + field)
+    if 'host_pid' in value and value['host_pid'] is not None:
+        if not valid_id(value['host_pid']) or value['host_pid'] == 0:
+            raise WireError('bad host_pid')
+    if 'through_id' in value and not valid_id(value['through_id']):
+        raise WireError('bad through_id')
+    if 'problem' in value and (not isinstance(value['problem'], str)
+            or not re.fullmatch(r'[ -~]{0,200}', value['problem'])):
+        raise WireError('bad problem')
+    if 'server' in value:
+        value['server'] = canonical_server(value['server'])
     if op == 'hub.announce':
-        validate_hub(value.get('server'), value.get('url'))
+        validate_hub(value.get('server'), value.get('url'), allow_restricted=True)
     if 'skips' in value:
         if (op != 'status' or type(value['skips']) is not bool
                 or (value['skips'] and any(field in value for field in ('key', 'session')))):
@@ -233,37 +280,30 @@ def validate_request(value):
     return op
 
 
-def validate_hub(server, url):
-    if not isinstance(server, str) or not re.fullmatch(r'nth-[A-Za-z0-9_.-]{1,100}', server):
+def canonical_server(server):
+    if not isinstance(server, str) or not re.fullmatch(r'nth[-_][A-Za-z0-9_-]{1,40}', server):
         raise WireError('bad hub server name')
+    return server.replace('_', '-')
+
+
+def validate_server(server):
+    return canonical_server(server)
+
+
+def validate_hub(server, url, *, allow_restricted=False):
+    validate_server(server)
     try:
         parts = urlsplit(url) if isinstance(url, str) else None
         if (not parts or len(url) > 512 or parts.scheme not in ('http', 'https') or not parts.hostname
                 or parts.username is not None or parts.password is not None
                 or parts.query or parts.fragment or any(ord(c) < 33 for c in url)):
             raise ValueError
-        parts.port  # Reject malformed ports before saving an allowlist entry.
+        parts.port
     except ValueError:
         raise WireError('bad hub URL; credentials, query and fragment are forbidden') from None
-    host = parts.hostname.rstrip('.').lower()
-    if (host == 'localhost' or host.endswith('.localhost') or host in
-            ('metadata.google.internal', 'metadata.goog', 'instance-data.ec2.internal', 'metadata.azure.internal',
-             'metadata', 'instance-data', '100.100.100.200', 'fd00:ec2::254')):
-        raise WireError('loopback, link-local and metadata hub hosts are forbidden')
-    try:
-        address = ipaddress.ip_address(host)
-    except ValueError:
-        address = None
-        # Refuse alternate numeric loopback spellings resolved by the OS (127.1,
-        # decimal/octal/hex IPv4). inet_aton is local parsing, never a DNS lookup.
-        try:
-            address = ipaddress.ip_address(socket.inet_aton(host))
-        except (OSError, UnicodeError):
-            pass
-    if address is not None:
-        address = getattr(address, 'ipv4_mapped', None) or address
-        if (address.is_loopback or address.is_link_local or address.is_unspecified
-                or str(address) in ('100.100.100.200', 'fd00:ec2::254')):
+    if not allow_restricted:
+        from nth_interposer_hubs import restricted_host
+        if restricted_host(url):
             raise WireError('loopback, link-local and metadata hub hosts are forbidden')
 
 
@@ -281,17 +321,18 @@ class Client:
         request = dict(fields, v=PROTOCOL_VERSION, id=request_id, op=op)
         validate_request(request)
         self.socket.sendall(encode_frame(request))
-        reply = read_frame(self.reader)
+        reply = deadline_frame(self.socket, self.deadline) if hasattr(self, 'deadline') else read_frame(self.reader)
         if (reply.get('id') is None and 'error' in reply and 'ok' not in reply
                 and type(reply.get('v')) is int and reply['v'] == PROTOCOL_VERSION):
-            raise WireError(reply['error'] if isinstance(reply['error'], str) else 'service error')
+            raise ServiceRefused(reply['error'].get('message', 'service error') if isinstance(reply['error'], dict) else str(reply['error']))
         if (reply.get('v') != PROTOCOL_VERSION or type(reply.get('v')) is not int
                 or not valid_id(reply.get('id')) or reply['id'] != request_id):
             raise WireError('invalid reply id or protocol version; restart trio-interposer')
         if ('ok' in reply) == ('error' in reply):
             raise WireError('reply must contain exactly one of ok or error')
         if 'error' in reply:
-            raise WireError(reply['error'] if isinstance(reply['error'], str) else 'service error')
+            raise ServiceRefused(reply['error'].get('message', 'service error') if isinstance(reply['error'], dict)
+                            else str(reply['error']))
         return reply['ok']
 
     def close(self):
@@ -433,3 +474,98 @@ def connect(spawn=False, *, timeout=10, path=None):
                 raise WireError('interposer failed to start; see trio interposer logs')
             time.sleep(min(.05, max(0, deadline - time.monotonic())))
     raise TimeoutError('interposer did not start within the connect timeout')
+
+
+_observation = threading.local()
+
+
+@contextmanager
+def observation():
+    """One hook's registration/attach/configure sequence shares a sub-second budget."""
+    previous = getattr(_observation, 'deadline', None)
+    _observation.deadline = time.monotonic() + .8
+    try:
+        yield
+    finally:
+        _observation.deadline = previous
+
+
+def deadline_frame(sock, deadline):
+    data = bytearray()
+    while len(data) <= MAX_FRAME:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError('frame deadline')
+        sock.settimeout(remaining)
+        byte = sock.recv(1)
+        if not byte:
+            raise EOFError
+        data.extend(byte)
+        if byte == b'\n':
+            return read_frame(io.BytesIO(data))
+    raise WireError('frame exceeds 64 KiB')
+
+
+def tell(op, **fields):
+    """Observe a hook without spawning or letting a failed observer block delivery."""
+    if os.environ.get('TRIO_INTERPOSER_SHADOW') == '0':
+        return False
+    request = dict(fields, v=PROTOCOL_VERSION, id=1, op=op)
+    try:
+        budget = getattr(_observation, 'deadline', None) or time.monotonic() + .8
+        validate_request(request)
+        encode_frame(request)
+        # One shared reply deadline bounds BOTH hello and the op, including a
+        # service that answers hello but hangs on the next request.
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+            remaining = budget - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError
+            sock.settimeout(min(.3, remaining))
+            sock.connect(str(socket_path()))
+            deadline = min(budget, time.monotonic() + .5)
+            with Client(sock) as client:
+                client.deadline = deadline
+                sock.settimeout(max(.001, deadline - time.monotonic()))
+                hello = client.call('hello', client='frontend', pid=os.getpid())
+                if not hello['protocol_min'] <= PROTOCOL_VERSION <= hello['protocol_max']:
+                    raise WireError('hello protocol version mismatch')
+                sock.settimeout(max(.001, deadline - time.monotonic()))
+                client.call(op, **fields)
+        return True
+    except ServiceRefused:
+        return False
+    except (OSError, EOFError, TimeoutError):
+        if op=='turn':
+            try:
+                from nth_interposer_store import _json_file
+                state = _json_file(home()/'events'/'hooks'/('session-'+fields['session']+'.json'))
+                if not state.get('memberships'):
+                    return False
+            except Exception:
+                return False
+        try:
+            # Invalid input is not durable work; never save arbitrary hook fields.
+            validate_request(request)
+            frame = encode_frame(request)
+            inbox = private_dir(home() / 'events' / 'inbox')
+            # Share fallback time across a hook batch; contention must not turn
+            # three short observations into three new lock deadlines.
+            with file_lock(inbox / 'write.lock', timeout=min(.15,max(0,budget+.15-time.monotonic()))):
+                files = sorted(inbox.glob('*.json'))
+                for path in files[:max(0, len(files) - 999)]:
+                    path.unlink(missing_ok=True)
+                target = inbox / f'{time.time_ns()}-{os.getpid()}-{secrets.token_hex(4)}.json'
+                temp = target.with_suffix('.tmp')
+                try:
+                    fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+                    with os.fdopen(fd, 'wb') as stream:
+                        stream.write(frame)
+                    os.replace(temp, target)
+                finally:
+                    temp.unlink(missing_ok=True)
+        except Exception:
+            pass  # Observation must never make a successful hook fail.
+        return False
+    except Exception:
+        return False

@@ -64,6 +64,7 @@ if [ "${1:-}" = "hub-service" ] || [ "${1:-}" = "upgrade" ]; then
              nth_cli.py nth_quartet_proxy.py nth_watch.py nth_claude_channel.py nth_claude_hook.py \
              nth_codex_hook.py nth_sse_client.py nth_listener.py nth_notice.py \
              nth_interposer.py nth_interposer_wire.py nth_interposer_store.py \
+             nth_interposer_hubs.py nth_interposer_runtime.py nth_interposer_shadow.py \
              nth_usage.py nth_conversation.py nth_webpush.py nth_media.py nth_ask_client.js; do
         if [ -f "$HUB_DIR/$f" ] && ! cmp -s "$SCRIPT_DIR/server/$f" "$HUB_DIR/$f"; then
             cp "$HUB_DIR/$f" "$HUB_DIR/$f.bak-$STAMP"
@@ -451,6 +452,9 @@ cp "$SCRIPT_DIR/server/nth_notice.py" "$SERVER_DIR/nth_notice.py"
 cp "$SCRIPT_DIR/server/nth_interposer.py" "$SERVER_DIR/nth_interposer.py"
 cp "$SCRIPT_DIR/server/nth_interposer_wire.py" "$SERVER_DIR/nth_interposer_wire.py"
 cp "$SCRIPT_DIR/server/nth_interposer_store.py" "$SERVER_DIR/nth_interposer_store.py"
+cp "$SCRIPT_DIR/server/nth_interposer_hubs.py" "$SERVER_DIR/nth_interposer_hubs.py"
+cp "$SCRIPT_DIR/server/nth_interposer_runtime.py" "$SERVER_DIR/nth_interposer_runtime.py"
+cp "$SCRIPT_DIR/server/nth_interposer_shadow.py" "$SERVER_DIR/nth_interposer_shadow.py"
 cp "$SCRIPT_DIR/server/nth_agent_manager.py" "$SERVER_DIR/nth_agent_manager.py"
 # Quota-burn series + the arithmetic over it.
 cp "$SCRIPT_DIR/server/nth_usage.py" "$SERVER_DIR/nth_usage.py"

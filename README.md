@@ -669,3 +669,37 @@ PY=~/.claude/nth/venv/bin/python bash tests/run-all.sh
 MIT. See [LICENSE](LICENSE).
 
 Project page: <https://thereprocase.github.io/projects/trio/>
+
+### Interposer shadow observation
+
+The interposer observes hook delivery without waking sessions or acknowledging
+messages. Existing hook waiters remain the live delivery path. Set
+`TRIO_INTERPOSER_SHADOW=0` to disable hook observations and shadow evidence.
+`trio interposer shadow-diff --since 3600 --json` compares announced IDs and notice
+counts in private, rotated logs; fewer shadow notices are expected from coalescing.
+Neither Claude nor Codex has a hook turn-start signal in this phase. Their
+shadow buffers usually settle as idle: 0.3 seconds for Claude, 2.5 for Codex.
+
+Remote shadow polling requires a trusted hub URL. MCP configurations import trust
+on service startup; new frontend announcements remain pending. Inspect
+`trio interposer status`, then use `trio interposer approve nth-example https://hub.example/sse` to approve
+a pending hub or URL change. Announcements never replace a trusted URL; pending
+URLs receive no membership tokens. Approval is a local CLI operation, absent from
+the wire protocol.
+
+Shadow state is separate from imported legacy state, including filter, enabled,
+ended reason and watermarks. Only explicitly attached, registered live holders
+can own a shadow poller. The user's own MCP config is a trust authority; an
+explicitly approved URL outranks stale config, which appears as a separate pending
+candidate. Approval requires the exact pending URL and rechecks DNS. Unknown
+announcements have a smaller expiring cap; trusted entries can evict announcements
+within the overall hub cap. Shadow polling publishes no heartbeat/filter presence.
+
+Shadow comparisons use the overlapping retained window with a three-second edge
+margin, so startup/tail records and in-flight coalescing do not imply missing IDs.
+They join membership identity across owner changes and report whether a comparable
+window exists. Without `--json`, shadow-diff prints a concise text result.
+
+SSE endpoints must keep the configured hub scheme, hostname and port. Shadow
+connections check and pin DNS answers again on reconnect, including metadata
+addresses hidden inside IPv6 transition forms and Unicode digit spellings.

@@ -1,6 +1,113 @@
 [
-  {"request":{"v":1,"id":7,"op":"hello"},"reply":{"v":1,"id":7,"ok":{"version":"8.3.0-beta.4","protocol_min":1,"protocol_max":1,"schema_version":2,"pid":4242,"activation":"fallback"}}},
-  {"request":{"v":1,"id":8,"op":"hub.announce","server":"nth-demo","url":"https://hub.example/sse"},"reply":{"v":1,"id":8,"ok":{"server":"nth-demo","url":"https://hub.example/sse","announced_at":123.0,"state":"pending","since":123.0,"error":"","pending_url":"","trust":"announced"}}},
-  {"request":{"v":1,"id":9,"op":"list"},"reply":{"v":1,"id":9,"ok":{"hubs":[{"server":"nth-demo","url":"https://hub.example/sse","announced_at":123.0,"state":"pending","since":123.0,"error":"","pending_url":"","trust":"announced"}],"memberships":[],"sessions":[],"holdings":[],"legacy_import_skips":[]}}},
-  {"request":{"v":1,"id":10,"op":"status","key":"0123456789abcdef01234567","session":null},"reply":{"v":1,"id":10,"ok":{"hubs":[{"server":"nth-demo","url":"https://hub.example/sse","announced_at":123.0,"state":"pending","since":123.0,"error":"","pending_url":"","trust":"announced"}],"memberships":[],"sessions":[],"holdings":[],"legacy_import_skips":[]}}}
+  {
+    "request": {
+      "v": 1,
+      "id": 7,
+      "op": "hello"
+    },
+    "reply": {
+      "v": 1,
+      "id": 7,
+      "ok": {
+        "version": "8.3.0-beta.4",
+        "protocol_min": 1,
+        "protocol_max": 1,
+        "schema_version": 3,
+        "pid": 4242,
+        "activation": "fallback"
+      }
+    }
+  },
+  {
+    "request": {
+      "v": 1,
+      "id": 8,
+      "op": "hub.announce",
+      "server": "nth-demo",
+      "url": "https://hub.example/sse"
+    },
+    "reply": {
+      "v": 1,
+      "id": 8,
+      "ok": {
+        "server": "nth-demo",
+        "url": "https://hub.example/sse",
+        "announced_at": 123.0,
+        "state": "pending",
+        "since": 123.0,
+        "error": "",
+        "pending_url": "",
+        "trust": "announced",
+        "approved": 0,
+        "config_url": "",
+        "config_pending_url": ""
+      }
+    }
+  },
+  {
+    "request": {
+      "v": 1,
+      "id": 9,
+      "op": "list"
+    },
+    "reply": {
+      "v": 1,
+      "id": 9,
+      "ok": {
+        "hubs": [
+          {
+            "server": "nth-demo",
+            "url": "https://hub.example/sse",
+            "announced_at": 123.0,
+            "state": "pending",
+            "since": 123.0,
+            "error": "",
+            "pending_url": "",
+            "trust": "announced",
+            "approved": 0,
+            "config_url": "",
+            "config_pending_url": ""
+          }
+        ],
+        "memberships": [],
+        "sessions": [],
+        "holdings": [],
+        "legacy_import_skips": []
+      }
+    }
+  },
+  {
+    "request": {
+      "v": 1,
+      "id": 10,
+      "op": "status",
+      "key": "0123456789abcdef01234567",
+      "session": null
+    },
+    "reply": {
+      "v": 1,
+      "id": 10,
+      "ok": {
+        "hubs": [
+          {
+            "server": "nth-demo",
+            "url": "https://hub.example/sse",
+            "announced_at": 123.0,
+            "state": "pending",
+            "since": 123.0,
+            "error": "",
+            "pending_url": "",
+            "trust": "announced",
+            "approved": 0,
+            "config_url": "",
+            "config_pending_url": ""
+          }
+        ],
+        "memberships": [],
+        "sessions": [],
+        "holdings": [],
+        "legacy_import_skips": []
+      }
+    }
+  }
 ]

@@ -48,6 +48,7 @@ class MCPSSEClient:
         self.base_origin = f"{u.scheme}://{u.netloc}"
         self.debug = debug
 
+        self.connection_guard = None
         self.endpoint_url = None
         self.endpoint_ready = threading.Event()
         self._pending = {}
@@ -66,11 +67,18 @@ class MCPSSEClient:
             sys.stderr.flush()
 
     def _abs(self, url):
-        if url.startswith("http://") or url.startswith("https://"):
-            return url
-        if not url.startswith("/"):
-            url = "/" + url
-        return self.base_origin + url
+        candidate = urllib.parse.urljoin(self.base_origin+'/',url)
+        self._same_origin(candidate)
+        return candidate
+
+    def _same_origin(self, url):
+        def origin(value):
+            parsed = urllib.parse.urlsplit(value)
+            if parsed.username is not None or parsed.password is not None:
+                raise ValueError('SSE endpoint credentials are forbidden')
+            return parsed.scheme,parsed.hostname,parsed.port or (443 if parsed.scheme=='https' else 80)
+        if origin(url)!=origin(self.base_origin):
+            raise ValueError('SSE endpoint must remain on the hub origin')
 
     def _next_request_id(self):
         with self._id_lock:
@@ -250,25 +258,21 @@ class MCPSSEClient:
 
     # ---- HTTP helpers ---------------------------------------------------
     def _make_conn(self, timeout):
-        if self.scheme == "https":
-            ctx = ssl.create_default_context()
-            return http.client.HTTPSConnection(self.host, self.port,
-                                               timeout=timeout, context=ctx)
-        return http.client.HTTPConnection(self.host, self.port, timeout=timeout)
+        if self.scheme == 'https':
+            conn = http.client.HTTPSConnection(self.host,self.port,timeout=timeout,context=ssl.create_default_context())
+        else:
+            conn = http.client.HTTPConnection(self.host,self.port,timeout=timeout)
+        if self.connection_guard:
+            conn._create_connection = self.connection_guard
+        return conn
 
     def _post(self, body):
         if self.endpoint_url is None:
             raise RuntimeError("Not connected — no endpoint URL")
+        self._same_origin(self.endpoint_url)
         u = urllib.parse.urlparse(self.endpoint_url)
-        host = u.hostname or self.host
-        port = u.port or self.port
-        path = u.path + ("?" + u.query if u.query else "")
-        scheme = u.scheme or self.scheme
-        if scheme == "https":
-            ctx = ssl.create_default_context()
-            conn = http.client.HTTPSConnection(host, port, timeout=20, context=ctx)
-        else:
-            conn = http.client.HTTPConnection(host, port, timeout=20)
+        path = u.path + ('?' + u.query if u.query else '')
+        conn = self._make_conn(timeout=20)
         try:
             data = json.dumps(body, separators=(",", ":")).encode("utf-8")
             conn.request("POST", path, body=data, headers={
