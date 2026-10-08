@@ -101,8 +101,8 @@ events are not automatically replayed after a Codex crash. Retention is manual.
 Claude launched with `trio claude` receives the same `new_messages` payload as
 a channel event from a listener inside its stdio frontend, as AGENT-RUNTIME.md
 describes; that path has no receipt, so it never uses this relay's `accepted`
-state. Launched plainly, Claude uses its Monitor, with its exact command
-returned by connect, which preserves canonical message, cadence and keepalive
-events. Codex currently receives channel messages; cadence/keepalive reminder parity
+state. Launched plainly, Claude is woken by the delivery hooks; without them it
+uses the one-shot waiter or a Monitor, with the exact command returned by
+connect, which preserves canonical message, cadence and keepalive events. Codex currently receives channel messages; cadence/keepalive reminder parity
 and a general subprocess/JSONL source adapter remain follow-up work. Managed
 feeds do not infer a final broadcast destination after mixing audiences.
