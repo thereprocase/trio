@@ -513,7 +513,7 @@ function buildSandbox() {
     EventTarget, Event, CustomEvent,
     // Used by 20-workspace's search (it aborts the in-flight request on each
     // keystroke) and by 05-loader. Node has a real one; no need to stub.
-    AbortController,
+    AbortController, AbortSignal,
   });
   window.webkitAudioContext = window.AudioContext;
   window.__TRIO_TEST__ = {};        // truthy → nth_web.py's hook publishes helpers here

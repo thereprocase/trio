@@ -583,7 +583,7 @@
     return null;
   }
   // The confident member for the words after a trigger, or null.
-  function matchSpokenName(words, sigil, names) {
+  function matchSpokenName(words, sigil, names, utteranceFinal = true) {
     const candidates = names.map(name => ({ name, key: sigilKey(name), exactOnly: false })).filter(c => c.key);
     if (sigil === '!') candidates.push({ name: 'all', key: 'all', exactOnly: true });
     const best = new Map(); // name -> { score, n }
@@ -598,7 +598,7 @@
         let score = Math.max(...spoken.map(s => (c.exactOnly ? (s === c.key ? 1 : 0) : levenshteinSimilarity(s, c.key))));
         if (c.key.length <= SHORT_NAME_LETTERS && score < SHORT_NAME_SCORE) score = 0;
         // "all" only as the whole command: last word, or followed by punctuation.
-        if (c.key === 'all' && c.exactOnly && !(m[1] || words.length === n)) score = 0;
+        if (c.key === 'all' && c.exactOnly && !(m[1] || (utteranceFinal && words.length === n))) score = 0;
         const prior = best.get(c.name);
         if (!prior || score > prior.score) best.set(c.name, { score, n });
       }
@@ -612,14 +612,14 @@
   }
   // Rewrites spoken triggers in `text` as sigils for the given member names.
   // Pure: the composer passes the current channel's names.
-  function applySpokenSigils(text, names) {
+  function applySpokenSigils(text, names, utteranceFinal = true) {
     const source = String(text || '');
     const words = [...source.matchAll(/\S+/g)].map(m => ({ raw: m[0], start: m.index, end: m.index + m[0].length }));
     let out = '', cursor = 0, i = 0;
     while (i < words.length) {
       const trigger = spokenTrigger(words[i].raw, words[i + 1]?.raw);
       const first = i + (trigger?.words || 0);
-      const match = trigger && matchSpokenName(words.slice(first, first + 3).map(w => w.raw), trigger.sigil, names || []);
+      const match = trigger && matchSpokenName(words.slice(first, first + 3).map(w => w.raw), trigger.sigil, names || [], utteranceFinal);
       if (!match) { i++; continue; }
       const last = words[first + match.n - 1];
       // Keep the name's closing punctuation ("@Bones?"), except the comma
@@ -649,7 +649,7 @@
   // and as captured at the start once the user has moved elsewhere.
   function sigilFinalizer(startedIn) {
     const namesAtStart = spokenSigilNames();
-    return text => applySpokenSigils(text, conversationId() === startedIn ? spokenSigilNames() : namesAtStart);
+    return (text, utteranceFinal = true) => applySpokenSigils(text, conversationId() === startedIn ? spokenSigilNames() : namesAtStart, utteranceFinal);
   }
   // Turns a SpeechRecognition session into composer text.
   //
@@ -695,10 +695,11 @@
       previousFinals = list.map(r => (r.isFinal ? r.text : null));
       const heard = collapseSpeech([carried, ...list.map(r => r.text)]);
       const finals = collapseSpeech([carried, ...list.filter(r => r.isFinal).map(r => r.text)]);
+      const utteranceFinal = !list.some(r => !r.isFinal && r.text);
       // The interim tail normally follows the finals; when an interim
       // restates them instead, show it as heard until its final arrives.
       const spoken = finals && speechKey(heard).startsWith(speechKey(finals))
-        ? joinSpeech(finalize(finals), heard.slice(finals.length).trim())
+        ? joinSpeech(finalize(finals, utteranceFinal), heard.slice(finals.length).trim())
         : heard;
       return withBaseline(baseline, spoken);
     };
@@ -1046,7 +1047,9 @@
         statusText: sttHealthCache?.remote ? "Transcribing (hub's speech service)…" : 'Transcribing (Whisper on the hub)…' });
       try {
         const audio = new Blob(chunks, { type: recorder.mimeType || 'audio/webm' });
-        const result = await fetch(apiUrl('/api/stt/transcribe'), { method: 'POST', headers: { 'Content-Type': audio.type || 'audio/webm' }, body: audio });
+        // Health exposes no server deadline; allow the default 60 s plus
+        // upload/response time, then use the existing failure and cleanup path.
+        const result = await fetch(apiUrl('/api/stt/transcribe'), { method: 'POST', headers: { 'Content-Type': audio.type || 'audio/webm' }, body: audio, signal: AbortSignal.timeout(75000) });
         const data = await result.json();
         if (!result.ok || !data.ok) throw new Error(data.error || 'transcription failed');
         const text = (data.text || '').trim();
@@ -1088,7 +1091,9 @@
         // that reads Local while doing Browser is the same lie this branch
         // exists to delete. An explicit button makes the switch a thing the
         // user chose, once, for this recording only. (LOTC/Frodo, critical)
-        const reason = humanEngineError(error.message) || 'Local transcription failed';
+        const reason = error.name === 'TimeoutError' || error.name === 'AbortError'
+          ? 'Local transcription failed: the request timed out. Try again.'
+          : humanEngineError(error.message) || 'Local transcription failed';
         refreshSttHealth(); // the hub may have lost its engine; let the next tap know
         if (hasBrowserDictation()) {
           Trio.ui.toast(reason, DICTATION_TOAST_MS, offerBrowserAction());
@@ -1370,6 +1375,7 @@
     loadDraft(); loadComposerAux();
   }
   function unmount() {
+    dictationGen++; // cancel starts still awaiting health or mic permission
     domListeners.forEach(([el, type, fn]) => el?.removeEventListener?.(type, fn)); domListeners.length = 0;
     if (unroute) { unroute(); unroute = null; }
     // Browser-engine (web) mode only ever set `recognition`, never `recorder`

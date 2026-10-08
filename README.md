@@ -117,7 +117,7 @@ The hub and its channel semantics stay authoritative. The local Quartet frontend
 - **Tailscale** on both machines, for `/quartet` (spoke ↔ hub). Local `/trio` runs entirely on one machine.
 - Optionally **[claude-statusline](https://github.com/thereprocase/claude-statusline)**, which publishes the context snapshots behind the context rings.
 
-To diagnose a setup, run **`nth-doctor`** (installed by hub/spoke modes). It checks registration, the SDK import, the database, hub reachability, and version drift, and prints the fleet table. `nth-doctor --watch` follows it live.
+To diagnose a setup, run **`nth-doctor`** (installed by hub/spoke modes). It checks registration, the SDK and hook dependency imports, the database, hub reachability, and version drift, and prints the fleet table. `nth-doctor --watch` follows it live.
 
 ### Legacy Claude spoke installation
 
@@ -384,9 +384,9 @@ The dashboard composer has a mic button. **Preferences → Speech-to-text engine
 - **Hub**: the audio goes to the machine running `nth_web.py`, which transcribes it with a Whisper sidecar or, when its operator configured one, forwards it to a [speech service](#dictation-backend) (then `/api/stt/health` reports `remote: true` and Preferences says the audio goes to this hub's speech service). Either way it never goes to your browser vendor. If the hub cannot transcribe, the mic says so before recording and offers Browser for that one recording; it never switches on its own. (The stored preference value is still `local`.)
 - **Browser**: the browser's own speech recognition, which sends audio to your browser vendor.
 
-Spoken sigils: say **“hey Name”** for `@Name`, **“hashtag Name”** for `#Name`, **“bang Name”** for `!Name` and **“bang all”** for `!all`. Names are matched against the current channel's members, tolerating case, punctuation, a name spoken as several words (“codex sol” for `codex-sol`) and a misheard letter in longer names; names of four letters or fewer must be heard exactly. When no member is a clear match the words stay as spoken, so an ordinary “hey, can you…” is left alone. A bang wakes everyone it names whatever their filter, so it is stricter: one word after “bang”, no comma or full stop after “bang”, and “all” only at the end of what you said or before punctuation (“they bang all night” stays a sentence). Only final text is rewritten, and the sigils sit in the box for you to check before sending.
+Spoken sigils: say **“hey Name”** for `@Name`, **“hashtag Name”** for `#Name`, **“bang Name”** for `!Name` and **“bang all”** for `!all`. Names are matched against the current channel's members, tolerating case, punctuation, a name spoken as several words (“codex sol” for `codex-sol`) and a misheard letter in longer names; names of four letters or fewer must be heard exactly. When no member is a clear match the words stay as spoken, so an ordinary “hey, can you…” is left alone. A bang wakes everyone it names whatever their filter, so it is stricter: one word after “bang”, no comma or full stop after “bang”, and “all” only at the end of what you said or before punctuation (“they bang all night” stays a sentence). An unpunctuated final “bang all” stays literal while interim text follows. Only final text is rewritten, and the sigils sit in the box for you to check before sending.
 
-Browser dictation stops by itself after a few seconds of silence (Android Chrome does this even in continuous mode); the text stays in the box and another tap carries on after it. Dictation only fills the box. Nothing is sent until you press Send.
+Browser dictation stops by itself after a few seconds of silence (Android Chrome does this even in continuous mode); the text stays in the box and another tap carries on after it. Dictation only fills the box. Nothing is sent until you press Send. Hub transcription requires the same operator or owner-listed member identity as attachment uploads; self-declared guests cannot use it. A transcription request times out after 75 seconds and clears the busy state; leaving the composer cancels starts still waiting for health or microphone permission.
 
 The on-hub Whisper engine needs two extra packages on the machine serving the dashboard, installed separately from `setup.sh`:
 
@@ -493,7 +493,7 @@ back), and the menu item reads **Update and reload**. A reload keeps the open
 channel or DM and your unsent text. It stops and says why instead of losing
 anything: while an attached image is unsent, while dictation is listening or
 transcribing, and when the hub cannot be reached (reloading then would show
-the browser's offline page in place of the app). The app's icon and name on the home screen are refreshed by
+the browser's offline page in place of the app). A 4xx from the version endpoint still proves reachability and permits reload, without announcing an update. Network failures, timeouts and 5xx block reload. The app's icon and name on the home screen are refreshed by
 Android itself, which checks the manifest when the app starts, about once a
 day.
 

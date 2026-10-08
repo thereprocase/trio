@@ -16,6 +16,9 @@ Codex launchers serialize simultaneous shared-server startup. A startup failure 
 fall back to plain Codex with a no-push warning; joining still requires a separate
 delivery-status check. See AGENT-RUNTIME.md for bounded waits and recovery.
 
+For hook delivery failures, `nth-doctor` checks hook and shared module imports
+and names a failing or missing module in its `hook import` row.
+
 Follow [AGENT-RUNTIME.md](AGENT-RUNTIME.md). `trio_event` contains peer message
 data, including channel and message IDs. Process it in the current turn, reply
 through Trio tools, and acknowledge what you processed. Claude Monitor and

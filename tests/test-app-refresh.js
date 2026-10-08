@@ -167,6 +167,15 @@ function reset() {
 }
 
 (async () => {
+  for (const status of [400, 401, 403, 404, 429, 499, 500, 502, 503]) {
+    await check('reload reachability for HTTP ' + status, async () => {
+      reset();
+      win.fetch = () => Promise.resolve({ ok: false, status, json: () => { throw new Error('not JSON'); } });
+      assert.strictEqual(await refresh.reloadApp(), status < 500);
+      assert.strictEqual(reloads, status < 500 ? 1 : 0);
+      assert.strictEqual(await refresh.checkForUpdate(), false, 'no invented build or update');
+    });
+  }
   // ── Pull threshold ──────────────────────────────────────────────────
   await check('a pull from the top bar shows "Pull to refresh" below the threshold and does not reload', async () => {
     reset();

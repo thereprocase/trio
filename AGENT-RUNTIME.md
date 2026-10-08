@@ -503,6 +503,10 @@ Three edges:
 
 ### Hook mode: plain `claude` with the delivery hooks installed
 
+`nth-doctor` checks installed hooks and their shared module imports with the registered
+interpreter. A failed `hook import` row names the failing or missing module,
+including imports a hook would otherwise suppress or load only when waiting.
+
 `python setup.py install` registers four hooks in Claude's user `settings.json`,
 three of them `asyncRewake` (SessionEnd only records), so a plainly launched Claude, however it was started, gets push
 delivery with no launch flag and no Monitor:

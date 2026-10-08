@@ -101,7 +101,7 @@ check('a literal !all is left alone', eq('bang !all', room, 'bang !all'));
 // ── finals only, browser engine ──
 // Interim text is shown as heard; only once it is final does it become a sigil.
 function res(transcript, isFinal) { return { 0: { transcript }, isFinal }; }
-const finalize = text => sig(text, room);
+const finalize = (text, utteranceFinal) => sig(text, room, utteranceFinal);
 let absorb = C.makeSpeechAccumulator('', finalize);
 check('interim "hey bones" stays as heard', absorb([res('hey bones', false)], 0) === 'hey bones');
 check('the same words become a sigil once final', absorb([res('hey bones check', true)], 0) === '@Bones check');
@@ -113,6 +113,18 @@ check('...and the tail is rewritten when it is final',
 absorb = C.makeSpeechAccumulator('hey bones', finalize);
 check('text typed before dictation is never rewritten',
       absorb([res('hashtag theo', true)], 0) === 'hey bones #Theo');
+absorb = C.makeSpeechAccumulator('', finalize);
+check('final bang all with interim night never renders an emergency wake',
+      absorb([res('they bang all', true), res(' night', false)]) === 'they bang all night');
+check('final continuation keeps bang all as ordinary speech',
+      absorb([res('they bang all', true), res(' night', true)]) === 'they bang all night');
+absorb = C.makeSpeechAccumulator('', finalize);
+check('pending interim, even a duplicate, prevents treating all as utterance-final',
+      absorb([res('bang all', true), res('bang all', false)]) === 'bang all');
+check('bang all becomes a command after the interim is gone',
+      absorb([res('bang all', true)]) === '!all');
+check('explicit punctuation still permits bang all before an interim tail',
+      absorb([res('bang all,', true), res(' check this', false)]) === '!all check this');
 
 // ── finals only, live: both engines read the channel roster ──
 (async () => {
@@ -145,6 +157,12 @@ check('text typed before dictation is never rewritten',
     check('browser engine: final rewritten in the box; the operator is not a target',
           box.textContent === '@Bones bang Frodo now');
     check('dictation never sends: the text is still in the box', box.textContent.length > 0);
+    C.stopDictation();
+    box.textContent = '';
+    await C.toggleDictation();
+    rec.onresult({ results: [res('they bang all', true), res(' night', false)], resultIndex: 1 });
+    check('browser engine: the live finalizer keeps bang all literal with an interim tail',
+          box.textContent === 'they bang all night');
     C.stopDictation();
 
     // Local engine: the transcript returned after Stop is final text.
