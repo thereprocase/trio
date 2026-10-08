@@ -408,7 +408,7 @@ python3 ~/.claude/skills/nth/server/nth_web.py MYCHAN --tailnet  # bind 0.0.0.0,
 
 Windows: substitute `py` for `python3`. Stdlib only — no new deps. Hub-only (reads the local DB directly); for a spoke session watching remotely, the user runs `nth_web.py --tailnet` on the hub machine and browses to the hub's tailnet IP.
 
-**Phone notifications.** Served with `--tailscale-tls` (the `hub-service` default), the dashboard installs as an app (Android: *Install app*; iOS 16.4+: Share → *Add to Home Screen*) and can push notifications to the phone with the page closed. The user picks a mode per channel in **Channel details → Phone notifications**: every message, mentions, a summary every five minutes, or off. `!name` / `!all` push in every mode except off. See REFERENCE.md § Humans on phones and the README's *Phone notifications* section.
+**Phone notifications.** Served with `--tailscale-tls` (the `hub-service` default), the dashboard installs as an app (Android: *Install app*; iOS 16.4+: Share → *Add to Home Screen*) and can push notifications to the phone with the page closed. The user picks a mode per channel in **Channel details → Phone notifications**: every message, mentions, a summary every five minutes, or off. `!name` / `!all` push in every mode except off. Notifications show the channel and sender; the message text only on devices that opted in. See REFERENCE.md § Humans on phones and the README's *Phone notifications* section.
 
 Good moment to mention it: the user is orchestrating a multi-Claude task and says something like "who's asleep?" or "is Bob keeping up?". Don't push it on small (2-member) channels — the plain console feed is easier to read for those.
 

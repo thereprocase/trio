@@ -205,8 +205,47 @@ p = npush.build_payload("ops", bang, msg("!bob-guest the build is on fire"))
 check("payload: per-channel tag and channel URL",
       p["tag"] == "nth-ops" and p["url"] == "/?channel=ops" and p["channel"] == "ops")
 check("payload: bang is marked urgent", p["title"].startswith("Urgent:"))
-p = npush.build_payload("ops", npush.Decision(True, "message"), msg("x" * 1000))
+p = npush.build_payload("ops", npush.Decision(True, "message"), msg("x" * 1000), show_text=True)
 check("payload: body is truncated", len(p["body"]) <= npush.MAX_BODY_CHARS)
+
+# Message text stays off the lock screen unless the device opted in.
+SECRET = "the deploy password is hunter2"
+p = npush.build_payload("ops", npush.Decision(True, "message"), msg(SECRET))
+check("payload: hidden by default -- the body is the neutral line",
+      p["body"] == npush.HIDDEN_BODY == "New message")
+check("payload: hidden by default -- the title still names channel and sender",
+      p["title"] == "#ops — Ada")
+check("payload: hidden by default -- no part of the text anywhere in the payload",
+      "hunter2" not in json.dumps(p) and "deploy" not in json.dumps(p))
+p = npush.build_payload("ops", npush.Decision(True, "message"),
+                        msg(SECRET, recipients=json.dumps([ME])))
+check("payload: a hidden DM names the DM and sender only",
+      p["title"] == "DM — Ada" and p["body"] == npush.HIDDEN_BODY)
+p = npush.build_payload("ops", bang, msg("!bob-guest " + SECRET))
+check("payload: a hidden bang is still marked urgent and still hides the text",
+      p["title"].startswith("Urgent:") and "hunter2" not in json.dumps(p))
+p = npush.build_payload("ops", npush.Decision(True, "message"), msg(SECRET), show_text=True)
+check("payload: show_text puts the message in the body", p["body"] == SECRET)
+check("payload: a digest is the same hidden or shown",
+      npush.build_payload("ops", d4) == npush.build_payload("ops", d4, show_text=True))
+tp = npush.test_payload("ops")
+check("payload: the test notification names the channel and says what it proves",
+      tp["title"] == "Test notification from #ops"
+      and tp["body"] == "If you can read this, notifications reach this device."
+      and tp["url"] == "/?channel=ops")
+check("payload: the test notification never replaces a real one (own tag)",
+      tp["tag"] != npush.build_payload("ops", d4)["tag"])
+
+# The test button's limiter, on a hand-driven clock.
+_lt = [100.0]
+lim = npush.TestPushLimiter(interval_s=10.0, clock=lambda: _lt[0])
+check("test limit: the first press goes through", lim.take("ep-a") == 0)
+check("test limit: a second press inside 10 s waits", 9.9 < lim.take("ep-a") <= 10.0)
+check("test limit: another device is not held up", lim.take("ep-b") == 0)
+_lt[0] += 4
+check("test limit: the wait counts down", 5.9 < lim.take("ep-a") <= 6.0)
+_lt[0] += 6
+check("test limit: allowed again once the interval has passed", lim.take("ep-a") == 0)
 
 if not npush.available():
     print()
@@ -532,12 +571,15 @@ db.close()
 EP = "https://fcm.googleapis.com/fcm/send/"
 
 
-def add_sub(n, mode="all", member=None, tier=npush.TIER_GUEST, channel=None):
+def add_sub(n, mode="all", member=None, tier=npush.TIER_GUEST, channel=None, show_text=True):
+    # show_text defaults to True HERE ONLY: the delivery tests below tell
+    # messages apart by their text. The product default (hidden) has its own
+    # tests further down.
     conn = sqlite3.connect(str(srv.DB_PATH))
     npush.upsert_subscription(conn, channel=channel or CH, endpoint=f"{EP}{n}",
                               p256dh=UA_PUBLIC, auth=UA_AUTH,
                               member_id=member or f"_op_g_{n}_x", member_name=f"{n}-guest",
-                              mode=mode, tier=tier)
+                              mode=mode, tier=tier, show_text=show_text)
     conn.commit()
     conn.close()
 
@@ -1108,6 +1150,8 @@ conn.commit()
 tiers = dict(conn.execute("SELECT endpoint, tier FROM push_subscriptions").fetchall())
 check("migrate: rows from before the tier column become 'legacy'",
       set(tiers.values()) == {npush.TIER_LEGACY})
+check("migrate: rows from before show_text hide message text (0)",
+      {r[0] for r in conn.execute("SELECT show_text FROM push_subscriptions")} == {0})
 npush.upsert_subscription(conn, channel="c", endpoint=f"{EP}owner-a", p256dh=UA_PUBLIC,
                           auth=UA_AUTH, member_id="_op_t_owner", member_name="Owner",
                           mode="mentions", tier=npush.TIER_TRUSTED, now=t0 + 86400)
@@ -1196,6 +1240,90 @@ check(f"move: a member at its quota keeps every channel ({moved})",
 check("move: another identity's row on the old endpoint is untouched",
       ("c5", E1, "X", "all") in rows)
 mconn.close()
+
+# ───────── Device controls: show_text, last delivery ─────────
+# A DB from the build just before show_text: every other column present.
+PREV_SCHEMA = OLD_SCHEMA.replace(
+    " PRIMARY KEY (channel, endpoint))",
+    " tier TEXT NOT NULL DEFAULT 'legacy', fail_count INTEGER NOT NULL DEFAULT 0,"
+    " last_ok_at REAL NOT NULL DEFAULT 0, PRIMARY KEY (channel, endpoint))")
+prev_dir = Path(tempfile.mkdtemp(prefix="nth_webpush_prev_"))
+pconn = sqlite3.connect(str(prev_dir / "n.db"))
+pconn.execute(PREV_SCHEMA)
+pconn.execute("INSERT INTO push_subscriptions (channel, endpoint, member_id, p256dh, auth, mode, "
+              "created_at, updated_at, tier, last_ok_at) VALUES ('c', ?, 'M', ?, ?, 'all', 1, 1, "
+              "'trusted', 5)", (f"{EP}prev", UA_PUBLIC, UA_AUTH))
+pconn.commit()
+npush.ensure_push_table(pconn)
+pconn.commit()
+check("migrate: an existing subscription gains show_text = 0 (hidden)",
+      pconn.execute("SELECT show_text, last_ok_at FROM push_subscriptions").fetchone() == (0, 5.0))
+
+
+def shown(conn, ep, channel="c"):
+    return conn.execute("SELECT show_text FROM push_subscriptions WHERE channel = ? AND "
+                        "endpoint = ?", (channel, ep)).fetchone()[0]
+
+
+def up(conn, ep, member="M", **kw):
+    npush.upsert_subscription(conn, channel="c", endpoint=ep, p256dh=UA_PUBLIC, auth=UA_AUTH,
+                              member_id=member, member_name="m", mode=kw.pop("mode", "all"),
+                              tier=npush.TIER_TRUSTED, **kw)
+
+
+up(pconn, f"{EP}new")
+check("store: a new subscription hides text unless asked", shown(pconn, f"{EP}new") == 0)
+up(pconn, f"{EP}new", show_text=True)
+check("store: subscribe with show_text stores it", shown(pconn, f"{EP}new") == 1)
+up(pconn, f"{EP}new", mode="mentions")
+check("store: a renewal or mode change without show_text keeps the choice",
+      shown(pconn, f"{EP}new") == 1)
+up(pconn, f"{EP}new", show_text=False)
+check("store: subscribe with show_text false turns it back off", shown(pconn, f"{EP}new") == 0)
+up(pconn, f"{EP}born-shown", show_text=True)
+check("store: a new subscription can start with text shown", shown(pconn, f"{EP}born-shown") == 1)
+check("store: set_show_text changes the owner's row",
+      npush.set_show_text(pconn, member_id="M", endpoint=f"{EP}new", channel="c",
+                          show_text=True) == 1 and shown(pconn, f"{EP}new") == 1)
+check("store: set_show_text refuses another identity's row",
+      npush.set_show_text(pconn, member_id="X", endpoint=f"{EP}new", channel="c",
+                          show_text=False) == 0 and shown(pconn, f"{EP}new") == 1)
+check("store: set_show_text on a missing row changes nothing",
+      npush.set_show_text(pconn, member_id="M", endpoint=f"{EP}none", channel="c",
+                          show_text=True) == 0)
+check("store: own_subscription finds only the caller's row",
+      npush.own_subscription(pconn, member_id="M", endpoint=f"{EP}new", channel="c")["show_text"]
+      is True
+      and npush.own_subscription(pconn, member_id="X", endpoint=f"{EP}new", channel="c") is None)
+npush.record_test_outcome(pconn, channel="c", endpoint=f"{EP}new", status=201, now=1234.0)
+check("store: a successful test marks the row delivered",
+      pconn.execute("SELECT last_ok_at, fail_count FROM push_subscriptions WHERE endpoint = ?",
+                    (f"{EP}new",)).fetchone() == (1234.0, 0))
+pconn.execute("UPDATE push_subscriptions SET fail_count = 2 WHERE endpoint = ?", (f"{EP}new",))
+npush.record_test_outcome(pconn, channel="c", endpoint=f"{EP}new", status=403, now=9999.0)
+check("store: a refused test leaves the delivery record and rejection count alone",
+      pconn.execute("SELECT last_ok_at, fail_count FROM push_subscriptions WHERE endpoint = ?",
+                    (f"{EP}new",)).fetchone() == (1234.0, 2))
+npush.record_test_outcome(pconn, channel="c", endpoint=f"{EP}new", status=410)
+check("store: a test answered 410 forgets the endpoint",
+      npush.own_subscription(pconn, member_id="M", endpoint=f"{EP}new", channel="c") is None)
+pconn.close()
+
+# The dispatcher sends each row's choice.
+clear_subs()
+add_sub("hide", show_text=False)
+add_sub("show", show_text=True)
+sc = Scripted()
+d = fresh(sc)
+say("rotate the staging keys tonight")
+d.tick()
+bodies = {e[len(EP):]: p["body"] for e, p, _u in sc.calls}
+check("dispatch: a device that has not opted in gets the neutral line",
+      bodies.get("hide") == npush.HIDDEN_BODY, str(bodies))
+check("dispatch: a device that opted in gets the message text",
+      bodies.get("show") == "rotate the staging keys tonight", str(bodies))
+check("dispatch: a delivery records last_ok_at", sub_row("hide")["last_ok_at"] == clock[0])
+clear_subs()
 
 # A failed outcome write is kept and applied on the next tick.
 clear_subs()
@@ -1327,6 +1455,20 @@ def as_json(raw):
         return {}
 
 
+def _owner_row_show_text(endpoint):
+    conn = sqlite3.connect(str(srv.DB_PATH))
+    try:
+        return conn.execute("SELECT show_text FROM push_subscriptions WHERE endpoint = ?",
+                            (endpoint,)).fetchone()[0]
+    finally:
+        conn.close()
+
+
+def srow(endpoint, mode, show_text=False, last_ok_at=None):
+    """One entry of /api/push/status `subscriptions`."""
+    return {"endpoint": endpoint, "mode": mode, "show_text": show_text, "last_ok_at": last_ok_at}
+
+
 try:
     hub.start()
     web.NthWebHandler.hub = hub
@@ -1445,7 +1587,7 @@ try:
               st == 200 and as_json(raw).get("moved") == [CH])
         st, _hd, raw = call(port, "GET", f"/api/push/status?channel={CH}")
         check("move: status shows the new endpoint",
-              as_json(raw).get("subscriptions") == [{"endpoint": NEW_EP, "mode": "every5m"}])
+              as_json(raw).get("subscriptions") == [srow(NEW_EP, "every5m")])
         st, _hd, _raw = call(port, "POST", "/api/push/move",
                              {"old_endpoint": NEW_EP,
                               "subscription": {**GOOD_SUB, "endpoint": "https://127.0.0.1/x"}})
@@ -1457,7 +1599,7 @@ try:
         status = as_json(raw)
         check("status: shows this identity's mode for the channel",
               st == 200 and status.get("subscriptions") == [
-                  {"endpoint": GOOD_SUB["endpoint"], "mode": "every5m"}], str(status))
+                  srow(GOOD_SUB["endpoint"], "every5m")], str(status))
         st, _hd, _raw = call(port, "POST", "/api/push/subscribe", {**SUB, "mode": "all"})
         st, _hd, raw_nd = call(port, "GET", f"/api/push/status?channel={CH}")
         check("status: a server with no sending hub says it is not delivering",
@@ -1497,7 +1639,7 @@ try:
         check("subscribe: mode off is refused over HTTP (400)", st == 400)
         st, _hd, raw = call(port, "GET", f"/api/push/status?channel={CH}")
         check("status: changing the mode replaces, never duplicates",
-              as_json(raw).get("subscriptions") == [{"endpoint": GOOD_SUB["endpoint"], "mode": "all"}])
+              as_json(raw).get("subscriptions") == [srow(GOOD_SUB["endpoint"], "all")])
 
         thief = web.OperatorIdentity(member_id="_op_g_thief_x", name="thief", source=web.IDENTITY_SOURCE_GUEST)
         web.NthWebHandler._resolve_identity = lambda self, _i=thief: (None, _i, False)
@@ -1515,6 +1657,92 @@ try:
         check("unsubscribe: the owner removes it", st == 200 and as_json(raw).get("removed") == 1)
         st, _hd, raw = call(port, "GET", f"/api/push/status?channel={CH}")
         check("status: empty after unsubscribe", as_json(raw).get("subscriptions") == [])
+
+        # ── Device controls over HTTP: show_text, last delivery, Send test ──
+        DEV = {**GOOD_SUB, "endpoint": GOOD_SUB["endpoint"] + "-dev"}
+        DEV_EP = DEV["endpoint"]
+        TARGET = {"endpoint": DEV_EP, "channel": CH}
+
+        def my_row():
+            body = as_json(call(port, "GET", f"/api/push/status?channel={CH}")[2])
+            return next((r for r in body.get("subscriptions", []) if r["endpoint"] == DEV_EP), None)
+
+        st, _hd, _raw = call(port, "POST", "/api/push/subscribe",
+                             {"subscription": DEV, "channel": CH, "mode": "all", "show_text": "yes"})
+        check("subscribe: a non-boolean show_text is refused (400)", st == 400)
+        st, _hd, _raw = call(port, "POST", "/api/push/subscribe",
+                             {"subscription": DEV, "channel": CH, "mode": "all"})
+        row = my_row()
+        check("status: a new device hides text and has never been delivered to",
+              st == 200 and row == srow(DEV_EP, "all"), str(row))
+        st, _hd, _raw = call(port, "POST", "/api/push/subscribe",
+                             {"subscription": DEV, "channel": CH, "mode": "all", "show_text": True})
+        check("subscribe: show_text true is stored", my_row()["show_text"] is True)
+        call(port, "POST", "/api/push/subscribe", {"subscription": DEV, "channel": CH, "mode": "mentions"})
+        check("subscribe: the page's quiet renewal (no show_text) keeps the choice",
+              my_row() == srow(DEV_EP, "mentions", show_text=True))
+        st, _hd, raw = call(port, "POST", "/api/push/settings", {**TARGET, "show_text": False})
+        check("settings: the owner turns message text off without re-subscribing",
+              st == 200 and as_json(raw).get("show_text") is False
+              and my_row()["show_text"] is False)
+        st, _hd, _raw = call(port, "POST", "/api/push/settings", {**TARGET, "show_text": 1})
+        check("settings: a non-boolean show_text is refused (400)", st == 400)
+        st, _hd, _raw = call(port, "POST", "/api/push/settings",
+                             {"endpoint": DEV_EP + "-nope", "channel": CH, "show_text": True})
+        check("settings: a missing subscription answers 404", st == 404)
+        st, _hd, _raw = call(port, "POST", "/api/push/settings", {**TARGET, "show_text": True},
+                             headers={"Origin": "https://evil.example.com"})
+        check("settings: cross-origin POST refused", st == 403)
+
+        sends = Scripted()
+        _real_send, _real_limiter = npush.send_push, npush.TEST_LIMITER
+        test_clock = [1000.0]
+        npush.send_push = sends
+        npush.TEST_LIMITER = npush.TestPushLimiter(clock=lambda: test_clock[0])
+        try:
+            web.NthWebHandler._resolve_identity = lambda self, _i=thief: (None, _i, False)
+            st, _hd, _raw = call(port, "POST", "/api/push/settings", {**TARGET, "show_text": True})
+            check("settings: another identity cannot change it (404, unchanged)",
+                  st == 404 and _owner_row_show_text(DEV_EP) == 0)
+            st, _hd, _raw = call(port, "POST", "/api/push/test", TARGET)
+            check("test: another identity cannot push to this device (404, nothing sent)",
+                  st == 404 and not sends.calls)
+            web.NthWebHandler._resolve_identity = lambda self, _i=ident: (None, _i, False)
+
+            st, _hd, _raw = call(port, "POST", "/api/push/test",
+                                 {"endpoint": DEV_EP + "-nope", "channel": CH})
+            check("test: a device with no subscription here answers 404, nothing sent",
+                  st == 404 and not sends.calls)
+            st, _hd, _raw = call(port, "POST", "/api/push/test", TARGET,
+                                 headers={"Origin": "https://evil.example.com"})
+            check("test: cross-origin POST refused", st == 403 and not sends.calls)
+
+            before = time.time()
+            st, _hd, raw = call(port, "POST", "/api/push/test", TARGET)
+            check("test: the owner's own device gets exactly one push",
+                  st == 200 and [c[0] for c in sends.calls] == [DEV_EP], f"{st} {raw[:120]!r}")
+            check("test: the push is the synthetic test notification",
+                  sends.calls and sends.calls[0][1] == npush.test_payload(CH))
+            row = my_row()
+            check("status: reports last_ok_at after a delivered test",
+                  row["last_ok_at"] is not None and row["last_ok_at"] >= before
+                  and as_json(raw).get("last_ok_at") == row["last_ok_at"], str(row))
+            st, _hd, raw = call(port, "POST", "/api/push/test", TARGET)
+            check("test: a second press within 10 s is rate-limited (429), nothing sent",
+                  st == 429 and len(sends.calls) == 1 and b"wait" in raw.lower())
+            test_clock[0] += npush.TEST_PUSH_INTERVAL_S
+            sends.status[DEV_EP] = 503
+            st, _hd, raw = call(port, "POST", "/api/push/test", TARGET)
+            check("test: a push-service failure says so (502) and keeps the last delivery",
+                  st == 502 and b"503" in raw and my_row()["last_ok_at"] == row["last_ok_at"])
+            test_clock[0] += npush.TEST_PUSH_INTERVAL_S
+            sends.status[DEV_EP] = 410
+            st, _hd, raw = call(port, "POST", "/api/push/test", TARGET)
+            check("test: an expired subscription answers 410 and is forgotten",
+                  st == 410 and my_row() is None)
+        finally:
+            npush.send_push, npush.TEST_LIMITER = _real_send, _real_limiter
+            web.NthWebHandler._resolve_identity = lambda self, _i=ident: (None, _i, False)
 
         pending = web.OperatorIdentity(member_id="_op_p_x", name="", source=web.IDENTITY_SOURCE_PENDING)
         web.NthWebHandler._resolve_identity = lambda self, _i=pending: (None, _i, False)

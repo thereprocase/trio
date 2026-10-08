@@ -88,6 +88,13 @@ MAX_PLAINTEXT = MAX_PUSH_BODY - HEADER_LEN - 16 - 1     # 3993
 MAX_ENDPOINT_LEN = 1024
 MAX_BODY_CHARS = 240
 MAX_TITLE_CHARS = 120
+# What a notification says in place of the message when the device has not
+# opted in to showing message text. A lock screen is readable by anyone
+# holding the phone, so the text stays inside the app unless asked for.
+HIDDEN_BODY = "New message"
+# A device's "Send test" button. Bounded per endpoint so the button cannot be
+# used to hammer a push service (or a phone) from the hub.
+TEST_PUSH_INTERVAL_S = 10.0
 
 # Subscription quotas, per tier. A self-declared guest gets a fresh member id
 # with every new cookie, so a per-member cap alone does not bound guests; the
@@ -537,11 +544,17 @@ def flush_due(mode: str, state: SubState, now: float) -> Decision:
 
 
 def build_payload(channel: str, decision: Decision,
-                  msg: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                  msg: Optional[Dict[str, Any]] = None,
+                  show_text: bool = False) -> Dict[str, Any]:
     """The JSON the service worker turns into a notification.
 
     `tag` is per channel so a burst collapses into one notification on the
     phone rather than stacking twenty.
+
+    The title names the channel (or DM) and the sender either way. The message
+    text goes in the body only when the device opted in with `show_text`;
+    otherwise the body is HIDDEN_BODY. A digest names only the latest sender,
+    which the titles already disclose, so it is the same in both cases.
     """
     base = {"channel": channel, "tag": f"nth-{channel}", "url": f"/?channel={channel}"}
     if decision.kind == "digest":
@@ -555,8 +568,22 @@ def build_payload(channel: str, decision: Decision,
     title = f"{where} — {sender}"
     if decision.kind == "bang":
         title = "Urgent: " + title
-    return {**base, "title": _clip(title, MAX_TITLE_CHARS),
-            "body": _clip(" ".join(str(msg.get("content") or "").split()), MAX_BODY_CHARS)}
+    if show_text:
+        body = _clip(" ".join(str(msg.get("content") or "").split()), MAX_BODY_CHARS)
+    else:
+        body = HIDDEN_BODY
+    return {**base, "title": _clip(title, MAX_TITLE_CHARS), "body": body}
+
+
+def test_payload(channel: str) -> Dict[str, Any]:
+    """The notification a device's "Send test" button asks for.
+
+    Its own tag, so it never replaces a real notification for the channel
+    that is still waiting to be read.
+    """
+    return {"channel": channel, "tag": "nth-test", "url": f"/?channel={channel}",
+            "title": _clip(f"Test notification from #{channel}", MAX_TITLE_CHARS),
+            "body": "If you can read this, notifications reach this device."}
 
 
 def _clip(text: str, limit: int) -> str:
@@ -606,14 +633,18 @@ def ensure_push_table(db: sqlite3.Connection) -> None:
         " tier TEXT NOT NULL DEFAULT 'legacy',"
         " fail_count INTEGER NOT NULL DEFAULT 0,"
         " last_ok_at REAL NOT NULL DEFAULT 0,"
+        " show_text INTEGER NOT NULL DEFAULT 0,"
         " PRIMARY KEY (channel, endpoint))")
     # Columns added after the table first shipped. Every insert names its
     # tier, so the default only ever lands on rows that predate the column:
-    # those become 'legacy' (see TIER_LEGACY), never 'guest'.
+    # those become 'legacy' (see TIER_LEGACY), never 'guest'. Rows from before
+    # show_text existed get 0: message text stays hidden until the device's
+    # owner turns it on.
     have = {r[1] for r in db.execute("PRAGMA table_info(push_subscriptions)").fetchall()}
     for column, ddl in (("tier", "TEXT NOT NULL DEFAULT 'legacy'"),
                         ("fail_count", "INTEGER NOT NULL DEFAULT 0"),
-                        ("last_ok_at", "REAL NOT NULL DEFAULT 0")):
+                        ("last_ok_at", "REAL NOT NULL DEFAULT 0"),
+                        ("show_text", "INTEGER NOT NULL DEFAULT 0")):
         if column not in have:
             try:
                 db.execute(f"ALTER TABLE push_subscriptions ADD COLUMN {column} {ddl}")
@@ -655,6 +686,7 @@ class SubscriptionConflict(Exception):
 def upsert_subscription(db: sqlite3.Connection, *, channel: str, endpoint: str,
                         p256dh: str, auth: str, member_id: str, member_name: str,
                         mode: str, tier: str = TIER_GUEST,
+                        show_text: Optional[bool] = None,
                         now: Optional[float] = None) -> None:
     """Store one device's subscription to one channel.
 
@@ -663,6 +695,10 @@ def upsert_subscription(db: sqlite3.Connection, *, channel: str, endpoint: str,
     it; another identity presenting the same endpoint is refused
     (SubscriptionConflict) and the page answers by making a fresh endpoint.
     Changing the mode clears any every5m count held under the old one.
+
+    `show_text` None keeps a row's current choice (a new row hides text): the
+    page renews its subscription quietly on every visit, and that must never
+    undo what the person ticked.
     """
     if mode not in SUBSCRIBE_MODES:
         raise ValueError("unknown mode (to turn notifications off, unsubscribe)")
@@ -677,7 +713,7 @@ def upsert_subscription(db: sqlite3.Connection, *, channel: str, endpoint: str,
         db.execute("BEGIN IMMEDIATE")
     try:
         _upsert_locked(db, channel, endpoint, p256dh, auth, member_id, member_name,
-                       mode, tier, now)
+                       mode, tier, show_text, now)
     except BaseException:
         if owns_txn:
             db.rollback()
@@ -687,7 +723,7 @@ def upsert_subscription(db: sqlite3.Connection, *, channel: str, endpoint: str,
 
 
 def _upsert_locked(db, channel, endpoint, p256dh, auth, member_id, member_name,
-                   mode, tier, now) -> None:
+                   mode, tier, show_text, now) -> None:
     existing = db.execute(
         "SELECT member_id FROM push_subscriptions WHERE channel = ? AND endpoint = ?",
         (channel, endpoint)).fetchone()
@@ -703,12 +739,15 @@ def _upsert_locked(db, channel, endpoint, p256dh, auth, member_id, member_name,
                           members).fetchone()[0]
         if mine >= per_member or pool >= per_tier:
             raise SubscriptionLimit("too many push subscriptions")
+    shown = None if show_text is None else int(bool(show_text))
     db.execute(
         "INSERT INTO push_subscriptions (channel, endpoint, member_id, member_name,"
-        " p256dh, auth, mode, created_at, updated_at, tier) VALUES (?,?,?,?,?,?,?,?,?,?)"
+        " p256dh, auth, mode, created_at, updated_at, tier, show_text)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,COALESCE(?, 0))"
         " ON CONFLICT(channel, endpoint) DO UPDATE SET"
         " member_name = excluded.member_name, p256dh = excluded.p256dh,"
         " auth = excluded.auth, updated_at = excluded.updated_at, fail_count = 0,"
+        " show_text = COALESCE(?, push_subscriptions.show_text),"
         # The tier comes from the server-side identity of whoever is posting
         # now, so it is rewritten on every renewal (re-tiering legacy rows).
         " tier = excluded.tier,"
@@ -718,7 +757,8 @@ def _upsert_locked(db, channel, endpoint, p256dh, auth, member_id, member_name,
         "   THEN push_subscriptions.pending_sender ELSE '' END,"
         " mode = excluded.mode"
         " WHERE push_subscriptions.member_id = excluded.member_id",
-        (channel, endpoint, member_id, member_name, p256dh, auth, mode, now, now, tier))
+        (channel, endpoint, member_id, member_name, p256dh, auth, mode, now, now, tier,
+         shown, shown))
 
 
 def move_endpoint(db: sqlite3.Connection, *, member_id: str, old_endpoint: str,
@@ -772,6 +812,79 @@ def delete_subscription(db: sqlite3.Connection, *, member_id: str, endpoint: str
     return cur.rowcount
 
 
+def set_show_text(db: sqlite3.Connection, *, member_id: str, endpoint: str,
+                  channel: str, show_text: bool) -> int:
+    """Change whether one of this identity's subscriptions shows message text.
+    Returns the rows changed: 0 when the row is missing or someone else's."""
+    ensure_push_table(db)
+    return db.execute("UPDATE push_subscriptions SET show_text = ? WHERE member_id = ? "
+                      "AND endpoint = ? AND channel = ?",
+                      (int(bool(show_text)), member_id, endpoint, channel)).rowcount
+
+
+def own_subscription(db: sqlite3.Connection, *, member_id: str, endpoint: str,
+                     channel: str) -> Optional[Dict[str, Any]]:
+    """This identity's row for one endpoint and channel, or None. The only way
+    the HTTP surface finds a row to act on, so nobody acts on another's."""
+    ensure_push_table(db)
+    row = db.execute("SELECT endpoint, p256dh, auth, mode, show_text, last_ok_at "
+                     "FROM push_subscriptions WHERE member_id = ? AND endpoint = ? "
+                     "AND channel = ?", (member_id, endpoint, channel)).fetchone()
+    if row is None:
+        return None
+    return {"endpoint": row[0], "p256dh": row[1], "auth": row[2], "mode": row[3],
+            "show_text": bool(row[4]), "last_ok_at": float(row[5] or 0)}
+
+
+def record_test_outcome(db: sqlite3.Connection, *, channel: str, endpoint: str,
+                        status: int, now: Optional[float] = None) -> None:
+    """Apply a test push's result the way the dispatcher applies a delivery's:
+    success marks the row delivered, 404/410 forgets an endpoint the push
+    service says is gone. Any other refusal leaves the rejection count alone;
+    the dispatcher keeps that count from real deliveries only."""
+    now = time.time() if now is None else now
+    ensure_push_table(db)
+    if 200 <= status < 300:
+        db.execute("UPDATE push_subscriptions SET fail_count = 0, last_ok_at = ? "
+                   "WHERE channel = ? AND endpoint = ?", (now, channel, endpoint))
+    elif status in (404, 410):
+        db.execute("DELETE FROM push_subscriptions WHERE endpoint = ?", (endpoint,))
+
+
+class TestPushLimiter:
+    """At most one test push per endpoint per interval, in this process.
+
+    In memory on purpose: the button is a convenience, a hub restart resetting
+    it costs nothing, and keeping it out of the DB keeps the test path from
+    taking the write lock just to say no.
+    """
+
+    def __init__(self, interval_s: float = TEST_PUSH_INTERVAL_S,
+                 clock: Callable[[], float] = time.monotonic):
+        self.interval_s = interval_s
+        self._clock = clock
+        self._last: Dict[str, float] = {}
+        self._lock = threading.Lock()
+
+    def take(self, key: str) -> float:
+        """0 when the caller may send now (and the slot is taken), else the
+        seconds left to wait."""
+        with self._lock:
+            now = self._clock()
+            # Forget expired entries so the map stays as small as the set of
+            # devices that pressed the button in the last interval.
+            for k in [k for k, t in self._last.items() if now - t >= self.interval_s]:
+                del self._last[k]
+            last = self._last.get(key)
+            if last is not None:
+                return self.interval_s - (now - last)
+            self._last[key] = now
+            return 0.0
+
+
+TEST_LIMITER = TestPushLimiter()
+
+
 def delete_channel_subscriptions(db: sqlite3.Connection, channel: str) -> int:
     """Forget every subscription to a channel that is being deleted."""
     ensure_push_table(db)
@@ -789,11 +902,15 @@ def subscriptions_of(db: sqlite3.Connection, member_id: str) -> List[Dict[str, s
 
 
 def subscriptions_for(db: sqlite3.Connection, member_id: str,
-                      channel: str) -> List[Dict[str, str]]:
+                      channel: str) -> List[Dict[str, Any]]:
+    """This identity's subscriptions to one channel, with what the page shows
+    for its own device: the text choice and when a push last got through
+    (None = never)."""
     ensure_push_table(db)
-    rows = db.execute("SELECT endpoint, mode FROM push_subscriptions WHERE "
-                      "member_id = ? AND channel = ?", (member_id, channel)).fetchall()
-    return [{"endpoint": r[0], "mode": r[1]} for r in rows]
+    rows = db.execute("SELECT endpoint, mode, show_text, last_ok_at FROM push_subscriptions "
+                      "WHERE member_id = ? AND channel = ?", (member_id, channel)).fetchall()
+    return [{"endpoint": r[0], "mode": r[1], "show_text": bool(r[2]),
+             "last_ok_at": float(r[3]) if r[3] else None} for r in rows]
 
 
 # ───────── Delivery ─────────
@@ -1221,7 +1338,8 @@ class PushDispatcher(threading.Thread):
             return STATUS_SKIPPED
         sub = item.sub
         endpoint = sub["endpoint"]
-        payload = build_payload(sub["channel"], item.decision, item.msg)
+        payload = build_payload(sub["channel"], item.decision, item.msg,
+                                show_text=bool(sub.get("show_text")))
         urgency = "high" if item.decision.kind == "bang" else "normal"
         try:
             return self._send(endpoint, sub["p256dh"], sub["auth"], payload,

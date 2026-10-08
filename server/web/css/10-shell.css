@@ -452,6 +452,17 @@ h1,h2,h3,h4{ margin:0; font-weight:600; }
 .push-modes .btn:disabled{ opacity:.55; cursor:not-allowed; }
 .push-hint{ margin-bottom:10px; padding:10px 12px; border-radius:var(--r-xs); background:var(--accent-tint); color:var(--ink-2); font-size:13px; line-height:1.45; }
 .push-status{ margin-top:9px; color:var(--ink-3); font-size:13px; line-height:1.45; }
+/* Per-device controls under the modes: the lock-screen text choice, the last
+   delivery and a test button, and the notice when the hub dropped the device. */
+.push-option{ display:flex; align-items:flex-start; gap:8px; margin-top:10px; color:var(--ink-2); font-size:13px; line-height:1.45; cursor:pointer; }
+.push-option input{ flex:none; margin:2px 0 0; }
+.push-device{ display:flex; align-items:center; justify-content:space-between; gap:8px; margin-top:9px; color:var(--ink-3); font-size:13px; }
+.push-device .btn, .push-dropped .btn{ border:1px solid var(--line); background:transparent; color:var(--ink); }
+.push-device .btn:hover, .push-dropped .btn:hover{ background:var(--surface-hover); }
+.push-device .btn:disabled{ opacity:.55; cursor:not-allowed; }
+.push-dropped{ margin-bottom:10px; padding:10px 12px; border-radius:var(--r-xs); background:var(--danger-tint); color:var(--ink-2); font-size:13px; line-height:1.45; }
+.push-dropped p{ margin:0 0 8px; }
+.push-device[hidden], .push-dropped[hidden]{ display:none; }
 .channel-drawer-empty{ color:var(--ink-3); font-size:13.5px; }
 .channel-drawer-empty-inline{ color:var(--ink-3); font-weight:500; font-size:13px; }
 @media (max-width:880px){

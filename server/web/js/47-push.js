@@ -28,6 +28,41 @@
   // single-channel viewer, or a dashboard started with --no-agent-control.
   const NOT_DELIVERING = 'Your choice is saved, but no hub is sending phone notifications right now. They are sent by the hub\'s main dashboard (nth_web.py started without a channel).';
 
+  // The hub deletes a subscription the push service keeps refusing, and
+  // nothing tells the phone. The page therefore remembers, per channel, that
+  // this device was subscribed and with which mode, so it can notice the row
+  // has gone and offer to restore it.
+  const DROPPED = 'Notifications to this device stopped after repeated delivery failures. Turn them back on?';
+  const REMEMBER_PREFIX = 'nth.push.subscribed.';
+  function remembered(channel) {
+    try { return localStorage.getItem(REMEMBER_PREFIX + channel) || ''; } catch { return ''; }
+  }
+  function remember(channel, mode) {
+    try {
+      if (mode && mode !== 'off') localStorage.setItem(REMEMBER_PREFIX + channel, mode);
+      else localStorage.removeItem(REMEMBER_PREFIX + channel);
+    } catch { /* private mode: the notice is a convenience */ }
+  }
+  // Whether to offer "Turn them back on": this device was subscribed here, the
+  // hub no longer has the row, and nothing else explains why (an unnamed
+  // visitor has no rows to show; a blocker already says what is wrong).
+  function droppedNotice({ rememberedMode, subscribedHere, named, blocked }) {
+    return !!rememberedMode && rememberedMode !== 'off' && !subscribedHere && named !== false && !blocked;
+  }
+
+  // "14:05" today, "14:05, Mar 3" on another day this year, with the year
+  // otherwise; "never" before the first delivery.
+  function lastDelivered(seconds, now = new Date()) {
+    if (!seconds) return 'never';
+    const when = new Date(seconds * 1000);
+    const pad = n => String(n).padStart(2, '0');
+    const time = pad(when.getHours()) + ':' + pad(when.getMinutes());
+    if (when.toDateString() === now.toDateString()) return time;
+    const opts = { month: 'short', day: 'numeric' };
+    if (when.getFullYear() !== now.getFullYear()) opts.year = 'numeric';
+    return time + ', ' + when.toLocaleDateString(undefined, opts);
+  }
+
   function supported() {
     return 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
   }
@@ -101,11 +136,20 @@
       `<button type="button" class="btn sm push-mode" data-push-mode="${id}" aria-pressed="false">${esc(label)}</button>`).join('');
     section.innerHTML = '<h3>Phone notifications</h3>'
       + '<p class="push-hint" hidden></p>'
+      + `<div class="push-dropped" hidden><p>${esc(DROPPED)}</p><button type="button" class="btn sm push-resubscribe">Turn back on</button> <button type="button" class="btn sm push-dismiss">Not now</button></div>`
       + `<div class="push-modes" role="group" aria-label="Phone notifications for #${esc(channel)}">${buttons}</div>`
+      + '<label class="push-option"><input type="checkbox" class="push-show-text"><span>Show message text on the lock screen</span></label>'
+      + '<div class="push-device" hidden><span class="push-last"></span><button type="button" class="btn sm push-test">Send test</button></div>'
       + '<p class="push-status" role="status" aria-live="polite"></p>';
     section.querySelectorAll('.push-mode').forEach(btn => {
       btn.addEventListener('click', () => choose(section, channel, btn.getAttribute('data-push-mode')));
     });
+    section.querySelector('.push-resubscribe')?.addEventListener('click', () => choose(section, channel, remembered(channel) || 'all', { fresh: true }));
+    section.querySelector('.push-dismiss')?.addEventListener('click', () => { remember(channel, 'off'); showDropped(section, false); });
+    section.querySelector('.push-show-text')?.addEventListener('change', () => toggleText(section, channel));
+    section.querySelector('.push-test')?.addEventListener('click', () => sendTest(section, channel));
+    showDropped(section, false);
+    showDevice(section, null);
     refresh(section, channel);
   }
 
@@ -129,7 +173,25 @@
     setStatus(section, `This device: ${label}. ${MODE_HELP[mode] || ''}`);
   }
   function disable(section, disabled) {
-    section.querySelectorAll('.push-mode').forEach(btn => { btn.disabled = disabled; });
+    section.querySelectorAll('.push-mode, .push-show-text, .push-test, .push-resubscribe')
+      .forEach(el => { el.disabled = disabled; });
+  }
+  function showDropped(section, on) {
+    const el = section.querySelector('.push-dropped');
+    if (el) el.hidden = !on;
+  }
+  // This device's row on this channel (null when not subscribed): the text
+  // choice it carries, and when a push last got through. Without a row the
+  // checkbox still works, and its value goes with the next subscribe.
+  const deviceRows = new WeakMap();
+  function showDevice(section, row) {
+    deviceRows.set(section, row);
+    const box = section.querySelector('.push-show-text');
+    if (box && row) box.checked = !!row.show_text;
+    const device = section.querySelector('.push-device');
+    if (device) device.hidden = !row;
+    const last = section.querySelector('.push-last');
+    if (last) last.textContent = 'Last delivered: ' + lastDelivered(row?.last_ok_at);
   }
 
   // Why this device cannot subscribe, or '' when it can.
@@ -160,14 +222,23 @@
     const why = blocker(status?.secure_url || '');
     setHint(section, why || (status && status.delivering === false ? NOT_DELIVERING : ''));
     disable(section, !!why);
-    if (why) { showMode(section, 'off'); return; }
+    if (why) { showMode(section, 'off'); showDevice(section, null); return; }
     let sub = null;
     try {
       if (supported() && Notification.permission === 'granted') sub = await browserSubscription(false);
     } catch { /* no registration yet: this device is not subscribed */ }
+    if (section.dataset.channel !== channel) return;
     const endpoint = sub?.endpoint || '';
-    const mine = (status?.subscriptions || []).find(s => s.endpoint === endpoint);
-    showMode(section, endpoint && mine ? mine.mode : 'off');
+    const mine = endpoint ? (status?.subscriptions || []).find(s => s.endpoint === endpoint) : null;
+    showMode(section, mine ? mine.mode : 'off');
+    showDevice(section, mine || null);
+    if (status) {
+      // Devices subscribed before this build start being remembered here.
+      if (mine) remember(channel, mine.mode);
+      showDropped(section, droppedNotice({
+        rememberedMode: remembered(channel), subscribedHere: !!mine, named: status.named, blocked: !!why,
+      }));
+    }
     // Quietly renew this device's row with the mode it already has: no
     // prompt, no visible change. It keeps the row's tier current with this
     // identity (rows from older builds are re-tiered) and marks it in use, so
@@ -178,7 +249,10 @@
     }
   }
 
-  async function choose(section, channel, mode) {
+  // `fresh` replaces the browser subscription even without a conflict: the
+  // "Turn back on" offer uses it, because the endpoint the hub dropped is the
+  // one the push service kept refusing.
+  async function choose(section, channel, mode, { fresh = false } = {}) {
     // Ask for permission FIRST and synchronously in the tap: iOS refuses the
     // prompt once the handler has awaited anything.
     let permission = Promise.resolve(window.Notification?.permission);
@@ -192,36 +266,97 @@
         // The browser subscription is shared by every channel on this device,
         // so turning one channel off removes only that channel's row.
         if (sub) await api.post('/api/push/unsubscribe', { endpoint: sub.endpoint, channel }, false);
+        remember(channel, 'off');
+        showDropped(section, false);
         showMode(section, 'off');
+        showDevice(section, null);
         return;
       }
       if ((await permission) !== 'granted') {
         setStatus(section, 'Notifications were not allowed, so nothing changed.');
         return;
       }
+      const showText = !!section.querySelector('.push-show-text')?.checked;
+      const body = s => ({ subscription: s.toJSON(), channel, mode, show_text: showText });
+      let note = '';
+      // Nothing to replace when the browser no longer holds a subscription.
+      let replace = fresh && !!(await browserSubscription(false).catch(() => null));
       let sub = await browserSubscription(true);
-      try {
-        await api.post('/api/push/subscribe', { subscription: sub.toJSON(), channel, mode }, false);
-      } catch (e) {
-        // 409: this browser's endpoint already belongs to another identity
-        // (the cookie changed). Replace the browser subscription so this
-        // identity gets an endpoint of its own; the old rows then expire at
-        // the push service and the hub prunes them.
-        if (e?.status !== 409) throw e;
+      if (!replace) {
+        try {
+          await api.post('/api/push/subscribe', body(sub), false);
+        } catch (e) {
+          // 409: this browser's endpoint already belongs to another identity
+          // (the cookie changed). Replace the browser subscription so this
+          // identity gets an endpoint of its own; the old rows then expire at
+          // the push service and the hub prunes them.
+          if (e?.status !== 409) throw e;
+          replace = true;
+        }
+      }
+      if (replace) {
         const oldEndpoint = sub.endpoint;
         await sub.unsubscribe();
         sub = await browserSubscription(true);
-        await api.post('/api/push/subscribe', { subscription: sub.toJSON(), channel, mode }, false);
-        const note = await moveOtherChannels(channel, oldEndpoint, sub);
-        showMode(section, mode);
-        if (note) setStatus(section, section.querySelector('.push-status').textContent + ' ' + note);
-        return;
+        await api.post('/api/push/subscribe', body(sub), false);
+        note = await moveOtherChannels(channel, oldEndpoint, sub);
       }
+      remember(channel, mode);
+      showDropped(section, false);
       showMode(section, mode);
+      showDevice(section, { mode, show_text: showText, last_ok_at: deviceRows.get(section)?.last_ok_at || null });
+      if (note) setStatus(section, section.querySelector('.push-status').textContent + ' ' + note);
     } catch (e) {
       setStatus(section, e?.message || 'Could not change phone notifications.');
     } finally {
       disable(section, false);
+    }
+  }
+
+  // The checkbox saves at once for a subscribed device. Otherwise it is only
+  // a choice on the page, sent with the next subscribe.
+  async function toggleText(section, channel) {
+    const box = section.querySelector('.push-show-text');
+    if (!box) return;
+    const want = !!box.checked;
+    const row = deviceRows.get(section);
+    if (!row) {
+      setStatus(section, want ? 'Message text will show once notifications are on for this device.'
+                              : 'Message text will stay hidden.');
+      return;
+    }
+    box.disabled = true;
+    try {
+      const sub = await browserSubscription(false);
+      if (!sub) throw new Error('This device has no push subscription. Pick a mode to turn notifications on.');
+      await api.post('/api/push/settings', { endpoint: sub.endpoint, channel, show_text: want }, false);
+      showDevice(section, { ...row, show_text: want });
+      setStatus(section, want ? 'Notifications on this device will show message text.'
+                              : 'Notifications on this device will hide message text.');
+    } catch (e) {
+      box.checked = !want;
+      setStatus(section, e?.message || 'Could not change that setting.');
+    } finally {
+      box.disabled = false;
+    }
+  }
+
+  async function sendTest(section, channel) {
+    const button = section.querySelector('.push-test');
+    if (button) button.disabled = true;
+    try {
+      const sub = await browserSubscription(false);
+      if (!sub) throw new Error('This device has no push subscription. Pick a mode to turn notifications on.');
+      const result = await api.post('/api/push/test', { endpoint: sub.endpoint, channel }, false);
+      const row = deviceRows.get(section);
+      if (row) showDevice(section, { ...row, last_ok_at: result?.last_ok_at || Date.now() / 1000 });
+      setStatus(section, 'Test sent. It should appear on this device within a few seconds.');
+    } catch (e) {
+      setStatus(section, e?.message || 'Could not send a test notification.');
+      // 410: the hub has just forgotten this endpoint; show the restore offer.
+      if (e?.status === 410) refresh(section, channel);
+    } finally {
+      if (button) button.disabled = false;
     }
   }
 
@@ -251,5 +386,5 @@
     if (window.isSecureContext) ensureRegistration().catch(() => { /* push stays unavailable; the page works as before */ });
   }
 
-  Trio.push = { mount, render, MODES, blocker, isIos, isStandalone, supported, keyBytes };
+  Trio.push = { mount, render, MODES, blocker, isIos, isStandalone, supported, keyBytes, droppedNotice, lastDelivered };
 })();
