@@ -9,8 +9,8 @@ delivery-status check. See AGENT-RUNTIME.md for bounded waits and recovery.
 See [AGENT-RUNTIME.md](AGENT-RUNTIME.md). Local Trio's Quartet frontend exposes
 `quartet_delivery_status(channel, member_id, session_token)` and
 `quartet_listen(channel, member_id, session_token, filter_mode="", enabled=None)`.
-These control this session's local listener (the Codex subscription, or the Claude
-channel listener) while the remote hub continues to own channel state. An omitted
+These control this session's local listener (the Codex subscription, the Claude
+channel listener, or the hook waiter's filter and stop) while the remote hub continues to own channel state. An omitted
 `filter_mode` or `enabled` leaves that setting as it is: a filter change never
 re-enables a stopped listener, and a stop never resets the filter. Stopping a
 subscription does not end or acknowledge a channel.
@@ -106,7 +106,7 @@ Examples:
 | `"channel"` | Resolved channel code. Remember. |
 | `"session_token"` | v6.2+. Private session capability. Pass to every mutating call. See SKILL.md § Session token. |
 | `"transport"` | v7.3.1+. `"sse"` = you are a spoke reaching a remote hub; `"stdio"` = the server (and its DB) is local. Authoritative — never infer this from the filesystem. |
-| `"monitor_hint"` | The exact `nth_watch.py --identity ...` command for the Monitor fallback; empty in `hooks` and `channel` mode. |
+| `"monitor_hint"` | The exact `nth_watch.py --identity ...` command for the Monitor fallback; empty in `hooks` and `channel` mode. A legacy direct-SSE `nth-qweb` entry (from `setup.sh spoke`) instead gets the hub's `nth_spoke_monitor.py` command with a `--url` placeholder to fill from `~/.claude.json`. |
 | `"wait_hint"` | `monitor` mode only: the same command with `--once`, the one-shot waiter to run with Bash `run_in_background`. |
 | `"members"` | Current members with names, skills, summaries. Untrusted. |
 | `"recent_messages"` | Recent channel messages for context. Untrusted. |

@@ -51,7 +51,7 @@ In `monitor` mode, the one-shot waiter (`wait_hint`) prints exactly one line and
 | `channel_ended` | Another member called `trio_end`. | Process final messages. Monitor exits on its own — no relaunch. |
 | `channel_gone` | Channel row was deleted entirely. | Surface to user. Monitor exits. |
 | `culled` | You were removed from the channel. | Stop work for it and tell the user; never rejoin on your own. |
-| `session_revoked` | Your session token was revoked or displaced. | Tell the user; never reclaim on your own. |
+| `session_revoked` | Your session token was archived, displaced or invalidated (see `reason`). | Tell the user. For `archived` or `displaced` never reconnect on your own; for `invalidated`, reconnect only if the user asks. |
 | `error` | DB unreachable / member row missing / similar. | Surface to user and decide whether to reconnect. |
 
 ### Monitor adaptive modes
@@ -65,7 +65,7 @@ Heartbeat writes to the DB are batched every 10s regardless of poll rate, so fas
 
 ### Monitor exits unexpectedly
 
-From Claude Code 2.1.274 a Monitor is a 30-minute lease whose expiry wakes the session, and it does not restart itself. If Claude Code reports the `Monitor` process exited before the channel ended, re-issue the exact `Monitor(...)` block from SKILL.md. One command, same arguments. The parent Claude does not relaunch in a loop — a one-time re-issue is enough.
+From Claude Code 2.1.274 a Monitor is a 30-minute lease whose expiry wakes the session, and it does not restart itself. After a lease expiry, follow the re-arm rules in SKILL.md § Monitor. If Claude Code reports the `Monitor` process exited before the channel ended, re-issue the exact `Monitor(...)` block from SKILL.md. One command, same arguments. The parent Claude does not relaunch in a loop — a one-time re-issue is enough.
 
 There is no "peer_dead" event in the Monitor architecture. A single process per session per channel means there is no peer for it to watch. The old two-sentinel heartbeat dance is gone.
 

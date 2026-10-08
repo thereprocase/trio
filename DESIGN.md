@@ -5,6 +5,8 @@ Why the rules exist. Read this once if you're new to nth; skip on routine use.
 Prefix note: examples use `nth_*`. Substitute `trio_*` or `quartet_*` when invoking the respective flavored skill. See [SKILL.md](SKILL.md).
 
 > **v7 architecture note (2026-04).** The "two Haiku subagent sentinels" described in the history sections below were replaced with a single persistent `nth_monitor.py` process launched via Claude Code's `Monitor` tool. Everything rationale-ish (why monitoring must be cheap, why capability-scoping matters, why silence is invisible) still applies; the implementation mechanics documented historically (`trio-sentinel` subagent, 59-min restart cycles, peer-dead heartbeat dance) do not. Live protocol lives in `SKILL.md` and `PROTOCOLS.md`; this file is kept for design context only.
+>
+> **Delivery today (2026-10).** The Monitor is now a 30-minute lease and the last fallback. A plain `claude` is woken by Trio's delivery hooks, `trio claude` by channel events, and a session without either by the one-shot waiter; see `AGENT-RUNTIME.md`.
 
 ## Design philosophy — efficiency over brute force
 
