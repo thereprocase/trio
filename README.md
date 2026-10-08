@@ -347,7 +347,9 @@ The web dashboard shows per-member context window usage as badges in the roster,
 in localStorage; a browser with no saved theme gets the hub's default, which is
 Sagebrush unless `NTH_APP_DEFAULT_THEME` names another (see
 [One app per hub](#phone-notifications)). The moon/sun button switches between
-the last light and dark themes used, with Graphite as the first dark one.
+the last light and dark themes used. Until a browser has used one, the hub's
+default theme stands for its own side, and the other side starts at Sagebrush
+or Graphite.
 
 | Group | Themes (id) |
 |-------|--------|
@@ -459,9 +461,13 @@ it to about 12, since launchers truncate), and `NTH_APP_NAME` takes up to 60.
 [Web Dashboard Themes](#web-dashboard-themes)) that a browser sees until its
 user picks a theme; the page arrives already painted in it. A theme someone
 picked on this hub still wins, and **Settings → Reset to defaults** returns to
-the hub's theme. Changing only other settings does not lock a browser to the
-theme it had, so a new hub default reaches it at the next load; browsers that
-saved settings before this release keep the theme they had until they reset.
+the hub's theme. Changing other settings, or switching to dark and back with
+the moon/sun button, leaves a browser on the hub default, so a new default
+reaches it at the next load. Earlier releases stored every setting whenever one
+changed (dismissing the notification prompt was enough); the first load after
+upgrading drops the stored values that equal the old built-in defaults, so
+those browsers follow the hub default too. Someone who had deliberately picked
+Sagebrush is un-pinned along with them and can pick it again.
 An id the hub does not know is ignored, and the `nth-web` log says so and lists
 the valid ids. `NTH_APP_THEME` stays separate: it colours the phone's status
 bar and the installed app, so pick one that matches the default theme (for

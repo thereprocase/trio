@@ -89,11 +89,39 @@
   // Only the settings a visitor actually changed are stored. Writing the whole
   // object would pin today's theme the first time someone flips an unrelated
   // switch, and a hub that later changed its default theme would never reach
-  // them, although they never chose one.
-  function storedRaw() {
-    const raw = JSON.parse(localStorage.getItem(KEY) || '{}');
-    return raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+  // them, although they never chose one. Objects written this way carry
+  // STORAGE_FORMAT, which is how an old full save is told apart.
+  const STORAGE_FORMAT = 2;
+  // Earlier releases wrote every setting on any save, including the dismissal
+  // of the notification prompt, so most browsers hold theme 'light-1' that
+  // nobody picked. These are the built-in defaults those saves copied; a value
+  // equal to one of them is dropped once, which un-pins the theme. Someone who
+  // deliberately chose Sagebrush is un-pinned too, and that is accepted.
+  const FULL_SAVE_DEFAULTS = { theme: 'light-1', lightTheme: 'light-1', darkTheme: 'dark-3', font: 'default', compact: false, messageNumbers: false, notifications: true, chime: false, chimeVolume: 0.5, dictation: true, sttMode: 'local', staleThreadDays: 7, messageTimes: 'local',
+    chimeTierDm: true, chimeTierMention: true, chimeTierRef: true, chimeTierPlain: false,
+    notifyTierDm: true, notifyTierMention: true, notifyTierRef: false, notifyTierPlain: false,
+    chimeSoundDm: 'alert', chimeSoundMention: 'ping', chimeSoundRef: 'tick', chimeSoundPlain: 'tick' };
+  // An unmarked object holding theme, lightTheme and darkTheme together came
+  // from a full save: only that path wrote all three. Requiring every current
+  // key instead would miss saves made before the newest keys existed.
+  function isOldFullSave(raw) {
+    return raw.format === undefined && ['theme', 'lightTheme', 'darkTheme'].every(k => k in raw);
   }
+  function migrateFullSave(raw) {
+    const kept = { format: STORAGE_FORMAT };
+    for (const [k, v] of Object.entries(raw)) if (!(k in FULL_SAVE_DEFAULTS) || FULL_SAVE_DEFAULTS[k] !== v) kept[k] = v;
+    return kept;
+  }
+  function storedRaw() {
+    let raw = JSON.parse(localStorage.getItem(KEY) || '{}');
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+    if (isOldFullSave(raw)) {
+      raw = migrateFullSave(raw);
+      localStorage.setItem(KEY, JSON.stringify(raw));
+    }
+    return raw;
+  }
+  const modeOf = id => themes.find(theme => theme.id === id)?.mode;
   function readFromStorage() {
     try {
       const raw = storedRaw();
@@ -103,8 +131,8 @@
       const legacyTheme = raw.theme === 'dark' ? 'dark-3' : raw.theme === 'light' ? 'light-1' : null;
       const next = { ...defaults, ...raw };
       if (legacyTheme) next.theme = legacyTheme;
-      if (!raw.lightTheme) next.lightTheme = raw.theme && raw.theme.startsWith('light-') ? raw.theme : defaults.lightTheme;
-      if (!raw.darkTheme) next.darkTheme = raw.theme && raw.theme.startsWith('dark-') ? raw.theme : defaults.darkTheme;
+      if (!raw.lightTheme) next.lightTheme = modeOf(next.theme) === 'light' ? next.theme : defaults.lightTheme;
+      if (!raw.darkTheme) next.darkTheme = modeOf(next.theme) === 'dark' ? next.theme : defaults.darkTheme;
       for (const k of Object.keys(schema)) next[k] = cast(k, next[k]);
       return next;
     } catch { return { ...defaults }; }
@@ -142,10 +170,14 @@
     syncToggleIcon(next.theme);
     return next;
   }
-  function save(change) {
+  // `unpin` names keys to drop from storage after the change is applied: the
+  // value takes effect now but follows the default from then on.
+  function save(change, unpin = []) {
     const current = read(); const next = { ...current };
     let stored; try { stored = storedRaw(); } catch { stored = {}; }
     for (const k of Object.keys(schema)) if (change[k] !== undefined) { next[k] = cast(k, change[k]); stored[k] = next[k]; }
+    for (const k of unpin) delete stored[k];
+    stored.format = STORAGE_FORMAT;
     localStorage.setItem(KEY, JSON.stringify(stored));
     apply(next);
     Trio.events.dispatchEvent(new CustomEvent('preferences:changed', { detail: next }));
@@ -156,10 +188,22 @@
     if (!selected) return read();
     return save(selected.mode === 'light' ? { theme, lightTheme: theme } : { theme, darkTheme: theme });
   }
+  // Toggling back onto the hub's default theme stores nothing for the theme,
+  // unless this browser picked that side's theme itself. Otherwise a trip to
+  // dark mode and back would pin today's default, and a later change of the
+  // hub default would never reach this browser.
   function toggle() {
     const current = read();
-    const currentTheme = themes.find(theme => theme.id === current.theme);
-    return save({ theme: currentTheme?.mode === 'dark' ? current.lightTheme : current.darkTheme });
+    const toLight = modeOf(current.theme) === 'dark';
+    const target = toLight ? current.lightTheme : current.darkTheme;
+    let stored; try { stored = storedRaw(); } catch { stored = {}; }
+    const sideChosen = (toLight ? 'lightTheme' : 'darkTheme') in stored;
+    // Remember the side being left when it is not that side's default, so the
+    // next toggle (even after a reload) comes back to it.
+    const leaving = toLight ? 'darkTheme' : 'lightTheme';
+    const change = { theme: target };
+    if (current.theme !== defaults[leaving] && modeOf(current.theme)) change[leaving] = current.theme;
+    return save(change, target === defaults.theme && !sideChosen ? ['theme'] : []);
   }
   function reset() {
     localStorage.removeItem(KEY);
