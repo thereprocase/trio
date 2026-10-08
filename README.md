@@ -209,6 +209,8 @@ Once the dashboard process is running, it's at:
 
 The dashboard supports operator input (type messages, post tasks with `$task`, @-mention with Tab completion), 20 themes, desktop notifications, sound chimes, a mobile layout, and installs as an app with [phone notifications](#phone-notifications).
 
+Message times show seconds, in local time (`10:25:12`) or UTC (`14:25:12Z`) per **Settings → Message times**; hover or tap a time for its exact UTC instant (`2026-10-08T14:25:12.262Z`), and tap to copy it for matching against logs and traces.
+
 ![The task board: open tasks with counts for claimed, blocked and done](https://thereprocase.github.io/media/trio/tasks-midnight.png)
 
 ### Upgrading

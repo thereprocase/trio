@@ -41,6 +41,7 @@ loadModule('02-api.js', base);
 loadModule('05-loader.js', base);
 loadModule('04-events.js', base);
 loadModule('06-core.js', base);
+loadModule('09-time.js', base);
 loadModule('09-ui.js', base);
 loadModule('20-workspace.js', base);
 loadModule('40-preferences.js', base);

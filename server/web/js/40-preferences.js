@@ -61,11 +61,11 @@
   // independent chime *sound preset* — see Trio.notifications.SOUNDS.
   const NOTIFICATION_TIERS = ['dm', 'mention', 'ref', 'plain'];
   const SOUND_IDS = ['ping', 'alert', 'tick'];
-  const defaults = { theme: 'light-1', lightTheme: 'light-1', darkTheme: 'dark-3', font: 'default', compact: false, messageNumbers: false, notifications: true, chime: false, chimeVolume: 0.5, dictation: true, sttMode: 'local', staleThreadDays: 7,
+  const defaults = { theme: 'light-1', lightTheme: 'light-1', darkTheme: 'dark-3', font: 'default', compact: false, messageNumbers: false, notifications: true, chime: false, chimeVolume: 0.5, dictation: true, sttMode: 'local', staleThreadDays: 7, messageTimes: 'local',
     chimeTierDm: true, chimeTierMention: true, chimeTierRef: true, chimeTierPlain: false,
     notifyTierDm: true, notifyTierMention: true, notifyTierRef: false, notifyTierPlain: false,
     chimeSoundDm: 'alert', chimeSoundMention: 'ping', chimeSoundRef: 'tick', chimeSoundPlain: 'tick' };
-  const schema = { theme: themeIds, lightTheme: lightThemeIds, darkTheme: darkThemeIds, font: ['default','serif','mono'], compact: 'boolean', messageNumbers: 'boolean', notifications: 'boolean', chime: 'boolean', chimeVolume: 'number', dictation: 'boolean', sttMode: ['local','web'], staleThreadDays: 'number',
+  const schema = { theme: themeIds, lightTheme: lightThemeIds, darkTheme: darkThemeIds, font: ['default','serif','mono'], compact: 'boolean', messageNumbers: 'boolean', notifications: 'boolean', chime: 'boolean', chimeVolume: 'number', dictation: 'boolean', sttMode: ['local','web'], staleThreadDays: 'number', messageTimes: ['local','utc'],
     chimeTierDm: 'boolean', chimeTierMention: 'boolean', chimeTierRef: 'boolean', chimeTierPlain: 'boolean',
     notifyTierDm: 'boolean', notifyTierMention: 'boolean', notifyTierRef: 'boolean', notifyTierPlain: 'boolean',
     chimeSoundDm: SOUND_IDS, chimeSoundMention: SOUND_IDS, chimeSoundRef: SOUND_IDS, chimeSoundPlain: SOUND_IDS };
@@ -181,6 +181,12 @@
     const behavior = document.createElement('section'); behavior.className = 'pref-group'; behavior.innerHTML = '<h3>Workspace behavior</h3>';
     const behaviors = [['compact','Compact messages','Tighter spacing for dense, high-volume channels.'],['messageNumbers','Message numbers','Show message IDs beside timestamps.'],['notifications','Desktop notifications','Master switch — which message types actually pop one is set below.'],['chime','Notification chime','Master switch — which message types actually play one, and which sound, is set below.'],['dictation','Dictation','Keep the microphone control available in the composer.']];
     behaviors.forEach(([key,label,description]) => { const row = document.createElement('div'); row.className = 'pref-row'; const text = document.createElement('div'); text.className = 'pr-txt'; text.innerHTML = `<div class="l">${esc(label)}</div><div class="d">${esc(description)}</div>`; const toggle = document.createElement('label'); toggle.className = 'switch'; toggle.innerHTML = `<input type="checkbox" ${p[key] ? 'checked' : ''} aria-label="${esc(label)}"><span class="track"></span><span class="knob"></span>`; toggle.querySelector('input').addEventListener('change', event => save({[key]:event.target.checked})); row.append(text, toggle); behavior.append(row); });
+    const timesRow = document.createElement('div'); timesRow.className = 'pref-row';
+    const timesText = document.createElement('div'); timesText.className = 'pr-txt'; timesText.innerHTML = '<div class="l">Message times</div><div class="d">Local shows your clock (10:25:12); UTC shows 14:25:12Z for matching against logs. Either way, hover a time for the full UTC instant, and tap it to copy.</div>';
+    const timesSelect = document.createElement('select'); timesSelect.className = 'pref-select'; timesSelect.setAttribute('aria-label', 'Message times');
+    [['local','Local'],['utc','UTC']].forEach(([value,label]) => { const opt = document.createElement('option'); opt.value = value; opt.textContent = label; if (p.messageTimes === value) opt.selected = true; timesSelect.append(opt); });
+    timesSelect.addEventListener('change', () => save({ messageTimes: timesSelect.value }));
+    timesRow.append(timesText, timesSelect); behavior.append(timesRow);
     const historyRow = document.createElement('div'); historyRow.className = 'pref-row';
     const historyText = document.createElement('div'); historyText.className = 'pr-txt'; historyText.innerHTML = '<div class="l">Hide old threads</div><div class="d">Move channels and DMs with no activity for this long into a &ldquo;show older&rdquo; group in the sidebar. Nothing is archived or deleted, and anything unread stays put.</div>';
     const historySelect = document.createElement('select'); historySelect.className = 'pref-select'; historySelect.setAttribute('aria-label', 'Hide old threads after');

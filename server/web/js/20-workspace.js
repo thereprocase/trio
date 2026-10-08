@@ -792,7 +792,7 @@
     const list = document.createElement('section'); list.className = 'attention-list';
     for (const item of filtered) {
       const article = document.createElement('article'); article.className = 'att-card k-' + item.kind;
-      article.innerHTML = `<div class="ac-h"><span class="avatar-fallback">${esc((item.source || '?').slice(0,2).toUpperCase())}</span><span><span class="who">${esc(item.source || 'Workspace')}</span><span class="sub">${esc(item.kind)} · ${esc(timeAgo(item.timestamp) || 'now')}</span></span><span class="waiting"><span class="p"></span>waiting for you</span></div><div class="reason">${esc(item.title)}</div>${item.body ? `<div class="att-detail"><div class="r"><span class="k">Details</span><span class="v">${esc(item.body)}</span></div></div>` : ''}`;
+      article.innerHTML = `<div class="ac-h"><span class="avatar-fallback">${esc((item.source || '?').slice(0,2).toUpperCase())}</span><span><span class="who">${esc(item.source || 'Workspace')}</span><span class="sub">${esc(item.kind)} · ${Trio.time.html(item.timestamp, { withDay: 'auto' }) || 'now'}</span></span><span class="waiting"><span class="p"></span>waiting for you</span></div><div class="reason">${esc(item.title)}</div>${item.body ? `<div class="att-detail"><div class="r"><span class="k">Details</span><span class="v">${esc(item.body)}</span></div></div>` : ''}`;
       if (item.actions.length) {
         const row = document.createElement('div'); row.className = 'att-actions';
         for (const d of item.actions) {
@@ -1149,7 +1149,7 @@
     function mentionCard(m) {
       const article = document.createElement('article'); article.className = 'att-card k-mention' + (m.read ? '' : ' unread');
       const source = m.member_name || m.member_id || 'Unknown';
-      const head = `<div class="ac-h">${avatarFor({ id: m.member_id, name: m.member_name })}<span><span class="who">${esc(source)}</span><span class="sub">#${esc(m.channel)} · ${esc(timeAgo(m.created_at) || 'now')}</span></span>${m.read ? '' : '<span class="waiting"><span class="p"></span>unread</span>'}</div>`;
+      const head = `<div class="ac-h">${avatarFor({ id: m.member_id, name: m.member_name })}<span><span class="who">${esc(source)}</span><span class="sub">#${esc(m.channel)} · ${Trio.time.html(m.created_at, { withDay: 'auto' }) || 'now'}</span></span>${m.read ? '' : '<span class="waiting"><span class="p"></span>unread</span>'}</div>`;
       const body = `<div class="reason">${Trio.markdown.renderMarkdown(m.content || '')}</div>`;
       const actions = document.createElement('div'); actions.className = 'att-actions';
       if (!m.read) {
@@ -1166,7 +1166,7 @@
     function dmCard(dm) {
       const article = document.createElement('article'); article.className = 'att-card k-mention' + (dm.unread ? ' unread' : '');
       const label = dm.name || dm.key || 'Conversation';
-      const head = `<div class="ac-h">${avatarFor(label)}<span><span class="who">${esc(label)}</span><span class="sub">Direct message · ${esc(timeAgo(dm.last_at) || 'now')}</span></span>${dm.unread ? `<span class="waiting"><span class="p"></span>${Number(dm.unread) || ''} unread</span>` : ''}</div>`;
+      const head = `<div class="ac-h">${avatarFor(label)}<span><span class="who">${esc(label)}</span><span class="sub">Direct message · ${Trio.time.html(dm.last_at, { withDay: 'auto' }) || 'now'}</span></span>${dm.unread ? `<span class="waiting"><span class="p"></span>${Number(dm.unread) || ''} unread</span>` : ''}</div>`;
       // The DM preview is a truncated (~120-char) content slice, so render it as
       // escaped plain text — markdown on a snippet would leave broken/partial
       // syntax, and a leading list/heading/fence would break the one-line layout
@@ -1658,10 +1658,11 @@
       const b = document.createElement('button'); b.type = 'button'; b.className = 'search-result';
       const ctx = r.dm ? 'DM · ' + r.dm : '#' + (r.channel || 'unknown');
       const author = r.member_name || r.member_id || 'unknown';
-      const time = r.created_at ? new Date(r.created_at).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '';
+      // The whole row is a button, so the time inside is not its own tab stop.
+      const time = Trio.time.html(r.created_at, { withDay: true, tabbable: false });
       const escaped = esc(r.content || '');
       const text = q && escaped.toLowerCase().includes(q.toLowerCase()) ? escaped.replace(new RegExp('(' + escRe(q) + ')', 'ig'), '<mark>$1</mark>') : escaped;
-      b.innerHTML = `<span class="search-meta">${esc(ctx)} · ${esc(author)} · ${esc(time)}</span><span class="search-body">${text}</span>`;
+      b.innerHTML = `<span class="search-meta">${esc(ctx)} · ${esc(author)}${time ? ' · ' + time : ''}</span><span class="search-body">${text}</span>`;
       b.addEventListener('click', () => { searchDialog.close(); if (r.dm) openDmByKey(r.dm); else openChannel(r.channel); if (r.id != null) setTimeout(() => { const card = document.querySelector(`[data-message-id="${r.id}"]`); if (card) { card.scrollIntoView({ behavior: 'smooth', block: 'center' }); card.focus(); } }, 200); });
       list.append(b);
     }

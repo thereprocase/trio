@@ -122,16 +122,10 @@
       avatarUrl: avatarUrlFor(msg.member_id),
     };
   }
-  function time(iso) {
-    if (!iso) return '';
-    try { return new Date(iso).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }); }
-    catch (_) { return ''; }
-  }
-  function date(iso) {
-    if (!iso) return '';
-    try { return new Date(iso).toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' }); }
-    catch (_) { return ''; }
-  }
+  // Local HH:MM:SS or UTC HH:MM:SSZ per the "Message times" preference; the
+  // day label follows the same zone so separators agree with the clock.
+  function time(iso) { return Trio.time.clock(iso); }
+  function date(iso) { return Trio.time.day(iso); }
   function nearBottom(el) { return !el || el.scrollHeight - el.scrollTop - el.clientHeight < 80; }
   function convId() { return state.dmKey ? 'dm:' + state.dmKey : (state.channel || 'home'); }
   // ── Read watermarks ──────────────────────────────────────────────────────
@@ -322,7 +316,7 @@
     if (vm.isEdited) {
       const edited = document.createElement('span');
       edited.className = 'edited-mark'; edited.textContent = ' (edited)';
-      edited.title = 'edited ' + vm.editedTime; body.append(edited);
+      edited.title = 'edited ' + vm.editedTime + (Trio.time.iso(vm.editedAt) ? ' (' + Trio.time.iso(vm.editedAt) + ')' : ''); body.append(edited);
     }
   }
 
@@ -578,7 +572,7 @@
     state.activeMessageActions = null;
   }
   function interactiveMessageTarget(target) {
-    return !!target?.closest?.('a,button,input,textarea,select,fieldset');
+    return !!target?.closest?.('a,button,input,textarea,select,fieldset,.msg-time');
   }
   function showMessageActions(card, content, msg, body) {
     if (!isOwn(msg) || msg.retracted_at || state.readOnly) return;
@@ -644,9 +638,8 @@
     const content = document.createElement('div'); content.className = 'message-content msg-body';
     const head = document.createElement('header'); head.className = 'message-head';
     const author = document.createElement('strong'); author.textContent = vm.author;
-    const stamp = document.createElement('time');
     const idPart = document.createElement('span'); idPart.className = 'message-id'; idPart.textContent = '#' + vm.id + ' · ';
-    stamp.append(idPart, document.createTextNode(vm.timestamp));
+    const stamp = Trio.time.element(vm.createdAt, { prefix: idPart });
     head.append(author);
     if (vm.role) {
       const role = document.createElement('span'); role.className = 'message-role role-' + vm.role; role.textContent = vm.role;
@@ -754,6 +747,27 @@
     pendingInsertIds.clear();
     pendingWasNear = false;
   }
+  // render() draws day separators, but history primes and live messages land
+  // through the incremental paths below. Re-derive the separators from the
+  // painted cards after each insert so a conversation that crosses midnight
+  // (local or UTC, per the preference) shows the boundary without a re-render.
+  function syncDaySeparators(list) {
+    if (!list) return;
+    const idByCard = new Map([...state.messageDomById].map(([id, card]) => [card, id]));
+    let lastDate = '';
+    let prev = null;
+    [...list.children].forEach(el => {
+      if (el.classList?.contains('day-separator')) { el.remove(); return; }
+      const before = prev; prev = el;
+      if (!idByCard.has(el)) return;
+      const d = date(state.messages.get(idByCard.get(el))?.created_at);
+      if (!d || d === lastDate) return;
+      lastDate = d;
+      const day = document.createElement('div'); day.className = 'day-separator'; day.textContent = d;
+      // render() puts the separator above the unread divider; keep that order.
+      list.insertBefore(day, before?.classList?.contains('unread-divider') ? before : el);
+    });
+  }
   function insertCardInOrder(list, card, id) {
     const next = [...list.children].find(el => el.dataset?.messageId && Number(el.dataset.messageId) > Number(id));
     if (next) list.insertBefore(card, next); else list.append(card);
@@ -784,8 +798,11 @@
     } else {
       cards.forEach(([id, card]) => { insertCardInOrder(list, card, id); state.messageDomById.set(id, card); });
     }
-    if (wasNear) { list.scrollTop = list.scrollHeight; markRead(); }
+    // Prune and place separators before pinning to the bottom, so a new day
+    // label cannot push the newest message below the fold.
     pruneMessages();
+    syncDaySeparators(list);
+    if (wasNear) { list.scrollTop = list.scrollHeight; markRead(); }
   }
   function openInsertWindow(wasNear) {
     if (pendingInsertFrame) return;
@@ -911,8 +928,9 @@
         }
       }
       else { render(); }
-      if (wasNear && list) { list.scrollTop = list.scrollHeight; markRead(); }
       pruneMessages();
+      syncDaySeparators(list);
+      if (wasNear && list) { list.scrollTop = list.scrollHeight; markRead(); }
       if (list) openInsertWindow(wasNear);
       return;
     }

@@ -917,12 +917,12 @@
     }
   }
   function renderActivityEvent(e) {
-    const time = e.ts ? new Date(e.ts).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' }) : '';
+    const time = Trio.time.html(e.ts, { withDay: 'auto' });
     const t = (e.type || 'event').toLowerCase();
     const meta = typeInfo[t] || { label: t, cls: '' };
     const content = typeof e.content === 'string' ? e.content : (e.message || (e.content ? JSON.stringify(e.content, null, 2) : ''));
     const body = content ? `<pre class="activity-raw">${esc(String(content).slice(0, 800))}</pre>` : '';
-    return `<article class="activity-event ${esc(meta.cls)}"><time>${esc(time)}</time><b>${esc(meta.label)}</b>${body}</article>`;
+    return `<article class="activity-event ${esc(meta.cls)}">${time || '<time></time>'}<b>${esc(meta.label)}</b>${body}</article>`;
   }
   function showActivity(id, events = [], offset = 0) {
     let panel = $('trio-activity');
