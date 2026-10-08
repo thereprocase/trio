@@ -299,6 +299,61 @@ finally:
         server.shutdown()
         server.server_close()
 
+# ═══ Review fixes ═══════════════════════════════════════════════════════════
+import re  # noqa: E402
+
+# W-C: the HTML is the last column, so lookups and sweeps never read it.
+with db() as conn:
+    cols = [r[1] for r in conn.execute("PRAGMA table_info(pages)")]
+    plan = " ".join(r[-1] for r in conn.execute(
+        "EXPLAIN QUERY PLAN DELETE FROM pages WHERE expires_at <= ?", ("x",)))
+check("schema: html is the last column of pages", cols[-1] == "html"
+      and cols.index("expires_at") < cols.index("html") and cols.index("bytes") < cols.index("html"))
+check("sweep: the expiry delete uses the expires_at index", "idx_pages_expires" in plan)
+
+o = json.loads(srv.nth_connect(summary="soon gone", name="Ola", channel="gone-room"))
+r = json.loads(srv.nth_page(channel="gone-room", member_id=o["member_id"], title="Orphan",
+                            html=HTML, session_token=o["session_token"]))
+with db() as conn:
+    conn.execute("DELETE FROM channels WHERE code = 'gone-room'")
+with db() as conn:
+    expired_only = nmedia.sweep_expired_pages(conn)
+    still = conn.execute("SELECT 1 FROM pages WHERE id = ?", (r["page"]["id"],)).fetchone()
+    orphans = nmedia.sweep_orphan_pages(conn)
+    gone = conn.execute("SELECT 1 FROM pages WHERE id = ?", (r["page"]["id"],)).fetchone()
+check("sweep: the expiry sweep leaves a live page of a deleted channel",
+      expired_only == 0 and still is not None)
+check("sweep: the orphan sweep removes it", orphans == 1 and gone is None)
+
+# Note 8: retracting the announcement deletes the page row.
+q = json.loads(srv.nth_connect(summary="retractor", name="Rae", channel="retract-room"))
+r = json.loads(srv.nth_page(channel="retract-room", member_id=q["member_id"], title="Oops",
+                            html=HTML, session_token=q["session_token"]))
+srv.nth_retract(channel="retract-room", member_id=q["member_id"], message_id=r["message_id"],
+                reason="wrong", session_token=q["session_token"])
+with db() as conn:
+    row = conn.execute("SELECT 1 FROM pages WHERE id = ?", (r["page"]["id"],)).fetchone()
+check("retract: the page row is deleted with the announcement", row is None)
+
+# Aragorn: html that cannot be encoded is a tool error.
+before = (message_count(), page_rows())
+out = json.loads(srv.nth_page(channel="retract-room", member_id=q["member_id"], title="Bad",
+                              html="<p>\ud800</p>", session_token=q["session_token"]))
+check("unicode: html holding a lone surrogate is refused as a tool error",
+      "error" in out and "Unicode" in out["error"] and (message_count(), page_rows()) == before)
+
+# Note 9: every tool a managed agent or the installer allowlists exists, and page is among them.
+import nth_codex_runtime as ncodex  # noqa: E402
+import nth_supervisor as nsup  # noqa: E402
+registered = {name[len("trio_"):] for name in srv.mcp._tool_manager._tools}
+setup_text = (SERVER.parent / "setup.sh").read_text()
+bases = set(re.search(r"TOOL_BASES=\(([^)]*)\)", setup_text).group(1).split())
+check("allowlist: setup.sh TOOL_BASES is every registered tool except permission_prompt",
+      bases == registered - {"permission_prompt"})
+check("allowlist: managed Claude and Codex agents get page",
+      "page" in nsup.TRIO_TOOL_NAMES and "page" in ncodex.TRIO_TOOL_NAMES
+      and set(ncodex.TRIO_TOOL_NAMES) <= registered)
+
 print()
 print(f"{'FAILED' if failures else 'OK'} — {len(failures)} failure(s)")
 sys.exit(1 if failures else 0)

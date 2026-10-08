@@ -554,14 +554,15 @@ case "$PLATFORM" in
         ;;
 esac
 
-# Tool base names — must match the @mcp.tool registrations in nth_server.py
-# (21 tools). Verify after adding a tool:
-#   diff <(rg -o 'def nth_(\w+)' server/nth_server.py | sed 's/def nth_//' | sort) \
-#        <(printf '%s\n' "${TOOL_BASES[@]}" | sort)
+# Tool base names — every @mcp.tool registration in nth_server.py except
+# permission_prompt, which Claude Code calls itself as the permission gate and
+# the model never does (28 tools). tests/test-agent-pages.py checks this list
+# against the registrations.
 # `pounds` was missing here through v8.0.1 while SKILL told `at`-mode agents
 # to call it on every wake, so the one routinely-called tool was the one that
 # always prompted.
-TOOL_BASES=(connect send poll ack claim complete cancel release lock unlock set_status rename status roster history end list cull cleanup retract pounds)
+TOOL_BASES=(connect send poll ack claim complete cancel release lock unlock set_status rename status roster history end list cull cleanup retract pounds
+            dm ask avatar_choices set_avatar delivery_status listen page)
 
 # Build allowlist arrays
 TRIO_TOOLS=()

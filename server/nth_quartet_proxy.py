@@ -21,8 +21,11 @@ from nth_event_access import (adapt_response_guidance, claude_channel_requested,
 
 LOCAL_TOOLS = ('quartet_delivery_status', 'quartet_listen')
 # Tools whose `attachments` may name files on this machine. The hub cannot read
-# them, so this frontend reads each file (regular files only, size-capped, never
-# under /proc, /dev or /sys) and forwards its bytes as data_base64.
+# them, so this frontend reads each file through nth_media.read_local_file (a
+# regular file inside NTH_ATTACH_ROOTS, by default this process's working
+# directory and the temp directory; size-capped; never under /proc, /dev or
+# /sys), refuses anything that is not an image, and forwards the bytes as
+# data_base64.
 PATH_ATTACHMENT_TOOLS = ('quartet_send', 'quartet_dm')
 # A hub that never stops paging must not hang the tool listing.
 MAX_TOOL_PAGES = 50

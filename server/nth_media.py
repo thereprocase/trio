@@ -1,7 +1,7 @@
 """Shared rules for rich content: attachment types and storage, file reads on an
 agent's machine, and burner pages.
 
-Standard library only. Three processes import it, and each needs the same answer:
+Standard library only. Three processes import it:
 
   * nth_web (the dashboard) sniffs and stores human uploads, serves attachments
     and pages, and sweeps what has expired;
@@ -11,18 +11,20 @@ Standard library only. Three processes import it, and each needs the same answer
     files an agent names and forwards their bytes, because the hub cannot see
     that machine's disk.
 
-Keeping the rules here means a file the web upload refuses is refused for an
-agent too, and the frontend reads a local path under exactly the checks the
-local server applies.
+Every path read, in the local server and in the frontend alike, goes through
+read_local_file: the same allowed folders, file checks and size caps, and the
+same image-type check before any byte leaves the machine. The hub then sniffs
+the bytes again, as it does for every attachment, and applies the quota.
 """
 import base64
 import binascii
-import json
 import os
 import re
 import secrets
 import sqlite3
 import stat
+import struct
+import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, NamedTuple, Optional, Tuple
@@ -43,7 +45,8 @@ MAX_UPLOAD_BYTES = env_bytes("NTH_UPLOAD_MAX_BYTES", 25 * 1024 * 1024)  # hard c
 # Total attachment bytes one member may hold in one channel. The per-file cap
 # bounds a single request; this bounds the SUM, so an identity allowed to attach
 # cannot fill the disk one legal file at a time. Anything linked to a message is
-# kept until its channel goes, so this quota is the only bound on that right.
+# kept until its channel goes (agents' DM images: DM_AGENT_ATTACH_RETENTION_DAYS),
+# so this quota is the only bound on that right.
 MAX_MEMBER_ATTACH_BYTES = env_bytes("NTH_ATTACH_QUOTA_BYTES", 200 * 1024 * 1024)
 
 # Images every browser renders, shown inline in the conversation.
@@ -176,7 +179,103 @@ def ensure_attachments_table(db: sqlite3.Connection) -> None:
     )
 
 
+# ── Image dimensions ──────────────────────────────────────────────────────
+
+_JPEG_SOF = {0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF}
+
+
+def image_dimensions(data: bytes) -> Optional[Tuple[int, int]]:
+    """(width, height) from a PNG, GIF, WebP or JPEG header, or None when the
+    header cannot be read. Reads the header only; the image is never decoded."""
+    try:
+        if data[:8] == b"\x89PNG\r\n\x1a\n" and data[12:16] == b"IHDR":
+            w, h = struct.unpack(">II", data[16:24])
+        elif data[:6] in (b"GIF87a", b"GIF89a"):
+            w, h = struct.unpack("<HH", data[6:10])
+        elif data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+            chunk = data[12:16]
+            if chunk == b"VP8X":
+                w = int.from_bytes(data[24:27], "little") + 1
+                h = int.from_bytes(data[27:30], "little") + 1
+            elif chunk == b"VP8L" and data[20:21] == b"\x2f":
+                bits = int.from_bytes(data[21:25], "little")
+                w, h = (bits & 0x3FFF) + 1, ((bits >> 14) & 0x3FFF) + 1
+            elif chunk == b"VP8 " and data[23:26] == b"\x9d\x01\x2a":
+                w, h = struct.unpack("<HH", data[26:30])
+                w, h = w & 0x3FFF, h & 0x3FFF
+            else:
+                return None
+        elif data[:3] == b"\xff\xd8\xff":
+            return _jpeg_dimensions(data)
+        else:
+            return None
+    except struct.error:
+        return None
+    return (w, h) if w > 0 and h > 0 else None
+
+
+def _jpeg_dimensions(data: bytes) -> Optional[Tuple[int, int]]:
+    i, size = 2, len(data)
+    for _ in range(10000):          # a header has far fewer segments than this
+        while i < size and data[i] == 0xFF and i + 1 < size and data[i + 1] == 0xFF:
+            i += 1                  # fill bytes
+        if i + 4 > size or data[i] != 0xFF:
+            return None
+        marker = data[i + 1]
+        if marker in _JPEG_SOF:
+            if i + 9 > size:
+                return None
+            h, w = struct.unpack(">HH", data[i + 5:i + 9])
+            return (w, h) if w > 0 and h > 0 else None
+        if marker in (0xD8, 0x01) or 0xD0 <= marker <= 0xD7:
+            i += 2
+            continue
+        if marker == 0xD9:
+            return None
+        i += 2 + struct.unpack(">H", data[i + 2:i + 4])[0]
+    return None
+
+
 # ── Agent attachments ─────────────────────────────────────────────────────
+
+# Per-file cap for an image an agent sends. Lower than the dashboard's upload
+# cap because every byte is meant for a model's context on poll.
+MAX_AGENT_ATTACH_BYTES = 10 * 1024 * 1024
+# All attachments of one message together.
+MAX_MESSAGE_ATTACH_BYTES = 25 * 1024 * 1024
+
+# Folders a `path` attachment may come from, as an os.pathsep list. Unset, the
+# reading process's working directory (the agent's project) and the system
+# temp directory. A hub-managed agent's server is started with this set to the
+# agent's own working directory, and with NTH_MANAGED_AGENT=1, so an unset or
+# empty list there allows no path at all.
+ATTACH_ROOTS_ENV = "NTH_ATTACH_ROOTS"
+MANAGED_AGENT_ENV = "NTH_MANAGED_AGENT"
+
+
+def agent_file_limit() -> int:
+    """Largest single image an agent may send."""
+    return min(MAX_UPLOAD_BYTES, MAX_AGENT_ATTACH_BYTES)
+
+
+def attach_roots(environ=None) -> List[str]:
+    """Resolved folders a path attachment may come from (see ATTACH_ROOTS_ENV)."""
+    env = os.environ if environ is None else environ
+    raw = (env.get(ATTACH_ROOTS_ENV) or "").strip()
+    if raw:
+        entries = raw.split(os.pathsep)
+    elif env.get(MANAGED_AGENT_ENV) == "1":
+        return []
+    else:
+        entries = [os.getcwd(), tempfile.gettempdir()]
+    roots = []
+    for entry in entries:
+        entry = os.path.expanduser(entry.strip())
+        # A relative root would mean whatever the working directory happens to be.
+        if entry and os.path.isabs(entry):
+            roots.append(os.path.realpath(entry))
+    return roots
+
 
 class RichContentError(ValueError):
     """An attachment or page the caller must fix. The message is shown to the
@@ -189,24 +288,30 @@ class PreparedAttachment(NamedTuple):
     filename: str
 
 
-# Kernel and device trees. Reading from them yields endless or live data (a
-# process's memory map, a terminal, /dev/zero) rather than a file someone made.
+# Kernel and device trees hold live and endless data (a process's memory map,
+# a terminal, /dev/zero). A root such as / must still never reach them.
 _REFUSED_ROOTS = ("/proc", "/dev", "/sys")
+
+
+def _under(path: str, root: str) -> bool:
+    return path == root or path.startswith(root.rstrip(os.sep) + os.sep)
 
 
 def _under_refused_root(path: str) -> bool:
     norm = os.path.normpath(path)
-    return any(norm == root or norm.startswith(root + os.sep) for root in _REFUSED_ROOTS)
+    return any(_under(norm, root) for root in _REFUSED_ROOTS)
 
 
-def read_local_file(path_text: Any, max_bytes: int) -> Tuple[bytes, str]:
+def read_local_file(path_text: Any, max_bytes: int,
+                    roots: Optional[List[str]] = None) -> Tuple[bytes, str]:
     """Read one file an agent named on its own machine: (bytes, basename).
 
-    Only a regular file, by absolute path (a leading ~ is expanded), at most
-    `max_bytes`. A path into /proc, /dev or /sys is refused both as written and
-    after symlinks resolve, and the type is checked again on the open handle so
-    a file swapped for a FIFO or device between the check and the read is still
-    refused."""
+    Only a regular file, by absolute path (a leading ~ is expanded), inside one
+    of `roots` (attach_roots() when None) once symlinks resolve, at most
+    `max_bytes`. A path into /proc, /dev or /sys is refused as written and as
+    resolved. The open uses O_NOFOLLOW where the platform has it, and the type
+    is checked again on the open handle, so a file swapped for a link, FIFO or
+    device after the checks is still refused."""
     if not isinstance(path_text, str) or not path_text.strip():
         raise RichContentError("attachment path must be a non-empty string")
     expanded = os.path.expanduser(path_text.strip())
@@ -215,6 +320,15 @@ def read_local_file(path_text: Any, max_bytes: int) -> Tuple[bytes, str]:
     real = os.path.realpath(expanded)
     if _under_refused_root(expanded) or _under_refused_root(real):
         raise RichContentError(f"attachment path is under /proc, /dev or /sys: {path_text!r}")
+    allowed = attach_roots() if roots is None else roots
+    if not allowed:
+        raise RichContentError(
+            "this server attaches no files by path; send the image as `data_base64` "
+            "with a `filename`")
+    if not any(_under(real, root) for root in allowed):
+        raise RichContentError(
+            f"attachment path {path_text!r} is outside the folders files may be attached "
+            f"from ({os.pathsep.join(allowed)}); copy it into one, or set {ATTACH_ROOTS_ENV}")
     try:
         st = os.stat(real)
     except OSError:
@@ -225,7 +339,8 @@ def read_local_file(path_text: Any, max_bytes: int) -> Tuple[bytes, str]:
         raise RichContentError(
             f"attachment {os.path.basename(real)!r} is {st.st_size} bytes; "
             f"the limit is {max_bytes}")
-    flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOCTTY", 0)
+    flags = (os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOCTTY", 0)
+             | getattr(os, "O_NOFOLLOW", 0))
     try:
         fd = os.open(real, flags)
     except OSError as exc:
@@ -245,23 +360,34 @@ def read_local_file(path_text: Any, max_bytes: int) -> Tuple[bytes, str]:
     return data, os.path.basename(real)
 
 
-def _items(items: Any) -> List[Dict[str, Any]]:
-    """The attachment list, shape-checked. None or [] is no attachments.
+_DATA_URL_PREFIX = re.compile(r"^data:[\w.+/-]*;base64,", re.IGNORECASE)
 
-    Some clients send a list argument as its JSON text. The hub's tool layer
-    parses that form itself, so the frontend accepts it too."""
+
+def _compact_base64(text: Any) -> str:
+    if not isinstance(text, str):
+        raise RichContentError("attachment `data_base64` must be a string")
+    return "".join(_DATA_URL_PREFIX.sub("", text.strip(), count=1).split())
+
+
+def _decoded_size(compact: str) -> int:
+    """Bytes `compact` decodes to, computed without decoding."""
+    return len(compact) * 3 // 4 - (len(compact) - len(compact.rstrip("=")))
+
+
+def _items(items: Any) -> List[Dict[str, Any]]:
+    """The attachment list, shape-checked and normalised: path items keep
+    `path`, data items carry their base64 without whitespace or a data: URL
+    prefix as `data`. The base64 items' decoded total is checked against the
+    per-message cap here, before anything is decoded; path items count against
+    it as they are read."""
     if items is None:
         return []
-    if isinstance(items, str):
-        try:
-            items = json.loads(items)
-        except ValueError:
-            raise RichContentError("attachments must be a list of objects")
     if not isinstance(items, list):
         raise RichContentError("attachments must be a list of objects")
     if len(items) > MAX_ATTACHMENTS_PER_MESSAGE:
         raise RichContentError(
             f"too many attachments ({len(items)}); the limit is {MAX_ATTACHMENTS_PER_MESSAGE}")
+    out, total = [], 0
     for item in items:
         if not isinstance(item, dict):
             raise RichContentError("each attachment must be an object with `path` or `data_base64`")
@@ -269,39 +395,74 @@ def _items(items: Any) -> List[Dict[str, Any]]:
         has_data = bool(item.get("data_base64"))
         if has_path == has_data:
             raise RichContentError("each attachment needs exactly one of `path` or `data_base64`")
-        if "filename" in item and not isinstance(item["filename"], str):
+        name = item.get("filename", "")
+        if not isinstance(name, str):
             raise RichContentError("attachment `filename` must be a string")
-    return items
-
-
-def inline_local_paths(items: Any, max_bytes: Optional[int] = None) -> Optional[List[Dict[str, Any]]]:
-    """Turn every `path` item into `data_base64` + `filename`, for a frontend
-    that forwards to a hub which cannot read this machine. `data_base64` items
-    pass through unchanged. Raises RichContentError on the first bad item, so
-    nothing is sent when any file cannot be read."""
-    if items is None:
-        return None
-    limit = MAX_UPLOAD_BYTES if max_bytes is None else max_bytes
-    out = []
-    for item in _items(items):
-        if item.get("path"):
-            data, base = read_local_file(item["path"], limit)
-            out.append({"data_base64": base64.b64encode(data).decode("ascii"),
-                        "filename": item.get("filename") or base})
-        else:
-            out.append(dict(item))
+        if has_path:
+            out.append({"path": item["path"], "filename": name})
+            continue
+        compact = _compact_base64(item["data_base64"])
+        total += _decoded_size(compact)
+        if total > MAX_MESSAGE_ATTACH_BYTES:
+            raise RichContentError(
+                f"the attachments in one message total more than {MAX_MESSAGE_ATTACH_BYTES} bytes")
+        out.append({"data": compact, "filename": name})
     return out
 
 
-_DATA_URL_PREFIX = re.compile(r"^data:[\w.+/-]*;base64,", re.IGNORECASE)
+def _require_image(data: bytes, shown_name: str) -> str:
+    mime = sniff_image_mime(data)
+    if mime not in AGENT_ATTACH_MIME:
+        raise RichContentError(
+            f"{(shown_name or 'attachment')!r} is not a PNG, JPEG, GIF or WebP image; "
+            "agents may attach those four types. Put text or HTML in a message or a page instead.")
+    return mime
 
 
-def _decode_base64(text: Any, max_bytes: int) -> bytes:
-    if not isinstance(text, str):
-        raise RichContentError("attachment `data_base64` must be a string")
-    compact = "".join(_DATA_URL_PREFIX.sub("", text.strip(), count=1).split())
-    # Refuse before decoding: base64 is 4 characters per 3 bytes.
-    if len(compact) > (max_bytes + 2) // 3 * 4:
+class _Budget:
+    """Bytes left under the per-message cap, spent as files are read."""
+
+    def __init__(self, items):
+        # Base64 items were totalled by _items; paths spend what is left.
+        self.left = MAX_MESSAGE_ATTACH_BYTES - sum(
+            _decoded_size(i["data"]) for i in items if "data" in i)
+
+    def spend(self, n: int) -> None:
+        self.left -= n
+        if self.left < 0:
+            raise RichContentError(
+                f"the attachments in one message total more than {MAX_MESSAGE_ATTACH_BYTES} bytes")
+
+
+def inline_local_paths(items: Any, roots: Optional[List[str]] = None) -> Optional[List[Dict[str, Any]]]:
+    """Turn every `path` item into `data_base64` + `filename`, for a frontend
+    that forwards to a hub which cannot read this machine. Each file passes
+    read_local_file and must be an image before it is encoded, so a refused
+    file never leaves the machine. `data_base64` items pass through for the
+    hub to check. Raises RichContentError on the first bad item, so nothing is
+    sent when any file is refused."""
+    if items is None:
+        return None
+    normal = _items(items)
+    budget = _Budget(normal)
+    out = []
+    for item in normal:
+        if "path" in item:
+            data, base = read_local_file(item["path"], agent_file_limit(), roots)
+            budget.spend(len(data))
+            name = item["filename"] or base
+            _require_image(data, name)
+            out.append({"data_base64": base64.b64encode(data).decode("ascii"), "filename": name})
+        else:
+            entry = {"data_base64": item["data"]}
+            if item["filename"]:
+                entry["filename"] = item["filename"]
+            out.append(entry)
+    return out
+
+
+def _decode_base64(compact: str, max_bytes: int) -> bytes:
+    if _decoded_size(compact) > max_bytes:
         raise RichContentError(f"attachment is larger than the {max_bytes}-byte limit")
     try:
         data = base64.b64decode(compact, validate=True)
@@ -315,32 +476,30 @@ def _decode_base64(text: Any, max_bytes: int) -> bytes:
 
 
 def prepare_attachments(items: Any, *, read_paths: bool,
-                        max_bytes: Optional[int] = None) -> List[PreparedAttachment]:
+                        roots: Optional[List[str]] = None) -> List[PreparedAttachment]:
     """Validate an agent's attachment list into sniffed, named byte blobs.
 
     `read_paths` is True only where the caller and this process share a machine
     and a user (the local stdio server). A hub sets it False: a path there would
     name a file on the hub, so it is refused with directions to send bytes."""
-    limit = MAX_UPLOAD_BYTES if max_bytes is None else max_bytes
+    normal = _items(items)
+    budget = _Budget(normal)
+    limit = agent_file_limit()
     prepared = []
-    for item in _items(items):
-        if item.get("path"):
+    for item in normal:
+        if "path" in item:
             if not read_paths:
                 raise RichContentError(
                     "this server cannot read files on your machine; send the bytes as "
                     "`data_base64` with a `filename`. The Quartet frontend installed by "
                     "setup.py converts `path` items for you.")
-            data, base = read_local_file(item["path"], limit)
-            raw_name = item.get("filename") or base
+            data, base = read_local_file(item["path"], limit, roots)
+            budget.spend(len(data))
+            raw_name = item["filename"] or base
         else:
-            data = _decode_base64(item["data_base64"], limit)
-            raw_name = item.get("filename") or ""
-        mime = sniff_image_mime(data)
-        if mime not in AGENT_ATTACH_MIME:
-            shown = raw_name or "attachment"
-            raise RichContentError(
-                f"{shown!r} is not a PNG, JPEG, GIF or WebP image; agents may attach "
-                "those four types. Put text or HTML in a message or a page instead.")
+            data = _decode_base64(item["data"], limit)
+            raw_name = item["filename"]
+        mime = _require_image(data, raw_name)
         prepared.append(PreparedAttachment(data, mime, attachment_filename(raw_name, mime)))
     return prepared
 
@@ -373,11 +532,13 @@ def store_attachments(db: sqlite3.Connection, attach_root: Path, channel: str,
     try:
         chan_dir.mkdir(parents=True, exist_ok=True)
         for p in prepared:
+            dims = image_dimensions(p.data) or (None, None)
             cur = db.execute(
                 "INSERT INTO attachments "
-                "(channel, message_id, member_id, mime, filename, bytes, path, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, '', ?)",
-                (channel, message_id, member_id, p.mime, p.filename, len(p.data), now))
+                "(channel, message_id, member_id, mime, filename, width, height, bytes, "
+                " path, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, '', ?)",
+                (channel, message_id, member_id, p.mime, p.filename, dims[0], dims[1],
+                 len(p.data), now))
             att_id = cur.lastrowid
             fpath = chan_dir / f"{att_id}{ALLOWED_ATTACH_MIME[p.mime]}"
             fpath.write_bytes(p.data)
@@ -397,6 +558,35 @@ def unlink_quietly(paths) -> None:
             Path(p).unlink()
         except OSError:
             pass
+
+
+# ── Images delivered to a model on poll ──────────────────────────────────
+# Limits that keep an image block within what a model API accepts: about 5 MB
+# of base64 per image (3.75 MB raw), 8000 pixels on a side, and about 5 MB raw
+# per poll response in total. An image outside them is listed with
+# delivered: false and a reason, and stays viewable in the dashboard.
+MAX_MODEL_IMAGE_BYTES = 3_750_000
+MAX_MODEL_IMAGE_SIDE = 8000
+MAX_POLL_IMAGE_BYTES = 5_000_000
+TOO_LARGE_FOR_MODEL = "too_large_for_model"
+POLL_BUDGET_SPENT = "poll_image_budget_spent"
+
+
+def model_image_refusal(data: bytes) -> Optional[str]:
+    """None when an image may go to a model as a block, else the reason."""
+    if len(data) > MAX_MODEL_IMAGE_BYTES:
+        return TOO_LARGE_FOR_MODEL
+    dims = image_dimensions(data)
+    if dims and max(dims) > MAX_MODEL_IMAGE_SIDE:
+        return TOO_LARGE_FOR_MODEL
+    return None
+
+
+# ── Retention of DM images from agents ───────────────────────────────────
+# Every DM shares one transport channel, so an agent's per-channel quota there
+# would be a lifetime allowance. Images agents send in DMs are therefore kept
+# this many days, then swept, which returns their bytes to the quota.
+DM_AGENT_ATTACH_RETENTION_DAYS = 30
 
 
 # ── Burner pages ──────────────────────────────────────────────────────────
@@ -439,8 +629,10 @@ def page_path(page_id: str) -> str:
 
 
 def ensure_pages_table(db: sqlite3.Connection) -> None:
-    """Create the pages table if missing. The HTML lives in the row: pages are
-    small, capped and short-lived, so deleting a row is the whole cleanup."""
+    """Create the pages table if missing. The HTML lives in the row, as the
+    LAST column: a page runs to 512 KB and spills into overflow pages, and
+    SQLite reads a row's columns in order, so every column a lookup, count or
+    sweep needs sits before it and is read without touching the HTML."""
     db.execute(
         "CREATE TABLE IF NOT EXISTS pages ("
         " id TEXT PRIMARY KEY,"
@@ -448,10 +640,10 @@ def ensure_pages_table(db: sqlite3.Connection) -> None:
         " message_id INTEGER,"
         " member_id TEXT NOT NULL,"
         " title TEXT NOT NULL,"
-        " html TEXT NOT NULL,"
         " bytes INTEGER NOT NULL,"
         " created_at TEXT NOT NULL,"
-        " expires_at TEXT NOT NULL)"
+        " expires_at TEXT NOT NULL,"
+        " html TEXT NOT NULL)"
     )
     db.execute("CREATE INDEX IF NOT EXISTS idx_pages_channel ON pages(channel, member_id)")
     db.execute("CREATE INDEX IF NOT EXISTS idx_pages_message ON pages(message_id)")
@@ -464,16 +656,24 @@ class PageDraft(NamedTuple):
     ttl_hours: float
 
 
+def _utf8_len(text: str, what: str) -> int:
+    try:
+        return len(text.encode("utf-8"))
+    except UnicodeEncodeError:
+        raise RichContentError(f"page {what} is not valid Unicode text (it holds a lone surrogate)")
+
+
 def validate_page(title: Any, html: Any, ttl_hours: Any) -> PageDraft:
     """A page ready to store, or RichContentError naming what to fix."""
     if not isinstance(title, str) or not title.strip():
         raise RichContentError("a page needs a title")
     clean_title = " ".join(title.split())
+    _utf8_len(clean_title, "title")
     if len(clean_title) > MAX_PAGE_TITLE:
         raise RichContentError(f"page title is longer than {MAX_PAGE_TITLE} characters")
     if not isinstance(html, str) or not html.strip():
         raise RichContentError("a page needs html")
-    size = len(html.encode("utf-8"))
+    size = _utf8_len(html, "html")
     if size > MAX_PAGE_BYTES:
         raise RichContentError(
             f"page html is {size} bytes; the limit is {MAX_PAGE_BYTES}. Inline images "
@@ -492,11 +692,12 @@ def insert_page(db: sqlite3.Connection, channel: str, member_id: str,
                 message_id: int, draft: PageDraft,
                 now: Optional[datetime] = None) -> Dict[str, Any]:
     """Store a page linked to its announcing message. Runs inside the caller's
-    write transaction, after the message INSERT. Sweeps expired pages first so
-    the live-page count below counts only pages that can still be opened."""
+    write transaction, after the message INSERT. Deletes expired pages first
+    (one indexed DELETE) so the live-page count counts only pages that can
+    still be opened."""
     moment = now or datetime.now(timezone.utc)
     ensure_pages_table(db)
-    sweep_pages(db, moment)
+    sweep_expired_pages(db, moment)
     live = db.execute(
         "SELECT COUNT(*) FROM pages WHERE channel = ? AND member_id = ?",
         (channel, member_id)).fetchone()[0]
@@ -507,31 +708,55 @@ def insert_page(db: sqlite3.Connection, channel: str, member_id: str,
     page_id = secrets.token_urlsafe(24)
     expires_at = utc_stamp(moment + timedelta(hours=draft.ttl_hours))
     db.execute(
-        "INSERT INTO pages (id, channel, message_id, member_id, title, html, bytes, "
-        "created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (page_id, channel, message_id, member_id, draft.title, draft.html,
-         len(draft.html.encode("utf-8")), utc_stamp(moment), expires_at))
+        "INSERT INTO pages (id, channel, message_id, member_id, title, bytes, "
+        "created_at, expires_at, html) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (page_id, channel, message_id, member_id, draft.title,
+         _utf8_len(draft.html, "html"), utc_stamp(moment), expires_at, draft.html))
     return {"id": page_id, "title": draft.title, "path": page_path(page_id),
             "expires_at": expires_at}
 
 
-def sweep_pages(db: sqlite3.Connection, now: Optional[datetime] = None) -> int:
-    """Delete expired pages and pages whose channel no longer exists. Returns
-    the number deleted; a database without the table has nothing to sweep."""
+def sweep_expired_pages(db: sqlite3.Connection, now: Optional[datetime] = None) -> int:
+    """Delete pages past their expiry: one DELETE on the expires_at index."""
     stamp = utc_stamp(now or datetime.now(timezone.utc))
     try:
-        cur = db.execute(
-            "DELETE FROM pages WHERE expires_at <= ? "
-            "OR channel NOT IN (SELECT code FROM channels)", (stamp,))
+        cur = db.execute("DELETE FROM pages WHERE expires_at <= ?", (stamp,))
     except sqlite3.OperationalError:
         return 0
     return cur.rowcount or 0
+
+
+def sweep_orphan_pages(db: sqlite3.Connection) -> int:
+    """Delete pages whose channel no longer exists. The distinct channels come
+    from the (channel, member_id) index, so this reads one entry per channel
+    with pages, then deletes by channel."""
+    try:
+        gone = [r[0] for r in db.execute(
+            "SELECT DISTINCT p.channel FROM pages p "
+            "WHERE NOT EXISTS (SELECT 1 FROM channels c WHERE c.code = p.channel)")]
+    except sqlite3.OperationalError:
+        return 0
+    return sum(purge_channel_pages(db, ch) for ch in gone)
+
+
+def sweep_pages(db: sqlite3.Connection, now: Optional[datetime] = None) -> int:
+    """Both page sweeps; the number of pages deleted."""
+    return sweep_expired_pages(db, now) + sweep_orphan_pages(db)
 
 
 def purge_channel_pages(db: sqlite3.Connection, channel: str) -> int:
     """Delete every page of one channel (the channel ended or was removed)."""
     try:
         cur = db.execute("DELETE FROM pages WHERE channel = ?", (channel,))
+    except sqlite3.OperationalError:
+        return 0
+    return cur.rowcount or 0
+
+
+def purge_message_page(db: sqlite3.Connection, message_id: int) -> int:
+    """Delete the page a message announced (the message was retracted)."""
+    try:
+        cur = db.execute("DELETE FROM pages WHERE message_id = ?", (message_id,))
     except sqlite3.OperationalError:
         return 0
     return cur.rowcount or 0

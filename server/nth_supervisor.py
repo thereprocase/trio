@@ -404,6 +404,7 @@ TRIO_TOOL_NAMES = (
     "claim", "complete", "cancel", "release", "lock", "unlock",
     "set_status", "rename", "status", "roster", "history", "end",
     "list", "cull", "cleanup", "retract", "avatar_choices", "set_avatar",
+    "page",
 )
 MANAGED_ALLOWED_TOOLS = ",".join(
     f"mcp__nth-trio__trio_{name}" for name in TRIO_TOOL_NAMES)
@@ -789,10 +790,16 @@ def build_spawn_argv(
     return argv
 
 
-def build_mcp_config(nth_server_path: str, python_cmd: str = "") -> str:
+def build_mcp_config(nth_server_path: str, python_cmd: str = "",
+                     attach_roots: Optional[List[str]] = None) -> str:
     """Inline JSON for `claude --mcp-config` that gives a spawned agent the Trio
     MCP tools (stdio), pointed at this repo's nth_server.py. Returned as a
     compact JSON string (claude accepts inline config or a file path).
+
+    The server runs on the hub as the hub's user, so it is marked as a managed
+    agent's and told the only folders it may attach files from by `path`:
+    `attach_roots`, normally the agent's own working directory. With no roots
+    it attaches no file by path at all (nth_media.attach_roots).
 
     NOTE: enabling this makes the agent call trio_connect itself, which mints a
     NEW member_id — the identity-reclaim path (agents connect AS their agent_id)
@@ -806,6 +813,10 @@ def build_mcp_config(nth_server_path: str, python_cmd: str = "") -> str:
                 "type": "stdio",
                 "command": py,
                 "args": [nth_server_path],
+                "env": {
+                    "NTH_MANAGED_AGENT": "1",
+                    "NTH_ATTACH_ROOTS": os.pathsep.join(attach_roots or []),
+                },
             }
         }
     }, separators=(",", ":"))
