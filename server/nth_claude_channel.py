@@ -44,7 +44,9 @@ CONFIRMED_HOST_VERSIONS = ('2.1.274',)
 UNCONFIRMED = ('written to the MCP transport; a channel notification has no receipt, '
                'so only the agent\'s own ack confirms that it was read')
 
-POLL_WAIT_SECONDS = 15
+# The hub holds a poll for at most 30 s (nth_poll clamps wait_seconds), and
+# every client read timeout is the wait plus 30 s, so the longest wait is safe.
+POLL_WAIT_SECONDS = 30
 # Floor between polls, as in the Codex relay: no input can make the loop spin.
 MIN_POLL_GAP_SECONDS = 1.0
 # The poll never acks, so an unread backlog makes every long poll return at once.

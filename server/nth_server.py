@@ -21,6 +21,7 @@ import time
 import re
 import hashlib
 import string
+import threading
 from datetime import datetime, timedelta, timezone
 from typing import Any, List, Tuple
 from pathlib import Path
@@ -281,13 +282,34 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+# The schema and migrations below are idempotent but cost ~45 statements per
+# connection, and every tool call and long-poll opens one. They run once per
+# database file per process. The key carries the file's identity and its
+# sqlite_master row count, so a replaced file or a table added by another
+# process (nth_web, a stdio server) runs them again.
+_schema_ready_key = None
+
+
+def _schema_key(conn: sqlite3.Connection):
+    try:
+        st = os.stat(DB_PATH)
+        tables = conn.execute("SELECT count(*) FROM sqlite_master").fetchone()[0]
+    except (OSError, sqlite3.Error):
+        return None
+    return (str(DB_PATH), st.st_dev, st.st_ino, tables)
+
+
 def get_db() -> sqlite3.Connection:
+    global _schema_ready_key
     DB_DIR.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(DB_PATH), timeout=10)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA busy_timeout=5000")
+    key = _schema_key(conn)
+    if key is not None and key == _schema_ready_key:
+        return conn
     conn.execute("""
         CREATE TABLE IF NOT EXISTS channels (
             code        TEXT PRIMARY KEY,
@@ -884,7 +906,86 @@ def get_db() -> sqlite3.Connection:
         "ON stall_events (resolved_at, id)"
     )
     conn.commit()
+    _schema_ready_key = _schema_key(conn)
     return conn
+
+
+# Long-polls wait on this instead of sleeping a fixed 2 s between full passes.
+# A send or DM in this process wakes them at once. Writes from other processes
+# (nth_web posts from the dashboard, a stdio server on the same file) change
+# SQLite's data_version, which a waiting poll checks every POLL_RECHECK_SECONDS
+# for the cost of one pragma; the full pass runs only after something changed.
+_message_wake = threading.Condition()
+_message_generation = 0
+POLL_RECHECK_SECONDS = 1.0
+# members.last_seen only needs to beat the 60 s dashboard light and the 300 s
+# stale threshold, so a waiting poll refreshes it this often, not every pass.
+POLL_HEARTBEAT_SECONDS = 20.0
+
+
+def _notify_new_messages() -> None:
+    global _message_generation
+    with _message_wake:
+        _message_generation += 1
+        _message_wake.notify_all()
+
+
+def _change_marker(db: sqlite3.Connection) -> tuple:
+    """What a waiting poll compares against: this process's send counter and
+    the connection's view of commits made by every other connection."""
+    try:
+        version = db.execute("PRAGMA data_version").fetchone()[0]
+    except sqlite3.Error:
+        version = None
+    return (_message_generation, version)
+
+
+def _wait_for_change(db: sqlite3.Connection, marker: tuple, deadline: float) -> None:
+    """Block until the database may hold something new for this poll, or the
+    deadline passes. A false wake only costs one extra pass."""
+    while True:
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            return
+        with _message_wake:
+            if _message_generation != marker[0]:
+                return
+            _message_wake.wait(min(POLL_RECHECK_SECONDS, remaining))
+            if _message_generation != marker[0]:
+                return
+        if _change_marker(db)[1] != marker[1]:
+            return
+
+
+def _poll_heartbeat(db: sqlite3.Connection, channel: str, member_id: str, now: str,
+                    monitor_heartbeat: bool, monitor_filter: str) -> None:
+    """Refresh the poller's liveness. A monitor process polling on the member's
+    behalf (nth_spoke_monitor.py over SSE) declares itself with
+    monitor_heartbeat=True so the monitor-liveness columns advance too;
+    otherwise _sentinel_nag() keeps prescribing a monitor relaunch to a member
+    whose monitor is alive but remote."""
+    if monitor_heartbeat:
+        try:
+            if monitor_filter in ("all", "about", "at"):
+                db.execute(
+                    "UPDATE members SET last_seen = ?, messenger_heartbeat = ?, "
+                    "watchdog_heartbeat = ?, filter_mode = ? "
+                    "WHERE id = ? AND channel = ?",
+                    (now, now, now, monitor_filter, member_id, channel),
+                )
+            else:
+                db.execute(
+                    "UPDATE members SET last_seen = ?, messenger_heartbeat = ?, "
+                    "watchdog_heartbeat = ? WHERE id = ? AND channel = ?",
+                    (now, now, now, member_id, channel),
+                )
+            return
+        except sqlite3.OperationalError:
+            pass
+    db.execute(
+        "UPDATE members SET last_seen = ? WHERE id = ? AND channel = ?",
+        (now, member_id, channel),
+    )
 
 
 MAX_SUMMARY_LENGTH = 200
@@ -2154,6 +2255,7 @@ def nth_send(channel: str, member_id: str, message: str, task: bool = False, pin
                 (now, channel),
             )
         db.commit()
+        _notify_new_messages()
 
         if task_id is not None:
             _console("📋", channel, f"{member['name']} posted task #{task_id}: {content}", 33)
@@ -2257,7 +2359,9 @@ def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: st
     try:
         deadline = time.time() + wait_seconds
         _ctx_relayed = False
+        _last_beat = None
         while True:
+            marker = _change_marker(db)
             member = _get_member(db, channel, member_id)
             if not member:
                 return json.dumps({"error": "You are not a member of this channel."})
@@ -2302,11 +2406,7 @@ def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: st
                     ],
                 })
 
-            # Update heartbeat. A monitor process polling on the member's
-            # behalf (nth_spoke_monitor.py over SSE) declares itself with
-            # monitor_heartbeat=True so the monitor-liveness columns advance
-            # too — otherwise _sentinel_nag() keeps prescribing a monitor
-            # relaunch to a member whose monitor is alive but remote.
+            # Liveness: _poll_heartbeat, at most every POLL_HEARTBEAT_SECONDS.
             now = now_iso()
             # Statusline relay: the monitor ships its session's context
             # snapshot so every nth_web instance (hub included) can render
@@ -2332,32 +2432,11 @@ def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: st
                         )
                 except (ValueError, TypeError, sqlite3.OperationalError):
                     pass
-            if monitor_heartbeat:
-                try:
-                    if monitor_filter in ("all", "about", "at"):
-                        db.execute(
-                            "UPDATE members SET last_seen = ?, messenger_heartbeat = ?, "
-                            "watchdog_heartbeat = ?, filter_mode = ? "
-                            "WHERE id = ? AND channel = ?",
-                            (now, now, now, monitor_filter, member_id, channel),
-                        )
-                    else:
-                        db.execute(
-                            "UPDATE members SET last_seen = ?, messenger_heartbeat = ?, "
-                            "watchdog_heartbeat = ? WHERE id = ? AND channel = ?",
-                            (now, now, now, member_id, channel),
-                        )
-                except sqlite3.OperationalError:
-                    db.execute(
-                        "UPDATE members SET last_seen = ? WHERE id = ? AND channel = ?",
-                        (now, member_id, channel),
-                    )
-            else:
-                db.execute(
-                    "UPDATE members SET last_seen = ? WHERE id = ? AND channel = ?",
-                    (now, member_id, channel),
-                )
-            db.commit()
+            if (_last_beat is None
+                    or time.monotonic() - _last_beat >= POLL_HEARTBEAT_SECONDS):
+                _last_beat = time.monotonic()
+                _poll_heartbeat(db, channel, member_id, now, monitor_heartbeat, monitor_filter)
+                db.commit()
 
             # Check for unread messages (from other members). Pull refs + bangs
             # so the response-enrichment block below can mark 'referenced' /
@@ -2385,7 +2464,7 @@ def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: st
                         if time.time() >= deadline:
                             return json.dumps({"event": "no_new", "unread_count": len(unread),
                                               "reminder": "No matching messages yet, but stay connected. Other members may need you. Keep polling until the channel ends or your user tells you to stop."})
-                        time.sleep(2)
+                        _wait_for_change(db, marker, deadline)
                         continue
                     display_msgs = filtered
                 else:
@@ -2412,7 +2491,7 @@ def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: st
                         db.commit()
                     if time.time() >= deadline:
                         return json.dumps({"event": "no_new"})
-                    time.sleep(2)
+                    _wait_for_change(db, marker, deadline)
                     continue
 
                 # Apply mentions_only filter: keep broadcasts (empty mentions)
@@ -2567,7 +2646,7 @@ def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: st
                     reminder += " " + nag
                 return json.dumps({"event": "no_new", "unread_count": 0, "reminder": reminder})
 
-            time.sleep(2)
+            _wait_for_change(db, marker, deadline)
     finally:
         db.close()
 
@@ -2923,6 +3002,7 @@ def nth_dm(channel: str = "", member_id: str = "", message: str = "",
         except Exception as e:
             db.rollback()
             return json.dumps({"error": f"Failed to send: {e}"})
+        _notify_new_messages()
 
         # Resolve recipient names for the console + response (audit-friendly).
         recipient_names = []
