@@ -41,7 +41,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Deque, Dict, List, Optional
+from typing import Any, Callable, Deque, Dict, List, Optional, Tuple
 
 try:
     from zoneinfo import ZoneInfo
@@ -445,6 +445,10 @@ ST_COMPACTING = "compacting"
 ST_SLEEPING = "sleeping"
 ST_STOPPED = "stopped"
 ST_ERRORED = "errored"
+# States a row can hold while this supervisor owns a live process for it. The
+# others are written by a teardown or a reap, and only spawn() leads out of
+# them, so an event from a process must never move a row out of one.
+LIVE_STATES = (ST_SPAWNING, ST_RUNNING, ST_IDLE, ST_COMPACTING)
 
 # Context window used to turn a turn's token usage into a fullness
 # percentage. As of the 4.6/5 model generation, 1M tokens is the DEFAULT
@@ -1073,10 +1077,14 @@ class AgentSupervisor:
             ST_COMPACTING if compacting else ST_RUNNING)
         # A reader thread can deliver its final buffered event while stop() /
         # shutdown() is tearing the process down. Never let that late event
-        # resurrect a deliberately stopped DB row.
+        # resurrect a deliberately stopped DB row. The is_running() check alone
+        # did not hold: a teardown on another thread could pop the handle and
+        # commit its state between the check and this write, which then turned
+        # a stopped row back into 'running' with no process behind it. The
+        # write is therefore conditional on the row still being live.
         if self.is_running(agent_id):
             try:
-                self._set_state(agent_id, state)
+                self._set_state(agent_id, state, only_from=LIVE_STATES)
             except Exception:
                 pass
         if evt.get("type") == "assistant":
@@ -1316,8 +1324,14 @@ class AgentSupervisor:
 
     def _set_state(self, agent_id: str, state: str, *,
                    pid: Optional[int] = None, session_id: Optional[str] = None,
-                   clear_pid: bool = False, clear_session: bool = False) -> int:
-        """Update an agent's row. Returns rows affected (0 = unknown agent)."""
+                   clear_pid: bool = False, clear_session: bool = False,
+                   only_from: Optional[Tuple[str, ...]] = None) -> int:
+        """Update an agent's row. Returns rows affected (0 = unknown agent).
+
+        only_from makes the write conditional on the row's current state, in
+        the same statement, so it cannot overwrite a state another thread has
+        committed since the caller decided to write.
+        """
         db = self._db()
         try:
             columns = {r[1] for r in db.execute("PRAGMA table_info(agents)")}
@@ -1339,8 +1353,12 @@ class AgentSupervisor:
                 if "runtime_ref" in columns:
                     sets.append("runtime_ref = NULL")
             vals.append(agent_id)
+            where = "id = ?"
+            if only_from:
+                where += f" AND state IN ({', '.join('?' * len(only_from))})"
+                vals.extend(only_from)
             cur = db.execute(
-                f"UPDATE agents SET {', '.join(sets)} WHERE id = ?", vals)
+                f"UPDATE agents SET {', '.join(sets)} WHERE {where}", vals)
             db.commit()
             if clear_pid or pid is not None:
                 # We just changed who owns this process, so any memoised answer

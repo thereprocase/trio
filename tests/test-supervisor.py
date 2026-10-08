@@ -298,6 +298,48 @@ def main() -> int:
     check("wake nonexistent agent returns None", s.wake("nope") is None)
     s.stop("agcold")
 
+    # ── a late event never resurrects a torn-down row ──
+    # The reader thread checks is_running() and then writes the state its event
+    # implies. A teardown on another thread can pop the handle and commit its
+    # own state in between, and the event's write used to land on top of it:
+    # a shut-down agent read 'running' with no process behind it (the shutdown
+    # case below failed between one run in 5 and one in 20). The teardown runs
+    # here exactly in that gap, on this thread, so the interleaving is forced
+    # every time.
+    real_is_running = s.is_running
+    late_assistant = {"type": "assistant", "message": {"role": "assistant", "content": "late"}}
+    for agent_id, teardown, evt, after in (
+            ("aglate1", s.stop, {"type": "result"}, sup.ST_STOPPED),
+            ("aglate2", s.hibernate, late_assistant, sup.ST_SLEEPING),
+            ("aglate3", lambda _aid: s.shutdown(preserve_sessions=False), {"type": "result"}, sup.ST_STOPPED)):
+        dbl = sqlite3.connect(str(db_path))
+        dbl.execute("INSERT INTO agents (id, name, model, created_at) "
+                    "VALUES (?, 'Late', 'sonnet', ?)", (agent_id, sup.now_iso()))
+        dbl.commit(); dbl.close()
+        s._accepting = True                    # shutdown() closed it on the previous pass
+        late_proc = s.spawn(agent_id, model="sonnet")
+        torn = []
+
+        def check_then_teardown(aid, _aid=agent_id, _teardown=teardown, _torn=torn):
+            live_now = real_is_running(aid)
+            # Only this thread's call: the agent's own reader thread may still
+            # be handling its init event, and must not be the one to tear down.
+            if (aid == _aid and live_now and not _torn
+                    and threading.current_thread() is threading.main_thread()):
+                _torn.append(True)
+                _teardown(aid)
+            return live_now
+
+        s.is_running = check_then_teardown
+        try:
+            s._handle_event(agent_id, evt, source=late_proc)
+        finally:
+            del s.is_running
+        check(f"late {evt['type']} event after {after}: the teardown ran inside the gap", torn == [True])
+        check(f"late {evt['type']} event after {after}: the row stays {after}",
+              _row(db_path, agent_id)["state"] == after)
+    s._accepting = True
+
     # ── shutdown with a LIVE agent actually stops it (Ents: prior test popped
     #    everything before shutdown, so its body never ran) ──
     db6 = sqlite3.connect(str(db_path))
@@ -307,7 +349,8 @@ def main() -> int:
     live = s.spawn("aglive", model="sonnet")
     check("shutdown precondition: agent live", live.alive())
     s.shutdown()
-    time.sleep(0.2)
+    # shutdown() waits for each process to exit before it writes the row, so
+    # both facts hold the moment it returns.
     check("shutdown stops a live agent", not live.alive())
     check("shutdown marks it stopped", _row(db_path, "aglive")["state"] == "stopped")
 
