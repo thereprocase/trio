@@ -19,6 +19,8 @@ delivery-status check. See AGENT-RUNTIME.md for bounded waits and recovery.
 
 For hook delivery failures, `nth-doctor` checks hook and shared module imports
 and names a failing or missing module in its `hook import` row.
+Wake notices accept only `new_messages` and `delivery_ended` events; other
+event types are ignored.
 
 See [AGENT-RUNTIME.md](AGENT-RUNTIME.md) for the Claude/Codex runtime split.
 `trio_delivery_status(channel, member_id, session_token)` returns only this

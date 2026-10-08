@@ -261,8 +261,8 @@ for module in sys.argv[2:]:
     try:
         importlib.import_module(module)
     except Exception as error:
-        print(module + ': ' + type(error).__name__ +
-              (' (' + error.name + ')' if isinstance(error, ImportError) and error.name else ''))
+        print(module[:80] + ': ' + type(error).__name__ +
+              (' (' + error.name[:80] + ')' if isinstance(error, ImportError) and error.name else ''))
         sys.exit(1)
 '''
         proc = subprocess.run([python or sys.executable, '-I', '-B', '-c', probe,
@@ -271,8 +271,8 @@ for module in sys.argv[2:]:
         if proc.returncode:
             return ('hook import', FAIL, proc.stdout.strip() or 'hook import probe failed')
         return ('hook import', OK, 'hooks and shared modules import successfully')
-    except (OSError, SyntaxError, subprocess.TimeoutExpired) as error:
-        return ('hook import', FAIL, f'{name}: {type(error).__name__}')
+    except (OSError, SyntaxError, ValueError, subprocess.TimeoutExpired) as error:
+        return ('hook import', FAIL, f'{name[:80]}: {type(error).__name__}')
 
 
 def run_checks(hub_override=None):

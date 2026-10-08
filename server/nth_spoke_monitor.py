@@ -57,6 +57,7 @@ Useful env / flags:
 """
 import argparse
 import json
+import math
 import os
 import subprocess
 import sys
@@ -234,9 +235,9 @@ def seconds_since(iso_ts):
 
 
 def gap_for_emit(gap):
-    """JSON-safe gap: None when unknown (inf). round(inf) raises OverflowError
+    """JSON-safe gap: None when non-finite. round(inf) raises OverflowError
     — the exact crash class fixed in nth_monitor.py (2026-08-11)."""
-    return None if gap == float("inf") else round(gap)
+    return None if not math.isfinite(gap) else round(gap)
 
 
 def is_sleeping(status_text):
@@ -259,7 +260,7 @@ def parse_id_list(raw):
     if isinstance(raw, str):
         try:
             v = json.loads(raw)
-            return v if isinstance(v, list) else []
+            return [x for x in v if isinstance(x, str)] if isinstance(v, list) else []
         except (ValueError, TypeError):
             return []
     return []

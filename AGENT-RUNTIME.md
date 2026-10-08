@@ -506,6 +506,10 @@ Three edges:
 `nth-doctor` checks installed hooks and their shared module imports with the registered
 interpreter. A failed `hook import` row names the failing or missing module,
 including imports a hook would otherwise suppress or load only when waiting.
+Invalid UTF-8 or null bytes in a hook produce a FAIL row; reported module names
+are limited to 80 characters. Wake notices accept only `new_messages` or
+`delivery_ended`; other event types are ignored. The hook adapter preserves
+older message metadata lacking an event tag by adding `new_messages`.
 
 `python setup.py install` registers four hooks in Claude's user `settings.json`,
 three of them `asyncRewake` (SessionEnd only records), so a plainly launched Claude, however it was started, gets push

@@ -282,7 +282,7 @@ class NoticeTests(unittest.TestCase):
         self.assertNotIn('ConnectionResetError', line)
 
     def test_from_event_reads_only_integers_and_identifiers(self):
-        notice = nth_notice.from_event('trio', {'channel': 'room', 'member_id': 'me', 'message_id': '9',
+        notice = nth_notice.from_event('trio', {'event': 'new_messages', 'channel': 'room', 'member_id': 'me', 'message_id': '9',
                                                 'first_message_id': '8', 'count': '2', 'more_unread': '3',
                                                 'banged': 'true', 'sender': 'evil <x>'})
         self.assertEqual(notice.ended, '')
@@ -310,19 +310,19 @@ class NoticeTests(unittest.TestCase):
         self.assertEqual(ended.line, 'Trio delivery has stopped for member None in trio channel None: listener '
                                      'failure. No further wake will come for it. The listener failed. Tell the '
                                      'user, and check trio_delivery_status.')
-        said = nth_notice.from_event('trio', {'channel': None, 'member_id': None, 'message_id': '4',
+        said = nth_notice.from_event('trio', {'event': 'new_messages', 'channel': None, 'member_id': None, 'message_id': '4',
                                               'first_message_id': '4', 'count': '1', 'mentioned': None,
                                               'banged': None})
         self.assertEqual(said.ended, '')
         self.assertIn('for member None in channel None.', said.line)
         self.assertNotIn('addressed', said.line)
-        self.assertIsNone(nth_notice.from_event('trio', {'channel': 'room', 'member_id': 'me', 'message_id': None,
+        self.assertIsNone(nth_notice.from_event('trio', {'event': 'new_messages', 'channel': 'room', 'member_id': 'me', 'message_id': None,
                                                          'first_message_id': '4', 'count': '1'}))
-        self.assertIsNone(nth_notice.from_event('trio', {'channel': 'room', 'member_id': 'me', 'message_id': '4',
+        self.assertIsNone(nth_notice.from_event('trio', {'event': 'new_messages', 'channel': 'room', 'member_id': 'me', 'message_id': '4',
                                                          'first_message_id': None, 'count': '1'}))
         # A None more_unread is no more unread.
         self.assertIn('1 new trio message (id 4)', nth_notice.from_event('trio', {
-            'channel': 'room', 'member_id': 'me', 'message_id': '4', 'first_message_id': '4', 'count': '1',
+            'event': 'new_messages', 'channel': 'room', 'member_id': 'me', 'message_id': '4', 'first_message_id': '4', 'count': '1',
             'more_unread': None}).line)
 
     def test_from_event_survives_any_meta(self):
@@ -347,20 +347,20 @@ class NoticeTests(unittest.TestCase):
     def test_from_event_turns_an_overflow_into_no_notice(self):
         # _integer refuses floats before int() could overflow on inf, so this pins the
         # last line of defence directly, on both branches.
-        meta = {'channel': 'room', 'member_id': 'me', 'message_id': '9', 'first_message_id': '8', 'count': '2'}
+        meta = {'event': 'new_messages', 'channel': 'room', 'member_id': 'me', 'message_id': '9', 'first_message_id': '8', 'count': '2'}
         with patch.object(nth_notice, '_integer', side_effect=OverflowError):
             self.assertIsNone(nth_notice.from_event('trio', meta))
         with patch.object(nth_notice, 'ended_notice', side_effect=OverflowError):
             self.assertIsNone(nth_notice.from_event('trio', {'event': 'delivery_ended', 'reason': 'channel ended'}))
 
     def test_from_event_refuses_what_is_not_an_integer(self):
-        base = {'channel': 'room', 'member_id': 'me', 'message_id': '9', 'first_message_id': '8', 'count': '2'}
+        base = {'event': 'new_messages', 'channel': 'room', 'member_id': 'me', 'message_id': '9', 'first_message_id': '8', 'count': '2'}
         for field, value in (('message_id', 'nine'), ('count', None), ('first_message_id', True),
                              ('more_unread', '1; drop'), ('count', float('inf')), ('message_id', 2 ** 53),
                              ('count', '-3'), ('message_id', 5.0)):
             with self.subTest(field=field, value=value):
                 self.assertIsNone(nth_notice.from_event('trio', dict(base, **{field: value})))
-        self.assertIsNone(nth_notice.from_event('trio', {'channel': 'room'}))
+        self.assertIsNone(nth_notice.from_event('trio', {'event': 'new_messages', 'channel': 'room'}))
         self.assertIsNone(nth_notice.from_event('trio', None))
         with self.assertRaises(TypeError):
             nth_notice.message_notice('trio', 'room', 'me', True, 1, 1)

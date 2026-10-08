@@ -62,7 +62,7 @@ function page({ health, transcript } = {}) {
   const box = cx.document.getElementById('input');
   return { cx, win, Trio, C: Trio.composer, state: Trio.state, toasts, mic, recorders, sessions, box };
 }
-function deferred() { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; }
+function deferred() { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; }
 
 (async () => {
   // Cancel even before an engine exists: health and permission awaits.
@@ -113,8 +113,106 @@ function deferred() { let resolve; const promise = new Promise(r => { resolve = 
     await tick(10);
     check('deadline: abort clears transcribing and processing', p.C.dictationState() === ''
       && !p.cx.document.getElementById('dictate-btn').classList.contains('processing'));
-    check('deadline: abort shows the existing failure offer', p.toasts.some(t => /transcription failed/i.test(t.message) && t.action));
+    check('deadline: abort shows the exact recovery wording and browser offer', p.toasts.some(t =>
+      t.message === 'Hub dictation timed out. Tap the mic and say it again, or use browser dictation.' && t.action));
     check('deadline: abort does not reopen browser dictation', p.sessions.length === 0);
+  }
+  // A pending transcription owns the shared recorder state until it settles.
+  {
+    const p = page({ health: { available: true, detail: 'ok' }, transcript: new Promise(() => {}) });
+    await p.C.refreshSttHealth();
+    p.Trio.preferences.save({ sttMode: 'local' });
+    const tap = p.C.toggleDictation();
+    p.mic.release.shift()();
+    await tap;
+    const rec = p.recorders[0];
+    let dispatchStop;
+    rec.stop = () => { rec.state = 'inactive'; dispatchStop = () => rec.onstop(); };
+    p.C.stopDictation();
+    p.state.channel = 'beta';
+    p.C.refresh();
+    check('queued onstop preserves processing before the event arrives', p.C.dictationState() === 'transcribing'
+      && p.cx.document.getElementById('dictate-btn').disabled);
+    await Promise.race([p.C.toggleDictation(), tick(20)]);
+    check('queued onstop refuses a new mic before the event arrives', p.mic.opens === 1);
+    dispatchStop();
+  }
+  {
+    const p = page({ health: { available: true, detail: 'ok' }, transcript: new Promise(() => {}) });
+    await p.C.refreshSttHealth();
+    p.Trio.preferences.save({ sttMode: 'local' });
+    p.win.navigator.mediaDevices.getUserMedia = () => Promise.reject(new Error('mic interrupted'));
+    await p.C.toggleDictation();
+    const earlierOffer = p.toasts.at(-1).action;
+    p.win.navigator.mediaDevices.getUserMedia = () => Promise.resolve({ getTracks: () => [] });
+    await p.C.toggleDictation();
+    p.recorders[0].stop();
+    await earlierOffer.onClick();
+    check('pending transcription refuses an earlier toast browser action', p.sessions.length === 0
+      && p.C.dictationState() === 'transcribing');
+  }
+  for (const outcome of ['timeout', 'success']) {
+    const answer = deferred();
+    const p = page({ health: { available: true, detail: 'ok' }, transcript: answer.promise });
+    await p.C.refreshSttHealth();
+    p.Trio.preferences.save({ sttMode: 'local' });
+    p.state.channel = 'alpha';
+    p.state.drafts.beta = 'beta draft';
+    const streams = [];
+    p.win.navigator.mediaDevices.getUserMedia = () => {
+      p.mic.opens++;
+      const stream = { stopped: 0, getTracks: () => [{ stop: () => stream.stopped++ }] };
+      streams.push(stream);
+      return Promise.resolve(stream);
+    };
+    const controller = new AbortController();
+    p.win.AbortSignal = { timeout: () => controller.signal };
+    const healthFetch = p.win.fetch;
+    p.win.fetch = (url, options) => {
+      if (!/transcribe/.test(url)) return healthFetch(url);
+      return new Promise((resolve, reject) => {
+        options.signal.addEventListener('abort', () => reject(options.signal.reason));
+        answer.promise.then(body => resolve({ ok: true, json: async () => body }));
+      });
+    };
+    await p.C.toggleDictation();
+    p.C.stopDictation();
+    p.state.channel = 'beta';
+    p.C.refresh();
+    const button = p.cx.document.getElementById('dictate-btn');
+    check(outcome + ': switching channels preserves processing', button.disabled
+      && button.classList.contains('processing') && !p.cx.document.getElementById('dictate-status').hidden);
+    await p.C.toggleDictation();
+    check(outcome + ': a new recording attempt is refused while transcribing', p.mic.opens === 1
+      && p.recorders.length === 1 && p.sessions.length === 0);
+    if (outcome === 'timeout') controller.abort(new DOMException('deadline', 'TimeoutError'));
+    else answer.resolve({ ok: true, text: 'alpha words' });
+    await tick(10);
+    check(outcome + ': completion makes dictation usable again', p.C.dictationState() === '' && !button.disabled);
+    check(outcome + ': completion leaves beta draft alone', p.box.textContent === 'beta draft');
+    if (outcome === 'success') check('success: old transcript is saved in alpha', p.state.drafts.alpha === 'alpha words');
+    await p.C.toggleDictation();
+    await tick(10);
+    check(outcome + ': the next recording stays active with its own live microphone',
+      p.recorders.at(-1).state === 'recording' && streams.at(-1).stopped === 0
+      && button.getAttribute('aria-pressed') === 'true');
+  }
+  for (const mode of ['auto', 'local']) {
+    for (const cancel of ['unmount', 'switch']) {
+      const p = page({ health: { available: true, detail: 'ok' } });
+      await p.C.refreshSttHealth();
+      p.Trio.preferences.save({ sttMode: mode });
+      p.state.channel = 'alpha';
+      const mic = deferred();
+      p.win.navigator.mediaDevices.getUserMedia = () => mic.promise;
+      const tap = p.C.toggleDictation();
+      if (cancel === 'unmount') p.C.unmount();
+      else p.state.channel = 'beta'; // also cancel a switch that skipped refresh
+      mic.reject(new DOMException('Microphone capture interrupted', 'AbortError'));
+      await tap;
+      check(mode + ': rejected start after ' + cancel + ' is silent cancellation',
+        p.sessions.length === 0 && p.recorders.length === 0 && p.toasts.length === 0 && p.C.dictationState() === '');
+    }
   }
   // ── local engine: thread switch while transcribing ──
   {
