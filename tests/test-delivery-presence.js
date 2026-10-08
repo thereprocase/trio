@@ -30,6 +30,18 @@ for (const [status, label, expected, chip] of [
     assert.strictEqual(node.querySelector('.channel-status-chip').textContent, chip);
   });
 }
+// Members without a delivery report keep the original supervisor-first path: a working agent
+// stays Working even when a reclaim left a stale supervisor state behind.
+for (const [member, expected] of [
+  [{ live: true, state: 'sleeping', status: 'working', busy: true }, 'working'],
+  [{ live: true, state: 'errored', status: 'working' }, 'working'],
+  [{ live: true, state: 'sleeping', status: 'idle' }, 'idle'],
+  [{ live: false, state: 'stopped', status: 'blocked' }, 'offline'],
+]) {
+  check('no delivery report: ' + JSON.stringify(member) + ' stays ' + expected, () => {
+    assert.strictEqual(ws.channelStatus({ id: 'm', name: 'M', ...member }), expected);
+  });
+}
 for (const [mode, clock] of [['local', '07:30:00'], ['utc', '12:30:00Z']]) {
   check('silent timestamp follows ' + mode + ' preference', () => {
     Trio.preferences.save({messageTimes: mode});

@@ -335,6 +335,7 @@ h1,h2,h3,h4{ margin:0; font-weight:600; }
 .channel-member-status{ margin-top:1px; color:var(--ink-3); font-size:13px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .channel-status-chip{ display:inline-flex; align-items:center; gap:6px; flex:none; border-radius:999px; padding:6px 11px; font-size:12px; font-weight:700; --c:currentColor; }
 .channel-status-chip .dot{ width:8px; height:8px; border-radius:50%; background:var(--c); }
+.channel-member-delivery{ margin-top:1px; color:var(--ink-3); font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .channel-member-tool{ margin-top:1px; color:var(--ink-3); font-size:11.5px; font-style:italic; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .channel-member-subagents{ margin-top:4px; display:grid; gap:2px; }
 .channel-member-subagents:empty{ display:none; margin:0; }

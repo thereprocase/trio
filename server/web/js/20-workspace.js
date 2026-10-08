@@ -1717,14 +1717,18 @@
     // it is not a live member that happens to be down: say so before any
     // liveness heuristic gets a chance to call it "Offline".
     if (member?.archived) return 'archived';
-    const strongerStatus = String(member?.status || '').toLowerCase();
-    const supervisorState = String(member?.state || '').toLowerCase();
-    if (strongerStatus === 'archived') return 'archived';
-    if (strongerStatus === 'blocked') return 'blocked';
-    if (['error','errored'].includes(strongerStatus) || ['error','errored'].includes(supervisorState)) return 'errored';
-    if (['sleeping','compacting'].includes(supervisorState)) return supervisorState;
-    if (['sleeping','compacting'].includes(strongerStatus)) return strongerStatus;
-    if (member?.delivery_label) return member.status === 'stale' ? 'offline' : member.status;
+    // A delivery report only ever sits below the states that matter more. Members
+    // without one take the original path below unchanged.
+    if (member?.delivery_label) {
+      const strongerStatus = String(member?.status || '').toLowerCase();
+      const supervisorState = String(member?.state || '').toLowerCase();
+      if (strongerStatus === 'archived') return 'archived';
+      if (strongerStatus === 'blocked') return 'blocked';
+      if (['error','errored'].includes(strongerStatus) || ['error','errored'].includes(supervisorState)) return 'errored';
+      if (['sleeping','compacting'].includes(supervisorState)) return supervisorState;
+      if (['sleeping','compacting'].includes(strongerStatus)) return strongerStatus;
+      return member.status === 'stale' ? 'offline' : member.status;
+    }
     // Agent roster objects carry {state, live, busy} from the supervisor —
     // the same source as the Agent roster page. Prefer those when present so
     // the details panel agrees with the roster instead of falling back to the
