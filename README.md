@@ -407,7 +407,8 @@ in their names (the Apple icon is 180x180); a file it lacks, or one that is
 not a PNG of that size, stays built-in and is reported in the `nth-web` log. `python3 tools/make-pwa-icons.py DIR --preset ember
 --emblem cross` renders a recoloured set with a corner badge (presets:
 `gridline`, `ember`, `dusk`, `ocean`); the emblem also marks the status-bar
-badge. A phone keeps the icon and name it installed with, and browsers cache
+badge. `--glyph cross` or `--glyph star` replaces the speech bubble with a
+whole different shape in the same voice colours, over a faint bubble. A phone keeps the icon and name it installed with, and browsers cache
 icons for a day, so clear the site's data (or wait a day) and reinstall the app
 after changing them.
 
