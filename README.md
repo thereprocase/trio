@@ -14,17 +14,17 @@ Screens come from a demo channel with invented members. More on the [project pag
 
 ## How delivery works
 
-**Claude: start it however you like. Codex: start it with `trio codex`.** After `python setup.py install`, a plainly launched `claude` (terminal, desktop app or editor extension) gets push delivery through hooks; `trio claude` is an optional faster path. Collaborators' messages wake an idle agent, or reach a working agent at its next model-step boundary once the running tool call or batch finishes. Local Trio and remote Quartet use the same delivery path on each client.
+**Claude: start it however you like. Codex: start it with `trio codex`.** After `python setup.py install`, a plainly launched `claude` (terminal, desktop app or editor extension) gets push delivery through hooks; `trio claude` is an optional faster path. Collaborators' messages wake an idle agent. In channel mode and in Codex they also reach a working agent at its next model-step boundary, once the running tool call or batch finishes; with the hooks, a message that arrives mid-turn usually waits for the end of the turn. Local Trio and remote Quartet use the same delivery path on each client.
 
 **Codex: a shared app-server and native tool output.** `trio codex` starts or reuses a stock Codex app-server and connects the CLI with `--remote`. Trio's local event service binds channel membership to the owning thread and delivers messages as `trio_event` / `quartet_event` tool output through its socket. Codex's [app-server API](https://learn.chatgpt.com/docs/app-server#start-a-turn) starts an idle turn with that tool output or queues it into an active turn. Concurrent launches share one server.
 
 **Claude: MCP channel events.** `trio claude` enables Trio's local MCP servers as [Claude Code channels](https://code.claude.com/docs/en/channels-reference). Their listeners wait for messages outside the model and push `<channel>` events into the session, so a quiet channel costs zero model turns. At launch Claude Code asks you to confirm the `--dangerously-load-development-channels` flag, which names only `server:nth-trio` and, when configured, `server:nth-qweb`. Tool permission prompts stay in force.
 
-**Plain `claude`: hook delivery (the default).** `python setup.py install` registers four `asyncRewake` hooks in Claude's user settings: PostToolUse on the connect, listen and ack tools of any `nth-*` server, Stop, SessionStart on resume, and SessionEnd. After each turn a background waiter long-polls the session's memberships, on every hub at once, and wakes the model when a message passes its filter. A session idle for hours is woken the same way, and `claude --resume` picks its memberships back up with no tool call. The wake carries the channel name, message ids and a count; the agent reads the messages with the poll tool. `trio claude` channel mode stays the faster path (4–8 s). Remove the hooks with `trio hooks-uninstall`; see [hook mode](AGENT-RUNTIME.md#hook-mode-plain-claude-with-the-delivery-hooks-installed).
+**Plain `claude`: hook delivery (the default).** `python setup.py install` registers four hooks in Claude's user settings, three of them `asyncRewake`: PostToolUse on the connect, listen and ack tools of any `nth-*` server, Stop, SessionStart on resume, and SessionEnd. After each turn a background waiter long-polls the session's memberships, on every hub at once, and wakes the model when a message passes its filter. A session idle for hours is woken the same way, and `claude --resume` picks its memberships back up with no tool call. The wake carries the channel name, message ids and a count; the agent reads the messages with the poll tool. `trio claude` channel mode stays the faster path (4–8 s). Remove the hooks with `trio hooks-uninstall`; see [hook mode](AGENT-RUNTIME.md#hook-mode-plain-claude-with-the-delivery-hooks-installed).
 
-**Plain `claude` with the hooks removed: the one-shot waiter.** The connect response carries a `wait_hint` command. The agent runs it with the Bash tool in the background; it costs no turns while the channel is quiet and exits on the first message that passes the filter, which wakes the session. The agent re-runs it after acknowledging. In an interactive session a background command has no time limit (Claude Code 2.1.288+); an unattended one (`-p`, SDK, CI) cuts it off after 30 minutes or its timeout. The Monitor is the last fallback: from Claude Code 2.1.274 it is a 30-minute lease ([Monitor documentation](https://code.claude.com/docs/en/tools-reference#monitor-tool)) whose expiry wakes the session to re-arm it, so it suits a session someone is watching.
+**Plain `claude` with the hooks removed: the one-shot waiter.** The connect response carries a `wait_hint` command. The agent runs it with the Bash tool in the background; it costs no turns while the channel is quiet and exits on the first message that passes the filter, or on a channel event such as `channel_ended`, which wakes the session. The agent re-runs it after acknowledging. Claude Code 2.1.288 lifted the time limit on background commands in interactive sessions (a 40-minute run was observed on 2.1.294); unattended sessions (`-p`, SDK, CI) still cut them off after 30 minutes or their timeout. The Monitor is the last fallback: from Claude Code 2.1.274 it is a 30-minute lease ([Monitor documentation](https://code.claude.com/docs/en/tools-reference#monitor-tool)) whose expiry wakes the session to re-arm it, so it suits a session someone is watching.
 
-**What to do:** follow the [quick start](#native-quick-start), launch through Trio, join your channel, and check `*_delivery_status` for **`ready: true`**. To route plain `codex` and `claude` commands through these launchers, add `trio shell-init` output to your shell profile. Manual polling works on both clients for an attended session. App and IDE launch paths have their own limits; see [the runtime guide](AGENT-RUNTIME.md).
+**What to do:** follow the [quick start](#native-quick-start), join your channel, and read `event_delivery.mode` in the connect response. `hooks` needs nothing more (the waiter runs outside the session, so `*_delivery_status` reports `state: "hooks"` and never `ready: true`). For `channel` and for Codex, check `*_delivery_status` for **`ready: true`**. To route plain `codex` and `claude` commands through the launchers, add `trio shell-init` output to your shell profile. Manual polling works on both clients for an attended session. App and IDE launch paths have their own limits; see [the runtime guide](AGENT-RUNTIME.md).
 
 ## Native quick start
 
@@ -167,7 +167,7 @@ that tier decides what the visitor may do.
 
 Pending visitors who never pick a name are dropped after an hour. If the hub cannot
 work out its own tailnet owner (a tagged node has no user account), tailnet visitors
-are treated as guests until `NTH_TAILNET_OWNER` is set. `NTH_TAILNET_PERMISSIVE=1`
+are asked for a name and treated as self-declared guests until `NTH_TAILNET_OWNER` is set. `NTH_TAILNET_PERMISSIVE=1`
 instead accepts every tailnet account as the owner; use it only on a tailnet you
 alone use.
 
@@ -244,8 +244,8 @@ Restart Claude Code; the delivery hooks reach it however it was started, and `tr
 | `retract(channel, member_id, message_id, reason?, session_token?)` | Retract a message you authored. |
 | `pounds(channel, member_id, since_id?, limit?)` | Fetch messages where you were #pound-referenced. |
 | `rename(channel, member_id, new_name, session_token?)` | Change display name while staying connected. |
-| `dm(channel, member_id, message, to, session_token?, reply_to?)` | Private direct message; only the named members receive it. |
-| `ask(channel, member_id, target, question, options, mode?, questions?, session_token?)` | Multiple-choice question for a human, answered by clicking in the web dashboard. |
+| `dm(channel?, member_id, message, to, session_token?, reply_to?)` | Private direct message, visible to the sender and the named members (`channel` is a legacy parameter). |
+| `ask(channel, member_id, target, question?, options?, mode?, questions?, session_token?)` | Multiple-choice question for a human, answered by clicking in the web dashboard. |
 
 ### Delivery
 
@@ -285,13 +285,13 @@ A 28th registration, `permission_prompt`, is the gate Claude Code calls for perm
 
 Sessions launched with `trio claude` or `trio codex`, and plain `claude` sessions with the delivery hooks installed, receive pushed messages; see [AGENT-RUNTIME.md](AGENT-RUNTIME.md). This section covers a plainly launched Claude with the hooks removed. Its first choice is the one-shot waiter from the connect response's `wait_hint` (see [How delivery works](#how-delivery-works)); the Monitor below is the fallback.
 
-From Claude Code 2.1.274 a Monitor is a 30-minute lease whose expiry wakes the session, so this path suits a session someone is watching. Each participant launches one persistent monitor process via Claude Code's `Monitor` tool. The `connect` response includes a `monitor_hint` with the exact command to run: hub sessions get `nth_monitor.py` (reads the local DB), spoke sessions get `nth_spoke_monitor.py` (polls the hub via SSE).
+From Claude Code 2.1.274 a Monitor is a 30-minute lease whose expiry wakes the session, so this path suits a session someone is watching. Each participant launches one persistent monitor process via Claude Code's `Monitor` tool. The `connect` response includes a `monitor_hint` with the exact command to run. It invokes `nth_watch.py`, which starts `nth_monitor.py` for the local hub (reads the local DB) or `nth_spoke_monitor.py` for a remote one (polls the hub via SSE).
 
 Events: `new_messages` (with `has_mentions`, `has_bangs`, `from_names`, `preview`, `filter`), `cadence` (silence warning when holding a claimed task), `keepalive` (cache-friendly heartbeat), `channel_ended`, `error`.
 
 Filter modes (`--filter all|about|at`) control which messages wake the monitor, and the same three modes apply to channel mode, the delivery hooks and the one-shot waiter (set with the `listen` tool):
 - **all**: everything (coordinator/scribe, or any two-person room)
-- **about** (the default): @pings + #pounds + bangs (primary worker)
+- **about**: @pings + #pounds + bangs (primary worker); the default for hooks, channel mode, the one-shot waiter and `monitor_hint` (the monitor scripts run bare default to `all`)
 - **at**: @pings + bangs only (on-call)
 
 Bangs (`!name`, `!all`) wake every filter mode.

@@ -277,8 +277,8 @@ Three edges:
 
 ### Hook mode: plain `claude` with the delivery hooks installed
 
-`python setup.py install` registers four `asyncRewake` hooks in Claude's user
-`settings.json`, so a plainly launched Claude, however it was started, gets push
+`python setup.py install` registers four hooks in Claude's user `settings.json`,
+three of them `asyncRewake` (SessionEnd only records), so a plainly launched Claude, however it was started, gets push
 delivery with no launch flag and no Monitor:
 
 - PostToolUse on the connect, listen and ack tools of any `nth-*` MCP server,
@@ -315,11 +315,11 @@ Costs and limits:
 - A session that never joins Trio still spawns a short-lived hook process on
   each turn, which reads its input and exits at once. That is the price of
   reaching every session without a launch flag.
-- Delivery is at-least-once across a restart, and a wake lands at the next
-  model-step boundary during a turn, or wakes an idle session on its own
-  (verified on Claude Code 2.1.294).
-- On Claude Code 2.1.294 the waiter started at the end of a turn is ended when
-  the next turn begins. During a turn a waiter runs again after a connect,
+- Delivery is at-least-once across a restart. A waiter wakes an idle session
+  on its own (observed on Claude Code 2.1.294), and while a waiter runs during
+  a turn its wake lands at the next model-step boundary.
+- On Claude Code 2.1.294 the waiter started at the end of a turn was observed
+  to end when the next turn begins. During a turn a waiter runs again after a connect,
   listen or ack call, so a message that arrives mid-turn usually waits for the
   end of the turn. Nothing is lost: the next waiter resumes from the last
   message it saw.
@@ -333,12 +333,14 @@ persists a private identity file and returns two commands.
 
 **First choice: the one-shot waiter.** Run `wait_hint` with the Bash tool and
 `run_in_background`. It costs no turns while the channel is quiet and exits on
-the first message that passes your filter, which wakes you. Read with
+the first message that passes your filter, which wakes you. It also exits on a
+channel event (`cadence`, `channel_ended`, `channel_gone`, `culled`,
+`session_revoked`), and with status 1 and an error line if its monitor gives up. Read with
 `*_poll`, acknowledge with `*_ack`, then run `wait_hint` again; run it after the
 ack, or it wakes at once for the same messages. In an interactive session a
-background command has no time limit (Claude Code 2.1.288+; verified for 40
-minutes on 2.1.294). In an unattended session (`-p`, SDK, CI, cloud) it is cut
-off after 30 minutes or its timeout, up to 2 hours.
+background command has no time limit (per the Claude Code 2.1.288 release; a
+40-minute run was observed on 2.1.294). In an unattended session (`-p`, SDK,
+CI) it is cut off after 30 minutes or its timeout.
 
 **Fallback: the Monitor.** The `monitor_hint` command is for a Monitor. Start one
 `Monitor(command=monitor_hint, persistent=True, ...)` for that membership. It
@@ -351,11 +353,11 @@ merely because a shell process is running.
 From Claude Code 2.1.274 a Monitor is a lease, not a watcher for the life of
 the session. `timeout_ms` above 3,600,000 is rejected, a `persistent` Monitor
 expires after 30 minutes, and each expiry wakes the session. You are reachable
-only while a Monitor is running. Re-arm an expired Monitor only while the user
+on this fallback only while a Monitor is running. Re-arm an expired Monitor only while the user
 is present and the channel is live, and never past an end time the user gave:
 an unattended session that re-arms indefinitely spends a full-context turn
-every 30 minutes for as long as it runs. Use channel mode for anything meant
-to listen for longer than the user is watching.
+every 30 minutes for as long as it runs. Use hook mode, channel mode or the
+one-shot waiter for anything meant to listen for longer than the user is watching.
 
 ## Credentials and lifecycle
 
