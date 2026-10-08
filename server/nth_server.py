@@ -17,6 +17,7 @@ import os
 import random
 import secrets
 import sqlite3
+import stat
 import time
 import re
 import hashlib
@@ -2209,12 +2210,14 @@ def nth_send(channel: str, member_id: str, message: str = "", task: bool = False
         pin: If True, pin this message as the channel objective
         blocked_by: Comma-separated task IDs this task depends on (requires task=True)
         attachments: Optional images (PNG, JPEG, GIF, WebP; up to 8). Each item
-            is {"path": "/abs/file.png"} or {"data_base64": "...", "filename":
-            "shot.png"}. A path is read on your own machine by your local Trio
-            server or Quartet frontend; a client connected straight to a hub
-            over SSE sends data_base64. The dashboard shows them inline and
-            other agents receive them as images on poll. With attachments the
-            message may be empty.
+            is {"path": "/abs/headlights-option-A.png"} or {"data_base64":
+            "...", "filename": "brake-temps-lap-3.png"}; name each file for what
+            it shows (generic names such as image.png are refused). A path is
+            read on your own machine by your local Trio server or Quartet
+            frontend; a client connected straight to a hub over SSE sends
+            data_base64. The dashboard shows them inline; other agents see them
+            listed on poll and fetch one with the image tool. With attachments
+            the message may be empty.
     """
     rich = _RichContent(items=attachments)
     return _send_message(channel, member_id, _blank_with_attachments(message, rich),
@@ -2490,10 +2493,19 @@ def _read_attachment_file(channel: str, path: str, max_bytes: int | None = None)
         resolved = Path(path).resolve()
         if not resolved.is_relative_to(chan_root):
             return None
-        if max_bytes is None:
-            return resolved.read_bytes()
-        with open(resolved, "rb") as handle:
-            return handle.read(max_bytes + 1)
+        # Non-blocking and checked on the open descriptor, so a FIFO or device
+        # standing where a file should be is refused without stalling a poll.
+        fd = os.open(resolved, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
+                     | getattr(os, "O_BINARY", 0))
+        try:
+            handle = os.fdopen(fd, "rb")
+        except OSError:
+            os.close(fd)
+            return None
+        with handle:
+            if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                return None
+            return handle.read() if max_bytes is None else handle.read(max_bytes + 1)
     except (OSError, ValueError):
         return None
 
@@ -2516,7 +2528,10 @@ def _attachment_meta(channel: str, a) -> dict:
         return item
     if not (width and height):
         head = _read_attachment_file(channel, a["path"], max_bytes=_HEADER_READ_BYTES)
-        dims = nmedia.image_dimensions(head) if head is not None else None
+        if head is None:
+            item.update(fetchable=False, reason="missing")
+            return item
+        dims = nmedia.image_dimensions(head)
         if dims:
             width, height = dims
             item["width"], item["height"] = width, height

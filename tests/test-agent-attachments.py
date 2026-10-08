@@ -689,6 +689,15 @@ check("names: a path with a generic basename is refused before it is read",
 check("names: the same file passes with a descriptive filename",
       nmedia.inline_local_paths([{"path": str(generic), "filename": "brake-light-wiring.png"}])[0]
       ["filename"] == "brake-light-wiring.png")
+# Names in any script describe as well as English ones; a file extension or a
+# version tag alone describes nothing.
+for good_name in ("фары-вариант-А.png", "前照灯の比較.png", "φανάρια.png", "photo.of.headlights",
+                  "bus-trace-2026-10-08.png", "chart-latency-p99.png"):
+    check(f"names: {good_name!r} passes the descriptive check",
+          not raises(lambda: nmedia.require_descriptive_name(good_name)))
+for bad_name in (".png", "png.png", "image.png.png", "screenshot.jpg.png", "v2.png"):
+    check(f"names: {bad_name!r} is refused",
+          raises(lambda: nmedia.require_descriptive_name(bad_name)))
 r = send_items([{"data_base64": b64(PNG), "filename": "headlights-option-A-segmented.png"}])
 check("names: a descriptive name is stored as given",
       r.get("attachments", [{}])[0].get("filename") == "headlights-option-A-segmented.png")

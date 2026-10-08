@@ -393,7 +393,13 @@ _GENERIC_NAME_WORDS = {
     "clipboard", "paste", "pasted", "attachment", "upload", "output", "out", "temp", "tmp",
     "test", "new", "copy", "scan", "figure", "fig", "graph", "chart", "plot", "diagram",
     "export", "frame", "render", "result", "at", "am", "pm",
+    "png", "jpg", "jpeg", "gif", "webp",
 }
+_IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".webp")
+# Letter runs in any script. A run of CJK ideographs or kana is a word on its
+# own, since those scripts carry a whole word in one or two characters.
+_LETTER_RUN = re.compile(r"[^\W\d_]+")
+_CJK = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uac00-\ud7af]")
 _HEXISH = re.compile(r"[0-9a-f]{8}(-?[0-9a-f]{4}){3}-?[0-9a-f]{12}|[0-9a-f]{8,}")
 NAME_EXAMPLE = "headlights-option-A-segmented.png"
 
@@ -402,9 +408,13 @@ def require_descriptive_name(name: str) -> str:
     """The name, when it says what the image shows; else RichContentError.
     Generic words (image, screenshot, untitled, file, ...), dates, numbers, a
     bare hash or a UUID leave nothing descriptive, so such a name is refused."""
-    stem = Path(name.strip()).stem.lower() if name and name.strip() else ""
-    words = [w for w in re.findall(r"[a-z]+", stem)
-             if len(w) >= 3 and w not in _GENERIC_NAME_WORDS]
+    stem = name.strip().lower() if name and name.strip() else ""
+    for ext in _IMAGE_EXTENSIONS:
+        if stem.endswith(ext):
+            stem = stem[:-len(ext)]
+            break
+    words = [w for w in _LETTER_RUN.findall(stem)
+             if w not in _GENERIC_NAME_WORDS and (len(w) >= 3 or _CJK.search(w))]
     if not stem or _HEXISH.fullmatch(stem) or not words:
         raise RichContentError(
             f"attachment name {name!r} does not describe the image; pass a `filename` "
