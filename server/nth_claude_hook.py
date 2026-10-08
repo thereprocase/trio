@@ -301,11 +301,10 @@ def process_stamp(pid):
 def empty_session():
     # `servers` names the MCP server each membership was joined through, so that a
     # wake on a machine with several Quartet hubs can say which one to poll; `joined`
-    # says when, so a status check can tell the newest holder of a membership. The
-    # unattended fields are the Codex wake budget: wakes since a person last typed.
+    # says when, so a status check can tell the newest holder of a membership.
     return {'memberships': {}, 'ended': False, 'high_water': {}, 'acked': {},
             'bucket': None, 'wakes': 0, 'last_wake': None, 'servers': {}, 'joined': {},
-            'client': '', 'unattended_wakes': 0, 'paused': False, 'last_prompt': None}
+            'client': ''}
 
 
 def load_session(session_id):
@@ -618,14 +617,13 @@ class StderrSink:
     A sink supplies `client`, `supervisor` (a process id or None), `lifetime` (seconds
     or None), `settle` (seconds to gather listeners that fire together), `patience`
     (seconds to wait for a predecessor still holding the session's lock), `name_servers`,
-    `budget` (wakes allowed since a person last typed, None for no limit), `status` and
+    `status` and
     `outcome` (extra fields for the status file), `standing_down()`, `preflight()` and
     `deliver(lines)`, which returns whether the wake counts as delivered.
     """
     client = 'claude'
     name_servers = False
     patience = 0.0
-    budget = None                                   # unattended wakes; None: no limit
     outcome = {}
 
     def __init__(self):
@@ -691,14 +689,6 @@ def _wait_locked(session_id, sink):
     if problem:
         _status(session_id, sink, 0, {}, problem=problem)
         return 0
-    if sink.budget and int(state.get('unattended_wakes') or 0) >= sink.budget:
-        # Nobody has typed in this session for `budget` wakes: a window that was closed,
-        # or two agents answering each other. Stay quiet until a person types again.
-        with session_update(session_id) as current:
-            if current is not None:
-                current['paused'] = True
-        _status(session_id, sink, 0, {}, paused=True)
-        return 0
     wake = Wake(state['bucket'])
     listeners, filters, marks, written, reported = {}, {}, {}, 0.0, None
     fired = False
@@ -759,7 +749,7 @@ def _wait_locked(session_id, sink):
         _status(session_id, sink, os.getpid(), {}, delivering=True)
     delivered = not gone and sink.deliver(lines)
     if delivered:
-        _remember(session_id, marks, wake, woke=True, unattended=sink.budget is not None)
+        _remember(session_id, marks, wake, woke=True)
         for key, reason in ended.items():
             # Said once. A membership that is over is not announced again at every re-arm.
             with membership_update(key) as config:
@@ -772,7 +762,7 @@ def _wait_locked(session_id, sink):
     return 0
 
 
-def _remember(session_id, marks, wake, woke, unattended=False):
+def _remember(session_id, marks, wake, woke):
     with session_update(session_id) as state:
         if state is not None:
             for key, mark in marks.items():
@@ -782,8 +772,6 @@ def _remember(session_id, marks, wake, woke, unattended=False):
             if woke:
                 state['wakes'] = int(state.get('wakes') or 0) + 1
                 state['last_wake'] = {'at': time.time()}
-                if unattended:
-                    state['unattended_wakes'] = int(state.get('unattended_wakes') or 0) + 1
 
 
 def read_status(session_id):

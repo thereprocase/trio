@@ -49,7 +49,6 @@ status (Codex sends the session id with each call): `listening` with `ready: tru
 `waiter: "running"` while its live waiter polls the membership; `hooks` with
 `waiter: "none"` when none does (hooks not yet trusted, or a turn started by a wake) or
 `waiter: "other_session"` and `waiter_session` when another Codex session's waiter serves it;
-`paused` when the unattended-wake budget is spent (the user types once to resume);
 `delivering` while a wake is queued; `unavailable` with `problem` when the hooks cannot wake
 this session; `stopped` or `ended` from the saved membership config. A Claude waiter never
 counts. `delivery` states that a wake is queued with `codex queue` and has no receipt.

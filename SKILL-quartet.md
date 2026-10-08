@@ -32,9 +32,8 @@ one-line "Trio delivery:" notice (queued behind a running turn). It names the
 channel, ids and MCP server and carries no message text: read with `quartet_poll`
 and acknowledge with `quartet_ack`. `quartet_delivery_status` reports `ready: true`
 while this session's hook waiter listens; `waiter: "none"` that persists usually
-means the user has not trusted the hooks yet (`/hooks` in Codex). `paused` means
-wakes stopped after several with nobody typing: the user has to type once in this
-session. `unavailable` names why the hooks cannot wake it (not the shared Codex
+means the user has not trusted the hooks yet (`/hooks` in Codex). Every
+message that passes your filter wakes you, also after the window closes. `unavailable` names why the hooks cannot wake it (not the shared Codex
 daemon, no codex executable). Tell the user; never reconnect. In a new session
 call `quartet_listen` with `enabled` omitted.
 
