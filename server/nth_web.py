@@ -9927,10 +9927,12 @@ def _app_icon(name: str, icon_dir: Optional[Path]) -> bytes:
         return builtin
     path = icon_dir / name
     try:
-        info = path.stat()
-        if not stat.S_ISREG(info.st_mode):
-            raise ValueError("not a regular file")
-        with path.open("rb") as handle:
+        # Opened non-blocking and checked on the open descriptor, so a FIFO or
+        # device swapped in after a stat cannot block import.
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+        with os.fdopen(fd, "rb") as handle:
+            if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                raise ValueError("not a regular file")
             data = handle.read(APP_ICON_MAX_BYTES + 1)
         if len(data) > APP_ICON_MAX_BYTES:
             raise ValueError("larger than 1 MB")
@@ -9957,6 +9959,11 @@ def _app_manifest() -> bytes:
 
 _APP_ICON_DIR = _icon_dir()
 PWA_ICONS = {name: _app_icon(name, _APP_ICON_DIR) for name in PWA_ICON_NAMES}
+if _APP_ICON_DIR is not None:
+    # One line per start, so a misspelt file name shows up as "built-in".
+    _custom = [n for n in PWA_ICON_NAMES if PWA_ICONS[n] != _read_web_bytes(f"icons/{n}")]
+    sys.stderr.write(f"[nth_web] NTH_APP_ICON_DIR: custom {', '.join(_custom) or 'none'}; "
+                     f"built-in {', '.join(n for n in PWA_ICON_NAMES if n not in _custom) or 'none'}\n")
 PWA_MANIFEST = _app_manifest()
 PWA_SERVICE_WORKER = _read_web_bytes("sw.js")
 # Static, identical for every viewer, and fetched by the browser without the

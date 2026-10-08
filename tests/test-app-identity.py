@@ -77,8 +77,13 @@ print(json.dumps({
 def probe(env_extra):
     env = {k: v for k, v in os.environ.items() if not k.startswith("NTH_APP_")}
     env.update(NTH_QUIET="1", **env_extra)
-    out = subprocess.run([sys.executable, "-c", PROBE, str(SERVER)], env=env,
-                         capture_output=True, text=True, check=True, timeout=60)
+    try:
+        out = subprocess.run([sys.executable, "-c", PROBE, str(SERVER)], env=env,
+                             capture_output=True, text=True, check=True, timeout=60)
+    except subprocess.TimeoutExpired:
+        check("importing nth_web finishes (an icon read blocked)", False)
+        print(f"\n{PASS} passed, {FAIL} failed")
+        sys.exit(1)
     return json.loads(out.stdout.strip().splitlines()[-1]), out.stderr
 
 
@@ -98,6 +103,18 @@ check("default Home Screen title is unchanged", got["apple_title"] == "nth", got
 check("default theme colour is unchanged", got["theme_meta"] == "#3d7a63", got["theme_meta"])
 check("default icons are the built-in files",
       all(got["icons"][n] == sha(ICONS / n) for n in got["icons"]))
+
+# 1b. The size each icon name promises matches the built-in PNGs and the manifest.
+sys.path.insert(0, str(SERVER))
+os.environ.setdefault("NTH_QUIET", "1")
+import nth_web  # noqa: E402  (the defaults are what this checks)
+for name, want in nth_web.PWA_ICON_SIZES.items():
+    check(f"built-in {name} is {want}x{want}",
+          nth_web._png_size((ICONS / name).read_bytes()) == (want, want))
+for entry in builtin_manifest["icons"]:
+    name = entry["src"].rsplit("/", 1)[-1]
+    want = nth_web.PWA_ICON_SIZES[name]
+    check(f"manifest declares {name} as {want}x{want}", entry["sizes"] == f"{want}x{want}")
 
 # 2. Overrides reach the manifest and the page head, escaped and cleaned.
 got, _ = probe({"NTH_APP_NAME": "Field <b>Hub</b>\x07", "NTH_APP_SHORT_NAME": 'Fi"eld',
@@ -126,6 +143,7 @@ with tempfile.TemporaryDirectory() as tmp:
     custom = png(192, 192, b"custom-192")
     (Path(tmp) / "icon-192.png").write_bytes(custom)
     (Path(tmp) / "apple-touch-icon.png").write_bytes(b"GIF89a not a png")
+    (Path(tmp) / "badge-96.PNG").write_bytes(png(96, 96))
     (Path(tmp) / "icon-512.png").write_bytes(png(512, 512, b"\0" * (1024 * 1024 + 1)))
     (Path(tmp) / "icon-maskable-192.png").write_bytes(png(64, 64))
     os.mkfifo(Path(tmp) / "icon-maskable-512.png")
@@ -145,11 +163,20 @@ with tempfile.TemporaryDirectory() as tmp:
           got["icons"]["icon-maskable-512.png"] == sha(ICONS / "icon-maskable-512.png"))
     check("a missing file keeps the built-in icon",
           got["icons"]["badge-96.png"] == sha(ICONS / "badge-96.png"))
+    check("the start-up summary names custom and built-in icons, so a misspelt file shows",
+          "NTH_APP_ICON_DIR: custom icon-192.png; built-in" in err and "badge-96.png" in err, err)
     check("each rejected file is reported on stderr",
           all(s in err for s in ("apple-touch-icon.png: not a PNG",
                                  "icon-512.png: larger than 1 MB",
                                  "icon-maskable-192.png: 64x64, expected 192x192",
                                  "icon-maskable-512.png: not a regular file")), err)
+
+with tempfile.TemporaryDirectory() as tmp:
+    apple = png(180, 180, b"apple")
+    (Path(tmp) / "apple-touch-icon.png").write_bytes(apple)
+    got, _ = probe({"NTH_APP_ICON_DIR": tmp})
+    check("a 180x180 Apple icon is accepted and served on /apple-touch-icon.png",
+          got["route_apple"] == hashlib.sha256(apple).hexdigest())
 
 got, err = probe({"NTH_APP_ICON_DIR": "/nonexistent/app-icons"})
 check("an icon directory that does not exist is reported and changes nothing",
