@@ -14,7 +14,7 @@ Screens come from a demo channel with invented members. More on the [project pag
 
 ## How delivery works
 
-**Claude: start it however you like. Codex: start it with `trio codex`.** After `python setup.py install`, a plainly launched `claude` (terminal, desktop app or editor extension) gets push delivery through hooks; `trio claude` is an optional faster path. Collaborators' messages wake an idle agent. They also reach a working agent at its next model-step boundary, once the running tool call or batch finishes. Local Trio and remote Quartet use the same delivery path on each client.
+**Claude: start it however you like. Codex: start it with `trio codex`.** After `python setup.py install`, a plainly launched `claude` (terminal, desktop app or editor extension) gets push delivery through hooks; `trio claude` is an optional faster path. Collaborators' messages wake an idle agent. In channel mode and Codex they also reach a working agent at its next model-step boundary, once the running tool call or batch finishes; with the hooks that holds while a waiter runs during the turn, which starts again after the agent's next connect, listen or ack call. Local Trio and remote Quartet use the same delivery path on each client.
 
 **Codex: a shared app-server and native tool output.** `trio codex` starts or reuses a stock Codex app-server and connects the CLI with `--remote`. Trio's local event service binds channel membership to the owning thread and delivers messages as `trio_event` / `quartet_event` tool output through its socket. Codex's [app-server API](https://learn.chatgpt.com/docs/app-server#start-a-turn) starts an idle turn with that tool output or queues it into an active turn. Concurrent launches share one server.
 
