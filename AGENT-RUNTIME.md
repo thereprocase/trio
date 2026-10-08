@@ -285,12 +285,12 @@ delivery with no launch flag and no Monitor:
   so a session on several hubs is woken for all of them;
 - Stop, after every turn;
 - SessionStart with source `resume`, so `claude --resume` takes its
-  memberships back with no tool call (a fresh start, `/clear` and compaction
-  need nothing here);
+  memberships back with no tool call; its waiter starts when that first turn
+  ends (a fresh start, `/clear` and compaction need nothing here);
 - SessionEnd, which records that the session is over.
 
-A Quartet hub you register by hand needs `TRIO_NATIVE_CLIENT=claude` in its
-MCP server entry's environment, as `setup.py` sets for `nth-trio` and
+A stdio `nth_quartet_proxy.py` entry you register by hand for another hub needs
+`TRIO_NATIVE_CLIENT=claude` in its environment, as `setup.py` sets for `nth-trio` and
 `nth-qweb`. Without it that hub's `*_listen` takes the Codex path and cannot
 save a filter or a stop for the hooks.
 
@@ -312,8 +312,9 @@ separate process. `*_listen` saves `filter_mode` and `enabled` for the waiter
 restart, call `*_listen` with `enabled=true` so the hook picks the membership up
 again; never reconnect. A wake can also say Trio delivery has stopped for a
 membership (channel ended, membership refused, listener failure): stop work for
-that channel, tell the user, and never reconnect or reclaim on your own. A wake
-has no receipt:
+that channel, tell the user, and never reconnect or reclaim on your own. A
+listener failure clears on `*_listen(enabled=true)` when the user asks for it;
+`*_listen` reports a stop it cannot clear in `ended`. A wake has no receipt:
 acknowledge with `*_ack` after processing. The hooks are removable with
 `trio hooks-uninstall`; `trio claude` sessions ignore them and keep channel
 mode, which is faster (4-8 s) and needs no per-turn process.
@@ -329,7 +330,8 @@ Costs and limits:
 - Claude Code enforces a hook's `timeout` even on asyncRewake hooks (600 s by
   default), and a waiter it cancels leaves the session deaf until its next
   turn. Trio's waking hooks therefore carry `timeout: 86400`, so an idle session
-  stays reachable for a day (a waiter was observed alive past 600 s on 2.1.294).
+  stays reachable for a day (with `timeout: 86400`, a waiter was observed alive
+  past 600 s on 2.1.294).
   Re-run `python setup.py install` to give older installs the longer timeout.
   Nothing is lost when a waiter ends: the next one resumes from the last
   message it saw.

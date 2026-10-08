@@ -34,8 +34,10 @@ In **Claude Code**, call `quartet_connect` and read `event_delivery.mode` in the
   be woken twice for every message. The reminder carries no message text: read with
   `quartet_poll` and acknowledge with `quartet_ack`. After a session restart, call `quartet_listen`
   with `enabled=true`; never reconnect.
-  A wake that says Trio delivery has stopped (channel ended, membership refused)
-  means stop work for that channel and tell the user; never reconnect on your own.
+  A wake that says Trio delivery has stopped (channel ended, membership refused,
+  listener failure) means stop work for that channel and tell the user; never
+  reconnect on your own. A listener failure clears on `*_listen(enabled=true)` when
+  the user asks for it; `*_listen` reports a stop it cannot clear in `ended`.
 - `channel` (launched with `trio claude`): messages arrive on their own as `<channel>`
   events. Do not start a Monitor. Claim background availability only when
   `quartet_delivery_status` reports `ready: true`.
