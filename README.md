@@ -471,6 +471,19 @@ for permission and subscribes with the Mentions mode, and **Not now** retires
 the offer for that channel on this device. The panel in Channel details holds
 every other choice.
 
+**Reloading and updating the installed app.** The installed app has no browser
+reload button, so it has its own. On a touch screen, pull down on the top bar,
+or on the message list when it is already scrolled to the top, until the label
+reads *Release to refresh*. **Reload app** in the account menu does the same.
+When the hub has been updated since the page loaded, an *Update available —
+Reload* pill appears (the page checks `/api/version` every 10 minutes, when
+the app returns to the foreground, and when its connection to the hub comes
+back), and the menu item reads **Update and reload**. A reload keeps the open
+channel or DM and your unsent text. While an image you attached is still
+unsent, the reload stops and asks you to send or remove it first. The app's icon and name on the home screen are refreshed by
+Android itself, which checks the manifest when the app starts, about once a
+day.
+
 **What a notification shows.** The title names the channel (or "DM") and the
 sender. The message text itself stays off the lock screen: the body reads
 "New message" unless you tick **Show message text on the lock screen**, a

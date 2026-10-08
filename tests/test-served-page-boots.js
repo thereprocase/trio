@@ -203,6 +203,16 @@ process.on('exit', cleanup);
   check('GET / returns a complete document',
         page.startsWith('<!doctype html>') && page.trimEnd().endsWith('</html>'));
 
+  // The update pill compares these two. If they ever disagree on an unchanged
+  // server, every installed app shows "Update available" forever.
+  const stamped = (page.match(/<meta name="nth-build" content="([0-9a-f]{12})">/) || [])[1];
+  const versionRes = await request(BASE, '/api/version');
+  const served = versionRes.ok ? (await versionRes.json()).build : null;
+  check('the page carries its build id and /api/version serves the same one',
+        !!stamped && served === stamped, `page ${stamped} vs /api/version ${served}`);
+  check('  /api/version is never cached',
+        /no-store/.test(versionRes.nodeHeaders['cache-control'] || ''));
+
   const blocks = [...page.matchAll(
     /<script(?: data-trio-source="([^"]*)")?[^>]*>([\s\S]*?)<\/script>/g)];
   check(`the page carries its script blocks (${blocks.length})`, blocks.length > 1);

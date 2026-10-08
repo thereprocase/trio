@@ -98,7 +98,7 @@
   Trio.nav = drawer;
   async function boot() {
     const mountFeatures = () => {
-      ['conversation', 'workspace', 'agents', 'preferences', 'gameboyControls', 'ipodControls', 'router', 'composer', 'push'].forEach(name => {
+      ['conversation', 'workspace', 'agents', 'preferences', 'gameboyControls', 'ipodControls', 'router', 'composer', 'push', 'appRefresh'].forEach(name => {
         const feature = Trio[name];
         if (!feature) return;
         // Isolate each mount: one feature throwing must not skip the rest —

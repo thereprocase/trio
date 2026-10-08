@@ -406,6 +406,7 @@
       database: '<ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v6c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 11v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6"/>',
       edit: '<path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/>',
       x: '<path d="M18 6 6 18M6 6l12 12"/>',
+      refresh: '<path d="M20 11a8 8 0 0 0-14.6-4.5L4 8"/><path d="M4 4v4h4"/><path d="M4 13a8 8 0 0 0 14.6 4.5L20 16"/><path d="M20 20v-4h-4"/>',
       settings: '<circle cx="12" cy="12" r="3"/><path d="M9.671 4.136a2.34 2.34 0 0 1 4.659 0 2.34 2.34 0 0 0 3.319 1.915 2.34 2.34 0 0 1 2.33 4.033 2.34 2.34 0 0 0 0 3.831 2.34 2.34 0 0 1-2.33 4.033 2.34 2.34 0 0 0-3.319 1.915 2.34 2.34 0 0 1-4.659 0 2.34 2.34 0 0 0-3.32-1.915 2.34 2.34 0 0 1-2.33-4.033 2.34 2.34 0 0 0 0-3.831A2.34 2.34 0 0 1 6.35 6.051a2.34 2.34 0 0 0 3.319-1.915"/>'
     };
     return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${icons[name] || ''}</svg>`;
@@ -1512,8 +1513,17 @@
     // Reuse the rail's .nav-item structure (plain icon + single-line label) so
     // these read identically to the top nav items; `account-item` is just a
     // behavioral hook for the click wiring / tests.
+    // Reload is an action, not a view, so it is wired separately below. It
+    // lives here because the installed app has no browser reload button and
+    // this menu is reachable from every view (48-app-refresh.js).
+    const refresh = Trio.appRefresh;
+    const update = !!refresh?.updateAvailable?.();
+    const reloadItem = refresh?.reloadApp
+      ? `<button type="button" class="nav-item account-action" data-account-action="reload" title="Load the newest version from the hub. Keeps this conversation and your unsent text."><span class="nav-hash">${navIcon('refresh')}</span><span class="nav-label">${update ? 'Update and reload' : 'Reload app'}</span>${update ? '<span class="nav-meta"><span class="badge">new</span></span>' : ''}</button>`
+      : '';
     items.innerHTML = `<div class="account-items-inner"><div class="account-menu-list">`
       + list.map(it => `<button type="button" class="nav-item account-item" data-view="${esc(it.view)}"><span class="nav-hash">${navIcon(it.icon)}</span><span class="nav-label">${esc(it.label)}</span></button>`).join('')
+      + reloadItem
       + `</div></div>`;
     items.removeAttribute('inert');
     items.setAttribute('aria-hidden', 'false');
@@ -1533,6 +1543,10 @@
       const view = btn.dataset.view;
       closeAccountMenu();
       navigateView(view);
+    }));
+    items.querySelectorAll('.account-action').forEach(btn => btn.addEventListener('click', () => {
+      closeAccountMenu();
+      if (btn.getAttribute('data-account-action') === 'reload') Trio.appRefresh?.reloadApp?.();
     }));
   }
   let menuClick = null, menuKeydown = null, menuButtonClick = null, accountTriggerClick = null;
