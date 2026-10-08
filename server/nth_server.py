@@ -312,7 +312,8 @@ def get_db() -> sqlite3.Connection:
     if key is not None and key == _schema_ready_key:
         return conn
     # Anything other than "the column is already there" (a lock timeout, the
-    # avatar index refused over duplicates) leaves the run unfinished, so the
+    # avatar index refused over duplicates, a tool_events rebuild that could
+    # not complete) leaves the run unfinished, so the
     # next open repeats it rather than the cache freezing a half-migrated file.
     unfinished = []
     conn.execute("""
@@ -694,10 +695,12 @@ def get_db() -> sqlite3.Connection:
             # runs unconditionally and puts them back.
             conn.execute("DROP TABLE tool_events")
             conn.execute("ALTER TABLE tool_events_rebuild RENAME TO tool_events")
-        except sqlite3.Error:
+        except sqlite3.Error as exc:
             # A rebuild we cannot complete must not take get_db() down with it —
             # that is the exact failure this migration exists to undo. Leave the
-            # legacy table alone; the ring degrades, the server still opens.
+            # legacy table alone; the ring degrades, the server still opens, and
+            # the next open tries the rebuild again.
+            unfinished.append(exc)
             try:
                 conn.execute("DROP TABLE IF EXISTS tool_events_rebuild")
             except sqlite3.Error:
@@ -956,24 +959,32 @@ def _data_version(db: sqlite3.Connection):
         return None
 
 
-def _channel_probe(db: sqlite3.Connection, channel: str, member_id: str) -> tuple:
-    """The parts of the database a waiting poll answers to."""
+def _channel_probe(db: sqlite3.Connection, channel: str, member_id: str,
+                   session_token: str) -> tuple:
+    """The parts of the database a waiting poll answers to: the channel's newest
+    message, its status, this membership, and the read watermark (a forced ack
+    can move it back and make old messages unread again)."""
     try:
         return tuple(db.execute(
             "SELECT (SELECT MAX(id) FROM messages WHERE channel = ?),"
             " (SELECT status FROM channels WHERE code = ?),"
-            " (SELECT COUNT(*) FROM members WHERE id = ? AND channel = ?)",
-            (channel, channel, member_id, channel)).fetchone())
+            " (SELECT COUNT(*) FROM members WHERE id = ? AND channel = ?),"
+            " (SELECT last_read FROM members WHERE id = ? AND channel = ?),"
+            " (SELECT last_read FROM sessions WHERE session_token = ?)",
+            (channel, channel, member_id, channel, member_id, channel,
+             session_token)).fetchone())
     except sqlite3.Error:
         return (None,)
 
 
-def _change_marker(db: sqlite3.Connection, channel: str, member_id: str) -> tuple:
-    return (_message_generation, _data_version(db), _channel_probe(db, channel, member_id))
+def _change_marker(db: sqlite3.Connection, channel: str, member_id: str,
+                   session_token: str) -> tuple:
+    return (_message_generation, _data_version(db),
+            _channel_probe(db, channel, member_id, session_token))
 
 
 def _wait_for_change(db: sqlite3.Connection, channel: str, member_id: str,
-                     marker: tuple, deadline: float) -> None:
+                     session_token: str, marker: tuple, deadline: float) -> None:
     """Block until this poll's channel may hold something new, or the deadline
     (time.monotonic) passes. A false wake only costs one extra pass."""
     generation, version, probe = marker
@@ -989,8 +1000,9 @@ def _wait_for_change(db: sqlite3.Connection, channel: str, member_id: str,
         current = _data_version(db)
         if woke or current != version:
             version = current
-            if _channel_probe(db, channel, member_id) != probe:
+            if _channel_probe(db, channel, member_id, session_token) != probe:
                 return
+
 
 def _poll_heartbeat(db: sqlite3.Connection, channel: str, member_id: str, now: str,
                     monitor_heartbeat: bool, monitor_filter: str) -> None:
@@ -2396,7 +2408,7 @@ def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: st
         _ctx_relayed = False
         _last_beat = None
         while True:
-            marker = _change_marker(db, channel, member_id)
+            marker = _change_marker(db, channel, member_id, session_token)
             member = _get_member(db, channel, member_id)
             if not member:
                 return json.dumps({"error": "You are not a member of this channel."})
@@ -2499,7 +2511,7 @@ def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: st
                         if time.monotonic() >= deadline:
                             return json.dumps({"event": "no_new", "unread_count": len(unread),
                                               "reminder": "No matching messages yet, but stay connected. Other members may need you. Keep polling until the channel ends or your user tells you to stop."})
-                        _wait_for_change(db, channel, member_id, marker, deadline)
+                        _wait_for_change(db, channel, member_id, session_token, marker, deadline)
                         continue
                     display_msgs = filtered
                 else:
@@ -2526,7 +2538,7 @@ def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: st
                         db.commit()
                     if time.monotonic() >= deadline:
                         return json.dumps({"event": "no_new"})
-                    _wait_for_change(db, channel, member_id, marker, deadline)
+                    _wait_for_change(db, channel, member_id, session_token, marker, deadline)
                     continue
 
                 # Apply mentions_only filter: keep broadcasts (empty mentions)
@@ -2681,7 +2693,7 @@ def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: st
                     reminder += " " + nag
                 return json.dumps({"event": "no_new", "unread_count": 0, "reminder": reminder})
 
-            _wait_for_change(db, channel, member_id, marker, deadline)
+            _wait_for_change(db, channel, member_id, session_token, marker, deadline)
     finally:
         db.close()
 
