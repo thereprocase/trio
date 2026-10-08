@@ -9,9 +9,11 @@ Covers:
   3. A quiet poll runs a pass at its start and one at its deadline, and
      none in between.
   4. The heartbeat is written at most once per POLL_HEARTBEAT_SECONDS.
-  5. Traffic in another channel wakes no full pass.
-  6. get_db() runs the schema once per database file, and again after a schema
-     change by another connection or for a replaced file.
+  5. Traffic in another channel wakes no full pass; a forced ack that moves
+     the watermark back does.
+  6. get_db() runs the schema once per database file, again after a schema
+     change by another connection or for a replaced file, and again after a
+     run that could not finish (a lock timeout during a migration).
 
 Run: python3 tests/test-poll-wait.py
 """
@@ -167,6 +169,21 @@ with tempfile.TemporaryDirectory() as tmp:
     nth_server._get_member = real_get_member
     nth_server._poll_heartbeat = real_beat
 
+    # 5b. A forced ack that moves the watermark back wakes a waiting poll
+    # (old messages are unread again).
+    thread, box = poll_in_thread(channel, reader, reader_token, 10)
+    time.sleep(0.5)
+    nth_server.nth_ack(channel=channel, member_id=reader, session_token=reader_token,
+                       through_id=0, force=True)
+    thread.join(12)
+    check("a forced ack back to 0 wakes a waiting poll with the re-opened messages",
+          box.get("result", {}).get("event") == "new_messages"
+          and box.get("elapsed", 99) < 3.0, (box.get("result", {}).get("event"),
+                                              box.get("elapsed")))
+    last = box["result"]["messages"][-1]["id"]
+    nth_server.nth_ack(channel=channel, member_id=reader, session_token=reader_token,
+                       through_id=last)
+
     # 6. Schema runs once per file, again after another connection changes the
     # schema, and again for a replaced file.
     statements = []
@@ -200,6 +217,46 @@ with tempfile.TemporaryDirectory() as tmp:
         db.close()
         check("get_db rebuilds the schema for a replaced file",
               {"channels", "members", "messages", "sessions"} <= tables, sorted(tables))
+
+        # 6b. A legacy tool_events rebuild that times out on a lock is not
+        # cached as done: the next open finishes it.
+        legacy = real_connect(str(nth_server.DB_PATH))
+        legacy.execute("DROP TABLE tool_events")
+        legacy.execute(
+            "CREATE TABLE tool_events (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, "
+            "tool_name TEXT NOT NULL DEFAULT '', target TEXT NOT NULL DEFAULT '', "
+            "created_at TEXT NOT NULL)")
+        legacy.execute("INSERT INTO tool_events (session_id, created_at) VALUES ('fp', 'x')")
+        legacy.commit()
+        legacy.close()
+
+        def hold_write_lock():
+            holder = real_connect(str(nth_server.DB_PATH), isolation_level=None)
+            holder.execute("BEGIN IMMEDIATE")
+            time.sleep(7)
+            holder.execute("COMMIT")
+            holder.close()
+
+        locker = threading.Thread(target=hold_write_lock)
+        locker.start()
+        time.sleep(0.3)
+        try:
+            nth_server.get_db().close()
+        except sqlite3.Error:
+            pass  # the open may fail outright under the lock; either way it must not be cached
+        locker.join()
+
+        def tool_event_columns():
+            probe = real_connect(str(nth_server.DB_PATH))
+            cols = {r[1] for r in probe.execute("PRAGMA table_info(tool_events)")}
+            probe.close()
+            return cols
+
+        check("a rebuild that timed out on a lock is still pending",
+              "fingerprint" not in tool_event_columns(), sorted(tool_event_columns()))
+        nth_server.get_db().close()
+        check("the next open finishes the tool_events rebuild",
+              "fingerprint" in tool_event_columns(), sorted(tool_event_columns()))
     finally:
         nth_server.sqlite3.connect = real_connect
 
