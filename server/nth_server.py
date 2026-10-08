@@ -5481,7 +5481,8 @@ def nth_delivery_status(channel: str, member_id: str, session_token: str) -> str
     channel listener) without exposing credentials."""
     from nth_event_access import delivery_status
     return json.dumps(delivery_status(channel, member_id, session_token, hub=_CHANNEL_HUB,
-                                      host=_host_info() if _CHANNEL_HUB is not None else None))
+                                      host=_host_info() if _CHANNEL_HUB is not None else None,
+                                      session=_caller_session()))
 
 
 @mcp.tool(name=f"{TOOL_PREFIX}_listen")
@@ -5492,7 +5493,8 @@ def nth_listen(channel: str, member_id: str, session_token: str,
     is, so a filter change never re-enables a stopped listener. enabled=true
     restarts it from these credentials after a session restart."""
     from nth_event_access import listen
-    return json.dumps(listen(channel, member_id, session_token, filter_mode, enabled, hub=_CHANNEL_HUB))
+    return json.dumps(listen(channel, member_id, session_token, filter_mode, enabled, hub=_CHANNEL_HUB,
+                             session=_caller_session()))
 
 
 def _poll_body(result):
@@ -5519,6 +5521,16 @@ def _local_poll_factory(binding):
     def poll(arguments):
         return _poll_body(nth_poll(**arguments))
     return poll, None
+
+
+def _caller_session():
+    """The Codex session this tool call comes from, from the request's `_meta`, or None.
+    Codex hook delivery reports on the caller's own session with it."""
+    try:
+        from nth_event_access import caller_session
+        return caller_session(mcp.get_context().request_context.meta)
+    except Exception:  # noqa: BLE001 - optional detail; status must not depend on it
+        return None
 
 
 def _host_info():

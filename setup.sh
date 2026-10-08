@@ -62,6 +62,7 @@ if [ "${1:-}" = "hub-service" ] || [ "${1:-}" = "upgrade" ]; then
              nth_codex_runtime.py nth_codex_socket.py nth_codex_relay.py \
              nth_event_sources.py nth_event_service.py nth_event_access.py \
              nth_cli.py nth_quartet_proxy.py nth_watch.py nth_claude_channel.py nth_claude_hook.py \
+             nth_codex_hook.py \
              nth_usage.py nth_conversation.py nth_webpush.py nth_media.py nth_ask_client.js; do
         if [ -f "$HUB_DIR/$f" ] && ! cmp -s "$SCRIPT_DIR/server/$f" "$HUB_DIR/$f"; then
             cp "$HUB_DIR/$f" "$HUB_DIR/$f.bak-$STAMP"
@@ -438,6 +439,8 @@ cp "$SCRIPT_DIR/server/nth_watch.py" "$SERVER_DIR/nth_watch.py"
 cp "$SCRIPT_DIR/server/nth_claude_channel.py" "$SERVER_DIR/nth_claude_channel.py"
 # Claude hook delivery for a plainly launched session. nth_cli imports it.
 cp "$SCRIPT_DIR/server/nth_claude_hook.py" "$SERVER_DIR/nth_claude_hook.py"
+# Codex hook delivery for a plainly launched Codex. nth_cli and nth_event_access import it.
+cp "$SCRIPT_DIR/server/nth_codex_hook.py" "$SERVER_DIR/nth_codex_hook.py"
 cp "$SCRIPT_DIR/server/nth_agent_manager.py" "$SERVER_DIR/nth_agent_manager.py"
 # Quota-burn series + the arithmetic over it.
 cp "$SCRIPT_DIR/server/nth_usage.py" "$SERVER_DIR/nth_usage.py"
