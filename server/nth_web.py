@@ -9928,9 +9928,18 @@ def _app_icon(name: str, icon_dir: Optional[Path]) -> bytes:
     path = icon_dir / name
     try:
         # Opened non-blocking and checked on the open descriptor, so a FIFO or
-        # device swapped in after a stat cannot block import.
-        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
-        with os.fdopen(fd, "rb") as handle:
+        # device swapped in after a stat cannot block import. The flags that
+        # only exist on some platforms default to 0; O_BINARY keeps Windows
+        # from translating the PNG signature's CR LF and 0x1A bytes.
+        flags = (os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
+                 | getattr(os, "O_NOCTTY", 0) | getattr(os, "O_BINARY", 0))
+        fd = os.open(path, flags)
+        try:
+            handle = os.fdopen(fd, "rb")
+        except OSError:
+            os.close(fd)
+            raise ValueError("not a regular file")
+        with handle:
             if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
                 raise ValueError("not a regular file")
             data = handle.read(APP_ICON_MAX_BYTES + 1)

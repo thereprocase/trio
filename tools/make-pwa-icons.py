@@ -20,9 +20,10 @@ The SVGs are built with the standard library. Rendering the PNGs needs
 runs this script, so the server gains no dependency.
 
 A hub can carry its own icon set (NTH_APP_ICON_DIR on nth-web), so one phone
-can tell two installed hubs apart. --preset recolours the tile and halo and
---emblem adds a corner badge; render a set into its own directory and point
-that hub at it.
+can tell two installed hubs apart. --preset recolours the tile and halo,
+--glyph replaces the speech bubble with a cross or a star in the same voice
+colours, and --emblem adds a corner badge; render a set into its own
+directory and point that hub at it.
 
 Usage: python3 tools/make-pwa-icons.py [output_dir] [--preset NAME]
                                       [--glyph bubble|cross|star] [--emblem cross]
