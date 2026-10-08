@@ -34,6 +34,8 @@ from nth_constants import (SLEEPING_KEYWORDS, NTH_VERSION, project_context,
                            narrow_wake, parse_recipients, BUDDY_AVATARS)
 
 from mcp.server.fastmcp import FastMCP, Image
+from typing_extensions import TypedDict
+import nth_media as nmedia
 
 DB_DIR = Path(os.environ.get("NTH_HOME", str(Path.home() / ".claude" / "nth")))
 DB_PATH = DB_DIR / "nth.db"
@@ -46,6 +48,13 @@ _AVATAR_INDEX_WARNED = False
 # Beside the DB, matching nth_web.attach_dir_for(), so a scratch DB
 # genuinely isolates its files.
 ATTACH_DIR = DB_DIR / "attachments"
+
+# Whether an attachment item may name a file by `path`. Only the stdio entry
+# point below turns this on: there the server runs on the caller's machine as
+# the caller's user, so the path means what the agent meant. The Quartet hub
+# imports this module and serves remote callers, where a path would name a
+# file on the hub; it keeps this False and accepts bytes only.
+_READS_CALLER_PATHS = False
 
 # One nth_server.py subprocess is spawned per managed agent (each `claude`
 # invocation gets its own --mcp-config stdio child), so this process only ever
@@ -922,6 +931,10 @@ def get_db() -> sqlite3.Connection:
         "CREATE INDEX IF NOT EXISTS idx_stall_events_open "
         "ON stall_events (resolved_at, id)"
     )
+    # Agents attach images and post burner pages, so the channel server owns
+    # these tables as well as the dashboard. Same DDL on both sides (nth_media).
+    nmedia.ensure_attachments_table(conn)
+    nmedia.ensure_pages_table(conn)
     conn.commit()
     if not unfinished:
         _schema_ready_key = _schema_key(conn)
@@ -2094,8 +2107,78 @@ def _reader_kind(db, channel: str, member_id: str) -> str:
     return (row["kind"] if row and row["kind"] else "agent")
 
 
+class AttachmentItem(TypedDict, total=False):
+    """One attachment for send or dm: exactly one of `path` or `data_base64`."""
+    path: str
+    data_base64: str
+    filename: str
+
+
+class _RichContent:
+    """Attachments and/or a page to store with a message, in its transaction."""
+
+    def __init__(self, attachments=None, page=None):
+        self.attachments = attachments or []
+        self.page = page
+
+    def __bool__(self):
+        return bool(self.attachments or self.page)
+
+
+
+def _prepare_rich(attachments) -> tuple:
+    """(_RichContent, None) or (None, error JSON) for a tool's attachments."""
+    try:
+        prepared = nmedia.prepare_attachments(attachments, read_paths=_READS_CALLER_PATHS)
+    except nmedia.RichContentError as exc:
+        return None, json.dumps({"error": str(exc)})
+    return _RichContent(attachments=prepared), None
+
+
+def _blank_with_attachments(message, rich) -> str:
+    """The stored text of a message sent with images and no words, matching the
+    dashboard's own placeholder for an image-only post."""
+    if (not message or not message.strip()) and rich.attachments:
+        return "[image]"
+    return message
+
+
+def _store_rich(db, channel: str, member_id: str, msg_id: int, rich, now: str):
+    """Store a message's attachments and page inside its open transaction.
+
+    Returns (result fields, written file paths). Raises RichContentError after
+    unlinking anything it wrote; the caller rolls the transaction back."""
+    fields, written = {}, []
+    if not rich:
+        return fields, written
+    meta, written = nmedia.store_attachments(
+        db, ATTACH_DIR, channel, member_id, msg_id, rich.attachments,
+        nmedia.MAX_MEMBER_ATTACH_BYTES, now)
+    if meta:
+        fields["attachments"] = meta
+    if rich.page is not None:
+        try:
+            fields["page"] = nmedia.insert_page(db, channel, member_id, msg_id, rich.page)
+        except (nmedia.RichContentError, sqlite3.Error):
+            nmedia.unlink_quietly(written)
+            raise
+    return fields, written
+
+
+def _commit_rich(db, written) -> str | None:
+    """Commit a message with its rich content. On failure, roll back, remove the
+    files written for it and return an error JSON; None on success."""
+    try:
+        db.commit()
+    except sqlite3.Error as exc:
+        db.rollback()
+        nmedia.unlink_quietly(written)
+        return json.dumps({"error": f"Failed to send: {type(exc).__name__}"})
+    return None
+
+
 @mcp.tool(name=f"{TOOL_PREFIX}_send")
-def nth_send(channel: str, member_id: str, message: str, task: bool = False, pin: bool = False, blocked_by: str = "", session_token: str = "", reply_to: int | None = None) -> str:
+def nth_send(channel: str, member_id: str, message: str = "", task: bool = False, pin: bool = False, blocked_by: str = "", session_token: str = "", reply_to: int | None = None, attachments: list[AttachmentItem] | None = None) -> str:
     """Send a message to the channel. No turns — send anytime.
 
     All members will see this message on their next poll.
@@ -2131,7 +2214,27 @@ def nth_send(channel: str, member_id: str, message: str, task: bool = False, pin
         task: If True, also create a claimable task from this message
         pin: If True, pin this message as the channel objective
         blocked_by: Comma-separated task IDs this task depends on (requires task=True)
+        attachments: Optional images (PNG, JPEG, GIF, WebP; up to 8). Each item
+            is {"path": "/abs/file.png"} or {"data_base64": "...", "filename":
+            "shot.png"}. A path is read on your own machine by your local Trio
+            server or Quartet frontend; a client connected straight to a hub
+            over SSE sends data_base64. The dashboard shows them inline and
+            other agents receive them as images on poll. With attachments the
+            message may be empty.
     """
+    rich, err = _prepare_rich(attachments)
+    if err:
+        return err
+    return _send_message(channel, member_id, _blank_with_attachments(message, rich),
+                         task, pin, blocked_by, session_token, reply_to, rich)
+
+
+def _send_message(channel: str, member_id: str, message: str, task: bool,
+                  pin: bool, blocked_by: str, session_token: str,
+                  reply_to: int | None, rich: "_RichContent") -> str:
+    """nth_send's body, shared with nth_page. `rich` is stored in the same
+    transaction as the message, so a message never exists without its images
+    or page, and a refused image or page leaves no message behind."""
     err = validate_channel_code(channel)
     if err:
         return json.dumps({"error": err})
@@ -2261,6 +2364,12 @@ def nth_send(channel: str, member_id: str, message: str, task: bool = False, pin
              author_session, reply_to, now),
         )
         msg_id = cur.lastrowid
+        try:
+            rich_fields, written = _store_rich(db, channel, member_id, msg_id, rich, now)
+        except (nmedia.RichContentError, sqlite3.Error) as exc:
+            db.rollback()
+            return json.dumps({"error": str(exc) if isinstance(exc, nmedia.RichContentError)
+                               else f"Failed to send: {type(exc).__name__}"})
 
         # v6: extend session heartbeat on successful send
         if author_session:
@@ -2301,7 +2410,9 @@ def nth_send(channel: str, member_id: str, message: str, task: bool = False, pin
                 "UPDATE channels SET updated_at = ? WHERE code = ?",
                 (now, channel),
             )
-        db.commit()
+        commit_err = _commit_rich(db, written)
+        if commit_err:
+            return commit_err
         _notify_new_messages()
 
         if task_id is not None:
@@ -2324,6 +2435,7 @@ def nth_send(channel: str, member_id: str, message: str, task: bool = False, pin
             result["task_id"] = task_id
         if pin:
             result["pinned"] = True
+        result.update(rich_fields)
         return json.dumps(result)
     finally:
         db.close()
@@ -2658,6 +2770,11 @@ def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: st
                                 item["delivered"] = False
                             meta.append(item)
                         entry["attachments"] = meta
+                    # A page is read in the dashboard; agents get its title,
+                    # path and expiry so they know what was shared.
+                    page = nmedia.page_for_message(db, m["id"])
+                    if page:
+                        entry["page"] = page
                     msg_list.append(entry)
 
                 nag = _sentinel_nag(member)
@@ -2696,6 +2813,62 @@ def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: st
             _wait_for_change(db, channel, member_id, session_token, marker, deadline)
     finally:
         db.close()
+
+
+# Optional dashboard address, so trio_page can return a link a person can open.
+# Without it the tool returns the path, which the dashboard's card links to.
+DASHBOARD_URL = os.environ.get("NTH_DASHBOARD_URL", "").strip().rstrip("/")
+
+
+@mcp.tool(name=f"{TOOL_PREFIX}_page")
+def nth_page(channel: str, member_id: str, title: str, html: str,
+             ttl_hours: float = nmedia.DEFAULT_PAGE_TTL_HOURS,
+             session_token: str = "", message: str = "", to: str = "") -> str:
+    """Publish a burner web page and post it to the channel.
+
+    The page is one self-contained HTML document (inline CSS and JS; images as
+    data: URLs) of at most 512 KB. The tool posts a message announcing it, and
+    the dashboard shows that message as a card with an Open link and a preview.
+    Whoever can see the message can open the page, until it expires or the
+    channel ends.
+
+    The page runs sandboxed in its own opaque origin: scripts run, and it has
+    no network access, no access to the dashboard, and no forms or popups.
+    Agents cannot open pages; they are for the people watching the dashboard.
+
+    Args:
+        channel: Channel code
+        member_id: Your member ID
+        title: Short title shown on the card (max 120 chars)
+        html: The complete page
+        ttl_hours: Hours until the page expires (default 24, max 168)
+        session_token: Your session token (same check as trio_send)
+        message: Optional text posted with the card. @/#/! sigils work as in
+            trio_send; use them to wake the people the page is for.
+        to: Optional recipients, as for trio_dm. The card is then a private
+            message and only its participants can open the page.
+
+    Returns the posted message id plus page {id, path, expires_at} and `url`
+    (the full address when the hub sets NTH_DASHBOARD_URL, else the path).
+    """
+    try:
+        draft = nmedia.validate_page(title, html, ttl_hours)
+    except nmedia.RichContentError as exc:
+        return json.dumps({"error": str(exc)})
+    content = f"[page] {draft.title}"
+    if message and message.strip():
+        content += "\n\n" + message.strip()
+    rich = _RichContent(page=draft)
+    if to and to.strip():
+        raw = _dm_message(member_id, content, to, session_token, None, rich)
+    else:
+        raw = _send_message(channel, member_id, content, False, False, "",
+                            session_token, None, rich)
+    result = json.loads(raw)
+    page = result.get("page")
+    if page:
+        result["url"] = (DASHBOARD_URL + page["path"]) if DASHBOARD_URL else page["path"]
+    return json.dumps(result)
 
 
 # How long trio_permission_prompt waits for a human to resolve a pending
@@ -2857,7 +3030,8 @@ def _inherited_dm_recipients(db, channel: str, reply_to, sender_id: str,
 @mcp.tool(name=f"{TOOL_PREFIX}_dm")
 def nth_dm(channel: str = "", member_id: str = "", message: str = "",
            to: str = "", session_token: str = "",
-           reply_to: int | None = None) -> str:
+           reply_to: int | None = None,
+           attachments: list[AttachmentItem] | None = None) -> str:
     """Send a PRIVATE direct message to specific member(s) — a REAL DM.
 
     Unlike trio_send (which broadcasts to the whole channel), trio_dm is
@@ -2891,11 +3065,22 @@ def nth_dm(channel: str = "", member_id: str = "", message: str = "",
         session_token: Your session token (same capability check as trio_send).
         reply_to: Optional id of a message this replies to (must be in the
             global inbox transport).
+        attachments: Optional images, exactly as for trio_send. They are
+            visible only to the DM's participants.
     """
+    rich, err = _prepare_rich(attachments)
+    if err:
+        return err
+    return _dm_message(member_id, _blank_with_attachments(message, rich), to,
+                       session_token, reply_to, rich)
+
+
+def _dm_message(member_id: str, message: str, to: str, session_token: str,
+                reply_to: int | None, rich: "_RichContent") -> str:
+    """nth_dm's body, shared with nth_page; `rich` is stored in the message's
+    transaction, as in _send_message."""
     if not message or not message.strip():
         return json.dumps({"error": "Message cannot be empty."})
-    if not message or not message.strip():
-        message = "[image]"
     if len(message) > MAX_MESSAGE_LENGTH:
         return json.dumps({"error": f"Message too long ({len(message)} > {MAX_MESSAGE_LENGTH})."})
     if not to or not to.strip():
@@ -3024,7 +3209,9 @@ def nth_dm(channel: str = "", member_id: str = "", message: str = "",
         )
         msg_id = cur.lastrowid
 
+        written = []
         try:
+            rich_fields, written = _store_rich(db, channel, member_id, msg_id, rich, now)
             if author_session:
                 db.execute(
                     "UPDATE sessions SET last_seen = ? WHERE session_token = ?",
@@ -3046,8 +3233,12 @@ def nth_dm(channel: str = "", member_id: str = "", message: str = "",
                 )
             db.execute("UPDATE channels SET updated_at = ? WHERE code = ?", (now, channel))
             db.commit()
+        except nmedia.RichContentError as e:
+            db.rollback()
+            return json.dumps({"error": str(e)})
         except Exception as e:
             db.rollback()
+            nmedia.unlink_quietly(written)
             return json.dumps({"error": f"Failed to send: {e}"})
         _notify_new_messages()
 
@@ -3070,6 +3261,7 @@ def nth_dm(channel: str = "", member_id: str = "", message: str = "",
             "recipient_names": recipient_names,
             "private": True,
         }
+        result.update(rich_fields)
         nag = _sentinel_nag(member)
         if nag:
             result["footer"] = nag
@@ -3344,14 +3536,6 @@ def nth_ask(
         })
     finally:
         db.close()
-
-
-# ── Image attachment delivery (Phase 2): poll returns MCP image blocks ──
-POLL_IMAGE_FORMATS = {
-    "image/png": "png", "image/jpeg": "jpeg",
-    "image/gif": "gif", "image/webp": "webp",
-}
-MAX_POLL_IMAGE_BYTES = 8 * 1024 * 1024   # total raw image bytes per poll response
 
 
 @mcp.tool(name=f"{TOOL_PREFIX}_ack")
@@ -4851,6 +5035,8 @@ def nth_end(channel: str, member_id: str) -> str:
             "WHERE code = ?",
             (now, member_id, now, channel),
         )
+        # Burner pages last only as long as the conversation that shared them.
+        nmedia.purge_channel_pages(db, channel)
         db.commit()
 
         log_path = export_conversation(db, channel)
@@ -5132,6 +5318,7 @@ def nth_cleanup(channel: str = "", all_ended: bool = False) -> str:
             db.execute("DELETE FROM messages WHERE channel = ?", (channel,))
             db.execute("DELETE FROM members WHERE channel = ?", (channel,))
             _doomed_files.append((_purge_channel_attachments(db, channel), channel))
+            nmedia.purge_channel_pages(db, channel)
             db.execute("DELETE FROM channels WHERE code = ?", (channel,))
             deleted.append(channel)
         elif all_ended:
@@ -5148,6 +5335,7 @@ def nth_cleanup(channel: str = "", all_ended: bool = False) -> str:
                 db.execute("DELETE FROM messages WHERE channel = ?", (code,))
                 db.execute("DELETE FROM members WHERE channel = ?", (code,))
                 _doomed_files.append((_purge_channel_attachments(db, code), code))
+                nmedia.purge_channel_pages(db, code)
                 db.execute("DELETE FROM channels WHERE code = ?", (code,))
                 deleted.append(code)
         else:
@@ -5219,6 +5407,8 @@ def _host_info():
 
 
 if __name__ == "__main__":
+    # A stdio server is spawned by the agent's own client, on its machine.
+    _READS_CALLER_PATHS = True
     # Same rule as nth_claude_channel.channel_mode(), checked without importing
     # it: Codex and hub launches of this file must not depend on that module.
     if (os.environ.get("TRIO_NATIVE_CLIENT") == "claude"

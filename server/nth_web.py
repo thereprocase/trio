@@ -74,6 +74,12 @@ import nth_request_log as nrl
 import nth_usage as nusage
 import nth_conversation as nconv
 import nth_webpush as npush
+import nth_media as nmedia
+# The attachment rules are shared with nth_server (agents attach too) and the
+# Quartet frontend, so they live in nth_media.
+from nth_media import (ALLOWED_ATTACH_MIME, ALLOWED_IMAGE_MIME, attachment_filename,
+                       ensure_attachments_table, sniff_attachment_mime)
+from nth_media import env_bytes as _env_bytes  # noqa: F401 - kept importable from here
 from nth_constants import (ANIMAL_EMOJIS, animal_for, animal_for_channel,
                            NTH_VERSION, project_context, AGENT_INBOX_CHANNEL, can_see, is_all_seeing,
                            parse_recipients, narrow_wake, BUDDY_AVATARS)
@@ -322,22 +328,15 @@ def channel_attach_dir(channel: str, base: Optional[Path] = None) -> Path:
 def attach_dir_for(db_path: Path) -> Path:
     """Attachment root for a given database file."""
     return Path(db_path).resolve().parent / "attachments"
-def _env_bytes(name: str, default: int) -> int:
-    """A positive byte count from the environment; the default when unset or malformed."""
-    try:
-        value = int(os.environ.get(name, "") or default)
-    except ValueError:
-        return default
-    return value if value > 0 else default
 
 
-MAX_UPLOAD_BYTES = _env_bytes("NTH_UPLOAD_MAX_BYTES", 25 * 1024 * 1024)  # hard cap per file
+MAX_UPLOAD_BYTES = nmedia.MAX_UPLOAD_BYTES  # hard cap per file
 # Total attachment bytes one member may hold in one channel. The per-image cap
 # bounds a single request; nothing bounded the SUM, so any identity allowed to
 # upload could fill the disk one legal 10 MB image at a time. sweep_attachments
 # only reclaims UNLINKED rows, so anything linked to a message is permanent --
 # this quota is the only bound on an upload right.
-MAX_MEMBER_ATTACH_BYTES = _env_bytes("NTH_ATTACH_QUOTA_BYTES", 200 * 1024 * 1024)
+MAX_MEMBER_ATTACH_BYTES = nmedia.MAX_MEMBER_ATTACH_BYTES
 # Attachment GC. An upload creates its row UNLINKED and /api/send links it, so
 # anything still unlinked long afterwards was abandoned — a paste thought better
 # of, a closed tab, a failed send. Nothing ever collected those, so they
@@ -346,47 +345,6 @@ ATTACH_GC_GRACE_S = 24 * 3600      # an unlinked upload is abandoned after this
 ATTACH_GC_MIN_INTERVAL_S = 600     # at most one sweep per process per 10 min
 ATTACH_GC_MAX_DELETES = 500        # deletions per sweep
 ATTACH_GC_MAX_SCAN = 2000          # files stat'd per sweep, resumed round-robin
-# Images every browser renders, shown inline in the conversation.
-ALLOWED_IMAGE_MIME = {
-    "image/png": ".png", "image/jpeg": ".jpg",
-    "image/gif": ".gif", "image/webp": ".webp",
-}
-# Everything a participant may attach. The type always comes from the bytes
-# (sniff_attachment_mime), never from the client. Anything outside
-# ALLOWED_IMAGE_MIME is served as a download and never rendered by the page.
-# Office documents are ZIP containers and arrive as application/zip under their
-# own filename; phones send photos as HEIC/HEIF, which only some browsers show.
-ALLOWED_ATTACH_MIME = {
-    **ALLOWED_IMAGE_MIME,
-    "image/heic": ".heic", "image/heif": ".heif",
-    "application/pdf": ".pdf",
-    "application/zip": ".zip",
-    "text/plain": ".txt",
-}
-# Extensions a download may keep, by sniffed type. The type comes from the bytes and
-# the name from the client, so without this a text file could be saved as run.bat or
-# Invoice.hta and run on a double-click. Any other extension gets the type's own added.
-ATTACH_NAME_EXTENSIONS = {
-    "image/png": {".png"}, "image/jpeg": {".jpg", ".jpeg"}, "image/gif": {".gif"},
-    "image/webp": {".webp"}, "image/heic": {".heic"}, "image/heif": {".heif", ".heic"},
-    "application/pdf": {".pdf"},
-    "application/zip": {".zip", ".docx", ".xlsx", ".pptx", ".odt", ".ods", ".odp"},
-    "text/plain": {".txt", ".csv", ".log", ".md"},
-}
-
-
-def attachment_filename(raw_name: str, mime: str) -> str:
-    """The stored name for an upload: sanitised, and ending in an extension the sniffed
-    type allows, so what the operator saves is the kind of file its bytes are."""
-    ext = ALLOWED_ATTACH_MIME[mime]
-    name = re.sub(r"[^\w.\- ]", "_", raw_name)[:120].strip(" .") or ("file" + ext)
-    if Path(name).suffix.lower() not in ATTACH_NAME_EXTENSIONS.get(mime, {ext}):
-        name = name[:120 - len(ext)] + ext
-    return name
-
-
-_HEIC_BRANDS = {b"heic", b"heix", b"hevc", b"hevx", b"heim", b"heis", b"hevm", b"hevs"}
-_HEIF_BRANDS = {b"mif1", b"msf1"}
 
 # ── Local speech-to-text (optional; powers /api/stt/*) ──
 # Transcription runs via a persistent nth_stt_worker.py sidecar that keeps the
@@ -1796,50 +1754,6 @@ def cull_member(db: sqlite3.Connection, channel: str, caller_id: str,
             "released_locks": released_locks}, None
 
 
-def sniff_attachment_mime(data: bytes) -> Optional[str]:
-    """Attachment MIME from the content, or None if the type is not accepted.
-    Images first (sniff_image_mime), then PDF, ZIP, HEIC/HEIF, and plain text:
-    UTF-8 with no NUL byte, the only type recognised by the absence of a header."""
-    mime = sniff_image_mime(data)
-    if mime:
-        return mime
-    if data[:5] == b"%PDF-":
-        return "application/pdf"
-    if data[:4] in (b"PK\x03\x04", b"PK\x05\x06"):
-        return "application/zip"
-    if data[4:8] == b"ftyp":
-        brand = data[8:12]
-        if brand in _HEIC_BRANDS:
-            return "image/heic"
-        if brand in _HEIF_BRANDS:
-            return "image/heif"
-    sample = data[:65536]
-    if sample and b"\x00" not in sample:
-        try:
-            sample.decode("utf-8")
-        except UnicodeDecodeError as exc:
-            # Only a sample that cut a longer file mid-character may end in a partial one.
-            cut = len(data) > len(sample) and exc.reason == "unexpected end of data"
-            if not cut:
-                return None
-        return "text/plain"
-    return None
-
-
-def sniff_image_mime(data: bytes) -> Optional[str]:
-    """Real image MIME from magic bytes, or None if not a supported image.
-    We trust the sniffed type over the client-declared Content-Type."""
-    if data[:8] == b"\x89PNG\r\n\x1a\n":
-        return "image/png"
-    if data[:3] == b"\xff\xd8\xff":
-        return "image/jpeg"
-    if data[:6] in (b"GIF87a", b"GIF89a"):
-        return "image/gif"
-    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
-        return "image/webp"
-    return None
-
-
 _last_attach_gc = 0.0
 _attach_gc_cursor = 0        # resume point for the bounded orphan walk
 _attach_gc_lock = threading.Lock()
@@ -1888,7 +1802,7 @@ def sweep_attachments(db_path: Path, force: bool = False) -> Dict[str, int]:
             return {"skipped": 1}
         _last_attach_gc = now
 
-    stats = {"abandoned": 0, "dead_channel": 0, "orphan_files": 0}
+    stats = {"abandoned": 0, "dead_channel": 0, "orphan_files": 0, "expired_pages": 0}
     cutoff = datetime.now(timezone.utc) - timedelta(seconds=ATTACH_GC_GRACE_S)
     cutoff_iso = cutoff.isoformat()
     db = None
@@ -1958,6 +1872,10 @@ def sweep_attachments(db_path: Path, force: bool = False) -> Dict[str, int]:
                 _unlink_quietly(Path(att_path))
                 stats[why] += 1
 
+        # Agents' burner pages past their expiry, or whose channel is gone.
+        # They are refused once expired; this reclaims the rows.
+        stats["expired_pages"] = nmedia.sweep_pages(db)
+
         # Orphan files, only ones older than the grace period. NB the upload
         # path inserts its row FIRST (with an empty path), then writes the file,
         # then fills the path in — so the window this guards is not "file
@@ -2020,36 +1938,6 @@ def sweep_attachments(db_path: Path, force: bool = False) -> Dict[str, int]:
             except sqlite3.Error:
                 pass
     return stats
-
-
-def ensure_attachments_table(db: sqlite3.Connection) -> None:
-    """Create the attachments table on demand. The web side owns this for the
-    prototype so it works before the MCP server ships the canonical CREATE —
-    both use IF NOT EXISTS, so it stays safe once the server half lands."""
-    db.execute(
-        "CREATE TABLE IF NOT EXISTS attachments ("
-        " id INTEGER PRIMARY KEY AUTOINCREMENT,"
-        " channel TEXT NOT NULL,"
-        " message_id INTEGER,"
-        " member_id TEXT NOT NULL,"
-        " mime TEXT NOT NULL,"
-        " filename TEXT,"
-        " width INTEGER, height INTEGER, bytes INTEGER,"
-        " path TEXT NOT NULL,"
-        " created_at TEXT NOT NULL)"
-    )
-    db.execute(
-        "CREATE INDEX IF NOT EXISTS idx_attachments_channel "
-        "ON attachments(channel)"
-    )
-    db.execute(
-        "CREATE INDEX IF NOT EXISTS idx_attachments_unlinked "
-        "ON attachments(created_at) WHERE message_id IS NULL"
-    )
-    db.execute(
-        "CREATE INDEX IF NOT EXISTS idx_attachments_message "
-        "ON attachments(message_id)"
-    )
 
 
 def attachments_for_message(db: sqlite3.Connection, msg_id: int) -> List[Dict[str, Any]]:
@@ -2217,6 +2105,9 @@ def _message_event(db: sqlite3.Connection, r: sqlite3.Row,
         "edited_at": (r["edited_at"] if "edited_at" in keys else None),
         "created_at": r["created_at"],
         "attachments": attachments_for_message(db, r["id"]),
+        # An agent's burner page announced by this message: {id, title, path,
+        # expires_at}, or None. The client draws it as a card.
+        "page": nmedia.page_for_message(db, r["id"]),
     }
 
 
@@ -4288,6 +4179,8 @@ class NthWebHandler(BaseHTTPRequestHandler):
             self._json({**STT.health(), "secure_url": SECURE_URL_HINT})
         elif path.startswith("/api/attachment/"):
             self._serve_attachment(path)
+        elif path.startswith(nmedia.PAGE_PATH_PREFIX):
+            self._serve_page(path)
         else:
             self._error(404, "not found")
 
@@ -7582,6 +7475,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
             # channel that lacked a members row (so no orphan points at the now
             # deleted channels.code) (Sauron).
             db.execute("DELETE FROM agent_channels WHERE channel = ?", (channel,))
+            nmedia.purge_channel_pages(db, channel)
             npush.delete_channel_subscriptions(db, channel)
             db.execute("DELETE FROM channels WHERE code = ?", (channel,))
             db.execute("COMMIT")
@@ -9516,6 +9410,71 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 except OSError:
                     pass
 
+    def _serve_page(self, path: str) -> None:
+        """An agent's burner page, for a viewer who can see the message that
+        announced it.
+
+        Visibility is the message's: the same can_see predicate and identity
+        tiers as the conversation, so a broadcast page opens for anyone who can
+        read the channel and a DM page only for its participants (and the
+        all-seeing owner, as with DMs themselves). A retracted announcement
+        takes its page down. The id is unguessable, and a page someone may not
+        see answers exactly like one that does not exist.
+
+        The headers carry the safety: `sandbox allow-scripts` without
+        allow-same-origin gives the document an opaque origin, so its scripts
+        run with no access to this dashboard's cookies, storage or API, even
+        when the page is opened directly in a tab."""
+        page_id = path[len(nmedia.PAGE_PATH_PREFIX):]
+        if not nmedia.PAGE_ID_RE.match(page_id):
+            self._error(404, "not found")
+            return
+        _token, ident, _is_new = self._resolve_identity()
+        if ident.source == IDENTITY_SOURCE_PENDING:
+            self._error(403, "pick a name to join this channel first")
+            return
+        row = None
+        db = None
+        try:
+            db = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True, timeout=5)
+            db.row_factory = sqlite3.Row
+            db.execute("PRAGMA busy_timeout=2000")
+            row = db.execute(
+                "SELECT p.channel AS channel, p.html AS html, p.expires_at AS expires_at, "
+                "       m.member_id AS sender, m.recipients AS recipients "
+                "  FROM pages p JOIN messages m ON m.id = p.message_id "
+                " WHERE p.id = ? AND m.retracted_at IS NULL",
+                (page_id,)).fetchone()
+        except sqlite3.Error:
+            row = None
+        finally:
+            if db is not None:
+                try:
+                    db.close()
+                except sqlite3.Error:
+                    pass
+        # A single-channel dashboard serves only its own channel, as with
+        # attachments.
+        if row is not None and not self.landing_mode and row["channel"] != self.channel:
+            row = None
+        if row is not None and not can_see(ident.member_id, None, row["sender"],
+                                           row["recipients"],
+                                           allow_all_seeing=is_all_seeing(ident.member_id)):
+            row = None
+        if row is None:
+            self._error(404, "not found")
+            return
+        if nmedia.page_expired(row["expires_at"]):
+            self._error(410, "this page has expired")
+            return
+        body = (row["html"] or "").encode("utf-8")
+        self.send_response(200)
+        for name, value in nmedia.PAGE_HEADERS:
+            self.send_header(name, value)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def _serve_attachment(self, path: str) -> None:
         tail = path.rsplit("/", 1)[-1]
         if not tail.isdigit():
@@ -10692,7 +10651,8 @@ def main() -> int:
     def _startup_sweep() -> None:
         try:
             _gc = sweep_attachments(db_path, force=True)
-            if any(_gc.get(k) for k in ("abandoned", "dead_channel", "orphan_files")):
+            if any(_gc.get(k) for k in ("abandoned", "dead_channel", "orphan_files",
+                                        "expired_pages")):
                 print(f"attachments: reclaimed {_gc}", flush=True)
         except Exception:
             pass

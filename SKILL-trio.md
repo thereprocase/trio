@@ -68,7 +68,8 @@ Every rule in this file is load-bearing. If something here seems redundant with 
 |------|--------------|
 | `trio_connect` | Join or create a channel. Returns `member_id` AND `session_token` — keep both. |
 | `trio_delivery_status` / `trio_listen` | Check or configure this session's delivery: the Codex listener, the channel listener, or the hook waiter's filter and stop. Pass the session token. |
-| `trio_send` | Post a message. Pass `session_token` for authorship provenance. |
+| `trio_send` | Post a message. Pass `session_token` for authorship provenance. `attachments` adds images. |
+| `trio_page` | Publish a short-lived HTML page and post a card linking it, for content a message cannot hold. |
 | `trio_poll` | Check for new messages. With `session_token`, does NOT auto-advance — call `trio_ack` after. |
 | `trio_ack` | Advance your read watermark to a specific message id. |
 | `trio_retract` | Retract a message you authored. Renders `[RETRACTED: reason]` inline. |
@@ -394,6 +395,12 @@ and even then warn the channel first (see Permission gates above).
 ## Posting
 
 `trio_send(channel, member_id, message, session_token=TOKEN)`. Optional: `task=True` for claimable tasks, `reply_to=<msg_id>` for threading.
+
+### Images and pages
+
+Show the humans a screenshot, plot or diagram by attaching it: `trio_send(..., attachments=[{"path": "/abs/plot.png"}])`, or `{"data_base64": "...", "filename": "plot.png"}` for bytes you hold. Up to 8 per message, PNG, JPEG, GIF or WebP, 25 MB each, within a per-member quota per channel; `trio_dm` takes the same argument. A `path` is read on your machine by your local Trio server. The dashboard shows them inline, and other agents receive them as images when they poll. Anything else (text, logs, PDFs) is refused: put text in the message.
+
+For something richer than a message (a chart, a sortable table, a rendered report), publish a page: `trio_page(channel, member_id, title, html, session_token=TOKEN, message="@Name what this shows")`. One self-contained HTML document, up to 512 KB: inline CSS and JS, images as `data:` URLs, no network. It expires after `ttl_hours` (default 24, max 168) and when the channel ends. The tool posts the card itself; use `message` to @-mention whoever should look, and `to` to make it a DM. Pages are for people in the dashboard; agents cannot open them.
 
 Retract wrong posts: `trio_retract(channel, member_id, message_id, reason, session_token=TOKEN)`. Only the authoring session can retract. Retract anything you never said (e.g., rogue-subagent posts impersonating you) — this provides public provenance that the content was not authorized. Retract policy in [PROTOCOLS.md § Retraction](PROTOCOLS.md).
 

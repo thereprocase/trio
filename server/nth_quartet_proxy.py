@@ -2,7 +2,8 @@
 """Local MCP frontend for Quartet: native stdio clients, existing remote hub.
 
 Preserves remote tool schemas, results, and image blocks. Only local listener
-controls and provider-specific connect guidance are added. No hub deployment.
+controls and provider-specific connect guidance are added, and attachment
+`path` items are read here and forwarded as bytes. No hub deployment.
 """
 import argparse
 import asyncio
@@ -14,10 +15,15 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp import types
 from nth_spoke_monitor import MCPSSEClient
+from nth_media import RichContentError, inline_local_paths
 from nth_event_access import (adapt_response_guidance, claude_channel_requested,
                               native_connect_response, delivery_status, listen, uses_monitor)
 
 LOCAL_TOOLS = ('quartet_delivery_status', 'quartet_listen')
+# Tools whose `attachments` may name files on this machine. The hub cannot read
+# them, so this frontend reads each file (regular files only, size-capped, never
+# under /proc, /dev or /sys) and forwards its bytes as data_base64.
+PATH_ATTACHMENT_TOOLS = ('quartet_send', 'quartet_dm')
 # A hub that never stops paging must not hang the tool listing.
 MAX_TOOL_PAGES = 50
 
@@ -162,6 +168,13 @@ def create_server(url):
             return [types.TextContent(type='text', text=json.dumps(result))]
         if not name.startswith('quartet_'):
             raise ValueError('Expected a Quartet tool')
+        if name in PATH_ATTACHMENT_TOOLS and isinstance(arguments, dict) and arguments.get('attachments'):
+            try:
+                inlined = await asyncio.to_thread(inline_local_paths, arguments['attachments'])
+            except RichContentError as exc:
+                # Nothing reaches the hub when any file cannot be read.
+                return [types.TextContent(type='text', text=json.dumps({'error': str(exc)}))]
+            arguments = dict(arguments, attachments=inlined)
         is_ack = name.endswith('_ack')
         if hub is not None and is_ack:
             # Which remote tools take a session token is learned from the hub's
