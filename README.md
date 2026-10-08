@@ -371,6 +371,8 @@ The dashboard composer has a mic button. **Preferences → Speech-to-text engine
 - **Local**: a sidecar process on the machine running `nth_web.py` transcribes the audio, and the audio stays on that machine. If the hub cannot run it, the mic says so before recording and offers Browser for that one recording; it never switches on its own.
 - **Browser**: the browser's own speech recognition, which sends audio to your browser vendor.
 
+Spoken sigils: say **“hey Name”** for `@Name`, **“hashtag Name”** for `#Name`, **“bang Name”** for `!Name` and **“bang all”** for `!all`. Names are matched against the current channel's members, tolerating case, punctuation, a name spoken as several words (“codex sol” for `codex-sol`) and a misheard letter; when no member is a clear match the words stay as spoken, so an ordinary “hey, can you…” is left alone. Only final text is rewritten, and the sigils sit in the box for you to check before sending.
+
 Browser dictation stops by itself after a few seconds of silence (Android Chrome does this even in continuous mode); the text stays in the box and another tap carries on after it. Dictation only fills the box. Nothing is sent until you press Send.
 
 Local mode needs two extra packages on the machine serving the dashboard, installed separately from `setup.sh`:
