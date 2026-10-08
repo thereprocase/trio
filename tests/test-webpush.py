@@ -518,6 +518,319 @@ db.execute("DELETE FROM push_subscriptions")
 db.commit()
 db.close()
 
+# ───────── Review fixes: delivery guarantees and bounds ─────────
+EP = "https://fcm.googleapis.com/fcm/send/"
+
+
+def add_sub(n, mode="all", member=None, tier=npush.TIER_GUEST, channel=None):
+    conn = sqlite3.connect(str(srv.DB_PATH))
+    npush.upsert_subscription(conn, channel=channel or CH, endpoint=f"{EP}{n}",
+                              p256dh=UA_PUBLIC, auth=UA_AUTH,
+                              member_id=member or f"_op_g_{n}_x", member_name=f"{n}-guest",
+                              mode=mode, tier=tier)
+    conn.commit()
+    conn.close()
+
+
+def sub_row(n, channel=None):
+    conn = sqlite3.connect(str(srv.DB_PATH))
+    conn.row_factory = sqlite3.Row
+    try:
+        return conn.execute("SELECT * FROM push_subscriptions WHERE channel = ? AND endpoint = ?",
+                            (channel or CH, f"{EP}{n}")).fetchone()
+    finally:
+        conn.close()
+
+
+def clear_subs():
+    conn = sqlite3.connect(str(srv.DB_PATH))
+    conn.execute("DELETE FROM push_subscriptions")
+    conn.commit()
+    conn.close()
+
+
+class Scripted:
+    """A sender whose status per endpoint the test sets, recording calls."""
+
+    def __init__(self):
+        self.status, self.calls, self.delay = {}, [], 0.0
+        self._lock = threading.Lock()
+
+    def __call__(self, endpoint, p256dh, auth_secret, payload, vapid, contact, urgency="normal"):
+        if self.delay:
+            time.sleep(self.delay)
+        with self._lock:
+            self.calls.append((endpoint, payload, urgency))
+        return self.status.get(endpoint, 201)
+
+
+def fresh(sender, **kw):
+    d = npush.PushDispatcher(srv.DB_PATH, Path(_TMP), sender=sender,
+                             clock=lambda: clock[0], **kw)
+    d.tick()                       # seed the high-water mark
+    return d
+
+
+def say(text):
+    srv.nth_send(channel=CH, member_id=ADA, message=text)
+
+
+# 1. Lease loss stops delivery.
+clear_subs()
+add_sub("lease")
+held = [True]
+sc = Scripted()
+d = fresh(sc, lease_check=lambda: held[0])
+say("before the takeover")
+d.tick()
+check("lease: a holder sends", len(sc.calls) == 1)
+held[0] = False
+say("after the takeover")
+check("lease: a tick after losing the lease sends nothing", d.tick() == 0 and len(sc.calls) == 1)
+check("lease: the dispatcher stops itself", d.stopped)
+
+lease = web.AgentControlLease(srv.DB_PATH)
+check("lease: acquire on a fresh DB", lease.acquire() is None)
+check("lease: still_held while we hold it", lease.still_held())
+conn = sqlite3.connect(str(srv.DB_PATH))
+conn.execute("UPDATE agent_control_lease SET holder = 'other-host:1:abcd' WHERE id = 1")
+conn.commit()
+conn.close()
+check("lease: still_held is False once another hub holds it", not lease.still_held())
+d2 = fresh(Scripted(), lease_check=lease.still_held)
+check("lease: a dispatcher wired to a lost lease stops on its first tick", d2.stopped)
+_was_enabled = web.NthWebHandler._agent_control_enabled
+web._PUSH_DISPATCHER = npush.PushDispatcher(srv.DB_PATH, Path(_TMP), sender=Scripted())
+victim = web._PUSH_DISPATCHER
+web._quiesce_agents()
+check("lease: _quiesce_agents (the on_lost hook) stops the push dispatcher",
+      victim.stopped and web._PUSH_DISPATCHER is None)
+web.NthWebHandler._agent_control_enabled = _was_enabled
+conn = sqlite3.connect(str(srv.DB_PATH))
+conn.execute("DELETE FROM agent_control_lease")
+conn.commit()
+conn.close()
+
+# 2. Tier quotas: guests have their own small pool.
+clear_subs()
+_quotas = dict(npush.TIER_QUOTAS)
+npush.TIER_QUOTAS[npush.TIER_GUEST] = (8, 3)
+try:
+    for i in range(3):
+        add_sub(f"g{i}", member=f"_op_g_cookie{i}_x")
+    try:
+        add_sub("g3", member="_op_g_cookie3_x")
+        check("quota: the guest pool is capped", False)
+    except npush.SubscriptionLimit:
+        check("quota: the guest pool is capped", True)
+    add_sub("owner", member="_op_t_owner", tier=npush.TIER_TRUSTED)
+    check("quota: a full guest pool leaves the owner room", sub_row("owner") is not None)
+finally:
+    npush.TIER_QUOTAS.update(_quotas)
+check("quota: guests and trusted tiers map as intended",
+      web._push_tier(web.OperatorIdentity("_op_g_x", "x", web.IDENTITY_SOURCE_GUEST)) == npush.TIER_GUEST
+      and web._push_tier(web.OperatorIdentity("_op_g_y", "y", web.IDENTITY_SOURCE_GUEST,
+                                              tailnet_verified=True)) == npush.TIER_GUEST
+      and all(web._push_tier(web.OperatorIdentity("_op_z", "z", src)) == npush.TIER_TRUSTED
+              for src in (web.IDENTITY_SOURCE_LOOPBACK, web.IDENTITY_SOURCE_TAILSCALE,
+                          web.IDENTITY_SOURCE_MEMBER)))
+
+# 7 + 10. Ownership and mode changes.
+clear_subs()
+add_sub("own", mode="every5m", member="_op_g_alice_x")
+try:
+    add_sub("own", mode="all", member="_op_g_mallory_x")
+    check("upsert: another identity cannot take over a subscription", False)
+except npush.SubscriptionConflict:
+    check("upsert: another identity cannot take over a subscription",
+          sub_row("own")["member_id"] == "_op_g_alice_x")
+conn = sqlite3.connect(str(srv.DB_PATH))
+conn.execute("UPDATE push_subscriptions SET pending_count = 7, pending_sender = 'Ada'")
+conn.commit()
+conn.close()
+add_sub("own", mode="every5m", member="_op_g_alice_x")
+check("upsert: re-choosing the same mode keeps the held count", sub_row("own")["pending_count"] == 7)
+add_sub("own", mode="all", member="_op_g_alice_x")
+check("upsert: changing mode resets the held count",
+      sub_row("own")["pending_count"] == 0 and sub_row("own")["pending_sender"] == "")
+
+# 10. Channel deletion takes subscriptions with it.
+r2 = json.loads(srv.nth_connect(summary="t", name="Bea", channel="doomed"))
+DOOMED = r2["channel"]
+add_sub("doomed", channel=DOOMED)
+conn = sqlite3.connect(str(srv.DB_PATH))
+check("channel delete: the prune helper removes its subscriptions",
+      npush.delete_channel_subscriptions(conn, DOOMED) == 1)
+conn.commit()
+conn.close()
+add_sub("doomed", channel=DOOMED)
+conn = sqlite3.connect(str(srv.DB_PATH))
+conn.execute("DELETE FROM channels WHERE code = ?", (DOOMED,))
+conn.commit()
+conn.close()
+fresh(Scripted()).tick()
+check("channel delete: a channel removed by any path is swept on the next tick",
+      sub_row("doomed", channel=DOOMED) is None)
+
+# 2. Repeated 4xx drops a subscription; a success in between resets the count.
+clear_subs()
+add_sub("rej")
+sc = Scripted()
+d = fresh(sc)
+sc.status[f"{EP}rej"] = 400
+say("one")
+d.tick()
+say("two")
+d.tick()
+check("4xx: two refusals are counted", sub_row("rej")["fail_count"] == 2)
+sc.status[f"{EP}rej"] = 201
+say("three")
+d.tick()
+check("4xx: a delivery resets the count", sub_row("rej")["fail_count"] == 0)
+sc.status[f"{EP}rej"] = 403
+for text in ("four", "five", "six"):
+    say(text)
+    d.tick()
+check("4xx: three refusals in a row drop the subscription", sub_row("rej") is None)
+
+# 2. Known-bad endpoints are skipped; sends run in parallel; ticks are capped.
+clear_subs()
+add_sub("slow-a")
+add_sub("bad")
+sc = Scripted()
+d = fresh(sc)
+sc.status[f"{EP}bad"] = 503
+say("first")
+d.tick()
+sc.calls.clear()
+say("second")
+d.tick()
+check("bounds: an endpoint in backoff costs no request",
+      [e for e, _p, _u in sc.calls] == [f"{EP}slow-a"])
+clear_subs()
+for i in range(8):
+    add_sub(f"par{i}", member=f"_op_g_par{i}_x")
+sc = Scripted()
+sc.delay = 0.3
+d = fresh(sc)
+say("fan out")
+t0 = time.monotonic()
+d.tick()
+elapsed = time.monotonic() - t0
+check(f"bounds: 8 slow sends run in parallel ({elapsed:.2f}s, serial would be 2.4s)",
+      len(sc.calls) == 8 and elapsed < 1.2)
+clear_subs()
+add_sub("cap")
+_cap = npush.MAX_SENDS_PER_TICK
+npush.MAX_SENDS_PER_TICK = 2
+try:
+    sc = Scripted()
+    d = fresh(sc)
+    for i in range(5):
+        say(f"burst {i}")
+    counts = []
+    for _ in range(4):
+        before = len(sc.calls)
+        d.tick()
+        counts.append(len(sc.calls) - before)
+    check(f"bounds: a tick takes at most the cap and the rest follow ({counts})",
+          counts[:3] == [2, 2, 1] and sum(counts) == 5)
+finally:
+    npush.MAX_SENDS_PER_TICK = _cap
+
+# 3. Undelivered summaries and bangs are kept.
+clear_subs()
+add_sub("dig", mode="every5m")
+sc = Scripted()
+d = fresh(sc)
+clock[0] += 10_000
+sc.status[f"{EP}dig"] = 503
+say("lost summary?")
+d.tick()
+check("retry: a failed summary hands its count back",
+      sub_row("dig")["pending_count"] == 1)
+say("held while backed off")
+d.tick()
+check("retry: messages keep counting while the endpoint rests",
+      sub_row("dig")["pending_count"] == 2 and len(sc.calls) == 1)
+sc.status[f"{EP}dig"] = 201
+d._endpoint_backoff.clear()
+d.tick()
+check("retry: the summary goes out once the endpoint recovers, with every message",
+      len(sc.calls) == 2 and sc.calls[-1][1]["title"].endswith("2 new messages")
+      and sub_row("dig")["pending_count"] == 0)
+
+clear_subs()
+add_sub("bang", mode="mentions")
+sc = Scripted()
+d = fresh(sc)
+sc.status[f"{EP}bang"] = 503
+say("!all the build is on fire")
+d.tick()
+sc.status[f"{EP}bang"] = 201
+d._endpoint_backoff.clear()
+d.tick()
+check("retry: a bang that failed transiently is delivered on a later tick",
+      len(sc.calls) == 2 and sc.calls[-1][2] == "high")
+sc.status[f"{EP}bang"] = 503
+say("!all again")
+attempts = 0
+for _ in range(10):
+    d._endpoint_backoff.clear()
+    before = len(sc.calls)
+    d.tick()
+    attempts += len(sc.calls) - before
+check(f"retry: bang retries are bounded ({attempts} sends)",
+      attempts == 1 + npush.BANG_RETRY_ATTEMPTS)
+
+# 8. A row that blows up is skipped, never pinning the high-water mark.
+clear_subs()
+add_sub("iso")
+sc = Scripted()
+d = fresh(sc)
+_decide = npush.decide
+
+
+def poisoned(mode, msg, *a, **k):
+    if msg.get("content") == "poison":
+        raise TypeError("malformed row")
+    return _decide(mode, msg, *a, **k)
+
+
+npush.decide = poisoned
+try:
+    say("poison")
+    say("after the poison")
+    d.tick()
+finally:
+    npush.decide = _decide
+check("isolation: the message after a malformed one is still delivered",
+      [p["body"] for _e, p, _u in sc.calls] == ["after the poison"])
+say("later still")
+d.tick()
+check("isolation: the high-water mark moved past the bad row",
+      [p["body"] for _e, p, _u in sc.calls][-1] == "later still" and len(sc.calls) == 2)
+clear_subs()
+
+# 9. The whole push body stays within 4096 octets.
+check("size: MAX_PLAINTEXT is 3993", npush.MAX_PLAINTEXT == 3993)
+huge = npush.encode_payload({"title": "😀" * 3000, "body": "é" * 9000, "tag": "nth-x", "url": "/"})
+check("size: an oversized payload is shortened to fit", len(huge) <= npush.MAX_PLAINTEXT)
+fits = npush.encrypt_aes128gcm(b"x" * 3993, b64d(UA_PUBLIC), b64d(UA_AUTH))
+check("size: a 3993-octet plaintext makes a 4096-octet body", len(fits) == 4096)
+try:
+    npush.encrypt_aes128gcm(b"x" * 3994, b64d(UA_PUBLIC), b64d(UA_AUTH))
+    check("size: 3994 octets are refused", False)
+except ValueError:
+    check("size: 3994 octets are refused", True)
+
+# 5. VAPID aud is canonical.
+for raw in ("https://FCM.GoogleAPIs.com/fcm/send/x", "https://fcm.googleapis.com:443/fcm/send/x",
+            "https://fcm.googleapis.com./fcm/send/x"):
+    hdr = keys.authorization(raw, "mailto:admin@example.com", now=now)
+    aud = npush.verify_jwt(hdr[len("vapid t="):hdr.index(", k=")], keys.public_bytes)["aud"]
+    check(f"vapid: aud is canonical for {raw.split('/')[2]}", aud == "https://fcm.googleapis.com")
+
 # ───────── HTTP surface ─────────
 hub = web.EventHub(srv.DB_PATH, CH)
 server = None
@@ -638,6 +951,20 @@ try:
                              headers={"Origin": "https://evil.example.com"})
         check("subscribe: cross-origin POST refused", st == 403)
 
+        npush.TIER_QUOTAS[npush.TIER_GUEST] = (8, 0)
+        try:
+            st, _hd, _raw = call(port, "POST", "/api/push/subscribe",
+                                 {**SUB, "subscription": {**GOOD_SUB, "endpoint": GOOD_SUB["endpoint"] + "full"}})
+            check("subscribe: a full guest pool answers 429", st == 429)
+            owner = web.OperatorIdentity(member_id="_op_t_owner2", name="owner",
+                                         source=web.IDENTITY_SOURCE_TAILSCALE)
+            web.NthWebHandler._resolve_identity = lambda self, _i=owner: (None, _i, False)
+            st, _hd, _raw = call(port, "POST", "/api/push/subscribe",
+                                 {**SUB, "subscription": {**GOOD_SUB, "endpoint": GOOD_SUB["endpoint"] + "own"}})
+            check("subscribe: the owner still subscribes while the guest pool is full", st == 200)
+            web.NthWebHandler._resolve_identity = lambda self, _i=ident: (None, _i, False)
+        finally:
+            npush.TIER_QUOTAS.update(_quotas)
         st, _hd, _raw = call(port, "POST", "/api/push/subscribe", {**SUB, "mode": "every5m"})
         check("subscribe: named guest can subscribe", st == 200)
         st, _hd, raw = call(port, "GET", f"/api/push/status?channel={CH}")
@@ -646,6 +973,20 @@ try:
               st == 200 and status.get("subscriptions") == [
                   {"endpoint": GOOD_SUB["endpoint"], "mode": "every5m"}], str(status))
         st, _hd, _raw = call(port, "POST", "/api/push/subscribe", {**SUB, "mode": "all"})
+        check("status: a server with no sending hub says it is not delivering",
+              as_json(raw).get("delivering") is False)
+        _c = sqlite3.connect(str(srv.DB_PATH))
+        web.AgentControlLease(srv.DB_PATH)._db().close()      # create the table
+        _c.execute("INSERT OR REPLACE INTO agent_control_lease (id, holder, host, pid, "
+                   "acquired_at, expires_at) VALUES (1, 'hub-a:1:x', 'hub-a', 1, 'now', ?)",
+                   (time.time() + 60,))
+        _c.commit()
+        st, _hd, raw2 = call(port, "GET", f"/api/push/status?channel={CH}")
+        check("status: a database driven by a live hub reports delivering",
+              as_json(raw2).get("delivering") is True)
+        _c.execute("DELETE FROM agent_control_lease")
+        _c.commit()
+        _c.close()
         st, _hd, raw = call(port, "GET", f"/api/push/status?channel={CH}")
         check("status: changing the mode replaces, never duplicates",
               as_json(raw).get("subscriptions") == [{"endpoint": GOOD_SUB["endpoint"], "mode": "all"}])
@@ -655,6 +996,8 @@ try:
         st, _hd, raw = call(port, "POST", "/api/push/unsubscribe",
                             {"endpoint": GOOD_SUB["endpoint"], "channel": CH})
         check("unsubscribe: another identity cannot remove it", as_json(raw).get("removed") == 0)
+        st, _hd, _raw = call(port, "POST", "/api/push/subscribe", SUB)
+        check("subscribe: another identity presenting the same endpoint gets 409", st == 409)
         st, _hd, raw = call(port, "GET", f"/api/push/status?channel={CH}")
         check("status: another identity does not see it", as_json(raw).get("subscriptions") == [])
 

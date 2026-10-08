@@ -3328,6 +3328,35 @@ _LEASE = None
 _PUSH_DISPATCHER = None
 
 
+def _push_tier(ident: "OperatorIdentity") -> str:
+    """Quota pool for a subscriber. Guests (self-declared or tailnet-verified)
+    share a small pool of their own; owner, local and listed members share the
+    large one, which guests can therefore never exhaust."""
+    if ident.source in (IDENTITY_SOURCE_LOOPBACK, IDENTITY_SOURCE_TAILSCALE,
+                        IDENTITY_SOURCE_MEMBER):
+        return npush.TIER_TRUSTED
+    return npush.TIER_GUEST
+
+
+def _push_delivering(db_path: Path) -> bool:
+    """True when some hub process is sending pushes for this database: this
+    one, or another process holding an unexpired agent-control lease."""
+    if _PUSH_DISPATCHER is not None and _PUSH_DISPATCHER.is_alive():
+        return True
+    try:
+        db = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=2)
+        try:
+            row = db.execute("SELECT holder, expires_at FROM agent_control_lease "
+                             "WHERE id=1").fetchone()
+        finally:
+            db.close()
+    except sqlite3.Error:
+        return False
+    if row is None or float(row[1]) <= time.time():
+        return False
+    return _LEASE is None or row[0] != _LEASE.holder
+
+
 def _quiesce_agents() -> None:
     """Give up the control plane. Handed to the lease as its on_lost callback.
 
@@ -3336,9 +3365,11 @@ def _quiesce_agents() -> None:
     Keeping that seam means the lease knows nothing about the HTTP handler or
     the router globals, which is what would let it move to its own module.
     """
-    global _ROUTER, _IDLE_REAPER
+    global _ROUTER, _IDLE_REAPER, _PUSH_DISPATCHER
     NthWebHandler._agent_control_enabled = False
-    for thread in (_ROUTER, _IDLE_REAPER):
+    # Phone pushes follow the same lease: the hub that took over sends them
+    # now, and two senders would deliver every notification twice.
+    for thread in (_ROUTER, _IDLE_REAPER, _PUSH_DISPATCHER):
         try:
             if thread is not None:
                 thread.stop()
@@ -3346,6 +3377,7 @@ def _quiesce_agents() -> None:
             pass
     _ROUTER = None
     _IDLE_REAPER = None
+    _PUSH_DISPATCHER = None
 _RUNTIME_HEALTH: Dict[str, Tuple[float, Dict[str, Any]]] = {}
 
 
@@ -6555,6 +6587,10 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 db.close()
         self._json({
             "enabled": npush.available(),
+            # Whether any hub is actually sending. A single-channel viewer or a
+            # --no-agent-control dashboard records choices but never delivers;
+            # the page says so instead of implying notifications will arrive.
+            "delivering": npush.available() and _push_delivering(self.db_path),
             "channel": channel,
             "named": named,
             "modes": list(npush.PUSH_MODES),
@@ -6589,10 +6625,15 @@ class NthWebHandler(BaseHTTPRequestHandler):
         try:
             npush.upsert_subscription(
                 db, channel=channel, endpoint=endpoint, p256dh=p256dh, auth=auth,
-                member_id=ident.member_id, member_name=ident.display_name, mode=mode)
+                member_id=ident.member_id, member_name=ident.display_name, mode=mode,
+                tier=_push_tier(ident))
             db.commit()
         except npush.SubscriptionLimit as exc:
             self._error(429, str(exc))
+            return
+        except npush.SubscriptionConflict as exc:
+            # The page answers this by replacing its browser subscription.
+            self._error(409, str(exc))
             return
         except sqlite3.Error as exc:
             sys.stderr.write(f"[nth_web push] subscribe failed: {exc}\n")
@@ -7262,6 +7303,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
             # channel that lacked a members row (so no orphan points at the now
             # deleted channels.code) (Sauron).
             db.execute("DELETE FROM agent_channels WHERE channel = ?", (channel,))
+            npush.delete_channel_subscriptions(db, channel)
             db.execute("DELETE FROM channels WHERE code = ?", (channel,))
             db.execute("COMMIT")
         except sqlite3.Error:
@@ -9956,6 +9998,27 @@ class AgentControlLease:
         finally:
             db.close()
 
+    def still_held(self) -> bool:
+        """Whether the database still names this hub as the unexpired holder.
+
+        Read-only, for the push dispatcher to ask before each send. A database
+        error answers True for the same reason renew() does: a locked read is
+        not evidence that another hub took over, and the TTL bounds the
+        overlap if one really did.
+        """
+        try:
+            db = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True, timeout=2)
+        except sqlite3.Error:
+            return True
+        try:
+            row = db.execute("SELECT holder, expires_at FROM agent_control_lease "
+                             "WHERE id=1").fetchone()
+        except sqlite3.Error:
+            return True
+        finally:
+            db.close()
+        return row is not None and row[0] == self.holder and float(row[1]) > time.time()
+
     def release(self) -> None:
         try:
             db = self._db()
@@ -10280,7 +10343,8 @@ def main() -> int:
     # never double-sends. Any dashboard can still record subscriptions.
     global _PUSH_DISPATCHER
     if _LEASE is not None and npush.available():
-        _PUSH_DISPATCHER = npush.PushDispatcher(db_path, db_path.parent)
+        _PUSH_DISPATCHER = npush.PushDispatcher(db_path, db_path.parent,
+                                                lease_check=_LEASE.still_held)
         _PUSH_DISPATCHER.start()
 
     def stop_hubs():

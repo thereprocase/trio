@@ -220,6 +220,110 @@ const click = el => (el._listeners.click || []).forEach(fn => fn({ type: 'click'
     state.dmKey = ''; state.dmThread = null;
   });
 
+  await check('a 409 (endpoint owned by another identity) replaces the browser subscription and retries', async () => {
+    pushCapable(ANDROID);
+    win.Notification.permission = 'granted';
+    current = subscription;
+    let unsubscribed = 0, n = 0;
+    const second = { ...subscription, endpoint: ENDPOINT + '-new', toJSON() { return { endpoint: ENDPOINT + '-new', keys: { p256dh: 'BPUB', auth: 'AUTH' } }; } };
+    subscription.unsubscribe = () => { unsubscribed++; current = null; return Promise.resolve(true); };
+    pushManager.subscribe = opts => { second.options = { applicationServerKey: opts.applicationServerKey.buffer }; current = second; return Promise.resolve(second); };
+    const realFetch = win.fetch;
+    win.fetch = async (url, init = {}) => {
+      if (url === '/api/push/subscribe' && n++ === 0) {
+        calls.push({ url, method: 'POST', body: JSON.parse(init.body) });
+        const text = JSON.stringify({ error: 'this device is subscribed under another identity' });
+        return { ok: false, status: 409, text: async () => text, json: async () => JSON.parse(text) };
+      }
+      return realFetch(url, init);
+    };
+    try {
+      const s = new FakeElement('section');
+      push.render(s, 'ops');
+      await settle();
+      calls.length = 0;
+      click(button(s, 'all'));
+      await settle();
+      const posts = calls.filter(c => c.url === '/api/push/subscribe');
+      assert.strictEqual(unsubscribed, 1);
+      assert.strictEqual(posts.length, 2);
+      assert.strictEqual(posts[1].body.subscription.endpoint, ENDPOINT + '-new');
+      assert.deepStrictEqual(pressed(s), ['all']);
+    } finally { win.fetch = realFetch; }
+  });
+
+  await check('a server with no sending hub says so', async () => {
+    pushCapable(ANDROID);
+    const realFetch = win.fetch;
+    win.fetch = async (url, init) => {
+      if (url.startsWith('/api/push/status')) {
+        const text = JSON.stringify({ enabled: true, delivering: false, named: true, subscriptions: [] });
+        return { ok: true, status: 200, text: async () => text, json: async () => JSON.parse(text) };
+      }
+      return realFetch(url, init);
+    };
+    try {
+      const s = new FakeElement('section');
+      push.render(s, 'ops');
+      await settle();
+      const hint = s.querySelector('.push-hint');
+      assert.strictEqual(hint.hidden, false);
+      assert.match(hint.textContent, /no hub is sending/);
+      assert.ok(buttons(s).every(b => !b.disabled), 'the choice can still be saved');
+    } finally { win.fetch = realFetch; }
+  });
+
+  // The service worker, run as shipped against a fake worker global.
+  function loadWorker(windows) {
+    const listeners = {}; const opened = []; const focused = []; const posted = [];
+    const self = {
+      location: { origin: 'https://hub.example.ts.net:8765' },
+      addEventListener: (type, fn) => { listeners[type] = fn; },
+      skipWaiting() {},
+      registration: { showNotification: () => Promise.resolve() },
+      clients: {
+        claim: () => Promise.resolve(),
+        matchAll: () => Promise.resolve(windows.map(url => ({ url, focus() { focused.push(url); return Promise.resolve(this); }, postMessage(m) { posted.push(m); } }))),
+        openWindow: url => { opened.push(url); return Promise.resolve(null); },
+      },
+    };
+    const src = require('fs').readFileSync(require('path').resolve(__dirname, '..', 'server', 'web', 'sw.js'), 'utf8');
+    require('vm').runInNewContext(src, { self, URL });
+    async function clickNotification(data) {
+      let done;
+      listeners.notificationclick({ notification: { data, close() {} }, waitUntil: p => { done = p; } });
+      await done;
+    }
+    return { clickNotification, opened, focused, posted };
+  }
+
+  await check('service worker: a click opens the channel when no window is open', async () => {
+    const w = loadWorker([]);
+    await w.clickNotification({ url: '/?channel=ops', channel: 'ops' });
+    assert.deepStrictEqual(w.opened, ['https://hub.example.ts.net:8765/?channel=ops']);
+  });
+
+  await check('service worker: a foreign URL in the payload opens the app home instead', async () => {
+    const w = loadWorker([]);
+    await w.clickNotification({ url: 'https://evil.example.com/phish', channel: 'ops' });
+    assert.deepStrictEqual(w.opened, ['https://hub.example.ts.net:8765/']);
+  });
+
+  await check('service worker: an open window on the channel is focused, not duplicated', async () => {
+    const w = loadWorker(['https://hub.example.ts.net:8765/?channel=ops']);
+    await w.clickNotification({ url: '/?channel=ops', channel: 'ops' });
+    assert.deepStrictEqual(w.focused, ['https://hub.example.ts.net:8765/?channel=ops']);
+    assert.strictEqual(w.opened.length, 0);
+  });
+
+  await check('service worker: an app open elsewhere is told to switch channel', async () => {
+    const w = loadWorker(['https://hub.example.ts.net:8765/tasks']);
+    await w.clickNotification({ url: '/?channel=ops', channel: 'ops' });
+    assert.strictEqual(w.opened.length, 0);
+    assert.strictEqual(w.posted[0]?.type, 'nth-open-channel');
+    assert.strictEqual(w.posted[0]?.channel, 'ops');
+  });
+
   console.log(`\n${failures.length ? 'FAILED' : 'OK'} — ${passed} passed, ${failures.length} failed`);
   process.exit(failures.length ? 1 : 0);
 })();
