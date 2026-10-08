@@ -34,6 +34,7 @@
   let starting = false, dictationGen = 0;
   // True while a finished recording is being sent to /api/stt/transcribe.
   let transcribing = false;
+  const keptClips = new Set(); // page-memory audio must be visible to reload protection
   const byId = id => document.getElementById(id);
   const input = () => byId('input');
   // The message box is a contenteditable div so @-mentions render as inline
@@ -810,7 +811,7 @@
   // speech service the hub's operator configured. Either way the audio goes
   // to the hub, never to the browser vendor, so both read as "Hub".
   function localUnavailableMessage(detail) {
-    if (/limited to its members/i.test(detail || '')) return 'Dictation on this hub is limited to its members. Use browser dictation.';
+    if (/limited to its members/i.test(detail || '')) return 'Dictation on this hub is limited to its members.';
     return /not installed/i.test(detail || '')
       ? "This hub's speech engine isn't installed."
       : `This hub's speech engine isn't working (${detail || 'no reason given'}).`;
@@ -1045,13 +1046,37 @@
     stopMeter();
   }
   function failedRecorderStop(recording) {
-    // A late stop event from this recorder must never submit or reset a newer one.
+    // Release the reservation, but retain handlers/chunks for a slow final event.
     if (localRecording !== recording) return;
+    recording.retired = true;
     releaseRecording(recording);
     transcribing = false;
     document.body.classList.remove('dictating');
     setDictationButtonState(false);
-    Trio.ui.toast('Hub recording could not finish. Tap the mic and try again.', DICTATION_TOAST_MS);
+    Trio.ui.toast('Hub recording is taking too long to finish. Late audio will be recovered when it arrives.', DICTATION_TOAST_MS);
+  }
+  function discardClip(clip) {
+    keptClips.delete(clip);
+    clip.discarded = true;
+    clip.audio = null;
+  }
+  function keepClip(clip, reason) {
+    if (clip.completed || clip.discarded) return false;
+    keptClips.add(clip);
+    const retry = { label: 'Retry', onClick: () => {
+      if (dictationBusy()) return false;
+      return transcribeClip(clip);
+    } };
+    const offers = [retry];
+    if (hasBrowserDictation()) offers.push({ label: 'Use browser dictation', onClick: () => {
+      if (dictationBusy()) return false;
+      discardClip(clip); // choosing a fresh browser recording explicitly replaces this clip
+      return offerBrowserAction().onClick();
+    } });
+    offers.push({ label: 'Discard', onClick: () => discardClip(clip) });
+    // Ordinary toast dismissal must not strand the kept audio without its actions.
+    Trio.ui.toast(reason, 0, offers, { dismissible: false });
+    return false;
   }
   function transcriptionTimeout(ms) {
     try {
@@ -1064,7 +1089,9 @@
     return { signal: controller.signal, cancel: () => clearTimeout(timer) };
   }
   async function transcribeClip(clip) {
-    if (clip.completed || dictationBusy()) return false;
+    if (clip.completed || clip.discarded) return false;
+    if (dictationBusy()) return keepClip(clip, 'Dictation is busy. Your recording is kept for Retry when it finishes.');
+    keptClips.delete(clip);
     transcribing = true;
     setDictationButtonState(false);
     let deadline;
@@ -1077,9 +1104,11 @@
       const result = await fetch(apiUrl('/api/stt/transcribe'), { method: 'POST',
         headers: { 'Content-Type': clip.audio.type || 'audio/webm' }, body: clip.audio, signal: deadline.signal });
       const data = await result.json();
+      if (clip.discarded) return false;
       if (!result.ok || !data.ok) throw new Error(data.error || 'transcription failed');
       const text = (data.text || '').trim();
       clip.completed = true;
+      clip.audio = null;
       if (!text) {
         Trio.ui.toast(data.no_speech
           ? 'Nothing was picked up — try again and start speaking right after you tap the mic.'
@@ -1095,14 +1124,7 @@
         ? 'Hub dictation timed out. Retry this recording, or use browser dictation.'
         : (humanEngineError(error.message) || 'Hub dictation failed') + ' Your recording is kept for Retry.';
       refreshSttHealth();
-      // A persistent offer owns the original Blob, conversation and roster.
-      // Retry reuses those bytes and refuses to interfere with current dictation.
-      const retry = { label: 'Retry', onClick: () => {
-        if (dictationBusy()) return false;
-        return transcribeClip(clip);
-      } };
-      const offers = hasBrowserDictation() ? [retry, offerBrowserAction()] : [retry];
-      Trio.ui.toast(reason, 0, offers);
+      keepClip(clip, reason);
     } finally {
       deadline?.cancel();
       transcribing = false;
@@ -1123,13 +1145,16 @@
     try {
       const ownedRecorder = recording.recorder = recorder = new window.MediaRecorder(stream);
       ownedRecorder.ondataavailable = event => {
-        if (localRecording === recording && event.data.size) recording.chunks.push(event.data);
+        if (!recording.finished && (localRecording === recording || recording.retired) && event.data.size) recording.chunks.push(event.data);
       };
       ownedRecorder.onstop = async () => {
-        if (localRecording !== recording) return;
+        if (recording.finished || (localRecording !== recording && !recording.retired)) return;
         const audio = new Blob(recording.chunks, { type: ownedRecorder.mimeType || 'audio/webm' });
-        releaseRecording(recording);
-        transcribing = false; // transfer the stop reservation to this request, synchronously
+        recording.finished = true;
+        if (localRecording === recording) {
+          releaseRecording(recording);
+          transcribing = false; // transfer only this recording's reservation
+        }
         return transcribeClip({ audio, startedIn, finalize, completed: false });
       };
       ownedRecorder.start();
@@ -1434,7 +1459,8 @@
   // What a reload would lose (48-app-refresh.js asks before reloading).
   function dictationState() {
     if (transcribing) return 'transcribing';
-    return recognition || recorder?.state === 'recording' ? 'recording' : '';
+    if (recognition || recorder?.state === 'recording') return 'recording';
+    return keptClips.size ? 'kept' : '';
   }
   // dom-harness.js recommends extracting pure helpers: the dictation paths
   // around them need a live MediaRecorder and SpeechRecognition, which the

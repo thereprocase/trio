@@ -63,7 +63,78 @@ function page(health = { available: true }) {
     await p.ready(); p.T.preferences.save({ sttMode: 'local' });
     await p.C.toggleDictation();
     assert.strictEqual(p.streams.length, 0); assert.strictEqual(p.browsers.length, 0);
-    assert.strictEqual(p.toasts[0].message, 'Dictation on this hub is limited to its members. Use browser dictation.');
+    assert.strictEqual(p.toasts[0].message, 'Dictation on this hub is limited to its members.');
+  });
+  await check('Firefox guest wording does not offer unavailable browser dictation', async () => {
+    const p = page({ available: false, detail: 'dictation on this hub is limited to its members' });
+    delete p.win.SpeechRecognition; await p.ready();
+    await p.C.toggleDictation();
+    assert.strictEqual(p.streams.length, 0);
+    assert.ok(/limited to its members/.test(p.toasts[0].message));
+    assert.ok(/no speech recognition/.test(p.toasts[0].message));
+    assert.ok(!/Use browser dictation/.test(p.toasts[0].message));
+  });
+  await check('a kept clip blocks reload until explicitly discarded', async () => {
+    const p = page(); await p.ready(); p.respond = 'failure';
+    let reloads = 0; p.win.location.reload = () => reloads++;
+    await p.C.toggleDictation(); await p.recorders[0].stop();
+    assert.strictEqual(p.C.dictationState(), 'kept');
+    const kept = p.toasts.at(-1);
+    assert.strictEqual(await p.T.appRefresh.reloadApp(), false);
+    assert.ok(/retry.*browser dictation.*discard/i.test(p.toasts.at(-1).message));
+    assert.strictEqual(reloads, 0);
+    const discard = kept.action.find(a => a.label === 'Discard');
+    assert.ok(discard); discard.onClick();
+    assert.strictEqual(p.C.dictationState(), '');
+    const requests = p.requests.length;
+    await kept.action.find(a => a.label === 'Retry').onClick();
+    assert.strictEqual(p.requests.length, requests, 'discarded audio cannot be replayed');
+  });
+  await check('choosing Browser explicitly resolves the kept clip', async () => {
+    const p = page(); await p.ready(); p.respond = 'failure';
+    await p.C.toggleDictation(); await p.recorders[0].stop();
+    const offer = p.toasts.at(-1);
+    assert.strictEqual(p.C.dictationState(), 'kept');
+    await offer.action.find(a => a.label === 'Use browser dictation').onClick();
+    assert.strictEqual(p.browsers.length, 1); p.C.stopDictation();
+    assert.strictEqual(p.C.dictationState(), '');
+  });
+  await check('slow stop after watchdog recovers its final audio when idle', async () => {
+    const p = page(); await p.ready(); p.T.state.drafts.alpha = 'note';
+    await p.C.toggleDictation(); const old = p.recorders[0]; p.lostStop = true;
+    p.C.stopDictation(); p.fire(5000);
+    old.ondataavailable({ data: new Blob(['slow audio']) });
+    await old.onstop();
+    assert.strictEqual(p.requests.length, 1);
+    assert.strictEqual(await p.requests[0].body.text(), 'slow audio');
+    assert.strictEqual(p.cx.document.getElementById('input').textContent, 'hello');
+    assert.strictEqual(p.C.dictationState(), '');
+    await old.onstop(); assert.strictEqual(p.requests.length, 1, 'late duplicate stop is ignored');
+  });
+  await check('slow stop while busy offers Retry and never resets the newer session', async () => {
+    const p = page(); await p.ready(); p.T.state.drafts.alpha = 'alpha note';
+    await p.C.toggleDictation(); const old = p.recorders[0]; p.lostStop = true;
+    p.C.stopDictation(); p.fire(5000);
+    p.T.state.channel = 'beta'; await p.C.toggleDictation();
+    old.ondataavailable({ data: new Blob(['late audio']) });
+    await old.onstop();
+    assert.strictEqual(p.requests.length, 0);
+    assert.strictEqual(p.C.dictationState(), 'recording');
+    assert.strictEqual(p.streams.at(-1).stopped, 0);
+    assert.strictEqual(p.cx.document.getElementById('dictate-btn').getAttribute('aria-pressed'), 'true');
+    const offers = p.toasts.at(-1).action;
+    assert.ok(Array.isArray(offers));
+    const retry = offers.find(a => a.label === 'Retry'); assert.ok(retry);
+    assert.strictEqual(retry.onClick(), false, 'Retry waits for newer recording');
+    p.lostStop = false; await p.recorders.at(-1).stop();
+    assert.strictEqual(p.C.dictationState(), 'kept', 'new success leaves old kept clip protected');
+    const beta = p.cx.document.getElementById('input').textContent;
+    await retry.onClick();
+    assert.strictEqual(await p.requests[1].body.text(), 'late audio');
+    assert.strictEqual(p.T.state.drafts.alpha, 'alpha note hello');
+    assert.strictEqual(p.cx.document.getElementById('input').textContent, beta);
+    assert.strictEqual(p.streams.length, 2, 'Retry opens no new microphone');
+    assert.strictEqual(p.C.dictationState(), '');
   });
   await check('older Safari gets an AbortController deadline and releases its timer', async () => {
     const p = page(); await p.ready(); p.win.AbortSignal = {};
@@ -72,7 +143,7 @@ function page(health = { available: true }) {
     assert.ok(p.requests[0].signal instanceof AbortSignal);
     p.fire(75000); await stopped;
     assert.strictEqual(p.requests[0].signal.aborted, true);
-    assert.strictEqual(p.C.dictationState(), '');
+    assert.strictEqual(p.C.dictationState(), 'kept');
     assert.ok(p.timers.find(t => t.ms === 75000).cleared);
   });
   await check('health deadline plus 15 seconds governs the actual upload', async () => {
@@ -96,7 +167,7 @@ function page(health = { available: true }) {
       await stopped;
       const offer = p.toasts.at(-1);
       assert.strictEqual(offer.ms, 0, 'offer persists until a choice');
-      assert.deepStrictEqual(Array.from(offer.action, a => a.label), ['Retry', 'Use browser dictation']);
+      assert.deepStrictEqual(Array.from(offer.action, a => a.label), ['Retry', 'Use browser dictation', 'Discard']);
       const original = p.requests[0].body;
       assert.strictEqual(await original.text(), 'saved audio bytes');
       p.T.state.channel = 'beta'; p.cx.document.getElementById('input').textContent = 'beta draft';
@@ -143,10 +214,12 @@ function page(health = { available: true }) {
     let timers = 0, retried = 0, browser = 0;
     cx.window.setTimeout = () => { timers++; };
     T.ui.toast('Recording retained', 0, [{ label: 'Retry', onClick: () => { retried++; return false; } },
-      { label: 'Use browser dictation', onClick: () => { browser++; } }]);
+      { label: 'Use browser dictation', onClick: () => { browser++; } }], { dismissible: false });
     const host = cx.document.getElementById('trio-toasts');
     const buttons = host.querySelectorAll('.toast-action');
     assert.strictEqual(buttons.length, 2); assert.strictEqual(timers, 0);
+    const toast = host.children[0]; toast._listeners.click[0]({ target: toast });
+    assert.strictEqual(host.children.length, 1, 'background tap cannot hide kept-clip actions');
     buttons[0]._listeners.click[0](); assert.strictEqual(retried, 1); assert.strictEqual(host.children.length, 1);
     buttons[1]._listeners.click[0](); assert.strictEqual(browser, 1); assert.strictEqual(host.children.length, 0);
   });

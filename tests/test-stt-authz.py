@@ -73,9 +73,10 @@ class TranscribeIdentityTests(unittest.TestCase):
 
     def test_health_is_open_but_denied_callers_cannot_choose_hub(self):
         for source in (web.IDENTITY_SOURCE_PENDING, web.IDENTITY_SOURCE_GUEST):
-            with self.subTest(source=source), patch.object(web, 'stt_health') as probe:
+            with self.subTest(source=source), patch.object(web, 'stt_health') as probe, \
+                 patch.object(web, 'SECURE_URL_HINT', 'https://hub.invalid'):
                 self.assertEqual(self.health(source), {'available': False,
-                    'detail': 'dictation on this hub is limited to its members'})
+                    'detail': 'dictation on this hub is limited to its members', 'secure_url': 'https://hub.invalid'})
                 probe.assert_not_called()
 
     def test_health_deadline_covers_cold_start_and_queue(self):

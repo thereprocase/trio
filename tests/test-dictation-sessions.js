@@ -111,7 +111,7 @@ function deferred() { let resolve, reject; const promise = new Promise((yes, no)
     check('deadline: request carries a 75-second timeout signal', timeoutMs === 75000 && requestSignal === controller.signal);
     controller.abort(new DOMException('The operation timed out', 'TimeoutError'));
     await tick(10);
-    check('deadline: abort clears transcribing and processing', p.C.dictationState() === ''
+    check('deadline: abort clears transcribing and processing', p.C.dictationState() === 'kept'
       && !p.cx.document.getElementById('dictate-btn').classList.contains('processing'));
     check('deadline: abort shows the exact recovery wording and browser offer', p.toasts.some(t =>
       t.message === 'Hub dictation timed out. Retry this recording, or use browser dictation.' && t.action));
@@ -188,7 +188,7 @@ function deferred() { let resolve, reject; const promise = new Promise((yes, no)
     if (outcome === 'timeout') controller.abort(new DOMException('deadline', 'TimeoutError'));
     else answer.resolve({ ok: true, text: 'alpha words' });
     await tick(10);
-    check(outcome + ': completion makes dictation usable again', p.C.dictationState() === '' && !button.disabled);
+    check(outcome + ': completion makes dictation usable again', p.C.dictationState() === (outcome === 'timeout' ? 'kept' : '') && !button.disabled);
     check(outcome + ': completion leaves beta draft alone', p.box.textContent === 'beta draft');
     if (outcome === 'success') check('success: old transcript is saved in alpha', p.state.drafts.alpha === 'alpha words');
     await p.C.toggleDictation();

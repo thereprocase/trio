@@ -358,7 +358,6 @@ MAX_STT_BYTES = 25 * 1024 * 1024        # 25 MB hard cap per audio clip
 # sidecar is found whether this file is deployed as a copy or a symlink.
 STT_WORKER = Path(__file__).resolve().with_name("nth_stt_worker.py")
 STT_WORKER_START_TIMEOUT = 180          # generous: first spawn may download ~1.5GB
-STT_TRANSCRIBE_TIMEOUT = 60             # per-clip inference ceiling
 STT_IMPORT_PROBE_TIMEOUT = 8            # cheap "is mlx_whisper importable" check
 STT_BODY_READ_TIMEOUT = 30              # a stalled upload must not hold a slot
 STT_PROBE_TTL_S = 60                    # cache the importability probe this long
@@ -4690,7 +4689,8 @@ class NthWebHandler(BaseHTTPRequestHandler):
             _token, ident, _is_new = self._resolve_identity()
             if ident.source not in UPLOAD_ALLOWED_SOURCES:
                 self._json({"available": False,
-                            "detail": "dictation on this hub is limited to its members"})
+                            "detail": "dictation on this hub is limited to its members",
+                            "secure_url": SECURE_URL_HINT})
                 return
             # secure_url rides along because this is the endpoint the composer
             # already consults about dictation. On an insecure origin the mic

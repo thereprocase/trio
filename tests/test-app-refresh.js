@@ -645,6 +645,47 @@ function reset() {
     }
   });
 
+  await check('kept audio blocks direct, pull and update-pill reloads until Discard', async () => {
+    reset();
+    const C = Trio.composer, savedFetch = win.fetch, savedToast = Trio.ui.toast;
+    let recorder, offers;
+    win.isSecureContext = true;
+    win.MediaRecorder = function () {
+      recorder = this; this.state = 'inactive';
+      this.start = () => { this.state = 'recording'; };
+      this.stop = () => { this.state = 'inactive'; return this.onstop(); };
+    };
+    win.navigator.mediaDevices = { getUserMedia: async () => ({ getTracks: () => [] }) };
+    win.Blob = function () { this.type = 'audio/webm'; };
+    Trio.ui.toast = (message, ms, action) => { toasts.push(String(message)); if (Array.isArray(action)) offers = action; };
+    win.fetch = url => /transcribe/.test(url)
+      ? Promise.resolve({ ok: false, json: async () => ({ ok: false, error: 'busy' }) })
+      : /stt\/health/.test(url) ? Promise.resolve({ ok: true, json: async () => ({ available: true }) }) : defaultFetch(url);
+    try {
+      await C.refreshSttHealth(); Trio.preferences.save({ sttMode: 'local' });
+      await C.toggleDictation(); await recorder.stop();
+      assert.strictEqual(C.dictationState(), 'kept');
+      assert.strictEqual(await refresh.reloadApp(), false);
+      const message = toasts.at(-1);
+      assert.ok(/retry.*browser dictation.*discard/i.test(message), message);
+      assert.strictEqual(startOn(headerButton), true);
+      moveTo(200, 100 + travel(PULL.threshold + 20)); lift(); await settle();
+      assert.strictEqual(toasts.at(-1), message);
+      hub.build = 'build-newer'; await refresh.checkForUpdate();
+      const button = doc.getElementById('update-pill').querySelector('.update-pill-reload');
+      assert.ok(button); button._listeners.click[0](); await settle();
+      assert.strictEqual(toasts.at(-1), message);
+      assert.strictEqual(reloads, 0);
+      offers.find(a => a.label === 'Discard').onClick();
+      assert.strictEqual(C.dictationState(), '');
+      assert.strictEqual(await refresh.reloadApp(), true);
+      assert.strictEqual(reloads, 1);
+    } finally {
+      offers?.find(a => a.label === 'Discard')?.onClick();
+      win.fetch = savedFetch; Trio.ui.toast = savedToast; delete win.MediaRecorder;
+    }
+  });
+
   // ── Drafts across the reload ────────────────────────────────────────
   await check('the draft key is the composer\'s own conversation id', async () => {
     const cases = [{ channel: 'ops', dmKey: '' }, { channel: 'ops', dmKey: 'ada' }, { channel: '', dmKey: '' }];
