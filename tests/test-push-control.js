@@ -767,6 +767,13 @@ const click = el => (el._listeners.click || []).forEach(fn => fn({ type: 'click'
     } finally { restoreOnboard(); }
   });
 
+  await check('banner: the refused-prompt hint on an iPhone names the Home Screen title it is given', async () => {
+    const ios = push.deniedHint(true, 'Field');
+    assert.match(ios, /Settings → Notifications → Field on this device/);
+    assert.match(ios, /Channel details → Phone notifications/);
+    assert.match(push.deniedHint(false, 'Field'), /site's settings in your browser/);
+  });
+
   await check('banner: stays hidden while the dropped-device notice applies or shows', async () => {
     installedPhone();
     const server = deviceServer();
