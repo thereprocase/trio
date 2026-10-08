@@ -398,7 +398,8 @@ STT_MAX_CONCURRENT = _env_int("NTH_STT_MAX_CONCURRENT", 2, 1)  # in-flight trans
 STT_REMOTE_URL = os.environ.get("NTH_STT_URL", "").strip()
 STT_REMOTE_TOKEN_FILE = os.environ.get("NTH_STT_TOKEN_FILE", "").strip()
 STT_REMOTE_TIMEOUT = _env_int("NTH_STT_TIMEOUT", 60, 1)  # per-clip ceiling, seconds
-STT_REMOTE_HEALTH_TIMEOUT = 3      # phones poll health; a dead host must not hold them
+# The client waits 3 s for /api/stt/health, so the probe must give up sooner.
+STT_REMOTE_HEALTH_TIMEOUT = 2      # phones poll health; a dead host must not hold them
 STT_REMOTE_DOWN_TTL_S = 10         # re-probe a failing service sooner than a healthy one
 STT_REMOTE_MAX_RESPONSE = 1024 * 1024   # a transcript is text; anything bigger is wrong
 STALE_SECONDS = 300          # fresh heartbeat threshold
@@ -3156,6 +3157,12 @@ def _stt_remote_target(url: str) -> Tuple[str, str, int, str]:
     are refused because environment values end up in unit files and process
     listings; the token has its own file with its own permissions.
     """
+    # Checked on the raw string: urlparse silently drops tabs and newlines,
+    # and http.client would later refuse the rest with an error that reads
+    # as "unreachable".
+    if any(ord(ch) <= 0x20 or ord(ch) >= 0x7f for ch in url):
+        raise ValueError("NTH_STT_URL contains spaces, control or non-ASCII characters; "
+                         "percent-encode them, or use the host's ASCII (punycode) name")
     try:
         parts = urlparse(url)
         port = parts.port
@@ -3169,6 +3176,9 @@ def _stt_remote_target(url: str) -> Tuple[str, str, int, str]:
         raise ValueError("NTH_STT_URL must not carry credentials; use NTH_STT_TOKEN_FILE")
     if parts.query or parts.fragment:
         raise ValueError("NTH_STT_URL must not have a query or fragment")
+    if parts.params:
+        raise ValueError("NTH_STT_URL must not have ';' parameters; "
+                         "give the service's base path only")
     if port is None:
         port = 443 if parts.scheme == "https" else 80
     return parts.scheme, parts.hostname, port, parts.path.rstrip("/")
@@ -3191,18 +3201,26 @@ def _read_stt_token(path: str) -> str:
     except OSError:
         raise ValueError("the speech service token file is missing or unreadable") from None
     try:
-        st = os.fstat(fd)
+        try:
+            st = os.fstat(fd)
+        except OSError:
+            raise ValueError("the speech service token file is missing or unreadable") from None
         if not stat.S_ISREG(st.st_mode):
             raise ValueError("the speech service token file is not a regular file")
-        # Windows reports synthetic mode bits, so the check means nothing there.
+        # Group access is allowed; access by everyone else is not. Windows
+        # reports synthetic mode bits, so the check means nothing there.
         if os.name != "nt" and st.st_mode & stat.S_IRWXO:
-            raise ValueError("the speech service token file is open to other users; chmod 600 it")
+            raise ValueError("the speech service token file is open to users outside its "
+                             "group; chmod 600 it")
         try:
             raw = os.read(fd, STT_TOKEN_FILE_MAX + 1)
         except OSError:
             raise ValueError("the speech service token file is missing or unreadable") from None
     finally:
-        os.close(fd)
+        try:
+            os.close(fd)
+        except OSError:
+            pass
     try:
         token = raw.decode("ascii").strip()
     except UnicodeDecodeError:
@@ -3233,14 +3251,70 @@ def _stt_clip(value: Any, limit: int) -> str:
 def _stt_number(value: Any) -> Optional[float]:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    return float(value) if math.isfinite(value) else None
+    try:
+        number = float(value)
+    except OverflowError:            # a JSON integer with hundreds of digits
+        return None
+    return number if math.isfinite(number) else None
+
+
+class _SttDeadline:
+    """Ends a request when its overall time budget runs out.
+
+    A socket timeout bounds each receive, never their sum, so a service that
+    sends one byte a second keeps every read alive: in the status line, the
+    headers or the body. That would hold a transcription slot, or the health
+    probe lock with every phone's poll queued behind it, for as long as the
+    service liked. When the budget runs out, a timer shuts the socket down,
+    which fails whatever read is blocked on it; `expired` lets the caller
+    report that failure as a timeout. The socket is attached once it exists,
+    so name resolution and the TCP connect itself are bounded only by the
+    socket timeout (per address tried).
+    """
+
+    def __init__(self, seconds: float):
+        self.expired = False
+        self._sock: Optional[socket.socket] = None
+        self._lock = threading.Lock()
+        self._timer = threading.Timer(seconds, self._expire)
+        self._timer.daemon = True
+
+    def __enter__(self) -> "_SttDeadline":
+        self._timer.start()
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        self._timer.cancel()
+
+    def attach(self, sock: socket.socket) -> None:
+        with self._lock:
+            self._sock = sock
+            expired = self.expired
+        if expired:                  # the budget ran out while connecting
+            self._shut(sock)
+
+    def _expire(self) -> None:
+        with self._lock:
+            self.expired = True
+            sock = self._sock
+        if sock is not None:
+            self._shut(sock)
+
+    @staticmethod
+    def _shut(sock: socket.socket) -> None:
+        # The base-class call on purpose: SSLSocket.shutdown also discards its
+        # TLS state, which races the thread still reading through it.
+        try:
+            socket.socket.shutdown(sock, socket.SHUT_RDWR)
+        except OSError:
+            pass
 
 
 def _read_capped(resp: http.client.HTTPResponse, limit: int, deadline: float) -> Optional[bytes]:
     """Read a response body under a size cap and an overall deadline.
 
-    The socket timeout bounds each read, not their sum, so a service sending a
-    byte at a time could otherwise hold a transcription slot indefinitely.
+    read1 returns after each receive, so the deadline is checked between
+    them; read(n) would loop inside http.client until n bytes arrived.
     Returns None when the body exceeds `limit`.
     """
     chunks: List[bytes] = []
@@ -3248,7 +3322,7 @@ def _read_capped(resp: http.client.HTTPResponse, limit: int, deadline: float) ->
     while True:
         if time.monotonic() > deadline:
             raise TimeoutError("speech service response exceeded its deadline")
-        chunk = resp.read(65536)
+        chunk = resp.read1(65536)
         if not chunk:
             return b"".join(chunks)
         total += len(chunk)
@@ -3286,6 +3360,8 @@ class RemoteStt:
             self._token = _read_stt_token(token_file)
         except ValueError as e:
             self.config_error = str(e)
+        except OSError:
+            self.config_error = "the speech service token file is missing or unreadable"
 
     @classmethod
     def from_env(cls) -> Optional["RemoteStt"]:
@@ -3306,36 +3382,58 @@ class RemoteStt:
         transport failure. A 3xx comes back as a status: http.client follows
         nothing on its own."""
         deadline = time.monotonic() + timeout
-        if self._scheme == "https":
-            conn: http.client.HTTPConnection = http.client.HTTPSConnection(
-                self._host, self._port, timeout=timeout,
-                context=ssl.create_default_context())
-        else:
-            conn = http.client.HTTPConnection(self._host, self._port, timeout=timeout)
         headers = {"Authorization": "Bearer " + self._token, "Accept": "application/json"}
         if body is not None:
             headers["Content-Type"] = content_type
             headers["Content-Length"] = str(len(body))
+        conn: Optional[http.client.HTTPConnection] = None
+        sock: Optional[socket.socket] = None
+        watchdog = _SttDeadline(timeout)
         try:
-            conn.request(method, (self._base + route), body=body, headers=headers)
-            resp = conn.getresponse()
-            raw = _read_capped(resp, STT_REMOTE_MAX_RESPONSE, deadline)
-            status = resp.status
+            with watchdog:
+                # Connected here rather than by http.client, so the watchdog
+                # holds the socket for the whole exchange, TLS handshake included.
+                sock = socket.create_connection((self._host, self._port), timeout=timeout)
+                watchdog.attach(sock)
+                if self._scheme == "https":
+                    sock = ssl.create_default_context().wrap_socket(
+                        sock, server_hostname=self._host, do_handshake_on_connect=False)
+                    watchdog.attach(sock)
+                    sock.do_handshake()
+                    conn = http.client.HTTPSConnection(self._host, self._port, timeout=timeout)
+                else:
+                    conn = http.client.HTTPConnection(self._host, self._port, timeout=timeout)
+                conn.sock = sock         # http.client connects only when sock is None
+                conn.request(method, (self._base + route), body=body, headers=headers)
+                resp = conn.getresponse()
+                raw = _read_capped(resp, STT_REMOTE_MAX_RESPONSE, deadline)
+                status = resp.status
+                if watchdog.expired:
+                    # A shut-down socket can read as a clean end of body.
+                    raise TimeoutError("speech service response exceeded its deadline")
+        except (OSError, http.client.HTTPException):
+            if watchdog.expired:
+                raise TimeoutError("speech service response exceeded its deadline") from None
+            raise
         finally:
-            conn.close()
+            if conn is not None:
+                conn.close()
+            if sock is not None:
+                sock.close()
         if raw is None:
             return status, None
         try:
             data = json.loads(raw.decode("utf-8"))
-        except ValueError:
+        except (ValueError, RecursionError):   # RecursionError: absurdly nested JSON
             return status, None
         return status, (data if isinstance(data, dict) else None)
 
     def _scrub(self, text: str) -> str:
         """Service text for the log: clipped, printable, and without the token
         even if the service echoes request headers into its errors."""
-        text = _stt_clip(text, 300)
-        return text.replace(self._token, "[token]") if self._token else text
+        if self._token:
+            text = text.replace(self._token, "[token]")    # before clipping can cut it
+        return _stt_clip(text, 300)
 
     def _forget_probe(self) -> None:
         """A failed transcription is fresher news than a cached 'available'."""
@@ -3392,7 +3490,13 @@ class RemoteStt:
             probe = self._probe                      # re-check inside the lock
             if probe is not None and time.monotonic() < probe[0]:
                 return dict(probe[1])
-            result = self._probe_health()
+            try:
+                result = self._probe_health()
+            except Exception as e:  # noqa: BLE001 - health must always answer
+                # The type only: the text of an unplanned error is unknown.
+                sys.stderr.write(f"[stt] speech service health probe failed: "
+                                 f"{type(e).__name__}\n")
+                result = self._health(False, False, "the speech service health check failed")
             ttl = STT_PROBE_TTL_S if result["available"] else STT_REMOTE_DOWN_TTL_S
             self._probe = (time.monotonic() + ttl, result)
             return dict(result)
@@ -3421,6 +3525,10 @@ class RemoteStt:
         except (OSError, http.client.HTTPException):
             self._forget_probe()
             raise RuntimeError("the speech service is unreachable") from None
+        except Exception as e:  # noqa: BLE001 - the handler expects RuntimeError
+            sys.stderr.write(f"[stt] speech service request failed: {type(e).__name__}\n")
+            self._forget_probe()
+            raise RuntimeError("the speech service request failed") from None
         if status == 200 and data is not None and data.get("ok") is True:
             text = data.get("text")
             if not isinstance(text, str):

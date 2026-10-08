@@ -420,7 +420,8 @@ The service needs two routes, both requiring `Authorization: Bearer <token>`:
   `{"ok": false, "error": "..."}` with status 401, 413, 422 or 500.
 
 The token file holds the token on one line. The hub reads it once at startup
-and refuses a file that other users can access, so create it private:
+and refuses a file that other users (outside its group) can access, so create
+it private:
 
 ```bash
 install -m 600 /dev/null ~/.config/nth/stt-token
@@ -433,7 +434,10 @@ address. Any problem with the URL, the token file or the service makes
 `detail` field; Auto then uses browser dictation, and the rest of the
 dashboard runs as usual. The hub checks the service's
 health at most once a minute while it is up and every 10 seconds while it is
-down, so phones polling the status do not load it.
+down, so phones polling the status do not load it. Each check gives up after
+2 seconds, though a slow DNS lookup, or a host name with several addresses
+that do not answer, can stretch that; a name that resolves quickly to one
+address keeps it tight.
 
 **Running a speech service.** A small HTTP wrapper around
 [onnx-asr](https://github.com/istupakov/onnx-asr) with NVIDIA's Parakeet TDT
