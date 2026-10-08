@@ -445,9 +445,12 @@ Quote each line: systemd splits an unquoted `Environment=` value at spaces.
 it to about 12, since launchers truncate), and `NTH_APP_NAME` takes up to 60.
 `NTH_APP_BACKGROUND` is the splash screen colour while the app starts.
 `NTH_APP_ICON_DIR` holds PNGs named like the built-in set: `icon-192.png`,
-`icon-512.png`, `icon-maskable-192.png`, `icon-maskable-512.png`,
-`apple-touch-icon.png` (180x180) and `badge-96.png`, each at the size in its
-name and at most 1 MB. A file that breaks these rules, or a missing one,
+`icon-512.png`, `icon-1024.png`, `icon-maskable-192.png`,
+`icon-maskable-512.png`, `icon-maskable-1024.png`, `apple-touch-icon.png`
+(180x180) and `badge-96.png`, each at the size in its name and at most 1 MB.
+Android draws its launch splash from the 1024 files; a set without them still
+works, and the manifest then stops at 512 so the splash keeps the hub's own
+artwork at a lower resolution. A file that breaks these rules, or a missing one,
 leaves that icon built-in; at
 start the `nth-web` log lists which icons are custom and which are built-in,
 and names each file it refused.

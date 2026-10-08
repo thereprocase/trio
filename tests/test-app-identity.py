@@ -10,6 +10,9 @@ Covers:
      size; a missing, non-PNG, oversized, wrong-size or non-regular file (a
      FIFO must not hang the import) keeps the built-in icon, and a value that
      names no directory is reported.
+  4b. The 1024 icons are listed only when they come from the same place as
+     their 512 siblings, so a hub customised before they existed keeps its
+     own artwork on the Android splash.
   5. NTH_APP_BACKGROUND reaches the manifest; malformed colours are reported.
 
 The settings are read at import, so each case imports nth_web in a fresh
@@ -184,8 +187,9 @@ with tempfile.TemporaryDirectory() as tmp:
     check("a missing file keeps the built-in icon",
           got["icons"]["badge-96.png"] == sha(ICONS / "badge-96.png"))
     check("the start-up summary names custom and built-in icons, so a misspelt file shows",
-          "NTH_APP_ICON_DIR: custom icon-192.png; built-in icon-512.png, "
-          "icon-maskable-192.png, icon-maskable-512.png, apple-touch-icon.png, badge-96.png" in err, err)
+          "NTH_APP_ICON_DIR: custom icon-192.png; built-in icon-512.png, icon-1024.png, "
+          "icon-maskable-192.png, icon-maskable-512.png, icon-maskable-1024.png, "
+          "apple-touch-icon.png, badge-96.png" in err, err)
     check("each rejected file is reported on stderr",
           all(s in err for s in ("apple-touch-icon.png: not a PNG",
                                  "icon-512.png: larger than 1 MB",
@@ -198,6 +202,28 @@ with tempfile.TemporaryDirectory() as tmp:
     got, _ = probe({"NTH_APP_ICON_DIR": tmp})
     check("a 180x180 Apple icon is accepted and served on /apple-touch-icon.png",
           got["route_apple"] == hashlib.sha256(apple).hexdigest())
+
+# 4b. The 1024 icons follow their 512 siblings.
+def listed(manifest):
+    return {i["src"].split("?", 1)[0].rsplit("/", 1)[-1] for i in manifest["icons"]}
+
+
+with tempfile.TemporaryDirectory() as tmp:
+    (Path(tmp) / "icon-512.png").write_bytes(png(512, 512, b"old-set"))
+    (Path(tmp) / "icon-maskable-512.png").write_bytes(png(512, 512, b"old-set-m"))
+    got, _ = probe({"NTH_APP_ICON_DIR": tmp})
+    check("a custom set without 1024 files lists no built-in 1024 icon",
+          listed(got["manifest"]) == {"icon-192.png", "icon-512.png",
+                                      "icon-maskable-192.png", "icon-maskable-512.png"},
+          listed(got["manifest"]))
+    big = png(1024, 1024, b"new-set")
+    (Path(tmp) / "icon-1024.png").write_bytes(big)
+    got, _ = probe({"NTH_APP_ICON_DIR": tmp})
+    check("a custom 1024 icon next to a custom 512 is listed under its own version",
+          "/icons/icon-1024.png?v=" + hashlib.sha256(big).hexdigest()[:12]
+          in [i["src"] for i in got["manifest"]["icons"]])
+    check("each 1024 entry is decided on its own sibling",
+          "icon-maskable-1024.png" not in listed(got["manifest"]), listed(got["manifest"]))
 
 # A platform without O_NONBLOCK / O_NOCTTY (Windows) still loads custom icons.
 with tempfile.TemporaryDirectory() as tmp:

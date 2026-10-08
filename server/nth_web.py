@@ -9863,9 +9863,17 @@ def _read_web_bytes(relative_path: str) -> bytes:
 
 
 PWA_ICON_NAMES = (
-    "icon-192.png", "icon-512.png", "icon-maskable-192.png",
-    "icon-maskable-512.png", "apple-touch-icon.png", "badge-96.png",
+    "icon-192.png", "icon-512.png", "icon-1024.png", "icon-maskable-192.png",
+    "icon-maskable-512.png", "icon-maskable-1024.png", "apple-touch-icon.png",
+    "badge-96.png",
 )
+# Android draws the launch splash from the largest icon, about 840 px on a
+# modern phone, so the 1024 renders keep it sharp. A hub that customised its
+# icon set before these sizes existed has no 1024 files; listing the built-in
+# ones there would put the stock artwork on its splash, so each 1024 entry is
+# listed only when it comes from the same place as its 512 sibling.
+PWA_ICON_LARGE = {"icon-1024.png": "icon-512.png",
+                  "icon-maskable-1024.png": "icon-maskable-512.png"}
 
 
 def _icon_dir() -> Optional[Path]:
@@ -9893,8 +9901,9 @@ def _png_size(data: bytes) -> Optional[Tuple[int, int]]:
 # The size each icon name promises in the manifest and page head; a PNG of
 # another size is refused, since installers reject the mismatch.
 PWA_ICON_SIZES = {
-    "icon-192.png": 192, "icon-512.png": 512, "icon-maskable-192.png": 192,
-    "icon-maskable-512.png": 512, "apple-touch-icon.png": 180, "badge-96.png": 96,
+    "icon-192.png": 192, "icon-512.png": 512, "icon-1024.png": 1024,
+    "icon-maskable-192.png": 192, "icon-maskable-512.png": 512,
+    "icon-maskable-1024.png": 1024, "apple-touch-icon.png": 180, "badge-96.png": 96,
 }
 
 
@@ -9949,12 +9958,23 @@ def _icon_url(path: str) -> str:
     return path if data is None else f"{path}?v={hashlib.sha256(data).hexdigest()[:12]}"
 
 
+def _is_builtin_icon(name: str) -> bool:
+    return PWA_ICONS[name] == _read_web_bytes(f"icons/{name}")
+
+
 def _app_manifest() -> bytes:
     manifest = json.loads(_read_web_bytes("manifest.webmanifest"))
     manifest.update(name=APP_NAME, short_name=APP_SHORT_NAME, theme_color=APP_THEME,
                     background_color=APP_BACKGROUND)
+    icons = []
     for icon in manifest.get("icons", []):
+        name = icon["src"].rsplit("/", 1)[-1]
+        sibling = PWA_ICON_LARGE.get(name)
+        if sibling and _is_builtin_icon(name) != _is_builtin_icon(sibling):
+            continue
         icon["src"] = _icon_url(icon["src"])
+        icons.append(icon)
+    manifest["icons"] = icons
     return json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8")
 
 
@@ -9962,7 +9982,7 @@ _APP_ICON_DIR = _icon_dir()
 PWA_ICONS = {name: _app_icon(name, _APP_ICON_DIR) for name in PWA_ICON_NAMES}
 if _APP_ICON_DIR is not None:
     # One line per start, so a misspelt file name shows up as "built-in".
-    _custom = [n for n in PWA_ICON_NAMES if PWA_ICONS[n] != _read_web_bytes(f"icons/{n}")]
+    _custom = [n for n in PWA_ICON_NAMES if not _is_builtin_icon(n)]
     sys.stderr.write(f"[nth_web] NTH_APP_ICON_DIR: custom {', '.join(_custom) or 'none'}; "
                      f"built-in {', '.join(n for n in PWA_ICON_NAMES if n not in _custom) or 'none'}\n")
 PWA_MANIFEST = _app_manifest()
