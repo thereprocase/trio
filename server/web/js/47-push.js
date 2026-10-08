@@ -434,9 +434,8 @@
   }
 
   // ── First-time banner in the conversation view ──────────────────────
-  // Browsers show the notification prompt only from a tap, so the page cannot
-  // simply turn Mentions on for an installed app. Instead it offers it once per
-  // channel, in the conversation, where the tap can happen. Only an installed
+  // Browsers show the notification prompt only from a tap, so the page offers
+  // Mentions once per channel, in the conversation, where the tap can happen. Only an installed
   // app is offered: in a browser tab the panel explains what installing gives.
   //
   // Pure, so the rules can be tested without a browser. `status` is null while
@@ -450,10 +449,16 @@
   const ONBOARD_TEXT = 'Get a notification when someone @mentions you here?';
   const ONBOARD_WHERE = 'Change it any time in Channel details → Phone notifications.';
   // Said when the person refused the prompt. Re-enabling lives in the system
-  // or browser settings; the page can only point there.
-  function deniedHint() {
-    return isIos()
-      ? 'Notifications are turned off for this app. To allow them, open Settings → Notifications → nth on this device, then pick a mode in Channel details → Phone notifications.'
+  // or browser settings; the page can only point there. iOS lists the app
+  // under its Home Screen title, which each hub may set.
+  function appTitle() {
+    const meta = document.querySelector('meta[name="apple-mobile-web-app-title"]');
+    return (meta && meta.getAttribute('content')) || 'this app';
+  }
+  // Pure: the device and the app's Home Screen title are passed in.
+  function deniedHint(ios, title) {
+    return ios
+      ? `Notifications are turned off for this app. To allow them, open Settings → Notifications → ${title} on this device, then pick a mode in Channel details → Phone notifications.`
       : 'Notifications are turned off for this site. To allow them, set Notifications to Allow in this site\'s settings in your browser, then pick a mode in Channel details → Phone notifications.';
   }
 
@@ -554,7 +559,7 @@
         + (outcome.note ? ' ' + outcome.note : ''), { showMe: true });
     } else if (outcome.permission === 'denied') {
       markOnboarded(channel);
-      resultOnboard(channel, deniedHint());
+      resultOnboard(channel, deniedHint(isIos(), appTitle()));
     } else {
       // The prompt was closed without an answer; the browser will ask again.
       offerOnboard(channel, 'The prompt closed without an answer. Tap Turn on to see it again.');
@@ -586,5 +591,5 @@
     if (window.isSecureContext) ensureRegistration().catch(() => { /* push stays unavailable; the page works as before */ });
   }
 
-  Trio.push = { mount, render, onboard, MODES, DEFAULT_MODE, blocker, isIos, isStandalone, supported, keyBytes, droppedNotice, onboardOffer, lastDelivered };
+  Trio.push = { mount, render, onboard, MODES, DEFAULT_MODE, blocker, isIos, isStandalone, supported, keyBytes, droppedNotice, onboardOffer, lastDelivered, deniedHint };
 })();
