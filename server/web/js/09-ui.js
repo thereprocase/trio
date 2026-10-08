@@ -11,7 +11,7 @@
     });
     return node;
   }
-  // Optional `action` = { label, onClick } renders an inline button (e.g. an
+  // Optional `action` = { label, onClick } or an array renders buttons (e.g. an
   // "Undo" affordance) that runs onClick and dismisses the toast. Back-compat:
   // existing callers pass no action and get a plain text toast.
   function toast(message, timeout = 3500, action = null) {
@@ -30,14 +30,15 @@
     // is the composer: a long message would otherwise cover Send and the mic
     // for its whole timeout.
     node.addEventListener('click', event => { if (event.target === node) dismiss(); });
-    if (action && action.label && typeof action.onClick === 'function') {
-      const btn = document.createElement('button'); btn.type = 'button'; btn.className = 'toast-action'; btn.textContent = action.label;
-      btn.addEventListener('click', () => { action.onClick(); dismiss(); });
+    for (const offer of (Array.isArray(action) ? action : [action])) {
+      if (!offer?.label || typeof offer.onClick !== 'function') continue;
+      const btn = document.createElement('button'); btn.type = 'button'; btn.className = 'toast-action'; btn.textContent = offer.label;
+      btn.addEventListener('click', () => { if (offer.onClick() !== false) dismiss(); });
       node.append(btn);
     }
     // showPopover throws if already open — swallow that and keep appending.
     if (host.showPopover) { try { host.showPopover(); } catch {} }
-    setTimeout(dismiss, timeout);
+    if (timeout > 0) setTimeout(dismiss, timeout);
   }
   // `body` is raw HTML, unlike `title` — callers MUST pre-escape any
   // user-controlled content (via `esc()` here or `Trio.markdown.escapeHtml`)

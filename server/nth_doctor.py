@@ -255,6 +255,9 @@ def _hook_import_check(install_dir, python):
                            else [node.module] if isinstance(node, ast.ImportFrom) else [])
                 modules.update(module.split('.')[0] for module in imports
                                if module and module.startswith('nth_'))
+    except (OSError, SyntaxError, ValueError) as error:
+        return ('hook import', FAIL, f'{name[:80]}: {type(error).__name__}')
+    try:
         probe = '''import importlib, sys
 sys.path.insert(0, sys.argv[1])
 for module in sys.argv[2:]:
@@ -271,8 +274,8 @@ for module in sys.argv[2:]:
         if proc.returncode:
             return ('hook import', FAIL, proc.stdout.strip() or 'hook import probe failed')
         return ('hook import', OK, 'hooks and shared modules import successfully')
-    except (OSError, SyntaxError, ValueError, subprocess.TimeoutExpired) as error:
-        return ('hook import', FAIL, f'{name[:80]}: {type(error).__name__}')
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return ('hook import', FAIL, f'probe failed: {type(error).__name__}')
 
 
 def run_checks(hub_override=None):
@@ -362,7 +365,10 @@ def run_checks(hub_override=None):
     if freshness:
         checks.append(freshness)
 
-    hook_import = _hook_import_check(install_base, reg_python)
+    try:
+        hook_import = _hook_import_check(install_base, reg_python)
+    except Exception as error:  # never lose the other findings on a broken install
+        hook_import = ('hook import', FAIL, f'probe failed: {type(error).__name__}')
     if hook_import:
         checks.append(hook_import)
 

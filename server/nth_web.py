@@ -398,6 +398,7 @@ STT_MAX_CONCURRENT = _env_int("NTH_STT_MAX_CONCURRENT", 2, 1)  # in-flight trans
 STT_REMOTE_URL = os.environ.get("NTH_STT_URL", "").strip()
 STT_REMOTE_TOKEN_FILE = os.environ.get("NTH_STT_TOKEN_FILE", "").strip()
 STT_REMOTE_TIMEOUT = _env_int("NTH_STT_TIMEOUT", 60, 1)  # per-clip ceiling, seconds
+STT_TRANSCRIBE_TIMEOUT = STT_REMOTE_TIMEOUT  # same operator ceiling for the local worker
 # The client waits 3 s for /api/stt/health, so the probe must give up sooner.
 STT_REMOTE_HEALTH_TIMEOUT = 2      # phones poll health; a dead host must not hold them
 STT_REMOTE_DOWN_TTL_S = 10         # re-probe a failing service sooner than a healthy one
@@ -3087,7 +3088,11 @@ class SttWorker:
 
     def transcribe(self, audio_path: str) -> Dict[str, Any]:
         """Blocking; returns {'text', 'seconds'} or raises RuntimeError."""
-        with self._lock:
+        queue_timeout = max(0, (STT_MAX_CONCURRENT - 1) *
+                            (STT_WORKER_START_TIMEOUT + STT_TRANSCRIBE_TIMEOUT + 2))
+        if not self._lock.acquire(timeout=queue_timeout):
+            raise RuntimeError("transcription busy — try again in a moment")
+        try:
             if not self._alive():
                 self._spawn()
             assert self._proc is not None and self._proc.stdin is not None and self._q is not None
@@ -3116,6 +3121,8 @@ class SttWorker:
             if not msg.get("ok"):
                 raise SttEngineError(msg.get("error") or "transcription failed")
             return msg
+        finally:
+            self._lock.release()
 
     def health(self) -> Dict[str, Any]:
         """Fast availability check for the settings status line — never loads the
@@ -3613,7 +3620,17 @@ STT_REMOTE: Optional[RemoteStt] = RemoteStt.from_env()
 def stt_health() -> Dict[str, Any]:
     """Health of the dictation backend this hub uses: the speech service when
     NTH_STT_URL is set, otherwise the mlx sidecar."""
-    return STT_REMOTE.health() if STT_REMOTE is not None else STT.health()
+    health = STT_REMOTE.health() if STT_REMOTE is not None else STT.health()
+    if STT_REMOTE is not None:
+        # The remote request ceiling includes that service's queue and startup.
+        deadline = STT_BODY_READ_TIMEOUT + STT_REMOTE.timeout
+    else:
+        # Include the bounded lock wait, cold startup, inference and reaping.
+        # Keep startup allowance even when warm: health can age during recording
+        # and a preceding clip can reset the worker before this clip runs.
+        deadline = (STT_BODY_READ_TIMEOUT + STT_MAX_CONCURRENT *
+                    (STT_WORKER_START_TIMEOUT + STT_TRANSCRIBE_TIMEOUT + 2))
+    return {**health, "deadline_s": deadline}
 
 
 # ───────── HTTP handler ─────────
@@ -4668,14 +4685,12 @@ class NthWebHandler(BaseHTTPRequestHandler):
         elif path == "/api/search":
             self._handle_search(parsed)
         elif path == "/api/stt/health":
-            # Gated like every other /api route. Ungated, each hit forked an
-            # interpreter to probe for mlx_whisper — ~1.5s wall and 2.6s CPU
-            # apiece, uncached and unbounded — so a bare GET loop from any
-            # reachable peer turned into unbounded process spawns. The probe is
-            # now cached too; both together close it.
+            # Availability is caller-specific: never invite a guest to record
+            # a clip that the transcription identity gate will then reject.
             _token, ident, _is_new = self._resolve_identity()
-            if ident.source == IDENTITY_SOURCE_PENDING:
-                self._error(403, "pick a name to join this channel first")
+            if ident.source not in UPLOAD_ALLOWED_SOURCES:
+                self._json({"available": False,
+                            "detail": "dictation on this hub is limited to its members"})
                 return
             # secure_url rides along because this is the endpoint the composer
             # already consults about dictation. On an insecure origin the mic

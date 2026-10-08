@@ -16,7 +16,7 @@
   // @-target ids (rebuilt into the selectedTargets Set on load).
   state.targetDrafts = state.targetDrafts || {};
   state.attachmentStore = state.attachmentStore || {};
-  let recognition = null, recorder = null, stream = null, chunks = [];
+  let recognition = null, recorder = null, stream = null, localRecording = null;
   // Metering is a SEPARATE stream from the one MediaRecorder/SpeechRecognition
   // consumes — SpeechRecognition never exposes its underlying audio, so a
   // level meter needs its own getUserMedia grab regardless of engine, and
@@ -774,9 +774,8 @@
   let sttHealthCache = null, sttHealthPending = null;
   function refreshSttHealth() {
     if (sttHealthPending) return sttHealthPending;
-    // Plain fetch rather than api.get: a guest who has not picked a name gets
-    // a 403 here, and api.get answers that by prompting for a name — not
-    // something a background check may do. Any failure reads as "unknown".
+    // Health is caller-specific, including guests. A failed background check
+    // keeps the last answer and never opens an identity prompt.
     sttHealthPending = fetch(apiUrl('/api/stt/health'))
       .then(response => (response.ok ? response.json() : null))
       .catch(() => null)
@@ -787,7 +786,8 @@
         // remote: the hub forwards audio to a speech service its operator
         // configured. Absent means the engine runs on the hub itself.
         const remote = h ? h.remote === true : !!sttHealthCache?.remote;
-        sttHealthCache = { available, detail, remote, at: Date.now() };
+        const deadline_s = h ? (typeof h.deadline_s === 'number' && Number.isFinite(h.deadline_s) && h.deadline_s > 0 ? h.deadline_s : null) : sttHealthCache?.deadline_s;
+        sttHealthCache = { available, detail, remote, deadline_s, at: Date.now() };
         if (h) {
           state.sttHealth = available ? 'ready' : 'unavailable';
           state.secureUrl = h.secure_url || '';
@@ -810,6 +810,7 @@
   // speech service the hub's operator configured. Either way the audio goes
   // to the hub, never to the browser vendor, so both read as "Hub".
   function localUnavailableMessage(detail) {
+    if (/limited to its members/i.test(detail || '')) return 'Dictation on this hub is limited to its members. Use browser dictation.';
     return /not installed/i.test(detail || '')
       ? "This hub's speech engine isn't installed."
       : `This hub's speech engine isn't working (${detail || 'no reason given'}).`;
@@ -950,8 +951,10 @@
     dictationGen++; // invalidate any in-flight async callback from this session (LOTC/Aragorn)
     if (recognition) { recognition.stop(); recognition = null; }
     if (recorder?.state === 'recording') {
+      const recording = localRecording;
       transcribing = true; // stop queues onstop; reserve ownership immediately
-      recorder.stop();
+      recording.stopTimer = setTimeout(() => failedRecorderStop(recording), 5000);
+      try { recorder.stop(); } catch { failedRecorderStop(recording); }
     }
     stopTracks(); stopMeter(); document.body.classList.remove('dictating'); setDictationButtonState(false);
   }
@@ -1030,96 +1033,115 @@
     // waveform is one signal too many.
     recognition.start(); document.body.classList.add('dictating'); setDictationButtonState(true);
   }
+  function dictationBusy() {
+    return starting || transcribing || !!recognition || recorder?.state === 'recording';
+  }
+  function releaseRecording(recording) {
+    clearTimeout(recording.stopTimer);
+    if (localRecording !== recording) return;
+    if (stream === recording.stream) stopTracks();
+    if (recorder === recording.recorder) recorder = null;
+    localRecording = null;
+    stopMeter();
+  }
+  function failedRecorderStop(recording) {
+    // A late stop event from this recorder must never submit or reset a newer one.
+    if (localRecording !== recording) return;
+    releaseRecording(recording);
+    transcribing = false;
+    document.body.classList.remove('dictating');
+    setDictationButtonState(false);
+    Trio.ui.toast('Hub recording could not finish. Tap the mic and try again.', DICTATION_TOAST_MS);
+  }
+  function transcriptionTimeout(ms) {
+    try {
+      if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function') {
+        return { signal: AbortSignal.timeout(ms), cancel: () => {} };
+      }
+    } catch { /* use the AbortController pattern from app refresh */ }
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), ms);
+    return { signal: controller.signal, cancel: () => clearTimeout(timer) };
+  }
+  async function transcribeClip(clip) {
+    if (clip.completed || dictationBusy()) return false;
+    transcribing = true;
+    setDictationButtonState(false);
+    let deadline;
+    try {
+      // Health includes upload, worker startup and queue allowances. Older hubs
+      // supply no deadline, so retain the 75-second compatibility fallback.
+      const seconds = sttHealthCache?.deadline_s;
+      const ms = seconds > 0 ? Math.min(2147483647, Math.ceil((seconds + 15) * 1000)) : 75000;
+      deadline = transcriptionTimeout(ms);
+      const result = await fetch(apiUrl('/api/stt/transcribe'), { method: 'POST',
+        headers: { 'Content-Type': clip.audio.type || 'audio/webm' }, body: clip.audio, signal: deadline.signal });
+      const data = await result.json();
+      if (!result.ok || !data.ok) throw new Error(data.error || 'transcription failed');
+      const text = (data.text || '').trim();
+      clip.completed = true;
+      if (!text) {
+        Trio.ui.toast(data.no_speech
+          ? 'Nothing was picked up — try again and start speaking right after you tap the mic.'
+          : 'That was too quiet to transcribe. Move closer to the mic and try again.', DICTATION_TOAST_MS);
+      } else if (conversationId() === clip.startedIn) {
+        applyDictatedText(withBaseline(inputValue(), clip.finalize(text)));
+      } else {
+        state.drafts[clip.startedIn] = withBaseline(state.drafts[clip.startedIn] || '', clip.finalize(text));
+        Trio.ui.toast('Your dictation was added to the draft of the conversation you recorded it in.', DICTATION_TOAST_MS);
+      }
+    } catch (error) {
+      const reason = error.name === 'TimeoutError' || error.name === 'AbortError'
+        ? 'Hub dictation timed out. Retry this recording, or use browser dictation.'
+        : (humanEngineError(error.message) || 'Hub dictation failed') + ' Your recording is kept for Retry.';
+      refreshSttHealth();
+      // A persistent offer owns the original Blob, conversation and roster.
+      // Retry reuses those bytes and refuses to interfere with current dictation.
+      const retry = { label: 'Retry', onClick: () => {
+        if (dictationBusy()) return false;
+        return transcribeClip(clip);
+      } };
+      const offers = hasBrowserDictation() ? [retry, offerBrowserAction()] : [retry];
+      Trio.ui.toast(reason, 0, offers);
+    } finally {
+      deadline?.cancel();
+      transcribing = false;
+      document.body.classList.remove('dictating');
+      setDictationButtonState(false);
+    }
+  }
   async function localDictation() {
     if (!hasLocalDictation()) throw new Error('Local dictation is unavailable in this browser');
-    // LOTC/Sauron+Uruk-Hai: `toggleDictation`'s "already active" guard checks
-    // `recognition`/`recorder`, both still null during the getUserMedia
-    // await below — a rapid double-click ran two of these concurrently,
-    // each overwriting the SAME module vars (stream/recorder/chunks/
-    // audioCtx/analyser/meterRaf), leaking the first stream+AudioContext
-    // with nothing left able to stop them, and corrupting the shared
-    // `chunks` array between two live recorders.
     if (starting) return;
     starting = true;
     const myGen = dictationGen, startedIn = conversationId();
+    try { stream = await window.navigator.mediaDevices.getUserMedia({ audio: true }); }
+    finally { starting = false; }
+    if (dictationGen !== myGen || conversationId() !== startedIn) { stopTracks(); return; }
+    const recording = localRecording = { stream, chunks: [], stopTimer: null };
     const finalize = sigilFinalizer(startedIn);
     try {
-      stream = await window.navigator.mediaDevices.getUserMedia({ audio: true }); chunks = [];
-    } finally { starting = false; }
-    // The permission prompt can sit open for a while. If the user stopped or
-    // moved to another conversation meanwhile, release the mic and stop here.
-    if (dictationGen !== myGen || conversationId() !== startedIn) { stopTracks(); return; }
-    recorder = new window.MediaRecorder(stream);
-    recorder.ondataavailable = event => { if (event.data.size) chunks.push(event.data); };
-    recorder.onstop = async () => {
-      transcribing = true;
-      setDictationButtonState(false, { processing: true,
-        statusText: sttHealthCache?.remote ? "Transcribing (hub's speech service)…" : 'Transcribing (Whisper on the hub)…' });
-      try {
-        const audio = new Blob(chunks, { type: recorder.mimeType || 'audio/webm' });
-        // Health exposes no server deadline; allow the default 60 s plus
-        // upload/response time, then use the existing failure and cleanup path.
-        const result = await fetch(apiUrl('/api/stt/transcribe'), { method: 'POST', headers: { 'Content-Type': audio.type || 'audio/webm' }, body: audio, signal: AbortSignal.timeout(75000) });
-        const data = await result.json();
-        if (!result.ok || !data.ok) throw new Error(data.error || 'transcription failed');
-        const text = (data.text || '').trim();
-        // Success with nothing in it. The old code appended '' and said
-        // nothing at all — you watched "Transcribing…" and then got silence,
-        // the same invisible-failure class this whole feature keeps hitting.
-        // The server already distinguishes the two causes; use them.
-        // (LOTC/Frodo, critical)
-        if (!text) {
-          Trio.ui.toast(data.no_speech
-            ? 'Nothing was picked up — try again and start speaking right after you tap the mic.'
-            : 'That was too quiet to transcribe. Move closer to the mic and try again.',
-            DICTATION_TOAST_MS);
-        } else if (conversationId() === startedIn) {
-          applyDictatedText(withBaseline(inputValue(), finalize(text)));
-        } else {
-          // The user switched threads while this was transcribing. Keep the
-          // words with the conversation they were spoken in rather than
-          // dropping them, and say where they went.
-          state.drafts[startedIn] = withBaseline(state.drafts[startedIn] || '', finalize(text));
-          Trio.ui.toast('Your dictation was added to the draft of the conversation you recorded it in.', DICTATION_TOAST_MS);
-        }
-      } catch (error) {
-        // This runs AFTER the user has stopped speaking. The old code
-        // responded by starting browserDictation() right here — which
-        // discarded the clip they had just recorded and silently opened a
-        // fresh live mic, so the honest instruction was "say the whole thing
-        // again into a microphone you were not told is on", while the toast
-        // implied their existing words were being transcribed. Two separate
-        // reasons that could never work: a post-recording start is outside
-        // the user gesture Safari requires, and on an insecure origin the
-        // engine is refused outright.
-        //
-        // So: say what broke and OFFER the browser engine as a button on the
-        // toast. The first version of this fix set a sticky flag that silently
-        // rerouted every later tap — which overrode the visible "Local
-        // (Whisper)" preference, fired on transient failures like a 503
-        // "busy, try again", and left no way back short of a reload. A setting
-        // that reads Local while doing Browser is the same lie this branch
-        // exists to delete. An explicit button makes the switch a thing the
-        // user chose, once, for this recording only. (LOTC/Frodo, critical)
-        const reason = error.name === 'TimeoutError' || error.name === 'AbortError'
-          ? 'Hub dictation timed out. Tap the mic and say it again, or use browser dictation.'
-          : humanEngineError(error.message) || 'Local transcription failed';
-        refreshSttHealth(); // the hub may have lost its engine; let the next tap know
-        if (hasBrowserDictation()) {
-          Trio.ui.toast(reason, DICTATION_TOAST_MS, offerBrowserAction());
-        } else Trio.ui.toast(reason, DICTATION_TOAST_MS);
-      } finally {
-        transcribing = false;
-        stopTracks();
-        document.body.classList.remove('dictating');
-        setDictationButtonState(false);
-      }
-    };
-    // No statusText while actively recording (see browserDictation) — the
-    // "Transcribing (…on the hub)…" text right after IS still useful,
-    // since that's invisible processing time the waveform can't represent.
-    recorder.start(); document.body.classList.add('dictating'); setDictationButtonState(true);
-    startMeter(stream);
+      const ownedRecorder = recording.recorder = recorder = new window.MediaRecorder(stream);
+      ownedRecorder.ondataavailable = event => {
+        if (localRecording === recording && event.data.size) recording.chunks.push(event.data);
+      };
+      ownedRecorder.onstop = async () => {
+        if (localRecording !== recording) return;
+        const audio = new Blob(recording.chunks, { type: ownedRecorder.mimeType || 'audio/webm' });
+        releaseRecording(recording);
+        transcribing = false; // transfer the stop reservation to this request, synchronously
+        return transcribeClip({ audio, startedIn, finalize, completed: false });
+      };
+      ownedRecorder.start();
+      document.body.classList.add('dictating'); setDictationButtonState(true);
+      startMeter(stream);
+    } catch (error) {
+      releaseRecording(recording);
+      document.body.classList.remove('dictating'); setDictationButtonState(false);
+      const failure = new Error(error?.message || 'Hub recording could not start');
+      failure.recordingStartFailed = true;
+      throw failure;
+    }
   }
   async function toggleDictation() {
     if (transcribing) return; // serialize recordings until the request settles
@@ -1154,6 +1176,7 @@
     catch (error) {
       if (dictationGen !== myGen || conversationId() !== startedIn) return;
       const reason = humanEngineError(error.message) || 'Local dictation failed';
+      if (error.recordingStartFailed) { Trio.ui.toast(reason, DICTATION_TOAST_MS); return; }
       if (!canRecognise) throw new Error(reason);
       // Explicit Local: say what broke and offer the browser engine; never
       // switch to it on the user's behalf (see chooseDictationEngine).
@@ -1167,7 +1190,10 @@
   function offerBrowserAction() {
     return {
       label: 'Use browser dictation',
-      onClick: () => browserDictation().catch(fallback => Trio.ui.toast(fallback.message, DICTATION_TOAST_MS)),
+      onClick: () => {
+        if (dictationBusy()) return false;
+        return browserDictation().catch(fallback => Trio.ui.toast(fallback.message, DICTATION_TOAST_MS));
+      },
     };
   }
   const domListeners = [];

@@ -498,7 +498,7 @@ function buildSandbox() {
     fetch: () => new Promise(() => {}),   // never resolves; boot()'s network calls hang harmlessly
     EventSource: FakeEventSource,
     Notification: function () {},
-    AudioContext: function () { return { createOscillator: () => ({ connect: noop, start: noop, stop: noop }), createGain: () => ({ connect: noop, gain: {} }), destination: {}, currentTime: 0 }; },
+    AudioContext: function () { return { createOscillator: () => ({ connect: noop, start: noop, stop: noop }), createGain: () => ({ connect: noop, gain: {} }), destination: {}, currentTime: 0, close: () => Promise.resolve() }; },
   };
   window.Notification.permission = 'default';
   window.Notification.requestPermission = () => Promise.resolve('default');

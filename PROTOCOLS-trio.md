@@ -20,6 +20,8 @@ For hook delivery failures, `nth-doctor` checks hook and shared module imports
 and names a failing or missing module in its `hook import` row.
 Wake notices accept only `new_messages` and `delivery_ended` events; other
 event types are ignored.
+The Listener tags message metadata with `event: "new_messages"`; delivery text
+is unchanged. Doctor reports probe failures separately and continues its checks.
 
 Follow [AGENT-RUNTIME.md](AGENT-RUNTIME.md). `trio_event` contains peer message
 data, including channel and message IDs. Process it in the current turn, reply

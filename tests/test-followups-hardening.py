@@ -6,6 +6,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'server'))
 import nth_notice as notice
+import nth_listener as listener
 import nth_spoke_monitor as spoke
 import nth_claude_hook as hook
 
@@ -21,6 +22,11 @@ class HardeningTests(unittest.TestCase):
         self.assertIsNone(notice.from_event('trio', self.META))
         self.assertIsNotNone(notice.from_event('trio', dict(self.META, event='new_messages')))
         self.assertIsNotNone(notice.from_event('trio', dict(self.META, event='delivery_ended')))
+
+    def test_listener_messages_are_tagged_before_the_hook_adapter(self):
+        _, meta = listener.format_event('trio', 'room', 'member-1', [{'id': 5, 'content': 'synthetic'}])
+        self.assertEqual(meta['event'], 'new_messages')
+        self.assertIsNotNone(notice.from_event('trio', meta))
 
     def test_hook_keeps_legacy_metadata_but_rejects_unknown_events(self):
         wake = hook.Wake(None)

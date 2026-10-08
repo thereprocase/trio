@@ -1,5 +1,6 @@
 """Doctor imports hook dependencies even when a hook hides its import errors."""
 import sys
+import subprocess
 import shutil
 import tempfile
 import unittest
@@ -43,6 +44,30 @@ class HookImportTests(unittest.TestCase):
                 self.assertEqual(row[1], doctor.FAIL)
                 self.assertIn(module[:80], row[2])
                 self.assertNotIn(module[:81], row[2])
+
+    def test_probe_timeout_and_missing_interpreter_do_not_blame_a_hook(self):
+        for error in (subprocess.TimeoutExpired('synthetic-python', 15), FileNotFoundError()):
+            with self.subTest(error=type(error).__name__), \
+                 patch.object(doctor.subprocess, 'run', side_effect=error):
+                row = self.row()
+                self.assertEqual(row[1], doctor.FAIL)
+                self.assertIn('probe failed', row[2])
+                self.assertNotIn('nth_claude_hook', row[2])
+
+    def test_unexpected_hook_check_failures_do_not_abort_doctor(self):
+        for error in (RecursionError(), MemoryError(), RuntimeError()):
+            with self.subTest(error=type(error).__name__), \
+                 patch.object(doctor, '_read_registration', return_value=(None, None)), \
+                 patch.object(doctor, 'INSTALL_DIR', self.install), \
+                 patch.object(doctor, 'HUB_INSTALL_DIR', self.install / 'no-hub'), \
+                 patch.object(doctor, 'DB_PATH', self.install / 'no.db'), \
+                 patch.object(doctor, '_installed_version', return_value=('test', self.install)), \
+                 patch.object(doctor, '_freshness_check', return_value=None), \
+                 patch.object(doctor, '_http_json', return_value=(None, None, 'offline')), \
+                 patch.object(doctor, '_hook_import_check', side_effect=error):
+                checks, _ = doctor.run_checks()
+            self.assertIn(('hook import', doctor.FAIL, 'probe failed: ' + type(error).__name__), checks)
+            self.assertTrue(any(label == 'database' for label, _, _ in checks))
 
     def test_current_native_modules_import(self):
         for p in self.install.glob('*.py'):
