@@ -9,9 +9,10 @@ registered Codex endpoints, binds successful MCP connect results to their real
 thread, and supervises durable local/Quartet subscriptions. `nth_cli.py` owns
 launchers; `nth_quartet_proxy.py` supplies a local stdio frontend to Quartet.
 Claude launched with `trio claude` receives channel events from a listener
-inside each stdio frontend (`nth_claude_channel.py`); launched plainly it falls
-back to the canonical Monitor via `nth_watch.py`, which from Claude Code 2.1.274
-is a 30-minute lease. Codex uses standalone tool output at the next active-turn
+inside each stdio frontend (`nth_claude_channel.py`). Launched plainly it is
+woken by the delivery hooks (`nth_claude_hook.py`); without them it uses the
+one-shot waiter (`nth_watch.py --once`), with the Monitor as the last fallback,
+which from Claude Code 2.1.274 is a 30-minute lease. Codex uses standalone tool output at the next active-turn
 model boundary. Never replace this with terminal typing or a second server
 attached to an already owned thread. A channel notification has no receipt:
 Claude status reports `written`, never `accepted`, and readiness is a separate

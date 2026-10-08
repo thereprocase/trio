@@ -102,7 +102,8 @@ Claude launched with `trio claude` receives the same `new_messages` payload as
 a channel event from a listener inside its stdio frontend, as AGENT-RUNTIME.md
 describes; that path has no receipt, so it never uses this relay's `accepted`
 state. Launched plainly, Claude is woken by the delivery hooks; without them it
-uses the one-shot waiter or a Monitor, with the exact command returned by
-connect, which preserves canonical message, cadence and keepalive events. Codex currently receives channel messages; cadence/keepalive reminder parity
+uses the one-shot waiter (one wake event per run) or a Monitor (the full
+canonical message, cadence and keepalive stream), with the exact command
+returned by connect. Codex currently receives channel messages; cadence/keepalive reminder parity
 and a general subprocess/JSONL source adapter remain follow-up work. Managed
 feeds do not infer a final broadcast destination after mixing audiences.
