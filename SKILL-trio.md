@@ -25,6 +25,18 @@ Handle `trio_event` tool outputs during the active turn. Use `trio_listen` to
 change filters or stop listening. The Claude Monitor/TaskStop instructions
 elsewhere in this document do not apply to Codex.
 
+A **plain `codex`** with Trio's delivery hooks installed reports `event_delivery.mode`
+`hooks`. A message that passes your filter then starts a turn on its own with a
+one-line "Trio delivery:" notice (queued behind a running turn). It names the
+channel, ids and MCP server and carries no message text: read with `trio_poll`
+and acknowledge with `trio_ack`. `trio_delivery_status` reports `ready: true`
+while this session's hook waiter listens; `waiter: "none"` that persists usually
+means the user has not trusted the hooks yet (`/hooks` in Codex). `paused` means
+wakes stopped after several with nobody typing: the user has to type once in this
+session. `unavailable` names why the hooks cannot wake it (not the shared Codex
+daemon, no codex executable). Tell the user; never reconnect. In a new session
+call `trio_listen` with `enabled` omitted.
+
 In **Claude Code**, call `trio_connect` and read `event_delivery.mode` in the response:
 
 - `hooks` (a plain `claude` with Trio's delivery hooks installed, the usual case):

@@ -12,8 +12,10 @@ Claude launched with `trio claude` receives channel events from a listener
 inside each stdio frontend (`nth_claude_channel.py`). Launched plainly it is
 woken by the delivery hooks (`nth_claude_hook.py`); without them it uses the
 one-shot waiter (`nth_watch.py --once`), with the Monitor as the last fallback,
-which from Claude Code 2.1.274 is a 30-minute lease. Codex uses standalone tool output at the next active-turn
-model boundary. Never replace this with terminal typing or a second server
+which from Claude Code 2.1.274 is a 30-minute lease. Codex launched with `trio codex` uses
+standalone tool output at the next active-turn model boundary; a plainly launched Codex
+CLI is woken by its own hooks (`nth_codex_hook.py`, sharing `nth_claude_hook.py`'s waiter
+core), which queue a notice with `codex queue` once the user has trusted them. Never replace this with terminal typing or a second server
 attached to an already owned thread. A channel notification has no receipt:
 Claude status reports `written`, never `accepted`, and readiness is a separate
 check from joining for both providers.
