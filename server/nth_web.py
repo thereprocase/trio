@@ -71,6 +71,7 @@ import nth_agent_manager as nam
 import nth_request_log as nrl
 import nth_usage as nusage
 import nth_conversation as nconv
+import nth_webpush as npush
 from nth_constants import (ANIMAL_EMOJIS, animal_for, animal_for_channel,
                            NTH_VERSION, project_context, AGENT_INBOX_CHANNEL, can_see, is_all_seeing,
                            parse_recipients, narrow_wake, BUDDY_AVATARS)
@@ -3324,6 +3325,7 @@ _SUPERVISOR_LOCK = threading.Lock()
 _ROUTER = None
 _IDLE_REAPER = None
 _LEASE = None
+_PUSH_DISPATCHER = None
 
 
 def _quiesce_agents() -> None:
@@ -4016,6 +4018,9 @@ class NthWebHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         path = parsed.path
+        if path in PWA_ROUTES:
+            self._serve_pwa_asset(path)
+            return
         if path.startswith("/avatars/"):
             # Static and unauthenticated on purpose: these are 29 checked-in
             # SVGs chosen from a fixed allowlist, identical for every viewer,
@@ -4139,6 +4144,10 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 viewer_id=ident.member_id,
                 all_seeing=is_all_seeing(ident.member_id),
             )
+        elif path == "/api/push/vapid-public-key":
+            self._handle_push_public_key()
+        elif path == "/api/push/status":
+            self._handle_push_status(parsed)
         elif path == "/api/search":
             self._handle_search(parsed)
         elif path == "/api/stt/health":
@@ -4218,6 +4227,10 @@ class NthWebHandler(BaseHTTPRequestHandler):
             self._handle_send()
         elif parsed.path == "/api/identify":
             self._handle_identify()
+        elif parsed.path == "/api/push/subscribe":
+            self._handle_push_subscribe()
+        elif parsed.path == "/api/push/unsubscribe":
+            self._handle_push_unsubscribe()
         elif parsed.path == "/api/cull":
             self._handle_cull()
         elif parsed.path == "/api/member/filter":
@@ -6455,6 +6468,170 @@ class NthWebHandler(BaseHTTPRequestHandler):
             stop.set()
             for hub, q in subs:
                 hub.unsubscribe(q)
+
+    # ── installable app + web push ──
+    def _serve_pwa_asset(self, path: str) -> None:
+        payload, content_type, cache_control, extra = PWA_ROUTES[path]
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(payload)))
+        self.send_header("Cache-Control", cache_control)
+        for name, value in extra:
+            self.send_header(name, value)
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def _push_state_dir(self) -> Path:
+        """Where the VAPID key lives: the hub state directory, beside nth.db."""
+        return Path(self.db_path).parent
+
+    def _push_identity(self) -> Optional[OperatorIdentity]:
+        """The caller, if it has a name. Any named tier may subscribe — owner,
+        member, tailnet guest, self-declared guest — because a push carries
+        only what that identity could already read on the page. A pending
+        visitor has no name to be mentioned by and no stable member id to key
+        a subscription on, so it is asked to pick one first (the client's
+        api.request turns this 403 into the name prompt)."""
+        _t, ident, _n = self._resolve_identity()
+        if ident.source == IDENTITY_SOURCE_PENDING or not ident.member_id:
+            self._error(403, "pick a name to join this channel first")
+            return None
+        return ident
+
+    def _push_channel(self, code: Any, must_exist: bool = True) -> Optional[str]:
+        """The channel a push request is about, or None (error already sent)."""
+        code = code if isinstance(code, str) else ""
+        if not self.landing_mode:
+            if code and code != self.channel:
+                self._error(404, f"no such channel: {code}")
+                return None
+            return self.channel
+        if not CHANNEL_CODE_RE.match(code):
+            self._error(400, "channel required")
+            return None
+        if must_exist and not self._channel_exists(code):
+            self._error(404, f"no such channel: {code}")
+            return None
+        return code
+
+    def _push_unavailable(self) -> bool:
+        if npush.available():
+            return False
+        self._json({"enabled": False,
+                    "error": "phone notifications are unavailable: the hub's "
+                             "Python lacks the cryptography package"}, status=503)
+        return True
+
+    def _handle_push_public_key(self) -> None:
+        if self._push_unavailable():
+            return
+        try:
+            keys = npush.vapid_for(self._push_state_dir())
+        except (OSError, RuntimeError, ValueError) as exc:
+            # The exception type only: the message could quote key material.
+            sys.stderr.write(f"[nth_web push] VAPID key unavailable: {type(exc).__name__}\n")
+            self._json({"enabled": False,
+                        "error": "the push signing key could not be loaded"}, status=503)
+            return
+        self._json({"enabled": True, "publicKey": keys.public_b64})
+
+    def _handle_push_status(self, parsed) -> None:
+        _t, ident, _n = self._resolve_identity()
+        channel = self._push_channel((parse_qs(parsed.query).get("channel") or [""])[0])
+        if channel is None:
+            return
+        named = ident.source != IDENTITY_SOURCE_PENDING
+        subs: List[Dict[str, str]] = []
+        if named:
+            db = sqlite3.connect(str(self.db_path), timeout=5)
+            try:
+                subs = npush.subscriptions_for(db, ident.member_id, channel)
+                db.commit()
+            except sqlite3.Error as exc:
+                sys.stderr.write(f"[nth_web push] status read failed: {exc}\n")
+                self._error(500, "could not read notification settings")
+                return
+            finally:
+                db.close()
+        self._json({
+            "enabled": npush.available(),
+            "channel": channel,
+            "named": named,
+            "modes": list(npush.PUSH_MODES),
+            # The caller's own endpoints only; they match them against their
+            # browser's subscription to show which mode this device is on.
+            "subscriptions": subs,
+            # Web push needs a secure context; over plain http the page can
+            # only say where the https address is.
+            "secure_url": SECURE_URL_HINT,
+        })
+
+    def _handle_push_subscribe(self) -> None:
+        ident = self._push_identity()
+        if ident is None or self._push_unavailable():
+            return
+        body = self._read_json_body(max_bytes=8192)
+        if body is None:
+            return
+        mode = body.get("mode")
+        if mode not in npush.PUSH_MODES:
+            self._error(400, "mode must be one of: " + ", ".join(npush.PUSH_MODES))
+            return
+        channel = self._push_channel(body.get("channel"))
+        if channel is None:
+            return
+        try:
+            endpoint, p256dh, auth = npush.validate_subscription(body.get("subscription"))
+        except ValueError as exc:
+            self._error(400, str(exc))
+            return
+        db = sqlite3.connect(str(self.db_path), timeout=5)
+        try:
+            npush.upsert_subscription(
+                db, channel=channel, endpoint=endpoint, p256dh=p256dh, auth=auth,
+                member_id=ident.member_id, member_name=ident.display_name, mode=mode)
+            db.commit()
+        except npush.SubscriptionLimit as exc:
+            self._error(429, str(exc))
+            return
+        except sqlite3.Error as exc:
+            sys.stderr.write(f"[nth_web push] subscribe failed: {exc}\n")
+            self._error(500, "could not save notification settings")
+            return
+        finally:
+            db.close()
+        self._json({"ok": True, "channel": channel, "mode": mode})
+
+    def _handle_push_unsubscribe(self) -> None:
+        ident = self._push_identity()
+        if ident is None:
+            return
+        body = self._read_json_body(max_bytes=4096)
+        if body is None:
+            return
+        endpoint = body.get("endpoint")
+        if not isinstance(endpoint, str) or not endpoint or len(endpoint) > npush.MAX_ENDPOINT_LEN:
+            self._error(400, "endpoint required")
+            return
+        channel = None
+        if body.get("channel"):
+            # Existence is not required: leaving a channel that has since been
+            # deleted must still work.
+            channel = self._push_channel(body.get("channel"), must_exist=False)
+            if channel is None:
+                return
+        db = sqlite3.connect(str(self.db_path), timeout=5)
+        try:
+            removed = npush.delete_subscription(db, member_id=ident.member_id,
+                                                endpoint=endpoint, channel=channel)
+            db.commit()
+        except sqlite3.Error as exc:
+            sys.stderr.write(f"[nth_web push] unsubscribe failed: {exc}\n")
+            self._error(500, "could not save notification settings")
+            return
+        finally:
+            db.close()
+        self._json({"ok": True, "removed": removed})
 
     def _serve_avatar(self, path: str) -> None:
         """Serve one checked-in character SVG.
@@ -9168,7 +9345,7 @@ WEB_JS_FILES = (
     "js/11-conversation.js", "js/12-composer.js", "js/13-file-links.js",
     "js/14-lightbox.js", "js/20-workspace.js", "js/30-agents.js",
     "js/40-preferences.js", "js/41-gameboy-controls.js", "js/42-ipod-controls.js",
-    "js/45-notifications.js", "js/46-data.js",
+    "js/45-notifications.js", "js/46-data.js", "js/47-push.js",
     "js/90-boot.js", "js/99-test-hook.js",
 )
 
@@ -9285,6 +9462,53 @@ def _compose_index_html() -> str:
 
 
 INDEX_HTML = _compose_index_html()
+
+
+# ───────── Installable web app (PWA) assets ─────────
+# The manifest, the service worker and the icons are what make "Add to Home
+# Screen" / "Install app" produce a real app, and an installed app is the only
+# place iOS allows web push at all. Read at import time like the rest of web/,
+# and for the same reason: a missing file should stop the server, not ship an
+# install button that silently does nothing.
+def _read_web_bytes(relative_path: str) -> bytes:
+    path = (WEB_SOURCE_DIR / relative_path).resolve()
+    if WEB_SOURCE_DIR not in path.parents:
+        raise ValueError(f"web asset escapes server/web/: {relative_path!r}")
+    try:
+        return path.read_bytes()
+    except OSError as exc:
+        raise RuntimeError(
+            f"required web asset missing: {relative_path} — server/web/ must "
+            "be installed alongside nth_web.py") from exc
+
+
+PWA_ICON_NAMES = (
+    "icon-192.png", "icon-512.png", "icon-maskable-192.png",
+    "icon-maskable-512.png", "apple-touch-icon.png", "badge-96.png",
+)
+PWA_ICONS = {name: _read_web_bytes(f"icons/{name}") for name in PWA_ICON_NAMES}
+PWA_MANIFEST = _read_web_bytes("manifest.webmanifest")
+PWA_SERVICE_WORKER = _read_web_bytes("sw.js")
+# Static, identical for every viewer, and fetched by the browser without the
+# page's cookies (a manifest request is credentials-less by default), so these
+# are served before any identity check — the same reasoning as /avatars/.
+# path -> (bytes, content type, cache-control, extra headers)
+PWA_ROUTES: Dict[str, Tuple[bytes, str, str, Tuple[Tuple[str, str], ...]]] = {
+    "/manifest.webmanifest": (PWA_MANIFEST, "application/manifest+json",
+                              "no-cache", ()),
+    # Root scope needs Service-Worker-Allowed only if the script ever moves off
+    # the root; sending it anyway keeps the scope explicit. no-cache makes the
+    # browser revalidate on every navigation so a deploy reaches phones.
+    "/sw.js": (PWA_SERVICE_WORKER, "text/javascript; charset=utf-8", "no-cache",
+               (("Service-Worker-Allowed", "/"),)),
+    # iOS probes these two root paths even when the page names its icon.
+    "/apple-touch-icon.png": (PWA_ICONS["apple-touch-icon.png"], "image/png",
+                              "public, max-age=86400", ()),
+    "/apple-touch-icon-precomposed.png": (PWA_ICONS["apple-touch-icon.png"],
+                                          "image/png", "public, max-age=86400", ()),
+    **{f"/icons/{name}": (data, "image/png", "public, max-age=86400", ())
+       for name, data in PWA_ICONS.items()},
+}
 
 
 # ───────── Landing page (served as / in landing mode) ─────────
@@ -9979,6 +10203,7 @@ def main() -> int:
     _mig = sqlite3.connect(str(db_path), timeout=5)
     try:
         ensure_ask_columns(_mig)
+        npush.ensure_push_table(_mig)
         _mig.commit()
     except sqlite3.Error as e:
         print(f"[nth_web] schema forward-compat skipped: {e}", flush=True)
@@ -10050,7 +10275,17 @@ def main() -> int:
         # dies during startup expires its lease instead of holding it.
         _LEASE.start_renewal()
 
+    # Phone push is delivered by whichever process drives this database — the
+    # same lease that owns the agents — so a second dashboard on the same DB
+    # never double-sends. Any dashboard can still record subscriptions.
+    global _PUSH_DISPATCHER
+    if _LEASE is not None and npush.available():
+        _PUSH_DISPATCHER = npush.PushDispatcher(db_path, db_path.parent)
+        _PUSH_DISPATCHER.start()
+
     def stop_hubs():
+        if _PUSH_DISPATCHER is not None:
+            _PUSH_DISPATCHER.stop()
         if hub is not None:
             hub.stop()
         with NthWebHandler.hubs_lock:

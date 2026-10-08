@@ -62,7 +62,7 @@ if [ "${1:-}" = "hub-service" ] || [ "${1:-}" = "upgrade" ]; then
              nth_codex_runtime.py nth_codex_socket.py nth_codex_relay.py \
              nth_event_sources.py nth_event_service.py nth_event_access.py \
              nth_cli.py nth_quartet_proxy.py nth_watch.py nth_claude_channel.py nth_claude_hook.py \
-             nth_usage.py nth_conversation.py nth_ask_client.js; do
+             nth_usage.py nth_conversation.py nth_webpush.py nth_ask_client.js; do
         if [ -f "$HUB_DIR/$f" ] && ! cmp -s "$SCRIPT_DIR/server/$f" "$HUB_DIR/$f"; then
             cp "$HUB_DIR/$f" "$HUB_DIR/$f.bak-$STAMP"
         fi
@@ -444,6 +444,9 @@ cp "$SCRIPT_DIR/server/nth_usage.py" "$SERVER_DIR/nth_usage.py"
 # Conversation identity (canonical DM thread keys). nth_web imports it at
 # module scope.
 cp "$SCRIPT_DIR/server/nth_conversation.py" "$SERVER_DIR/nth_conversation.py"
+# Web push (phone notifications). nth_web imports it at module load; without
+# it the dashboard does not start.
+cp "$SCRIPT_DIR/server/nth_webpush.py" "$SERVER_DIR/nth_webpush.py"
 # The ask-picker helpers. Not a Python import but read at IMPORT time all the
 # same — nth_web inlines this file into the page — so an install missing it
 # raises before the dashboard can serve anything, exactly like a missing
