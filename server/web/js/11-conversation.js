@@ -850,10 +850,10 @@
     // the rendered list IS the full list. (It used to be a slice, and mapping
     // between the two was where the divider went missing.)
     if (unread >= 0) unreadRel = unread;
-    let lastDate = '';
+    let lastKey = '';
     rendered.forEach((msg, index) => {
-      const d = date(msg.created_at);
-      if (d && d !== lastDate) { lastDate = d; const day = document.createElement('div'); day.className = 'day-separator'; day.textContent = d; list.append(day); }
+      const key = Trio.time.dayKey(msg.created_at);
+      if (key && key !== lastKey) { lastKey = key; const day = document.createElement('div'); day.className = 'day-separator'; day.textContent = date(msg.created_at); list.append(day); }
       if (index === unreadRel) { const divider = document.createElement('div'); divider.className = 'unread-divider'; divider.textContent = 'New since your last visit'; list.append(divider); }
       const card = cardFor(msg); list.append(card); state.messageDomById.set(msg.id, card);
     });
