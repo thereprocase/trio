@@ -65,6 +65,57 @@ function page({ health, transcript } = {}) {
 function deferred() { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; }
 
 (async () => {
+  // Cancel even before an engine exists: health and permission awaits.
+  {
+    const answer = deferred();
+    const p = page({ health: answer.promise });
+    p.Trio.preferences.save({ sttMode: 'local' });
+    const tap = p.C.toggleDictation();
+    p.C.unmount();
+    answer.resolve({ available: true, detail: 'ok' });
+    await Promise.race([tap, tick(50)]);
+    check('unmount during health wait never opens the mic', p.mic.opens === 0);
+  }
+  {
+    const p = page({ health: { available: true, detail: 'ok' } });
+    await p.C.refreshSttHealth();
+    p.Trio.preferences.save({ sttMode: 'local' });
+    let stopped = 0;
+    p.win.navigator.mediaDevices.getUserMedia = () => new Promise(resolve =>
+      p.mic.release.push(() => resolve({ getTracks: () => [{ stop: () => stopped++ }] })));
+    const tap = p.C.toggleDictation();
+    p.C.unmount();
+    p.mic.release.shift()();
+    await tap;
+    check('unmount during mic prompt never starts a recorder', p.recorders.length === 0);
+    check('unmount during mic prompt releases the returned stream', stopped === 1);
+  }
+  {
+    const p = page({ health: { available: true, detail: 'ok' } });
+    await p.C.refreshSttHealth();
+    p.Trio.preferences.save({ sttMode: 'local' });
+    const controller = new AbortController();
+    let timeoutMs, requestSignal;
+    p.win.AbortSignal = { timeout: ms => { timeoutMs = ms; return controller.signal; } };
+    const healthFetch = p.win.fetch;
+    p.win.fetch = (url, options) => {
+      if (!/transcribe/.test(url)) return healthFetch(url);
+      requestSignal = options.signal;
+      return new Promise((_, reject) => options.signal?.addEventListener('abort', () => reject(controller.signal.reason)));
+    };
+    const tap = p.C.toggleDictation();
+    p.mic.release.shift()();
+    await tap;
+    p.recorders[0].stop();
+    check('deadline: transcription is busy before the deadline', p.C.dictationState() === 'transcribing');
+    check('deadline: request carries a 75-second timeout signal', timeoutMs === 75000 && requestSignal === controller.signal);
+    controller.abort(new DOMException('The operation timed out', 'TimeoutError'));
+    await tick(10);
+    check('deadline: abort clears transcribing and processing', p.C.dictationState() === ''
+      && !p.cx.document.getElementById('dictate-btn').classList.contains('processing'));
+    check('deadline: abort shows the existing failure offer', p.toasts.some(t => /transcription failed/i.test(t.message) && t.action));
+    check('deadline: abort does not reopen browser dictation', p.sessions.length === 0);
+  }
   // ── local engine: thread switch while transcribing ──
   {
     const p = page({ health: { available: true, detail: 'ok' }, transcript: { ok: true, text: 'ship it' } });

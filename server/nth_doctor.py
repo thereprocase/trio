@@ -12,6 +12,7 @@ Checks, in order:
                 server script exist on disk
   mcp import    the REGISTERED python can import FastMCP (catches OS
                 python upgrades orphaning site-packages, and mcp 2.x)
+  hook import   installed hooks and shared modules import; names missing modules
   install       installed server files + their NTH_VERSION
   database      local DB opens read-only; channel/message counts
   hub           /healthz answers (URL from nth-qweb registration, else
@@ -23,6 +24,7 @@ Checks, in order:
 Diagnosis only — never writes to the DB, never restarts anything.
 """
 import argparse
+import ast
 import json
 import os
 import re
@@ -230,6 +232,49 @@ def interposer_check():
         return ('interposer', FAIL, 'hello failed: ' + type(exc).__name__)
 
 
+def _hook_import_check(install_dir, python):
+    """Import hooks and their shared modules without running a hook action.
+
+    Read imports too: a hook may catch ImportError and silently stand down.
+    Probe present shared modules separately to cover lazy/suppressed imports.
+    """
+    if not install_dir:
+        return None
+    base = Path(install_dir)
+    hooks = [name for name in ('nth_claude_hook', 'nth_codex_hook')
+             if (base / (name + '.py')).is_file()]
+    if not hooks:
+        return None
+    modules = set(hooks)
+    modules.update(name for name in ('nth_listener', 'nth_notice', 'nth_sse_client')
+                   if (base / (name + '.py')).is_file())
+    try:
+        for name in hooks:
+            for node in ast.walk(ast.parse((base / (name + '.py')).read_text())):
+                imports = ([alias.name for alias in node.names] if isinstance(node, ast.Import)
+                           else [node.module] if isinstance(node, ast.ImportFrom) else [])
+                modules.update(module.split('.')[0] for module in imports
+                               if module and module.startswith('nth_'))
+        probe = '''import importlib, sys
+sys.path.insert(0, sys.argv[1])
+for module in sys.argv[2:]:
+    try:
+        importlib.import_module(module)
+    except Exception as error:
+        print(module + ': ' + type(error).__name__ +
+              (' (' + error.name + ')' if isinstance(error, ImportError) and error.name else ''))
+        sys.exit(1)
+'''
+        proc = subprocess.run([python or sys.executable, '-I', '-B', '-c', probe,
+                               str(base.resolve()), *sorted(modules)],
+                              capture_output=True, text=True, timeout=15)
+        if proc.returncode:
+            return ('hook import', FAIL, proc.stdout.strip() or 'hook import probe failed')
+        return ('hook import', OK, 'hooks and shared modules import successfully')
+    except (OSError, SyntaxError, subprocess.TimeoutExpired) as error:
+        return ('hook import', FAIL, f'{name}: {type(error).__name__}')
+
+
 def run_checks(hub_override=None):
     """Return (checks, fleet_rows). checks = [(label, level, detail)]."""
     checks = [interposer_check()]
@@ -316,6 +361,10 @@ def run_checks(hub_override=None):
         freshness = ("freshness", WARN, f"could not compare install: {type(e).__name__}")
     if freshness:
         checks.append(freshness)
+
+    hook_import = _hook_import_check(install_base, reg_python)
+    if hook_import:
+        checks.append(hook_import)
 
     # --- local database ---
     # Hub-service boxes keep the DB under the service's de-rooted HOME.

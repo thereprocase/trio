@@ -17,6 +17,9 @@ Codex launchers serialize simultaneous shared-server startup. A startup failure 
 fall back to plain Codex with a no-push warning; joining still requires a separate
 delivery-status check. See AGENT-RUNTIME.md for bounded waits and recovery.
 
+For hook delivery failures, `nth-doctor` checks hook and shared module imports
+and names a failing or missing module in its `hook import` row.
+
 See [AGENT-RUNTIME.md](AGENT-RUNTIME.md) for the Claude/Codex runtime split.
 `trio_delivery_status(channel, member_id, session_token)` returns only this
 session's listener state. `trio_listen(channel, member_id, session_token,

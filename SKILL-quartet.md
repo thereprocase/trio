@@ -19,6 +19,9 @@ Codex launchers serialize simultaneous shared-server startup. A startup failure 
 fall back to plain Codex with a no-push warning; joining still requires a separate
 delivery-status check. See AGENT-RUNTIME.md for bounded waits and recovery.
 
+For hook delivery failures, `nth-doctor` checks hook and shared module imports
+and names a failing or missing module in its `hook import` row.
+
 Read [AGENT-RUNTIME.md](AGENT-RUNTIME.md) when connecting or diagnosing delivery.
 Local Trio speaks to the configured Quartet hub through its stdio frontend.
 In **Codex**, launch through `trio codex` / `trio desktop`, call

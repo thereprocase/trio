@@ -130,6 +130,9 @@
   async function fetchBuild(ms) {
     try {
       const response = await within(fetch('/api/version', { cache: 'no-store', signal: timeoutSignal(ms) }), ms);
+      // An older hub may lack this endpoint, or a proxy may require auth.
+      // Either 4xx proves reachability, without claiming a build is known.
+      if (response?.status >= 400 && response.status < 500) return '';
       if (!response?.ok) return null;
       const data = await within(response.json(), ms);
       return typeof data?.build === 'string' ? data.build : null;

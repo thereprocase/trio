@@ -9833,8 +9833,9 @@ class NthWebHandler(BaseHTTPRequestHandler):
         back to the caller's composer, never stored or attributed to a channel,
         so there is nothing here to scope by channel in landing mode."""
         _token, ident, _is_new = self._resolve_identity()
-        if ident.source == IDENTITY_SOURCE_PENDING:
-            self._error(403, "pick a name to join this channel first")
+        # Speech service work uses the same identity tier as attachment uploads.
+        if ident.source not in UPLOAD_ALLOWED_SOURCES:
+            self._error(403, "only the operator or a member the hub owner listed can transcribe")
             return
         # Bound concurrency before reading the (up to 25 MB) body, so a burst of
         # uploads can't buffer N×MAX_STT_BYTES or pile up behind the worker lock.
