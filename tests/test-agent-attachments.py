@@ -691,11 +691,15 @@ check("names: the same file passes with a descriptive filename",
       ["filename"] == "brake-light-wiring.png")
 # Names in any script describe as well as English ones; a file extension or a
 # version tag alone describes nothing.
-for good_name in ("фары-вариант-А.png", "前照灯の比較.png", "φανάρια.png", "photo.of.headlights",
+for good_name in ("фары-вариант-А.png", "前照灯の比較.png", "φανάρια.png",
+                  "हेडलाइट.png", "முகப்பு-விளக்கு.png", "হেডলাইট.png", "مَصَابِيح.png", "photo.of.headlights",
                   "bus-trace-2026-10-08.png", "chart-latency-p99.png"):
     check(f"names: {good_name!r} passes the descriptive check",
           not raises(lambda: nmedia.require_descriptive_name(good_name)))
-for bad_name in (".png", "png.png", "image.png.png", "screenshot.jpg.png", "v2.png"):
+for bad_name in (".png", "png.png", "image.png.png", "screenshot.jpg.png", "v2.png",
+                 "PXL_20261008_123456789.jpg", "DSCN0001.JPG", "WhatsApp Image 2026-10-08 at 10.00.00.jpeg",
+                 "Bildschirmfoto 2026-10-08 um 10.00.00.png", "スクリーンショット 2026-10-08.png", "截图.png",
+                 "Снимок экрана 2026-10-08.png"):
     check(f"names: {bad_name!r} is refused",
           raises(lambda: nmedia.require_descriptive_name(bad_name)))
 r = send_items([{"data_base64": b64(PNG), "filename": "headlights-option-A-segmented.png"}])
