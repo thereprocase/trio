@@ -24,9 +24,10 @@ class OnceStdoutTests(unittest.TestCase):
 
         return real, codes, nth_watch.OnceStdout(real, wake, exit=fake_exit)
 
-    def test_keepalive_filter_mode_and_errors_keep_it_waiting(self):
+    def test_keepalive_cadence_filter_mode_and_errors_keep_it_waiting(self):
+        # cadence would re-fire on every relaunch: the monitors remember it only in memory.
         real, codes, out = self.stream()
-        for event in ('filter_mode', 'keepalive', 'error'):
+        for event in ('filter_mode', 'keepalive', 'cadence', 'error'):
             print(json.dumps({'event': event}), file=out, flush=True)
         print('not json', file=out)
         self.assertEqual(real.getvalue(), '')
@@ -43,7 +44,7 @@ class OnceStdoutTests(unittest.TestCase):
         self.assertEqual(codes, [0])
 
     def test_channel_end_and_revocation_wake(self):
-        for event in ('channel_ended', 'channel_gone', 'culled', 'session_revoked', 'cadence'):
+        for event in ('channel_ended', 'channel_gone', 'culled', 'session_revoked'):
             real, codes, out = self.stream()
             with self.assertRaises(Stop):
                 print(json.dumps({'event': event}), file=out)
