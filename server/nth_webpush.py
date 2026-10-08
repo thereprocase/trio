@@ -99,6 +99,16 @@ TIER_QUOTAS = {               # tier -> (per member, whole tier)
     TIER_GUEST: (8, 200),
     TIER_TRUSTED: (64, 4800),
 }
+# Rows written before the tier column existed. Their owner is unknown, so
+# they are never aged out (that could delete the owner's subscriptions) and
+# count against the trusted pool. The page re-posts its subscription on load,
+# which re-tiers the row from the server-side identity.
+TIER_LEGACY = "legacy"
+# Which stored tiers draw on each pool.
+TIER_POOL_MEMBERS = {
+    TIER_GUEST: (TIER_GUEST,),
+    TIER_TRUSTED: (TIER_TRUSTED, TIER_LEGACY),
+}
 
 # Delivery bounds. Sends run in parallel and each tick stops taking new
 # messages once this many pushes are queued; the rest wait for the next tick.
@@ -112,8 +122,13 @@ LEASE_RECHECK_S = 2.0         # how often a long send re-asks for the lease
 SWEEP_INTERVAL_S = 60.0       # orphan / idle-guest sweep cadence
 GUEST_IDLE_S = 30 * 86400     # guest rows with no update or delivery this long go
 MARKER_INTERVAL_S = 10.0      # how often the dispatcher re-advertises itself
-MARKER_FRESH_S = 60.0         # an advertisement older than this no longer counts
+# An advertisement older than this no longer counts. Above the worst-case tick
+# (256 sends / 16 workers x 10 s timeout = 160 s), and the marker is also
+# refreshed during long send phases; a dead hub drops out sooner anyway,
+# when its lease expires.
+MARKER_FRESH_S = 300.0
 STATUS_SKIPPED = -1           # a push not attempted because the lease is in doubt
+MAX_RECORD_BACKLOG = 5000     # outcome writes kept while the DB refuses them
 
 # What a lease check may answer. EXPIRED is our own row past its expiry
 # (renewals failing: a locked DB, a suspend, a clock step) and only pauses
@@ -588,18 +603,25 @@ def ensure_push_table(db: sqlite3.Connection) -> None:
         " last_sent_at REAL NOT NULL DEFAULT 0,"
         " pending_count INTEGER NOT NULL DEFAULT 0,"
         " pending_sender TEXT NOT NULL DEFAULT '',"
-        " tier TEXT NOT NULL DEFAULT 'guest',"
+        " tier TEXT NOT NULL DEFAULT 'legacy',"
         " fail_count INTEGER NOT NULL DEFAULT 0,"
         " last_ok_at REAL NOT NULL DEFAULT 0,"
         " PRIMARY KEY (channel, endpoint))")
-    # Columns added after the table first shipped. A row written before `tier`
-    # existed counts as a guest: the smaller pool is the safe default.
+    # Columns added after the table first shipped. Every insert names its
+    # tier, so the default only ever lands on rows that predate the column:
+    # those become 'legacy' (see TIER_LEGACY), never 'guest'.
     have = {r[1] for r in db.execute("PRAGMA table_info(push_subscriptions)").fetchall()}
-    for column, ddl in (("tier", "TEXT NOT NULL DEFAULT 'guest'"),
+    for column, ddl in (("tier", "TEXT NOT NULL DEFAULT 'legacy'"),
                         ("fail_count", "INTEGER NOT NULL DEFAULT 0"),
                         ("last_ok_at", "REAL NOT NULL DEFAULT 0")):
         if column not in have:
-            db.execute(f"ALTER TABLE push_subscriptions ADD COLUMN {column} {ddl}")
+            try:
+                db.execute(f"ALTER TABLE push_subscriptions ADD COLUMN {column} {ddl}")
+            except sqlite3.OperationalError as exc:
+                # Two processes starting together can both see the column
+                # missing; the loser's ALTER finds it already there.
+                if "duplicate column name" not in str(exc).lower():
+                    raise
     db.execute("CREATE INDEX IF NOT EXISTS idx_push_member "
                "ON push_subscriptions(member_id, channel)")
     # The running dispatcher advertises itself here, naming the lease holder
@@ -675,8 +697,10 @@ def _upsert_locked(db, channel, endpoint, p256dh, auth, member_id, member_name,
         per_member, per_tier = TIER_QUOTAS[tier]
         mine = db.execute("SELECT COUNT(*) FROM push_subscriptions WHERE member_id = ?",
                           (member_id,)).fetchone()[0]
-        pool = db.execute("SELECT COUNT(*) FROM push_subscriptions WHERE tier = ?",
-                          (tier,)).fetchone()[0]
+        members = TIER_POOL_MEMBERS[tier]
+        marks = ",".join("?" for _ in members)
+        pool = db.execute(f"SELECT COUNT(*) FROM push_subscriptions WHERE tier IN ({marks})",
+                          members).fetchone()[0]
         if mine >= per_member or pool >= per_tier:
             raise SubscriptionLimit("too many push subscriptions")
     db.execute(
@@ -685,6 +709,9 @@ def _upsert_locked(db, channel, endpoint, p256dh, auth, member_id, member_name,
         " ON CONFLICT(channel, endpoint) DO UPDATE SET"
         " member_name = excluded.member_name, p256dh = excluded.p256dh,"
         " auth = excluded.auth, updated_at = excluded.updated_at, fail_count = 0,"
+        # The tier comes from the server-side identity of whoever is posting
+        # now, so it is rewritten on every renewal (re-tiering legacy rows).
+        " tier = excluded.tier,"
         " pending_count = CASE WHEN push_subscriptions.mode = excluded.mode"
         "   THEN push_subscriptions.pending_count ELSE 0 END,"
         " pending_sender = CASE WHEN push_subscriptions.mode = excluded.mode"
@@ -692,6 +719,45 @@ def _upsert_locked(db, channel, endpoint, p256dh, auth, member_id, member_name,
         " mode = excluded.mode"
         " WHERE push_subscriptions.member_id = excluded.member_id",
         (channel, endpoint, member_id, member_name, p256dh, auth, mode, now, now, tier))
+
+
+def move_endpoint(db: sqlite3.Connection, *, member_id: str, old_endpoint: str,
+                  new_endpoint: str, p256dh: str, auth: str,
+                  now: Optional[float] = None) -> List[str]:
+    """Re-point this identity's subscriptions from one endpoint to another.
+
+    Used when the page has to replace its browser subscription. One write
+    transaction, row count unchanged, so a member at its quota keeps every
+    channel. A channel already subscribed on the new endpoint keeps that row
+    and only the old one is removed. Returns the channels moved.
+    """
+    now = time.time() if now is None else now
+    ensure_push_table(db)
+    owns_txn = not db.in_transaction
+    if owns_txn:
+        db.execute("BEGIN IMMEDIATE")
+    try:
+        rows = db.execute("SELECT channel FROM push_subscriptions WHERE member_id = ? "
+                          "AND endpoint = ?", (member_id, old_endpoint)).fetchall()
+        moved = []
+        for (channel,) in rows:
+            taken = db.execute("SELECT 1 FROM push_subscriptions WHERE channel = ? AND "
+                               "endpoint = ?", (channel, new_endpoint)).fetchone()
+            if taken:
+                db.execute("DELETE FROM push_subscriptions WHERE channel = ? AND endpoint = ?",
+                           (channel, old_endpoint))
+                continue
+            db.execute("UPDATE push_subscriptions SET endpoint = ?, p256dh = ?, auth = ?, "
+                       "updated_at = ?, fail_count = 0 WHERE channel = ? AND endpoint = ?",
+                       (new_endpoint, p256dh, auth, now, channel, old_endpoint))
+            moved.append(channel)
+    except BaseException:
+        if owns_txn:
+            db.rollback()
+        raise
+    if owns_txn:
+        db.commit()
+    return moved
 
 
 def delete_subscription(db: sqlite3.Connection, *, member_id: str, endpoint: str,
@@ -818,6 +884,12 @@ class PushDispatcher(threading.Thread):
 
     `holder` and `version` are advertised in the push_dispatcher table so a
     dashboard can report whether pushes are actually being sent.
+
+    Delivery guarantees: summaries and bangs survive a transient failure or a
+    send skipped while the lease is in doubt (the count is handed back; the
+    bang is retried a bounded number of times). Plain all/mentions messages
+    are at most once: one that cannot be sent right then is dropped, and the
+    next message on the channel reaches the phone as usual.
     """
 
     def __init__(self, db_path: Path, state_dir: Path, *, poll_s: float = 2.0,
@@ -850,6 +922,10 @@ class PushDispatcher(threading.Thread):
         self._lease_checked_at = 0.0
         self._lease_ok = True
         self._planned_retries: List[_Outgoing] = []
+        self._beat_lock = threading.Lock()
+        # Outcome writes whose commit failed, reapplied at the next tick so a
+        # handed-back summary count or a failure count is never lost.
+        self._record_backlog: List[Tuple[str, Tuple[Any, ...]]] = []
 
     def stop(self) -> None:
         self._stop.set()
@@ -895,7 +971,34 @@ class PushDispatcher(threading.Thread):
             if now - self._lease_checked_at >= LEASE_RECHECK_S:
                 self._lease_ok = self._lease() == LEASE_HELD
                 self._lease_checked_at = now
-            return self._lease_ok
+            ok = self._lease_ok
+        # A long send phase keeps the advertisement fresh too.
+        self._beat()
+        return ok
+
+    def _beat(self) -> None:
+        """Advertise this dispatcher (holder + version), at most every
+        MARKER_INTERVAL_S. Safe from worker threads; a failed write only
+        delays the next advertisement."""
+        if not self.holder:
+            return
+        with self._beat_lock:
+            mono = time.monotonic()
+            if mono < self._next_marker:
+                return
+            self._next_marker = mono + MARKER_INTERVAL_S
+        try:
+            db = sqlite3.connect(str(self.db_path), timeout=2)
+            try:
+                db.execute("INSERT OR REPLACE INTO push_dispatcher "
+                           "(id, holder, version, heartbeat_at) VALUES (1, ?, ?, ?)",
+                           (self.holder, self.version, time.time()))
+                db.commit()
+            finally:
+                db.close()
+        except sqlite3.Error:
+            with self._beat_lock:
+                self._next_marker = 0.0
 
     def _backed_off(self, endpoint: str) -> bool:
         return self._endpoint_backoff.get(endpoint, 0) > time.monotonic()
@@ -917,6 +1020,7 @@ class PushDispatcher(threading.Thread):
         with self._lease_lock:
             self._lease_checked_at, self._lease_ok = time.monotonic(), True
         self._housekeeping()
+        self._apply_record_backlog()
         outbox = self._plan()
         if not outbox:
             return 0
@@ -935,7 +1039,8 @@ class PushDispatcher(threading.Thread):
 
     def _housekeeping(self) -> None:
         mono = time.monotonic()
-        if mono < self._next_sweep and mono < self._next_marker:
+        if mono < self._next_sweep:
+            self._beat()
             return
         db = self._connect()
         try:
@@ -950,18 +1055,19 @@ class PushDispatcher(threading.Thread):
                 db.execute("DELETE FROM push_subscriptions WHERE channel NOT IN "
                            "(SELECT code FROM channels)")
                 db.commit()
+                # Mode 'off' rows (left by an older build; subscribe no
+                # longer creates them) can never deliver.
+                db.execute("DELETE FROM push_subscriptions WHERE mode = 'off'")
+                db.commit()
+                # Only 'guest': a 'legacy' row's owner is unknown and may be
+                # the hub owner, so it waits to be re-tiered instead.
                 db.execute("DELETE FROM push_subscriptions WHERE tier = ? AND "
                            "MAX(updated_at, last_ok_at) < ?",
                            (TIER_GUEST, self._clock() - GUEST_IDLE_S))
                 db.commit()
-            if self.holder and mono >= self._next_marker:
-                self._next_marker = mono + MARKER_INTERVAL_S
-                db.execute("INSERT OR REPLACE INTO push_dispatcher "
-                           "(id, holder, version, heartbeat_at) VALUES (1, ?, ?, ?)",
-                           (self.holder, self.version, time.time()))
-                db.commit()
         finally:
             db.close()
+        self._beat()
 
     def _plan(self) -> List[_Outgoing]:
         """Decide every push this poll earns and persist the new state.
@@ -1030,11 +1136,17 @@ class PushDispatcher(threading.Thread):
                     _set_state(sub, d.state, dirty)
                     outbox.append(_Outgoing(sub, d, None, prior))
             if dirty:
+                # Conditional on the row being the one planned from: a mode
+                # change (which resets the held count) or an unsubscribe and
+                # re-subscribe (a new created_at) between the read and this
+                # write must not be overwritten by stale absolute values.
                 db.executemany(
                     "UPDATE push_subscriptions SET last_sent_at = ?, pending_count = ?, "
-                    "pending_sender = ? WHERE channel = ? AND endpoint = ?",
+                    "pending_sender = ? WHERE channel = ? AND endpoint = ? "
+                    "AND mode = ? AND created_at = ?",
                     [(s["last_sent_at"], s["pending_count"], s["pending_sender"],
-                      s["channel"], s["endpoint"]) for s in dirty.values()])
+                      s["channel"], s["endpoint"], s["mode"], s["created_at"])
+                     for s in dirty.values()])
                 db.commit()
         except BaseException:
             for item in reversed(retries):
@@ -1122,52 +1234,91 @@ class PushDispatcher(threading.Thread):
             return 0
 
     def _record(self, outbox: List[_Outgoing]) -> None:
-        """Apply send outcomes: prune dead rows, restore undelivered summaries."""
-        db = self._connect()
+        """Apply send outcomes: prune dead rows, restore undelivered summaries.
+
+        A push skipped because the lease was in doubt (STATUS_SKIPPED), or
+        that failed transiently, keeps a summary's count and re-queues a bang.
+        A plain all/mentions message in that position is dropped: plain
+        messages are delivered at most once by design, and the next message
+        on the channel reaches the phone as usual.
+        """
         now = self._clock()
-        try:
-            for item in outbox:
-                sub, status = item.sub, item.status
-                endpoint, channel = sub["endpoint"], sub["channel"]
-                if 200 <= status < 300:
-                    self._endpoint_backoff.pop(endpoint, None)
-                    db.execute("UPDATE push_subscriptions SET fail_count = 0, last_ok_at = ? "
-                               "WHERE channel = ? AND endpoint = ?", (now, channel, endpoint))
-                elif status in (404, 410):
-                    # The browser dropped this subscription; it never comes back.
-                    db.execute("DELETE FROM push_subscriptions WHERE endpoint = ?", (endpoint,))
-                    self._endpoint_backoff.pop(endpoint, None)
-                elif status == STATUS_SKIPPED or _transient(status):
-                    if status != STATUS_SKIPPED:
-                        self._endpoint_backoff[endpoint] = time.monotonic() + TRANSIENT_BACKOFF_S
-                    if item.decision.kind == "digest":
-                        # Hand the count back so the summary goes out later.
-                        db.execute(
-                            "UPDATE push_subscriptions SET pending_count = pending_count + ?, "
-                            "last_sent_at = ?, pending_sender = CASE WHEN pending_sender = '' "
-                            "THEN ? ELSE pending_sender END WHERE channel = ? AND endpoint = ?",
-                            (item.decision.count, item.prior.last_sent_at,
-                             item.decision.sender, channel, endpoint))
-                    elif item.decision.kind == "bang":
-                        if status == STATUS_SKIPPED:
-                            item.attempt = max(0, item.attempt - 1)
-                        self._queue_retry(item)
+        ops: List[Tuple[str, Tuple[Any, ...]]] = []
+        for item in outbox:
+            sub, status = item.sub, item.status
+            endpoint, channel = sub["endpoint"], sub["channel"]
+            if 200 <= status < 300:
+                self._endpoint_backoff.pop(endpoint, None)
+                ops.append(("UPDATE push_subscriptions SET fail_count = 0, last_ok_at = ? "
+                            "WHERE channel = ? AND endpoint = ?", (now, channel, endpoint)))
+            elif status in (404, 410):
+                # The browser dropped this subscription; it never comes back.
+                ops.append(("DELETE FROM push_subscriptions WHERE endpoint = ?", (endpoint,)))
+                self._endpoint_backoff.pop(endpoint, None)
+            elif status == STATUS_SKIPPED or _transient(status):
+                if status != STATUS_SKIPPED:
+                    self._endpoint_backoff[endpoint] = time.monotonic() + TRANSIENT_BACKOFF_S
+                if item.decision.kind == "digest":
+                    # Hand the count back so the summary goes out later --
+                    # unless the mode changed meanwhile, which reset it.
+                    ops.append((
+                        "UPDATE push_subscriptions SET pending_count = pending_count + ?, "
+                        "last_sent_at = ?, pending_sender = CASE WHEN pending_sender = '' "
+                        "THEN ? ELSE pending_sender END WHERE channel = ? AND endpoint = ? "
+                        "AND mode = 'every5m' AND created_at = ?",
+                        (item.decision.count, item.prior.last_sent_at, item.decision.sender,
+                         channel, endpoint, sub["created_at"])))
+                elif item.decision.kind == "bang":
+                    if status == STATUS_SKIPPED:
+                        item.attempt = max(0, item.attempt - 1)
+                    self._queue_retry(item)
+            else:
+                # A 4xx the service will repeat (bad keys, bad auth, too
+                # large). Three in a row and the subscription goes.
+                ops.append(("UPDATE push_subscriptions SET fail_count = fail_count + 1 "
+                            "WHERE channel = ? AND endpoint = ?", (channel, endpoint)))
+                ops.append(("DELETE FROM push_subscriptions WHERE channel = ? AND "
+                            "endpoint = ? AND fail_count >= ?",
+                            (channel, endpoint, MAX_CONSECUTIVE_REJECTS)))
+                if int(sub.get("fail_count") or 0) + 1 >= MAX_CONSECUTIVE_REJECTS:
+                    sys.stderr.write(f"[nth_web push] dropping a subscription after "
+                                     f"repeated refusals from {_host_of(endpoint)} "
+                                     f"(HTTP {status})\n")
+        self._record_backlog.extend(ops)
+        self._apply_record_backlog()
+
+    def _apply_record_backlog(self) -> None:
+        """Write pending outcome ops in one transaction, retrying briefly. On
+        failure they stay queued (bounded) for the next tick."""
+        if not self._record_backlog:
+            return
+        ops = self._record_backlog
+        for attempt in range(3):
+            db = None
+            try:
+                db = self._connect()
+                db.execute("BEGIN IMMEDIATE")
+                for sql, params in ops:
+                    db.execute(sql, params)
+                db.commit()
+                self._record_backlog = []
+                return
+            except sqlite3.Error as exc:
+                if db is not None:
+                    try:
+                        db.rollback()
+                    except sqlite3.Error:
+                        pass
+                if attempt == 2:
+                    sys.stderr.write(f"[nth_web push] outcome write deferred: "
+                                     f"{type(exc).__name__}\n")
                 else:
-                    # A 4xx the service will repeat (bad keys, bad auth, too
-                    # large). Three in a row and the subscription goes.
-                    db.execute("UPDATE push_subscriptions SET fail_count = fail_count + 1 "
-                               "WHERE channel = ? AND endpoint = ?", (channel, endpoint))
-                    row = db.execute("SELECT fail_count FROM push_subscriptions WHERE "
-                                     "channel = ? AND endpoint = ?", (channel, endpoint)).fetchone()
-                    if row is not None and row[0] >= MAX_CONSECUTIVE_REJECTS:
-                        db.execute("DELETE FROM push_subscriptions WHERE channel = ? "
-                                   "AND endpoint = ?", (channel, endpoint))
-                        sys.stderr.write(f"[nth_web push] dropped a subscription after "
-                                         f"{row[0]} refusals from {_host_of(endpoint)} "
-                                         f"(HTTP {status})\n")
-            db.commit()
-        finally:
-            db.close()
+                    time.sleep(0.2)
+            finally:
+                if db is not None:
+                    db.close()
+        # Keep the most recent outcomes if the DB stays unwritable for long.
+        self._record_backlog = ops[-MAX_RECORD_BACKLOG:]
 
 
 def _row_message(row: sqlite3.Row) -> Dict[str, Any]:

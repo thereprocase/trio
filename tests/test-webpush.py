@@ -1007,6 +1007,7 @@ clear_subs()
 add_sub("old-guest")
 add_sub("fresh-guest", member="_op_g_fresh_x")
 add_sub("old-owner", member="_op_t_owner_x", tier=npush.TIER_TRUSTED)
+_clock_before_aging = clock[0]
 clock[0] = 2_000_000_000.0     # a realistic epoch, so "a month ago" is positive
 long_ago = clock[0] - npush.GUEST_IDLE_S - 10
 conn = sqlite3.connect(str(srv.DB_PATH))
@@ -1019,6 +1020,7 @@ fresh(Scripted())
 check("aging: an idle guest row is removed", sub_row("old-guest") is None)
 check("aging: a guest row that still receives pushes stays", sub_row("fresh-guest") is not None)
 check("aging: an idle trusted row stays", sub_row("old-owner") is not None)
+clock[0] = _clock_before_aging
 
 # The quota check and insert are atomic.
 clear_subs()
@@ -1065,6 +1067,238 @@ conn.commit()
 conn.close()
 check("marker: the dispatcher records its holder and version",
       marker is not None and marker[:2] == ("hub-a:1:x", "v-test"))
+clear_subs()
+
+# ───────── Third review: migration, move, outcome writes, races ─────────
+OLD_SCHEMA = (
+    "CREATE TABLE push_subscriptions ("
+    " channel TEXT NOT NULL, endpoint TEXT NOT NULL, member_id TEXT NOT NULL,"
+    " member_name TEXT NOT NULL DEFAULT '', p256dh TEXT NOT NULL, auth TEXT NOT NULL,"
+    " mode TEXT NOT NULL, created_at REAL NOT NULL, updated_at REAL NOT NULL,"
+    " last_sent_at REAL NOT NULL DEFAULT 0, pending_count INTEGER NOT NULL DEFAULT 0,"
+    " pending_sender TEXT NOT NULL DEFAULT '', PRIMARY KEY (channel, endpoint))")
+
+
+def old_db(path):
+    """A hub DB as build 200b513 left it: no tier, fail_count or last_ok_at."""
+    conn = sqlite3.connect(str(path))
+    conn.execute("CREATE TABLE channels (code TEXT)")
+    conn.execute("INSERT INTO channels VALUES ('c')")
+    conn.execute("CREATE TABLE messages (id INTEGER PRIMARY KEY, channel TEXT, member_id TEXT, "
+                 "member_name TEXT, content TEXT, mentions TEXT, bangs TEXT, recipients TEXT, "
+                 "retracted_at TEXT)")
+    conn.execute(OLD_SCHEMA)
+    return conn
+
+
+mig_dir = Path(tempfile.mkdtemp(prefix="nth_webpush_mig_"))
+mig_db = mig_dir / "nth.db"
+t0 = 2_000_000_000.0
+conn = old_db(mig_db)
+for ep, member, mode in (("owner-a", "_op_t_owner", "mentions"),
+                         ("owner-b", "_op_t_owner", "mentions"),
+                         ("guest-old", "_op_g_old_x", "mentions"),
+                         ("old-off", "_op_t_owner", "off")):
+    conn.execute("INSERT INTO push_subscriptions (channel, endpoint, member_id, p256dh, auth, "
+                 "mode, created_at, updated_at) VALUES ('c', ?, ?, ?, ?, ?, ?, ?)",
+                 (f"{EP}{ep}", member, UA_PUBLIC, UA_AUTH, mode, t0, t0))
+conn.commit()
+npush.ensure_push_table(conn)
+conn.commit()
+tiers = dict(conn.execute("SELECT endpoint, tier FROM push_subscriptions").fetchall())
+check("migrate: rows from before the tier column become 'legacy'",
+      set(tiers.values()) == {npush.TIER_LEGACY})
+npush.upsert_subscription(conn, channel="c", endpoint=f"{EP}owner-a", p256dh=UA_PUBLIC,
+                          auth=UA_AUTH, member_id="_op_t_owner", member_name="Owner",
+                          mode="mentions", tier=npush.TIER_TRUSTED, now=t0 + 86400)
+npush.upsert_subscription(conn, channel="c", endpoint=f"{EP}guest-old", p256dh=UA_PUBLIC,
+                          auth=UA_AUTH, member_id="_op_g_old_x", member_name="old-guest",
+                          mode="mentions", tier=npush.TIER_GUEST, now=t0 + 86400)
+npush.upsert_subscription(conn, channel="c", endpoint=f"{EP}guest-new", p256dh=UA_PUBLIC,
+                          auth=UA_AUTH, member_id="_op_g_new_x", member_name="new-guest",
+                          mode="mentions", tier=npush.TIER_GUEST, now=t0 + 31 * 86400)
+tiers = dict(conn.execute("SELECT endpoint, tier FROM push_subscriptions").fetchall())
+check("migrate: renewing re-tiers a legacy row from the caller's identity",
+      tiers[f"{EP}owner-a"] == npush.TIER_TRUSTED and tiers[f"{EP}guest-old"] == npush.TIER_GUEST)
+conn.close()
+d = npush.PushDispatcher(mig_db, mig_dir, sender=Scripted(), clock=lambda: t0 + 32 * 86400)
+d._housekeeping()
+conn = sqlite3.connect(str(mig_db))
+left = {r[0] for r in conn.execute("SELECT endpoint FROM push_subscriptions")}
+check("migrate: after 32 days the re-tiered owner row survives the sweep", f"{EP}owner-a" in left)
+check("migrate: a legacy row that was never renewed is not aged out", f"{EP}owner-b" in left)
+check("migrate: a genuinely stale guest row still ages out", f"{EP}guest-old" not in left)
+check("migrate: a recently renewed guest row stays", f"{EP}guest-new" in left)
+check("migrate: an old build's mode-off row is swept", f"{EP}old-off" not in left)
+_q = dict(npush.TIER_QUOTAS)
+npush.TIER_QUOTAS[npush.TIER_TRUSTED] = (64, 2)
+try:
+    try:
+        npush.upsert_subscription(conn, channel="c", endpoint=f"{EP}owner-c", p256dh=UA_PUBLIC,
+                                  auth=UA_AUTH, member_id="_op_t_other", member_name="o",
+                                  mode="all", tier=npush.TIER_TRUSTED)
+        check("migrate: legacy rows count against the trusted pool", False)
+    except npush.SubscriptionLimit:
+        check("migrate: legacy rows count against the trusted pool", True)
+finally:
+    npush.TIER_QUOTAS.update(_q)
+conn.close()
+
+
+class StaleTableInfo(sqlite3.Connection):
+    """Reports the pre-migration columns, as a racing second process would
+    have seen them a moment before the first one added them."""
+
+    def execute(self, sql, *args):
+        if sql.startswith("PRAGMA table_info(push_subscriptions)"):
+            return super().execute("SELECT 0, 'channel'")
+        return super().execute(sql, *args)
+
+
+race_dir = Path(tempfile.mkdtemp(prefix="nth_webpush_race_"))
+old_db(race_dir / "nth.db").close()
+first = sqlite3.connect(str(race_dir / "nth.db"))
+npush.ensure_push_table(first)
+first.commit()
+first.close()
+loser = sqlite3.connect(str(race_dir / "nth.db"), factory=StaleTableInfo)
+try:
+    npush.ensure_push_table(loser)
+    check("migrate: a duplicate-column race on first start is treated as success", True)
+except sqlite3.OperationalError as exc:
+    check("migrate: a duplicate-column race on first start is treated as success", False, str(exc))
+loser.close()
+
+# Moving a guest at its per-member quota to a new endpoint keeps every channel.
+move_dir = Path(tempfile.mkdtemp(prefix="nth_webpush_move_"))
+mconn = sqlite3.connect(str(move_dir / "n.db"))
+E1, E2 = f"{EP}E1", f"{EP}E2"
+_q = dict(npush.TIER_QUOTAS)
+npush.TIER_QUOTAS[npush.TIER_GUEST] = (5, 200)
+try:
+    npush.upsert_subscription(mconn, channel="c5", endpoint=E1, p256dh=UA_PUBLIC, auth=UA_AUTH,
+                              member_id="X", member_name="x", mode="all")
+    for ch in ("c1", "c2", "c3", "c4"):
+        npush.upsert_subscription(mconn, channel=ch, endpoint=E1, p256dh=UA_PUBLIC,
+                                  auth=UA_AUTH, member_id="Y", member_name="y", mode="mentions")
+    npush.upsert_subscription(mconn, channel="c5", endpoint=E2, p256dh=UA_PUBLIC, auth=UA_AUTH,
+                              member_id="Y", member_name="y", mode="all")
+    moved = npush.move_endpoint(mconn, member_id="Y", old_endpoint=E1, new_endpoint=E2,
+                                p256dh=UA_PUBLIC, auth=UA_AUTH)
+finally:
+    npush.TIER_QUOTAS.update(_q)
+rows = mconn.execute("SELECT channel, endpoint, member_id, mode FROM push_subscriptions "
+                     "ORDER BY channel").fetchall()
+check(f"move: a member at its quota keeps every channel ({moved})",
+      sorted(moved) == ["c1", "c2", "c3", "c4"]
+      and [r for r in rows if r[2] == "Y"] == [(c, E2, "Y", "mentions") for c in ("c1", "c2", "c3", "c4")]
+      + [("c5", E2, "Y", "all")])
+check("move: another identity's row on the old endpoint is untouched",
+      ("c5", E1, "X", "all") in rows)
+mconn.close()
+
+# A failed outcome write is kept and applied on the next tick.
+clear_subs()
+add_sub("rec", mode="every5m")
+sc = Scripted()
+d = fresh(sc)
+real_connect = d._connect
+
+
+def impatient_connect():
+    conn = real_connect()
+    conn.execute("PRAGMA busy_timeout=50")
+    return conn
+
+
+d._connect = impatient_connect
+clock[0] += 10_000
+say("summary that will fail")
+locker = []
+
+
+def failing_then_locking(endpoint, *a, **k):
+    # Opened on the sender's worker thread and closed from the test, so the
+    # connection must not be pinned to its creating thread.
+    hold = sqlite3.connect(str(srv.DB_PATH), timeout=5, check_same_thread=False)
+    hold.execute("BEGIN IMMEDIATE")
+    locker.append(hold)
+    return 503
+
+
+d._send = failing_then_locking
+d.tick()
+check("record: an outcome write that cannot commit is kept for later",
+      len(d._record_backlog) == 1 and sub_row("rec")["pending_count"] == 0)
+for h in locker:
+    h.rollback()
+    h.close()
+d._send = sc
+d.tick()
+check("record: the kept write lands on the next tick (the summary count is back)",
+      not d._record_backlog and sub_row("rec")["pending_count"] >= 1)
+
+# A mode change during planning is not overwritten by the plan's write.
+clear_subs()
+add_sub("mc", mode="every5m", member="_op_g_mc_x")
+conn = sqlite3.connect(str(srv.DB_PATH))
+conn.execute("UPDATE push_subscriptions SET pending_count = 5, pending_sender = 'Ada', "
+             "last_sent_at = ?", (clock[0],))
+conn.commit()
+conn.close()
+sc = Scripted()
+d = fresh(sc)
+switched = []
+
+
+def switch_mode_mid_plan(mode, msg, member_id, *a, **k):
+    if not switched:
+        switched.append(1)
+        add_sub("mc", mode="all", member="_op_g_mc_x")      # resets the held count
+    return _decide(mode, msg, member_id, *a, **k)
+
+
+npush.decide = switch_mode_mid_plan
+try:
+    say("one more while every5m")
+    d.tick()
+finally:
+    npush.decide = _decide
+row = sub_row("mc")
+check(f"plan: a concurrent mode change keeps its reset (mode {row['mode']}, "
+      f"pending {row['pending_count']})", row["mode"] == "all" and row["pending_count"] == 0)
+
+# The advertisement stays fresh through a long send phase.
+check("marker: freshness outlasts the worst-case tick",
+      npush.MARKER_FRESH_S > npush.MAX_SENDS_PER_TICK / npush.SEND_WORKERS * npush.SEND_TIMEOUT_S)
+clear_subs()
+for i in range(3):
+    add_sub(f"hb{i}", member=f"_op_g_hb{i}_x")
+seen = []
+
+
+def heartbeat_probe(*a, **k):
+    time.sleep(0.05)
+    conn = sqlite3.connect(str(srv.DB_PATH))
+    seen.append(npush.dispatcher_marker(conn)[2])
+    conn.close()
+    return 201
+
+
+_mi, _workers = npush.MARKER_INTERVAL_S, npush.SEND_WORKERS
+npush.MARKER_INTERVAL_S, npush.SEND_WORKERS = 0.0, 1
+try:
+    d = fresh(heartbeat_probe, holder="hub-hb:1:x", version="t")
+    say("long send phase")
+    d.tick()
+finally:
+    npush.MARKER_INTERVAL_S, npush.SEND_WORKERS = _mi, _workers
+check("marker: the heartbeat advances during the send phase",
+      len(seen) == 3 and seen[-1] > seen[0])
+conn = sqlite3.connect(str(srv.DB_PATH))
+conn.execute("DELETE FROM push_dispatcher")
+conn.commit()
+conn.close()
 clear_subs()
 
 # ───────── HTTP surface ─────────
@@ -1203,6 +1437,22 @@ try:
             npush.TIER_QUOTAS.update(_quotas)
         st, _hd, _raw = call(port, "POST", "/api/push/subscribe", {**SUB, "mode": "every5m"})
         check("subscribe: named guest can subscribe", st == 200)
+        NEW_EP = GOOD_SUB["endpoint"] + "-moved"
+        st, _hd, raw = call(port, "POST", "/api/push/move",
+                            {"old_endpoint": GOOD_SUB["endpoint"],
+                             "subscription": {**GOOD_SUB, "endpoint": NEW_EP}})
+        check("move: the page's move call re-points this identity's rows",
+              st == 200 and as_json(raw).get("moved") == [CH])
+        st, _hd, raw = call(port, "GET", f"/api/push/status?channel={CH}")
+        check("move: status shows the new endpoint",
+              as_json(raw).get("subscriptions") == [{"endpoint": NEW_EP, "mode": "every5m"}])
+        st, _hd, _raw = call(port, "POST", "/api/push/move",
+                             {"old_endpoint": NEW_EP,
+                              "subscription": {**GOOD_SUB, "endpoint": "https://127.0.0.1/x"}})
+        check("move: a non-push-service endpoint is refused (400)", st == 400)
+        st, _hd, raw = call(port, "POST", "/api/push/move",
+                            {"old_endpoint": NEW_EP, "subscription": GOOD_SUB})
+        check("move: and back again", st == 200 and as_json(raw).get("moved") == [CH])
         st, _hd, raw = call(port, "GET", f"/api/push/status?channel={CH}")
         status = as_json(raw)
         check("status: shows this identity's mode for the channel",

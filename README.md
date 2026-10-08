@@ -367,8 +367,12 @@ hub takes the lease over, so a push is sent by one hub only, and pauses while
 its own lease renewal is failing (a locked database, a suspend). The sending hub
 advertises itself in `nth.db`; a single-channel or `--no-agent-control`
 dashboard still saves your choice, and its control says when no hub is sending. A summary or bang that hits a temporary push-service
-failure is retried; a subscription the service rejects three times in a row is
-dropped. Guests share a small subscription pool of their own, which leaves the
+failure, or that the hub holds back while its lease is in doubt, is kept and
+sent later; a plain message in that position is dropped, since plain messages
+are delivered at most once and the next one reaches the phone as usual. A
+subscription the service rejects three times in a row is dropped. Opening a
+channel's details renews this device's subscription quietly, with its current
+mode. Guests share a small subscription pool of their own, which leaves the
 owner and members their room, and a guest subscription that has neither been
 renewed nor delivered to in 30 days is removed. Push needs the `cryptography` package in the hub's
 Python, which the MCP SDK already pulls in through PyJWT; without it the dashboard runs

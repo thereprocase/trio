@@ -4268,6 +4268,8 @@ class NthWebHandler(BaseHTTPRequestHandler):
             self._handle_push_subscribe()
         elif parsed.path == "/api/push/unsubscribe":
             self._handle_push_unsubscribe()
+        elif parsed.path == "/api/push/move":
+            self._handle_push_move()
         elif parsed.path == "/api/cull":
             self._handle_cull()
         elif parsed.path == "/api/member/filter":
@@ -6655,6 +6657,37 @@ class NthWebHandler(BaseHTTPRequestHandler):
         finally:
             db.close()
         self._json({"ok": True, "channel": channel, "mode": mode})
+
+    def _handle_push_move(self) -> None:
+        """Move the caller's subscriptions from an old browser endpoint to a new
+        one, in one transaction, so replacing the browser subscription never
+        costs a channel to the quota."""
+        ident = self._push_identity()
+        if ident is None or self._push_unavailable():
+            return
+        body = self._read_json_body(max_bytes=8192)
+        if body is None:
+            return
+        old = body.get("old_endpoint")
+        if not isinstance(old, str) or not old or len(old) > npush.MAX_ENDPOINT_LEN:
+            self._error(400, "old_endpoint required")
+            return
+        try:
+            endpoint, p256dh, auth = npush.validate_subscription(body.get("subscription"))
+        except ValueError as exc:
+            self._error(400, str(exc))
+            return
+        db = sqlite3.connect(str(self.db_path), timeout=5)
+        try:
+            moved = npush.move_endpoint(db, member_id=ident.member_id, old_endpoint=old,
+                                        new_endpoint=endpoint, p256dh=p256dh, auth=auth)
+        except sqlite3.Error as exc:
+            sys.stderr.write(f"[nth_web push] move failed: {exc}\n")
+            self._error(500, "could not save notification settings")
+            return
+        finally:
+            db.close()
+        self._json({"ok": True, "moved": moved})
 
     def _handle_push_unsubscribe(self) -> None:
         ident = self._push_identity()

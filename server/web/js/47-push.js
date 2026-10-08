@@ -161,14 +161,21 @@
     setHint(section, why || (status && status.delivering === false ? NOT_DELIVERING : ''));
     disable(section, !!why);
     if (why) { showMode(section, 'off'); return; }
-    let endpoint = '';
+    let sub = null;
     try {
-      if (supported() && Notification.permission === 'granted') {
-        endpoint = (await browserSubscription(false))?.endpoint || '';
-      }
+      if (supported() && Notification.permission === 'granted') sub = await browserSubscription(false);
     } catch { /* no registration yet: this device is not subscribed */ }
+    const endpoint = sub?.endpoint || '';
     const mine = (status?.subscriptions || []).find(s => s.endpoint === endpoint);
     showMode(section, endpoint && mine ? mine.mode : 'off');
+    // Quietly renew this device's row with the mode it already has: no
+    // prompt, no visible change. It keeps the row's tier current with this
+    // identity (rows from older builds are re-tiered) and marks it in use, so
+    // an active guest is never aged out.
+    if (sub && mine && status?.named) {
+      api.post('/api/push/subscribe', { subscription: sub.toJSON(), channel, mode: mine.mode }, false)
+        .catch(() => { /* best effort; the visible state is already right */ });
+    }
   }
 
   async function choose(section, channel, mode) {
@@ -219,28 +226,15 @@
   }
 
   // After a 409 the browser endpoint was replaced, and this identity's other
-  // channels still name the old one, which the push service now rejects. Move
-  // each to the new endpoint with its mode; name any that could not be moved,
-  // since those are now off.
+  // channels still name the old one, which the push service now rejects. The
+  // server moves all of them to the new endpoint in one transaction (so the
+  // quota never costs a channel); report which channels came along.
   async function moveOtherChannels(channel, oldEndpoint, sub) {
-    let status;
-    try { status = await api.get('/api/push/status?channel=' + encodeURIComponent(channel), false); }
-    catch { return ''; }
-    const stale = (status?.mine || []).filter(s => s.endpoint === oldEndpoint && s.channel !== channel);
-    const moved = [], lost = [];
-    for (const row of stale) {
-      try {
-        await api.post('/api/push/subscribe', { subscription: sub.toJSON(), channel: row.channel, mode: row.mode }, false);
-        moved.push('#' + row.channel);
-      } catch { lost.push('#' + row.channel); }
-    }
-    if (stale.length) {
-      try { await api.post('/api/push/unsubscribe', { endpoint: oldEndpoint }, false); } catch { /* the push service retires it anyway */ }
-    }
-    const parts = [];
-    if (moved.length) parts.push('Also kept on for ' + moved.join(', ') + '.');
-    if (lost.length) parts.push('Now off for ' + lost.join(', ') + ' — turn them on again there.');
-    return parts.join(' ');
+    let result;
+    try { result = await api.post('/api/push/move', { old_endpoint: oldEndpoint, subscription: sub.toJSON() }, false); }
+    catch { return 'Phone notifications on your other channels may now be off — check them there.'; }
+    const moved = (result?.moved || []).filter(c => c !== channel).map(c => '#' + c);
+    return moved.length ? 'Also kept on for ' + moved.join(', ') + '.' : '';
   }
 
   // ── Service worker wiring ─────────────────────────────────────────────
