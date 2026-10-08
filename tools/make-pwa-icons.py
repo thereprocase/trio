@@ -1,160 +1,104 @@
 #!/usr/bin/env python3
-"""Generate the dashboard's web-app icons with the Python standard library.
+"""Generate the dashboard's web-app icons.
 
-Writes PNGs into server/web/icons/ (the committed copies are what the server
-serves; rerun this only to change the artwork):
-
-  icon-192.png, icon-512.png                 "any" purpose, rounded square
-  icon-maskable-192.png, icon-maskable-512.png  full bleed, glyph inside the
-                                             80% safe zone launchers crop to
+Writes SVG sources and PNG renders into server/web/icons/ (the committed PNGs
+are what the server serves; rerun this only to change the artwork):
+  icon-192.png, icon-512.png                 rounded tile, "any" purpose
+  icon-maskable-192.png, icon-maskable-512.png  full bleed, glyph scaled into
+                                             the 80% safe zone launchers crop to
   apple-touch-icon.png (180)                 full bleed and opaque; iOS rounds
-                                             the corners itself and renders any
-                                             transparency as black
+                                             the corners itself
   badge-96.png                               white silhouette on transparent,
                                              for the Android status bar
 
-The artwork is a chat bubble with three dots, drawn with signed distance
-functions so edges are anti-aliased without supersampling. Colours come from
-the light-1 tokens in server/web/css/00-tokens.css (--accent, --accent-strong).
+The artwork: a speech bubble drawn as four separate arcs, one colour per voice
+(trio and quartet are conversations between several sessions), a tail in the
+gap between two voices, and a spark at the centre, on a dark Gridline tile.
 
-No Pillow on purpose: the hub venv does not ship it and the dashboard adds no
-dependencies. zlib + struct are enough to write a valid RGBA PNG.
+The SVGs are built with the standard library. Rendering the PNGs needs
+`rsvg-convert` (librsvg) on the machine that regenerates them; the hub never
+runs this script, so the server gains no dependency.
 
 Usage: python3 tools/make-pwa-icons.py [output_dir]
 """
-from __future__ import annotations
-
-import math
-import struct
-import sys
-import zlib
-from pathlib import Path
-
-ACCENT = (0x3D, 0x7A, 0x63)          # --accent
-ACCENT_STRONG = (0x31, 0x64, 0x51)   # --accent-strong
-WHITE = (0xFF, 0xFF, 0xFF)
-
-OUT_DIR = Path(__file__).resolve().parent.parent / "server" / "web" / "icons"
-
-
-# ── signed distance functions, in unit-square coordinates ──
-
-def sd_round_rect(px, py, cx, cy, hw, hh, r):
-    qx = abs(px - cx) - (hw - r)
-    qy = abs(py - cy) - (hh - r)
-    outside = math.hypot(max(qx, 0.0), max(qy, 0.0))
-    inside = min(max(qx, qy), 0.0)
-    return outside + inside - r
-
-
-def sd_circle(px, py, cx, cy, r):
-    return math.hypot(px - cx, py - cy) - r
-
-
-def sd_triangle(px, py, a, b, c):
-    """Exact signed distance to a triangle (negative inside)."""
-    def sub(u, v):
-        return (u[0] - v[0], u[1] - v[1])
-
-    def dot(u, v):
-        return u[0] * v[0] + u[1] * v[1]
-
-    p = (px, py)
-    e0, e1, e2 = sub(b, a), sub(c, b), sub(a, c)
-    v0, v1, v2 = sub(p, a), sub(p, b), sub(p, c)
-
-    def edge(v, e):
-        t = max(0.0, min(1.0, dot(v, e) / dot(e, e)))
-        return (v[0] - e[0] * t, v[1] - e[1] * t)
-
-    pq0, pq1, pq2 = edge(v0, e0), edge(v1, e1), edge(v2, e2)
-    s = 1.0 if e0[0] * e2[1] - e0[1] * e2[0] > 0 else -1.0
-    # Component-wise minimum: nearest edge for the distance, and the point is
-    # inside only when it is on the inner side of all three edges.
-    dist_sq = min(dot(pq0, pq0), dot(pq1, pq1), dot(pq2, pq2))
-    side = min(s * (v0[0] * e0[1] - v0[1] * e0[0]),
-               s * (v1[0] * e1[1] - v1[1] * e1[0]),
-               s * (v2[0] * e2[1] - v2[1] * e2[0]))
-    return -math.sqrt(dist_sq) * (1.0 if side > 0 else -1.0)
+import math, sys
+CX, CY, R = 256, 244, 128
+def pt(a, rr=R): return (CX + rr*math.cos(math.radians(a)), CY + rr*math.sin(math.radians(a)))
+def arc(a0, a1):
+    (x0, y0), (x1, y1) = pt(a0), pt(a1)
+    return f"M {x0:.1f} {y0:.1f} A {R} {R} 0 0 1 {x1:.1f} {y1:.1f}"
+# Four voices, one per quadrant; the gap at 135 deg holds the tail.
+ARCS = [(235, 305, "#5fe3b0", "#3fc8ff"), (325, 395, "#ffd36b", "#ff9f43"),
+        (55, 118, "#ff6b8b", "#ff4f6a"), (152, 215, "#4fa8ff", "#7c6bff")]
+def spark(x, y, big, small):
+    pts = [f"{x+(big if k%2==0 else small)*math.cos(math.radians(-90+k*45)):.1f},"
+           f"{y+(big if k%2==0 else small)*math.sin(math.radians(-90+k*45)):.1f}" for k in range(8)]
+    return "M " + " L ".join(pts) + " Z"
+def glyph(mono=False):
+    a, b = pt(121, R-4), pt(149, R-4)
+    tip = pt(135, R+96)
+    tail = f"M {a[0]:.1f} {a[1]:.1f} L {tip[0]:.1f} {tip[1]:.1f} L {b[0]:.1f} {b[1]:.1f} Z"
+    if mono:
+        arcs = "".join(f'<path d="{arc(a0, a1)}"/>' for a0, a1, *_ in ARCS)
+        return (f'<g fill="none" stroke="#fff" stroke-width="34" stroke-linecap="round">{arcs}</g>'
+                f'<path d="{tail}" fill="#fff" stroke="#fff" stroke-width="14" stroke-linejoin="round"/>'
+                f'<path d="{spark(CX, CY, 62, 14)}" fill="#fff"/>')
+    grads, paths = [], []
+    for i, (a0, a1, c0, c1) in enumerate(ARCS):
+        (x0, y0), (x1, y1) = pt(a0), pt(a1)
+        grads.append(f'<linearGradient id="g{i}" gradientUnits="userSpaceOnUse" x1="{x0:.0f}" y1="{y0:.0f}" '
+                     f'x2="{x1:.0f}" y2="{y1:.0f}"><stop offset="0" stop-color="{c0}"/><stop offset="1" stop-color="{c1}"/></linearGradient>')
+        paths.append(f'<path d="{arc(a0, a1)}" stroke="url(#g{i})"/>')
+    tg = (f'<linearGradient id="tail" gradientUnits="userSpaceOnUse" x1="{a[0]:.0f}" y1="{a[1]:.0f}" '
+          f'x2="{tip[0]:.0f}" y2="{tip[1]:.0f}"><stop offset="0" stop-color="#ff4f6a"/><stop offset="1" stop-color="#7c6bff"/></linearGradient>')
+    body = (f'<g fill="none" stroke-width="{{w}}" stroke-linecap="round">{"".join(paths)}</g>'
+            f'<path d="{tail}" fill="url(#tail)" stroke="url(#tail)" stroke-width="{{tw}}" stroke-linejoin="round"/>')
+    return ("".join(grads) + tg,
+            f'<g filter="url(#bloom)" opacity="0.95">{body.format(w=34, tw=16)}<path d="{spark(CX, CY, 66, 15)}" fill="#bfffe6"/></g>'
+            + body.format(w=30, tw=12) + f'<path d="{spark(CX, CY, 62, 13)}" fill="url(#sparkfill)"/>')
+def tile(rounded, scale=1.0):
+    defs, art = glyph()
+    grid = "".join(f'<path d="M {v} 0 V 512 M 0 {v} H 512"/>' for v in range(32, 512, 32))
+    clip = f'<rect width="512" height="512" rx="{112 if rounded else 0}"/>'
+    s = scale; off = 256*(1-s)
+    return f'''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><defs>
+<linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#10261f"/><stop offset="1" stop-color="#04090a"/></linearGradient>
+<radialGradient id="halo" cx="0.5" cy="0.47" r="0.42"><stop offset="0" stop-color="#7cf5c8" stop-opacity="0.22"/><stop offset="1" stop-color="#7cf5c8" stop-opacity="0"/></radialGradient>
+<radialGradient id="sparkfill" cx="0.5" cy="0.5" r="0.5"><stop offset="0" stop-color="#fff"/><stop offset="1" stop-color="#e6fff6"/></radialGradient>
+<filter id="bloom" x="-30%" y="-30%" width="160%" height="160%"><feGaussianBlur stdDeviation="9"/></filter>
+<clipPath id="tile">{clip}</clipPath>{defs}</defs>
+<g clip-path="url(#tile)"><rect width="512" height="512" fill="url(#bg)"/>
+<g stroke="#fff" stroke-opacity="0.045" stroke-width="2">{grid}</g><rect width="512" height="512" fill="url(#halo)"/></g>
+<g transform="translate({off:.1f} {off:.1f}) scale({s})">{art}</g></svg>'''
+def badge():
+    return f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><g transform="translate(35.8 46.8) scale(0.86)">{glyph(mono=True)}</g></svg>'
 
 
-DOTS = ((0.385, 0.455), (0.5, 0.455), (0.615, 0.455))
-
-
-def glyph(px, py):
-    """(bubble distance, dots distance) for the chat glyph at scale 1."""
-    body = sd_round_rect(px, py, 0.5, 0.455, 0.275, 0.2, 0.09)
-    tail = sd_triangle(px, py, (0.33, 0.56), (0.47, 0.6), (0.29, 0.775))
-    dots = min(sd_circle(px, py, x, y, 0.037) for x, y in DOTS)
-    return min(body, tail), dots
-
-
-def coverage(dist, size):
-    """Anti-aliased coverage of a shape from its distance, one pixel wide."""
-    return max(0.0, min(1.0, 0.5 - dist * size))
-
-
-def mix(a, b, t):
-    return tuple(round(a[i] + (b[i] - a[i]) * t) for i in range(3))
-
-
-def render(size, *, background, rounded, glyph_scale, silhouette=False):
-    """RGBA rows for one icon."""
-    rows = []
-    for y in range(size):
-        row = bytearray()
-        for x in range(size):
-            px, py = (x + 0.5) / size, (y + 0.5) / size
-            gx, gy = (px - 0.5) / glyph_scale + 0.5, (py - 0.5) / glyph_scale + 0.5
-            bubble, dots = glyph(gx, gy)
-            bubble_cov = coverage(bubble * glyph_scale, size)
-            dots_cov = coverage(dots * glyph_scale, size)
-            if silhouette:
-                alpha = bubble_cov * (1.0 - dots_cov)
-                row += bytes((*WHITE, round(alpha * 255)))
-                continue
-            # A gentle top-to-bottom shade keeps the flat accent from reading
-            # as a placeholder square at launcher size.
-            base = mix(ACCENT, ACCENT_STRONG, py) if background else ACCENT
-            colour = mix(base, WHITE, bubble_cov)
-            colour = mix(colour, ACCENT, dots_cov * bubble_cov)
-            alpha = 1.0
-            if rounded:
-                alpha = coverage(sd_round_rect(px, py, 0.5, 0.5, 0.5, 0.5, 0.22), size)
-            row += bytes((*colour, round(alpha * 255)))
-        rows.append(bytes(row))
-    return rows
-
-
-def png_bytes(rows, size):
-    def chunk(kind, data):
-        body = kind + data
-        return struct.pack(">I", len(data)) + body + struct.pack(">I", zlib.crc32(body) & 0xFFFFFFFF)
-
-    raw = b"".join(b"\x00" + r for r in rows)   # filter type 0 on every row
-    ihdr = struct.pack(">IIBBBBB", size, size, 8, 6, 0, 0, 0)  # 8-bit RGBA
-    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr)
-            + chunk(b"IDAT", zlib.compress(raw, 9)) + chunk(b"IEND", b""))
-
-
-ICONS = (
-    ("icon-192.png", 192, dict(background=True, rounded=True, glyph_scale=1.0)),
-    ("icon-512.png", 512, dict(background=True, rounded=True, glyph_scale=1.0)),
-    ("icon-maskable-192.png", 192, dict(background=True, rounded=False, glyph_scale=0.86)),
-    ("icon-maskable-512.png", 512, dict(background=True, rounded=False, glyph_scale=0.86)),
-    ("apple-touch-icon.png", 180, dict(background=True, rounded=False, glyph_scale=0.95)),
-    ("badge-96.png", 96, dict(background=False, rounded=False, glyph_scale=1.3, silhouette=True)),
+RENDERS = (
+    ("icon.svg", "icon-512.png", 512), ("icon.svg", "icon-192.png", 192),
+    ("icon-maskable.svg", "icon-maskable-512.png", 512),
+    ("icon-maskable.svg", "icon-maskable-192.png", 192),
+    ("apple-touch.svg", "apple-touch-icon.png", 180), ("badge.svg", "badge-96.png", 96),
 )
 
 
-def main(argv):
-    out = Path(argv[1]) if len(argv) > 1 else OUT_DIR
+def main() -> None:
+    import shutil
+    import subprocess
+    from pathlib import Path
+    out = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(__file__).resolve().parent.parent / "server" / "web" / "icons"
     out.mkdir(parents=True, exist_ok=True)
-    for name, size, opts in ICONS:
-        (out / name).write_bytes(png_bytes(render(size, **opts), size))
-        print(f"wrote {out / name} ({size}x{size})")
-    return 0
+    sources = {"icon.svg": tile(True), "icon-maskable.svg": tile(False, 0.78),
+               "apple-touch.svg": tile(False, 0.92), "badge.svg": badge()}
+    for name, svg in sources.items():
+        (out / name).write_text(svg, encoding="utf-8")
+    renderer = shutil.which("rsvg-convert")
+    if not renderer:
+        sys.exit("rsvg-convert not found: SVG sources written, PNGs left unchanged")
+    for svg, png, size in RENDERS:
+        subprocess.run([renderer, "-w", str(size), "-h", str(size), str(out / svg), "-o", str(out / png)], check=True)
+    print(f"wrote {len(sources)} SVG sources and {len(RENDERS)} PNGs to {out}")
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv))
+    main()
