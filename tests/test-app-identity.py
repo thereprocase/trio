@@ -6,8 +6,11 @@ Covers:
   2. NTH_APP_NAME / NTH_APP_SHORT_NAME / NTH_APP_THEME reach the manifest and
      the page head, HTML-escaped and with control characters dropped.
   3. A malformed theme colour falls back to the built-in one.
-  4. NTH_APP_ICON_DIR replaces exactly the icons it holds as PNGs; a missing,
-     non-PNG or oversized file keeps the built-in icon.
+  4. NTH_APP_ICON_DIR replaces exactly the icons it holds as PNGs of the right
+     size; a missing, non-PNG, oversized, wrong-size or non-regular file (a
+     FIFO must not hang the import) keeps the built-in icon, and a value that
+     names no directory is reported.
+  5. NTH_APP_BACKGROUND reaches the manifest; malformed colours are reported.
 
 The settings are read at import, so each case imports nth_web in a fresh
 interpreter with its own environment.
@@ -16,6 +19,8 @@ Run: python3 tests/test-app-identity.py
 """
 import json
 import os
+import struct
+import zlib
 import subprocess
 import sys
 import tempfile
@@ -25,6 +30,18 @@ ROOT = Path(__file__).resolve().parent.parent
 SERVER = ROOT / "server"
 ICONS = SERVER / "web" / "icons"
 PNG = b"\x89PNG\r\n\x1a\n"
+
+
+
+def png(width, height, payload=b""):
+    """A minimal valid PNG with the given IHDR size."""
+    def chunk(kind, data):
+        return (struct.pack(">I", len(data)) + kind + data
+                + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF))
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    return (PNG + chunk(b"IHDR", ihdr) + chunk(b"IDAT", zlib.compress(b"\0" * 4))
+            + chunk(b"tEXt", b"note\0" + payload) + chunk(b"IEND", b""))
+
 
 PASS = 0
 FAIL = 0
@@ -61,7 +78,7 @@ def probe(env_extra):
     env = {k: v for k, v in os.environ.items() if not k.startswith("NTH_APP_")}
     env.update(NTH_QUIET="1", **env_extra)
     out = subprocess.run([sys.executable, "-c", PROBE, str(SERVER)], env=env,
-                         capture_output=True, text=True, check=True)
+                         capture_output=True, text=True, check=True, timeout=60)
     return json.loads(out.stdout.strip().splitlines()[-1]), out.stderr
 
 
@@ -104,14 +121,16 @@ check("blank name falls back", got["manifest"]["name"] == builtin_manifest["name
 check("short name clipped to 24 characters", got["manifest"]["short_name"] == "x" * 24)
 
 # 4. Icon directory: replaces what it holds, falls back otherwise.
+import hashlib
 with tempfile.TemporaryDirectory() as tmp:
-    custom = PNG + b"custom-192"
+    custom = png(192, 192, b"custom-192")
     (Path(tmp) / "icon-192.png").write_bytes(custom)
     (Path(tmp) / "apple-touch-icon.png").write_bytes(b"GIF89a not a png")
-    (Path(tmp) / "icon-512.png").write_bytes(PNG + b"\0" * (1024 * 1024 + 1))
-    import hashlib
+    (Path(tmp) / "icon-512.png").write_bytes(png(512, 512, b"\0" * (1024 * 1024 + 1)))
+    (Path(tmp) / "icon-maskable-192.png").write_bytes(png(64, 64))
+    os.mkfifo(Path(tmp) / "icon-maskable-512.png")
     got, err = probe({"NTH_APP_ICON_DIR": tmp})
-    check("a PNG in the icon directory replaces the built-in icon",
+    check("a PNG of the right size replaces the built-in icon",
           got["icons"]["icon-192.png"] == hashlib.sha256(custom).hexdigest())
     check("the replaced icon is what /icons/ serves",
           got["route_icon"] == hashlib.sha256(custom).hexdigest())
@@ -120,10 +139,28 @@ with tempfile.TemporaryDirectory() as tmp:
           and got["route_apple"] == sha(ICONS / "apple-touch-icon.png"))
     check("an oversized file keeps the built-in icon",
           got["icons"]["icon-512.png"] == sha(ICONS / "icon-512.png"))
+    check("a PNG of the wrong size keeps the built-in icon",
+          got["icons"]["icon-maskable-192.png"] == sha(ICONS / "icon-maskable-192.png"))
+    check("a FIFO keeps the built-in icon without hanging the import",
+          got["icons"]["icon-maskable-512.png"] == sha(ICONS / "icon-maskable-512.png"))
     check("a missing file keeps the built-in icon",
           got["icons"]["badge-96.png"] == sha(ICONS / "badge-96.png"))
-    check("each rejected file is reported once on stderr",
-          "apple-touch-icon.png: not a PNG" in err and "icon-512.png: larger than 1 MB" in err, err)
+    check("each rejected file is reported on stderr",
+          all(s in err for s in ("apple-touch-icon.png: not a PNG",
+                                 "icon-512.png: larger than 1 MB",
+                                 "icon-maskable-192.png: 64x64, expected 192x192",
+                                 "icon-maskable-512.png: not a regular file")), err)
+
+got, err = probe({"NTH_APP_ICON_DIR": "/nonexistent/app-icons"})
+check("an icon directory that does not exist is reported and changes nothing",
+      "is not a directory" in err
+      and all(got["icons"][n] == sha(ICONS / n) for n in got["icons"]), err)
+
+# 5. Splash background and colour warnings.
+got, err = probe({"NTH_APP_BACKGROUND": "#0b0405", "NTH_APP_THEME": "c0392b"})
+check("background colour override reaches the manifest",
+      got["manifest"]["background_color"] == "#0b0405", got["manifest"]["background_color"])
+check("a malformed theme colour is reported", "NTH_APP_THEME='c0392b' is not #rrggbb" in err, err)
 
 print(f"\n{PASS} passed, {FAIL} failed")
 sys.exit(1 if FAIL else 0)

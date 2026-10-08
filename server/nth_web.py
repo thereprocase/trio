@@ -47,6 +47,7 @@ import queue
 import re
 import secrets
 import shutil
+import stat
 import signal
 import socket
 import sqlite3
@@ -9810,6 +9811,7 @@ def _compose_index_html() -> str:
 DEFAULT_APP_NAME = "nth — agent workspace"
 DEFAULT_APP_SHORT_NAME = "nth"
 DEFAULT_APP_THEME = "#3d7a63"
+DEFAULT_APP_BACKGROUND = "#0b1713"
 APP_ICON_MAX_BYTES = 1024 * 1024
 _PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 
@@ -9825,19 +9827,25 @@ def _env_label(name: str, default: str, limit: int) -> str:
 
 def _env_color(name: str, default: str) -> str:
     raw = os.environ.get(name, "").strip()
-    return raw if re.fullmatch(r"#[0-9a-fA-F]{6}", raw) else default
+    if not raw:
+        return default
+    if re.fullmatch(r"#[0-9a-fA-F]{6}", raw):
+        return raw
+    sys.stderr.write(f"[nth_web] {name}={raw!r} is not #rrggbb; using {default}\n")
+    return default
 
 
 APP_NAME = _env_label("NTH_APP_NAME", DEFAULT_APP_NAME, 60)
 # The launcher label under the icon; Android and iOS truncate past ~12 characters.
 APP_SHORT_NAME = _env_label("NTH_APP_SHORT_NAME", DEFAULT_APP_SHORT_NAME, 24)
 APP_THEME = _env_color("NTH_APP_THEME", DEFAULT_APP_THEME)
+# The splash screen an installed app shows while it starts.
+APP_BACKGROUND = _env_color("NTH_APP_BACKGROUND", DEFAULT_APP_BACKGROUND)
 
 
 def _apply_app_identity(page: str) -> str:
     """Put this hub's name and colour into the page head. The markers are the
-    built-in values, so a page that lost one fails loudly instead of quietly
-    keeping the default name."""
+    built-in values, so a page that lost one raises at import."""
     for old, new in (
             ("<title>nth — chat with your agents</title>",
              "<title>nth — chat with your agents</title>" if APP_NAME == DEFAULT_APP_NAME
@@ -9879,21 +9887,59 @@ PWA_ICON_NAMES = (
 )
 
 
-def _app_icon(name: str) -> bytes:
-    """This hub's icon from NTH_APP_ICON_DIR when that directory holds a PNG of
-    the same name, else the built-in one. A missing, oversized or non-PNG file
+def _icon_dir() -> Optional[Path]:
+    """NTH_APP_ICON_DIR as a directory, or None. A value that names no
+    directory is reported once, because every icon would then quietly stay
+    built-in."""
+    raw = os.environ.get("NTH_APP_ICON_DIR", "").strip()
+    if not raw:
+        return None
+    path = Path(raw)
+    if not path.is_dir():
+        sys.stderr.write(f"[nth_web] NTH_APP_ICON_DIR={raw!r} is not a directory; "
+                         "using the built-in icons\n")
+        return None
+    return path
+
+
+def _png_size(data: bytes) -> Optional[Tuple[int, int]]:
+    """Width and height from a PNG's IHDR chunk, or None if it has none."""
+    if len(data) < 24 or not data.startswith(_PNG_MAGIC) or data[12:16] != b"IHDR":
+        return None
+    return int.from_bytes(data[16:20], "big"), int.from_bytes(data[20:24], "big")
+
+
+# The size each icon name promises in the manifest and page head; a PNG of
+# another size is refused, since installers reject the mismatch.
+PWA_ICON_SIZES = {
+    "icon-192.png": 192, "icon-512.png": 512, "icon-maskable-192.png": 192,
+    "icon-maskable-512.png": 512, "apple-touch-icon.png": 180, "badge-96.png": 96,
+}
+
+
+def _app_icon(name: str, icon_dir: Optional[Path]) -> bytes:
+    """This hub's icon from NTH_APP_ICON_DIR when that directory holds a valid
+    PNG of the same name; the built-in one otherwise. A file that is present
+    but unusable (not a regular file, over 1 MB, not a PNG, the wrong size)
     falls back with a warning, so a half-filled icon set still installs."""
-    icon_dir = os.environ.get("NTH_APP_ICON_DIR", "").strip()
     builtin = _read_web_bytes(f"icons/{name}")
-    if not icon_dir:
+    if icon_dir is None:
         return builtin
-    path = Path(icon_dir) / name
+    path = icon_dir / name
     try:
-        if path.stat().st_size > APP_ICON_MAX_BYTES:
+        info = path.stat()
+        if not stat.S_ISREG(info.st_mode):
+            raise ValueError("not a regular file")
+        with path.open("rb") as handle:
+            data = handle.read(APP_ICON_MAX_BYTES + 1)
+        if len(data) > APP_ICON_MAX_BYTES:
             raise ValueError("larger than 1 MB")
-        data = path.read_bytes()
-        if not data.startswith(_PNG_MAGIC):
+        size = _png_size(data)
+        if size is None:
             raise ValueError("not a PNG")
+        want = PWA_ICON_SIZES[name]
+        if size != (want, want):
+            raise ValueError(f"{size[0]}x{size[1]}, expected {want}x{want}")
         return data
     except FileNotFoundError:
         return builtin
@@ -9904,11 +9950,13 @@ def _app_icon(name: str) -> bytes:
 
 def _app_manifest() -> bytes:
     manifest = json.loads(_read_web_bytes("manifest.webmanifest"))
-    manifest.update(name=APP_NAME, short_name=APP_SHORT_NAME, theme_color=APP_THEME)
+    manifest.update(name=APP_NAME, short_name=APP_SHORT_NAME, theme_color=APP_THEME,
+                    background_color=APP_BACKGROUND)
     return json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8")
 
 
-PWA_ICONS = {name: _app_icon(name) for name in PWA_ICON_NAMES}
+_APP_ICON_DIR = _icon_dir()
+PWA_ICONS = {name: _app_icon(name, _APP_ICON_DIR) for name in PWA_ICON_NAMES}
 PWA_MANIFEST = _app_manifest()
 PWA_SERVICE_WORKER = _read_web_bytes("sw.js")
 # Static, identical for every viewer, and fetched by the browser without the
