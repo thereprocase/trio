@@ -32,6 +32,8 @@
   // async callback (e.g. browserDictation's metering getUserMedia) detect
   // it's stale — see LOTC/Aragorn's unmount-race finding below.
   let starting = false, dictationGen = 0;
+  // True while a finished recording is being sent to /api/stt/transcribe.
+  let transcribing = false;
   const byId = id => document.getElementById(id);
   const input = () => byId('input');
   // The message box is a contenteditable div so @-mentions render as inline
@@ -1039,6 +1041,7 @@
     recorder = new window.MediaRecorder(stream);
     recorder.ondataavailable = event => { if (event.data.size) chunks.push(event.data); };
     recorder.onstop = async () => {
+      transcribing = true;
       setDictationButtonState(false, { processing: true,
         statusText: sttHealthCache?.remote ? "Transcribing (hub's speech service)…" : 'Transcribing (Whisper on the hub)…' });
       try {
@@ -1091,6 +1094,7 @@
           Trio.ui.toast(reason, DICTATION_TOAST_MS, offerBrowserAction());
         } else Trio.ui.toast(reason, DICTATION_TOAST_MS);
       } finally {
+        transcribing = false;
         stopTracks();
         document.body.classList.remove('dictating');
         setDictationButtonState(false);
@@ -1382,9 +1386,14 @@
   function refresh() { loadDraft(); loadComposerAux(); setInputState(input()); }
   Object.assign(actions, { sendMessage: send, setTargets, insertTarget, uploadImage: upload, toggleDictation, stopDictation, buildSendPayload });
   // speechErrorMessage / hasBrowserDictation are exported for the same reason
+  // What a reload would lose (48-app-refresh.js asks before reloading).
+  function dictationState() {
+    if (transcribing) return 'transcribing';
+    return recognition || recorder?.state === 'recording' ? 'recording' : '';
+  }
   // dom-harness.js recommends extracting pure helpers: the dictation paths
   // around them need a live MediaRecorder and SpeechRecognition, which the
   // harness deliberately does not fake, but the decisions they encode are the
   // part that regressed and they are testable on their own.
-  Trio.composer = { init, mount, unmount, render: renderTargets, refresh, send, setTargets, insertTarget, targetOrder, toggleTarget, clearTargets, toggleAllTargets, upload, toggleDictation, stopDictation, buildSendPayload, syncReadOnly, setDictationButtonState, speechErrorMessage, hasBrowserDictation, makeSpeechAccumulator, unavailableReason, humanEngineError, chooseDictationEngine, collapseSpeech, sttHealthNow, refreshSttHealth, applySpokenSigils };
+  Trio.composer = { init, mount, unmount, render: renderTargets, refresh, send, conversationId, dictationState, setTargets, insertTarget, targetOrder, toggleTarget, clearTargets, toggleAllTargets, upload, toggleDictation, stopDictation, buildSendPayload, syncReadOnly, setDictationButtonState, speechErrorMessage, hasBrowserDictation, makeSpeechAccumulator, unavailableReason, humanEngineError, chooseDictationEngine, collapseSpeech, sttHealthNow, refreshSttHealth, applySpokenSigils };
 })();

@@ -479,8 +479,10 @@ When the hub has been updated since the page loaded, an *Update available —
 Reload* pill appears (the page checks `/api/version` every 10 minutes, when
 the app returns to the foreground, and when its connection to the hub comes
 back), and the menu item reads **Update and reload**. A reload keeps the open
-channel or DM and your unsent text. While an image you attached is still
-unsent, the reload stops and asks you to send or remove it first. The app's icon and name on the home screen are refreshed by
+channel or DM and your unsent text. It stops and says why instead of losing
+anything: while an attached image is unsent, while dictation is listening or
+transcribing, and when the hub cannot be reached (reloading then would show
+the browser's offline page in place of the app). The app's icon and name on the home screen are refreshed by
 Android itself, which checks the manifest when the app starts, about once a
 day.
 

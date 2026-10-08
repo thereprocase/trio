@@ -892,6 +892,14 @@ h1,h2,h3,h4{ margin:0; font-weight:600; }
 .update-pill-dismiss svg{ width:15px; height:15px; }
 .update-pill-dismiss:hover{ background:var(--bg-sink); color:var(--ink); }
 @media (min-width:881px){ .update-pill{ left:auto; right:24px; transform:none; } }
+/* A 44px touch target for the dismiss button without a taller pill: the
+   ::after reaches 8px past the 28px button, and the wider gap keeps that
+   reach off the Reload button. */
+@media (pointer:coarse){
+  .update-pill{ gap:8px; }
+  .update-pill-dismiss{ position:relative; }
+  .update-pill-dismiss::after{ content:""; position:absolute; inset:-8px; }
+}
 @media (prefers-reduced-motion: reduce){
   .pull-refresh-icon{ transition:none; }
   .pull-refresh.refreshing .pull-refresh-icon{ animation:none; }

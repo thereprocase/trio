@@ -35,9 +35,11 @@
   function session() {
     try { return window.sessionStorage || null; } catch { return null; }
   }
-  // Mirrors 12-composer's conversationId(); kept here rather than exported
-  // from there so this feature does not reach into the composer's module.
+  // The composer's own key, so a saved draft lands back in the conversation
+  // it was typed in. The fallback is the same rule, for a page without one.
   function conversationKey() {
+    const fromComposer = Trio.composer?.conversationId?.();
+    if (fromComposer) return fromComposer;
     return state.dmKey ? 'dm:' + state.dmKey : (state.channel || 'home');
   }
   function saveDrafts() {
@@ -79,19 +81,59 @@
     return restored;
   }
   restoreDrafts();
+  // A page restored from the back/forward cache never reloaded: its drafts
+  // are still in memory, and the copy pagehide wrote would otherwise wait for
+  // the next real reload and bring back text sent in the meantime.
+  function onPageShow(event) {
+    if (!event?.persisted) return;
+    try { session()?.removeItem(DRAFTS_KEY); } catch { /* nothing to clear */ }
+  }
 
   // ── Reload ────────────────────────────────────────────────────────────
-  // Images waiting in the composer are File objects in memory; there is no
-  // honest way to carry them through a reload, so the reload is refused with
-  // the reason instead of dropping them.
+  // Some work cannot be carried through a reload, so the reload is refused
+  // with the reason instead of losing it: images waiting in the composer
+  // (File objects in memory) and dictation that is still listening or whose
+  // recording is still at /api/stt/transcribe.
   function unsentImages() {
     const lists = Object.values(state.attachmentStore || {});
     if (!lists.length && Array.isArray(state.pendingAttachments)) lists.push(state.pendingAttachments);
     return lists.reduce((sum, list) => sum + (Array.isArray(list) ? list.length : 0), 0);
   }
+  function reloadBlocker() {
+    const images = unsentImages();
+    if (images === 1) return 'An image is still waiting to be sent. Send or remove it first: reloading would lose it.';
+    if (images) return images + ' images are still waiting to be sent. Send or remove them first: reloading would lose them.';
+    const dictation = Trio.composer?.dictationState?.() || '';
+    if (dictation === 'recording') return 'Dictation is still listening. Stop it first, then reload.';
+    if (dictation === 'transcribing') return 'Your dictation is still being transcribed. Reload once its text appears in the box.';
+    return '';
+  }
   const WORKER_WAIT_MS = 1500;
+  // Reloading while the hub is unreachable replaces the app with the
+  // browser's offline page: sw.js has no fetch handler to serve anything
+  // else. So the reload first asks the hub, briefly.
+  const REACH_TIMEOUT_MS = 2000;
+  const CHECK_TIMEOUT_MS = 5000;
+  // Settles with the promise's value, or undefined after `ms`. A rejection,
+  // early or late, also settles as undefined, so nothing is left unhandled.
   function within(promise, ms) {
-    return Promise.race([promise, new Promise(resolve => setTimeout(resolve, ms))]);
+    let timer;
+    const settled = Promise.resolve(promise).catch(() => undefined);
+    const timeout = new Promise(resolve => { timer = setTimeout(resolve, ms); });
+    return Promise.race([settled, timeout]).finally(() => clearTimeout(timer));
+  }
+  function timeoutSignal(ms) {
+    try { if (typeof AbortSignal !== 'undefined' && AbortSignal.timeout) return AbortSignal.timeout(ms); } catch { /* fall through */ }
+    try { const controller = new AbortController(); setTimeout(() => controller.abort(), ms); return controller.signal; } catch { return undefined; }
+  }
+  // The build the hub serves now, or null when it cannot be reached in time.
+  async function fetchBuild(ms) {
+    try {
+      const response = await within(fetch('/api/version', { cache: 'no-store', signal: timeoutSignal(ms) }), ms);
+      if (!response?.ok) return null;
+      const data = await within(response.json(), ms);
+      return typeof data?.build === 'string' ? data.build : null;
+    } catch { return null; }
   }
   // What the page can and cannot refresh about the installed app:
   //   * the bundle: always, by reloading (see the header comment);
@@ -111,27 +153,31 @@
     try {
       const registration = await within(sw.getRegistration(), WORKER_WAIT_MS);
       if (registration?.update) await within(registration.update(), WORKER_WAIT_MS);
-    } catch { /* an update that fails leaves the current worker in place */ }
+    } catch { /* getRegistration threw: the current worker stays in place */ }
   }
   // Guards the wait for the service worker, so a second tap on Reload during
   // it does not start a second round.
   let reloading = false;
+  function refuse(message) { toast(message, 6000); return false; }
   async function reloadApp() {
     if (reloading) return true;
-    const images = unsentImages();
-    if (images) {
-      toast(images === 1
-        ? 'An image is still waiting to be sent. Send or remove it first: reloading would lose it.'
-        : images + ' images are still waiting to be sent. Send or remove them first: reloading would lose them.', 6000);
-      return false;
-    }
+    const before = reloadBlocker();
+    if (before) return refuse(before);
     reloading = true;
-    saveDrafts();
-    Trio.ui?.setLive?.('Reloading');
-    await refreshWorker();
-    reloading = false;
-    window.location.reload();
-    return true;
+    try {
+      if ((await fetchBuild(REACH_TIMEOUT_MS)) === null) {
+        return refuse("Can't reach the hub right now. Reload when you're back online.");
+      }
+      Trio.ui?.setLive?.('Reloading');
+      await refreshWorker();
+      // The waits above take up to a few seconds; an image attached or a
+      // dictation started meanwhile counts as much as one from before.
+      const after = reloadBlocker();
+      if (after) return refuse(after);
+      saveDrafts();
+      window.location.reload();
+      return true;
+    } finally { reloading = false; }
   }
 
   // ── Build version check ───────────────────────────────────────────────
@@ -154,13 +200,9 @@
   }
   async function checkForUpdate() {
     lastCheck = Date.now();
-    let build = '';
-    try {
-      const response = await fetch('/api/version', { cache: 'no-store' });
-      if (!response.ok) return false;
-      build = String((await response.json())?.build || '');
-    } catch { return false; }   // offline: the connection pill already says so
-    if (build) servedBuild = build;
+    const build = await fetchBuild(CHECK_TIMEOUT_MS);
+    if (!build) return false;   // offline: the connection pill already says so
+    servedBuild = build;
     renderPill();
     return updateAvailable();
   }
@@ -201,21 +243,23 @@
   //     downward drag there has no other meaning. It is on screen in every
   //     view, including a long conversation scrolled to its newest message,
   //     which is where a chat is nearly always read;
-  //   * the message list or a workspace page, only when it is already at its
-  //     top when the finger lands, as with Chrome's own gesture. A scroll that
-  //     reaches the top does not roll on into a refresh. A list that is still
+  //   * the message list or a workspace page, only when it, and anything
+  //     scrollable between it and the finger, is already at its top when the
+  //     finger lands, as with Chrome's own gesture. A scroll that reaches the
+  //     top does not roll on into a refresh. A list that is still
   //     loading marks itself aria-busy and is skipped, so a future "load older
   //     messages" at the top can never be mistaken for a pull.
   // Never inside the composer, drawers, menus, dialogs or form fields; never
   // with the nav drawer, a dialog or a text selection open; never with two
-  // fingers. A finger that rests before moving is a long press (time copy,
+  // fingers. A finger that takes longer than holdMs from touchdown to leaving
+  // the dead zone was resting, which makes it a long press (time copy,
   // message actions, text selection), not a pull.
   const PULL = {
     deadZone: 10,       // px of finger travel before a drag counts as a pull
     damping: 0.5,       // the indicator moves half as far as the finger
     threshold: 64,      // damped px; about 140px of finger travel
     max: 112,           // damped px the indicator can travel
-    holdMs: 450,        // a rest longer than this before moving is a long press
+    holdMs: 450,        // touchdown to past the dead zone; slower is a long press
   };
   const BLOCKED = '.composer-shell, .sidebar, .channel-drawer, .agent-drawer, dialog, .channel-menu, '
     + '.message-actions-menu, .lightbox, .push-onboard, .update-pill, input, textarea, select, .msg-time';
@@ -247,13 +291,25 @@
     if (overlayOpen() || hasSelection()) return null;
     if (target.closest('.conversation-header')) return 'header';
     const scroller = target.closest(SCROLLERS);
-    if (!scroller || scroller.scrollTop > 0) return null;
+    if (!scroller || scrolledDown(target, scroller)) return null;
     if (scroller.getAttribute('aria-busy') === 'true') return null;
     return 'list';
   }
+  // Whether the target, the scroller or anything between them is scrolled
+  // away from its top. A pull inside a scrolled code block is a scroll.
+  function scrolledDown(target, scroller) {
+    for (let node = target; node; node = node.parentElement) {
+      if ((node.scrollTop || 0) > 0) return true;
+      if (node === scroller) break;
+    }
+    return false;
+  }
 
   let gesture = null;
-  let suppressClickUntil = 0;
+  // After a pull, the element it started on may still get the click some
+  // browsers fire on release. Only that element, only briefly, and only until
+  // the next touch begins.
+  let suppressClick = null;
   const firstTouch = event => event.touches?.[0] || event.changedTouches?.[0] || null;
   function indicator() {
     let node = document.getElementById('pull-refresh');
@@ -287,7 +343,9 @@
   }
 
   function start(event) {
-    gesture = null;
+    // A second finger landing mid-pull arrives here too: hide what it drew.
+    cancel();
+    suppressClick = null;
     if (!pullEnabled()) return false;
     if ((event.touches?.length || 1) !== 1) return false;
     const surface = surfaceFor(event.target);
@@ -295,7 +353,7 @@
     if (!surface || !touch) return false;
     gesture = {
       surface, phase: 'armed', distance: 0,
-      x: touch.clientX, y: touch.clientY, at: Date.now(),
+      x: touch.clientX, y: touch.clientY, at: Date.now(), target: event.target,
       scroller: surface === 'list' ? event.target.closest(SCROLLERS) : null,
     };
     return true;
@@ -316,7 +374,7 @@
       if (dy < -PULL.deadZone) { cancel(); return null; }
       if (dy <= PULL.deadZone) return 'armed';
       if (Date.now() - gesture.at > PULL.holdMs) { cancel(); return null; }
-      if (gesture.scroller && gesture.scroller.scrollTop > 0) { cancel(); return null; }
+      if (gesture.scroller && scrolledDown(gesture.target, gesture.scroller)) { cancel(); return null; }
       if (hasSelection()) { cancel(); return null; }
       gesture.phase = 'pulling';
     }
@@ -329,20 +387,20 @@
     const done = gesture;
     gesture = null;
     if (!done || done.phase !== 'pulling') return false;
-    // The finger travelled, so whatever it started on (a header button) must
-    // not also receive the click some browsers fire on release.
-    suppressClickUntil = Date.now() + 600;
+    suppressClick = { target: done.target, until: Date.now() + 600 };
     if (done.distance < PULL.threshold) { hide(); return false; }
     paint(PULL.max, 'refreshing');
     reloadApp().then(ok => { if (!ok) hide(); }, hide);
     return true;
   }
   function swallowClick(event) {
-    if (Date.now() < suppressClickUntil) {
-      suppressClickUntil = 0;
-      event.preventDefault?.();
-      event.stopPropagation?.();
-    }
+    const guard = suppressClick;
+    if (!guard) return false;
+    suppressClick = null;
+    if (Date.now() > guard.until || !guard.target?.contains?.(event.target)) return false;
+    event.preventDefault?.();
+    event.stopPropagation?.();
+    return true;
   }
 
   // ── Mount ─────────────────────────────────────────────────────────────
@@ -360,6 +418,7 @@
       [document, 'visibilitychange', maybeCheck],
       [window, 'online', maybeCheck],
       [window, 'pagehide', saveDrafts],
+      [window, 'pageshow', onPageShow],
     ];
     listeners.forEach(([target, type, fn, opts]) => target.addEventListener?.(type, fn, opts));
     const onConnection = event => {
@@ -378,8 +437,8 @@
 
   Trio.appRefresh = {
     mount, reloadApp, checkForUpdate, updateAvailable, loadedBuild,
-    saveDrafts, restoreDrafts, unsentImages, installed, pullEnabled,
-    pull: { start, move, end, cancel, surfaceFor, current: () => gesture },
-    PULL, DRAFTS_KEY,
+    saveDrafts, restoreDrafts, onPageShow, conversationKey, unsentImages, installed, pullEnabled,
+    pull: { start, move, end, cancel, surfaceFor, swallowClick, current: () => gesture },
+    PULL, DRAFTS_KEY, WORKER_WAIT_MS, MIN_GAP_MS,
   };
 })();
