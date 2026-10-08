@@ -2115,30 +2115,36 @@ class AttachmentItem(TypedDict, total=False):
 
 
 class _RichContent:
-    """Attachments and/or a page to store with a message, in its transaction."""
+    """Attachments and/or a page to store with a message, in its transaction.
 
-    def __init__(self, attachments=None, page=None):
-        self.attachments = attachments or []
+    `items` is the tool's raw attachments argument. prepare() reads and decodes
+    it, which can mean 25 MB of work, so the send bodies call it only after the
+    cheap channel, membership and session checks have passed."""
+
+    def __init__(self, items=None, page=None):
+        self.items = items or []
+        self.attachments = []
         self.page = page
 
     def __bool__(self):
         return bool(self.attachments or self.page)
 
-
-
-def _prepare_rich(attachments) -> tuple:
-    """(_RichContent, None) or (None, error JSON) for a tool's attachments."""
-    try:
-        prepared = nmedia.prepare_attachments(attachments, read_paths=_READS_CALLER_PATHS)
-    except nmedia.RichContentError as exc:
-        return None, json.dumps({"error": str(exc)})
-    return _RichContent(attachments=prepared), None
+    def prepare(self) -> str | None:
+        """Decode and check the attachments; an error JSON, or None."""
+        if not self.items:
+            return None
+        try:
+            self.attachments = nmedia.prepare_attachments(
+                self.items, read_paths=_READS_CALLER_PATHS)
+        except nmedia.RichContentError as exc:
+            return json.dumps({"error": str(exc)})
+        return None
 
 
 def _blank_with_attachments(message, rich) -> str:
     """The stored text of a message sent with images and no words, matching the
     dashboard's own placeholder for an image-only post."""
-    if (not message or not message.strip()) and rich.attachments:
+    if (not message or not message.strip()) and rich.items:
         return "[image]"
     return message
 
@@ -2210,9 +2216,7 @@ def nth_send(channel: str, member_id: str, message: str = "", task: bool = False
             other agents receive them as images on poll. With attachments the
             message may be empty.
     """
-    rich, err = _prepare_rich(attachments)
-    if err:
-        return err
+    rich = _RichContent(items=attachments)
     return _send_message(channel, member_id, _blank_with_attachments(message, rich),
                          task, pin, blocked_by, session_token, reply_to, rich)
 
@@ -2267,6 +2271,12 @@ def _send_message(channel: str, member_id: str, message: str, task: bool,
             ).fetchone()
             if not target:
                 return json.dumps({"error": f"reply_to target #{reply_to} not found in this channel."})
+
+        # The channel, membership and session checks have passed; only now
+        # read and decode the attachments, before the first write.
+        err = rich.prepare()
+        if err:
+            return err
 
         now = now_iso()
         task_id = None
@@ -2455,11 +2465,74 @@ def _attachments_for(db: sqlite3.Connection, msg_id: int):
     """Attachment rows for a message, or [] if the table doesn't exist yet."""
     try:
         return db.execute(
-            "SELECT id, mime, filename, path FROM attachments "
+            "SELECT id, mime, filename, path, bytes FROM attachments "
             "WHERE message_id = ? ORDER BY id", (msg_id,),
         ).fetchall()
     except sqlite3.Error:
         return []
+
+
+def _read_attachment_file(channel: str, path: str):
+    """An attachment's bytes, or None when missing or outside its channel dir.
+
+    Same containment check the web read path applies. attachments.path is
+    always server-computed today, but the two consumers of this column should
+    not disagree about whether it is trusted: if a row ever diverges from its
+    channel dir, both readers must refuse it."""
+    if not path:
+        return None
+    try:
+        chan_root = (ATTACH_DIR / nmedia.channel_dir_name(channel)).resolve()
+        resolved = Path(path).resolve()
+        if not resolved.is_relative_to(chan_root):
+            return None
+        return resolved.read_bytes()
+    except (OSError, ValueError):
+        return None
+
+
+def _poll_images(channel: str, atts, budget: int, first: bool):
+    """Image blocks for one message's attachments: (metadata, blocks, bytes
+    used), or None when the message must wait for the next poll.
+
+    A message whose images do not fit what is left of this poll's image
+    budget waits whole, so it is delivered later rather than acked without
+    its images. The first message of a response never waits (that would
+    wedge the poll): an image of it that does not fit is marked
+    too_large_for_model. A file is read only when its stored size says it
+    can be sent."""
+    meta, blocks, used = [], [], 0
+    for a in atts:
+        item = {"id": a["id"], "mime": a["mime"], "filename": a["filename"] or ""}
+        meta.append(item)
+        item["delivered"] = False
+        fmt = POLL_IMAGE_FORMATS.get(a["mime"])
+        if not fmt:
+            continue
+        size = a["bytes"] if "bytes" in a.keys() else None
+        if size is not None and size > nmedia.MAX_MODEL_IMAGE_BYTES:
+            item["reason"] = nmedia.TOO_LARGE_FOR_MODEL
+            continue
+        if size is not None and size > budget - used:
+            if not first:
+                return None
+            item["reason"] = nmedia.TOO_LARGE_FOR_MODEL
+            continue
+        raw = _read_attachment_file(channel, a["path"])
+        if raw is None:
+            continue
+        refusal = nmedia.model_image_refusal(raw)
+        if refusal is None and len(raw) > budget - used:
+            if not first:
+                return None
+            refusal = nmedia.TOO_LARGE_FOR_MODEL
+        if refusal:
+            item["reason"] = refusal
+            continue
+        blocks.append(Image(data=raw, format=fmt))
+        used += len(raw)
+        item["delivered"] = True
+    return meta, blocks, used
 
 
 @mcp.tool(name=f"{TOOL_PREFIX}_poll")
@@ -2688,9 +2761,8 @@ def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: st
                 # here and then failing to return would mark the batch read
                 # while the caller never saw it, losing those messages for good.
                 _pending_ack = None
-                if not from_name_lower and sess_row is None and auto_ack:
-                    _pending_ack = max(m["id"] for m in unread)
-                elif sess_row is not None:
+                _ack_batch = not from_name_lower and sess_row is None and auto_ack
+                if sess_row is not None:
                     # Extend session heartbeat on every successful read
                     db.execute(
                         "UPDATE sessions SET last_seen = ? WHERE session_token = ?",
@@ -2703,6 +2775,9 @@ def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: st
                 msg_list = []
                 image_blocks = []
                 image_budget = nmedia.MAX_POLL_IMAGE_BYTES
+                # Set when a message's images exceed this poll's budget: that
+                # message and every later one stay unread for the next poll.
+                deferred_from = None
                 for m in display_msgs:
                     mentions_raw = m["mentions"] if m["mentions"] else ""
                     try:
@@ -2722,8 +2797,6 @@ def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: st
                     mentioned = member_id in mention_list
                     referenced = member_id in ref_list
                     banged = member_id in bang_list
-                    if mentioned or banged:
-                        has_mentions = True
                     entry = {
                         "id": m["id"],
                         "from": m["member_name"] or m["member_id"],
@@ -2740,43 +2813,16 @@ def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: st
                     # pixels as MCP Image blocks within the per-poll byte budget.
                     atts = _attachments_for(db, m["id"])
                     if atts:
-                        meta = []
-                        for a in atts:
-                            item = {"id": a["id"], "mime": a["mime"],
-                                    "filename": a["filename"] or ""}
-                            fmt = POLL_IMAGE_FORMATS.get(a["mime"])
-                            raw = None
-                            if fmt and a["path"]:
-                                try:
-                                    # Same containment check the web read path
-                                    # applies. attachments.path is always
-                                    # server-computed today, but the two
-                                    # consumers of this column should not
-                                    # disagree about whether it is trusted — if
-                                    # a row ever diverges from its channel dir,
-                                    # both readers must refuse it, not one.
-                                    chan_root = (ATTACH_DIR / re.sub(
-                                        r"[^\w.\-]", "_", channel)).resolve()
-                                    resolved = Path(a["path"]).resolve()
-                                    if resolved.is_relative_to(chan_root):
-                                        raw = resolved.read_bytes()
-                                    else:
-                                        raw = None
-                                except (OSError, ValueError):
-                                    raw = None
-                            refusal = nmedia.model_image_refusal(raw) if raw is not None else None
-                            if raw is not None and refusal is None and len(raw) <= image_budget:
-                                image_blocks.append(Image(data=raw, format=fmt))
-                                image_budget -= len(raw)
-                                item["delivered"] = True
-                            else:
-                                item["delivered"] = False
-                                if refusal:
-                                    item["reason"] = refusal
-                                elif raw is not None:
-                                    item["reason"] = nmedia.POLL_BUDGET_SPENT
-                            meta.append(item)
+                        got = _poll_images(channel, atts, image_budget, first=not msg_list)
+                        if got is None:
+                            deferred_from = m["id"]
+                            break
+                        meta, blocks, used = got
+                        image_blocks.extend(blocks)
+                        image_budget -= used
                         entry["attachments"] = meta
+                    if mentioned or banged:
+                        has_mentions = True
                     # A page is read in the dashboard; agents get its title,
                     # path and expiry so they know what was shared.
                     page = nmedia.page_for_message(db, m["id"])
@@ -2798,6 +2844,18 @@ def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: st
                     resp["filtered_by"] = from_name
                 if image_blocks:
                     resp["images_note"] = POLL_IMAGES_NOTE
+                if deferred_from is not None:
+                    resp["more_pending"] = True
+                    resp["more_note"] = (
+                        f"[server] Message #{deferred_from} and later ones carry images past "
+                        "this poll's limit and stay unread. Ack through the messages above, "
+                        "then poll again to receive them.")
+                if _ack_batch:
+                    # Only what this response carries: a deferred message and
+                    # everything after it stay unread for the next poll.
+                    acked = [u["id"] for u in unread
+                             if deferred_from is None or u["id"] < deferred_from]
+                    _pending_ack = max(acked) if acked else None
                 # Text JSON first (backward-compatible), then any image blocks.
                 # A plain str return still becomes a single TextContent, so
                 # text-only clients are unaffected.
@@ -3077,9 +3135,7 @@ def nth_dm(channel: str = "", member_id: str = "", message: str = "",
         attachments: Optional images, exactly as for trio_send. They are
             visible only to the DM's participants.
     """
-    rich, err = _prepare_rich(attachments)
-    if err:
-        return err
+    rich = _RichContent(items=attachments)
     return _dm_message(member_id, _blank_with_attachments(message, rich), to,
                        session_token, reply_to, rich)
 
@@ -3185,6 +3241,11 @@ def _dm_message(member_id: str, message: str, to: str, session_token: str,
             ).fetchone()
             if not target:
                 return json.dumps({"error": f"reply_to target #{reply_to} not found in this channel."})
+
+        # As in _send_message: decode only once the cheap checks have passed.
+        err = rich.prepare()
+        if err:
+            return err
 
         now = now_iso()
         content = message
