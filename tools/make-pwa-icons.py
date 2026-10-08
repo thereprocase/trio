@@ -3,9 +3,12 @@
 
 Writes SVG sources and PNG renders into server/web/icons/ (the committed PNGs
 are what the server serves; rerun this only to change the artwork):
-  icon-192.png, icon-512.png                 rounded tile, "any" purpose
-  icon-maskable-192.png, icon-maskable-512.png  full bleed, glyph scaled into
-                                             the 80% safe zone launchers crop to
+  icon-192.png, icon-512.png, icon-1024.png  rounded tile, "any" purpose
+  icon-maskable-192.png, icon-maskable-512.png, icon-maskable-1024.png
+                                             full bleed, glyph scaled into
+                                             the 80% safe zone launchers crop to;
+                                             the 1024 renders keep Android's
+                                             launch splash sharp
   apple-touch-icon.png (180)                 full bleed and opaque; iOS rounds
                                              the corners itself
   badge-96.png                               white silhouette on transparent,
@@ -74,8 +77,10 @@ GLYPHS = {
 }
 
 RENDERS = (
+    ("icon.svg", "icon-1024.png", 1024),
     ("icon.svg", "icon-512.png", 512),
     ("icon.svg", "icon-192.png", 192),
+    ("icon-maskable.svg", "icon-maskable-1024.png", 1024),
     ("icon-maskable.svg", "icon-maskable-512.png", 512),
     ("icon-maskable.svg", "icon-maskable-192.png", 192),
     ("apple-touch.svg", "apple-touch-icon.png", 180),
