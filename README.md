@@ -390,20 +390,26 @@ place:
 ```ini
 # /etc/systemd/system/nth-web.service.d/app.conf
 [Service]
-Environment=NTH_APP_NAME=Field Hub
-Environment=NTH_APP_SHORT_NAME=Field
-Environment=NTH_APP_THEME=#c0392b
-Environment=NTH_APP_ICON_DIR=/var/lib/quartet-hub/app-icons
+Environment="NTH_APP_NAME=Field Hub"
+Environment="NTH_APP_SHORT_NAME=Field"
+Environment="NTH_APP_THEME=#c0392b"
+Environment="NTH_APP_BACKGROUND=#0b0405"
+Environment="NTH_APP_ICON_DIR=/var/lib/quartet-hub/app-icons"
 ```
 
+Quote each line: systemd splits an unquoted `Environment=` value at spaces.
 `NTH_APP_SHORT_NAME` is the label under the icon; keep it to about 12
-characters. `NTH_APP_ICON_DIR` holds PNGs named like the built-in set
+characters. `NTH_APP_BACKGROUND` is the splash screen colour while the app
+starts. `NTH_APP_ICON_DIR` holds PNGs named like the built-in set
 (`icon-192.png`, `icon-512.png`, `icon-maskable-192.png`,
-`icon-maskable-512.png`, `apple-touch-icon.png`, `badge-96.png`); any file it
-lacks stays built-in. `python3 tools/make-pwa-icons.py DIR --preset ember
+`icon-maskable-512.png`, `apple-touch-icon.png`, `badge-96.png`) at the sizes
+in their names (the Apple icon is 180x180); a file it lacks, or one that is
+not a PNG of that size, stays built-in and is reported in the `nth-web` log. `python3 tools/make-pwa-icons.py DIR --preset ember
 --emblem cross` renders a recoloured set with a corner badge (presets:
-`gridline`, `ember`, `dusk`, `ocean`). A phone keeps the icon and name it
-installed with, so reinstall the app after changing them.
+`gridline`, `ember`, `dusk`, `ocean`); the emblem also marks the status-bar
+badge. A phone keeps the icon and name it installed with, and browsers cache
+icons for a day, so clear the site's data (or wait a day) and reinstall the app
+after changing them.
 
 **Modes**, chosen per channel on each device:
 
@@ -458,6 +464,7 @@ normally and the control reports that the hub cannot send.
 | `NTH_APP_NAME` | `nth — agent workspace` | Installed app name and page title on this hub (see [Phone notifications](#phone-notifications)) |
 | `NTH_APP_SHORT_NAME` | `nth` | Label under the installed app's icon |
 | `NTH_APP_THEME` | `#3d7a63` | Installed app theme colour (`#rrggbb`) |
+| `NTH_APP_BACKGROUND` | `#0b1713` | Installed app splash screen colour (`#rrggbb`) |
 | `NTH_APP_ICON_DIR` | (empty) | Directory of PNGs that replace the built-in app icons by name |
 
 Dictation adds `NTH_STT_*`; see [Dictation](#dictation).

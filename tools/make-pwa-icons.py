@@ -183,10 +183,32 @@ def tile(rounded, scale=1.0, preset="gridline", emblem_kind="none"):
     )
 
 
-def badge():
-    """The monochrome badge, scaled to keep the stroke ends inside the canvas."""
-    return ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">'
-            f'<g transform="translate(35.8 46.8) scale(0.86)">{mono_glyph()}</g></svg>')
+def mono_emblem(kind):
+    """The emblem as a white ring with a solid cross, for the badge, so the
+    status-bar icon tells hubs apart too."""
+    if kind != "cross":
+        return ""
+    (x, y), r = EMBLEM_CENTRE, EMBLEM_RADIUS
+    arm, half = r * 0.62, r * 0.2
+    return (f'<circle cx="{x}" cy="{y}" r="{r}" fill="none" stroke="#fff" stroke-width="14"/>'
+            f'<path d="M {x - half:.1f} {y - arm:.1f} H {x + half:.1f} V {y + arm:.1f} '
+            f'H {x - half:.1f} Z M {x - arm:.1f} {y - half:.1f} H {x + arm:.1f} '
+            f'V {y + half:.1f} H {x - arm:.1f} Z" fill="#fff"/>')
+
+
+def badge(emblem_kind="none"):
+    """The monochrome badge, scaled to keep the stroke ends inside the canvas.
+    Android draws the badge from its alpha channel, so an emblem is cut out of
+    the glyph with a mask (a painted black disc would show as solid)."""
+    head = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">'
+    place = '<g transform="translate(35.8 46.8) scale(0.86)">'
+    if emblem_kind == "none":
+        return f'{head}{place}{mono_glyph()}</g></svg>'
+    (x, y), r = EMBLEM_CENTRE, EMBLEM_RADIUS
+    cut = ('<defs><mask id="cut"><rect width="512" height="512" fill="#fff"/>'
+           f'<circle cx="{x}" cy="{y}" r="{r + 14}" fill="#000"/></mask></defs>')
+    return (f'{head}{cut}{place}<g mask="url(#cut)">{mono_glyph()}</g>'
+            f'{mono_emblem(emblem_kind)}</g></svg>')
 
 
 def main() -> None:
@@ -202,7 +224,7 @@ def main() -> None:
         "icon.svg": tile(True, **look),
         "icon-maskable.svg": tile(False, 0.78, **look),
         "apple-touch.svg": tile(False, 0.92, **look),
-        "badge.svg": badge(),
+        "badge.svg": badge(args.emblem),
     }
     for name, svg in sources.items():
         (out / name).write_text(svg, encoding="utf-8")
