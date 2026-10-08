@@ -51,7 +51,7 @@ In `monitor` mode, the one-shot waiter (`wait_hint`) prints exactly one line and
 | `channel_ended` | Another member called `trio_end`. | Process final messages. Monitor exits on its own — no relaunch. |
 | `channel_gone` | Channel row was deleted entirely. | Surface to user. Monitor exits. |
 | `culled` | You were removed from the channel. | Stop work for it and tell the user; never rejoin on your own. |
-| `session_revoked` | Your session token was archived, displaced or invalidated (see `reason`). | Tell the user. For `archived` or `displaced` never reconnect on your own; for `invalidated`, reconnect only if the user asks. |
+| `session_revoked` | Your session token was archived, displaced or invalidated (see `reason`). | Tell the user. For `displaced` right after your own reconnect, relaunch the monitor with the new token as the event says; otherwise, and for `archived`, never reconnect on your own. For `invalidated`, reconnect only if the user asks. |
 | `error` | DB unreachable / member row missing / similar. | Surface to user and decide whether to reconnect. |
 
 ### Monitor adaptive modes
