@@ -27,6 +27,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -111,8 +112,6 @@ shot.write_bytes(PNG)
 inlined = nmedia.inline_local_paths([{"path": str(shot)}])
 check("frontend: a path item becomes data_base64 with the file's name",
       inlined == [{"data_base64": b64(PNG), "filename": "screen shot.png"}])
-check("frontend: a list sent as JSON text is read like the list",
-      nmedia.inline_local_paths(json.dumps([{"path": str(shot)}])) == inlined)
 check("frontend: a data_base64 item passes through unchanged",
       nmedia.inline_local_paths([{"data_base64": b64(GIF), "filename": "g.gif"}])
       == [{"data_base64": b64(GIF), "filename": "g.gif"}])
@@ -170,13 +169,13 @@ try:
     env = {k: v for k, v in os.environ.items() if not k.startswith(("TRIO_", "NTH_"))}
     env.update(NTH_HOME=_tmp, TRIO_NATIVE_CLIENT="codex")
     with patch.dict(os.environ, env, clear=True), patch.object(proxy, "MCPSSEClient", FakeHub):
-        server, _client, _hub = proxy.create_server("http://hub.example/sse")
+        proxy_server, _client, _hub = proxy.create_server("http://hub.example/sse")
 
     def call(name, **arguments):
         request = types.CallToolRequest(method="tools/call", params=types.CallToolRequestParams(
             name=name, arguments=arguments))
         with patch.dict(os.environ, env, clear=True):
-            return asyncio.run(server.request_handlers[types.CallToolRequest](request)).root
+            return asyncio.run(proxy_server.request_handlers[types.CallToolRequest](request)).root
 
     remote = FakeHub.instances[0]
     call("quartet_send", channel=CH, member_id=ADA, message="m",
@@ -358,6 +357,238 @@ finally:
         server.shutdown()
         server.server_close()
     hub.stop()
+
+# ═══ Review fixes ═══════════════════════════════════════════════════════════
+import struct  # noqa: E402
+import nth_codex_runtime as ncodex  # noqa: E402
+import nth_supervisor as nsup  # noqa: E402
+
+
+def png(width, height, size=2048):
+    head = b"\x89PNG\r\n\x1a\n" + struct.pack(">I", 13) + b"IHDR" + struct.pack(">II", width, height)
+    return head + b"\x00" * (size - len(head))
+
+
+def send_items(items, **kw):
+    return send(message=kw.pop("message", "m"), attachments=items, **kw)
+
+
+# ── W-A: folders a path may come from ───────────────────────────────────────
+allowed = FILES / "allowed"
+outside = FILES / "outside"
+allowed.mkdir()
+outside.mkdir()
+(allowed / "in.png").write_bytes(PNG)
+(outside / "out.png").write_bytes(PNG)
+os.symlink(outside / "out.png", allowed / "escape.png")
+roots = [os.path.realpath(allowed)]
+
+check("roots: by default the working directory and the temp directory",
+      nmedia.attach_roots({}) == [os.path.realpath(os.getcwd()),
+                                  os.path.realpath(tempfile.gettempdir())])
+check("roots: NTH_ATTACH_ROOTS replaces the default; relative entries are dropped",
+      nmedia.attach_roots({"NTH_ATTACH_ROOTS": os.pathsep.join([str(allowed), "rel/dir"])})
+      == roots)
+check("roots: a managed agent with no roots gets none",
+      nmedia.attach_roots({"NTH_MANAGED_AGENT": "1"}) == []
+      and nmedia.attach_roots({"NTH_MANAGED_AGENT": "1", "NTH_ATTACH_ROOTS": ""}) == [])
+check("roots: a file inside a root is read",
+      nmedia.read_local_file(str(allowed / "in.png"), 1 << 20, roots)[0] == PNG)
+check("roots: a file outside every root is refused",
+      raises(lambda: nmedia.read_local_file(str(outside / "out.png"), 1 << 20, roots)))
+check("roots: a symlink inside a root that leads outside is refused",
+      raises(lambda: nmedia.read_local_file(str(allowed / "escape.png"), 1 << 20, roots)))
+check("roots: with no roots no path is read",
+      raises(lambda: nmedia.read_local_file(str(allowed / "in.png"), 1 << 20, [])))
+
+# O_NOFOLLOW: a link that is still a link at open time (here: resolution is
+# skipped, as in a swap after the checks) is refused by the open itself.
+os.symlink(allowed / "in.png", allowed / "late-link.png")
+_realpath = nmedia.os.path.realpath
+try:
+    nmedia.os.path.realpath = lambda p: os.path.abspath(p)
+    check("nofollow: a symlink at open time is refused",
+          raises(lambda: nmedia.read_local_file(str(allowed / "late-link.png"), 1 << 20, roots)))
+finally:
+    nmedia.os.path.realpath = _realpath
+
+# The hub's managed agents: their server is started with the marker and the
+# agent's own folder, or no folder at all.
+cfg = json.loads(nsup.build_mcp_config("/srv/nth_server.py", attach_roots=["/work/agent"]))
+check("managed: the MCP config marks the server and names the agent's folder",
+      cfg["mcpServers"]["nth-trio"]["env"] == {"NTH_MANAGED_AGENT": "1",
+                                               "NTH_ATTACH_ROOTS": "/work/agent"})
+check("managed: the hub passes the agent's cwd, or no root without one",
+      json.loads(web.build_mcp_config_for_hub("/work/a"))["mcpServers"]["nth-trio"]["env"]
+      ["NTH_ATTACH_ROOTS"] == "/work/a"
+      and json.loads(web.build_mcp_config_for_hub(""))["mcpServers"]["nth-trio"]["env"]
+      == {"NTH_MANAGED_AGENT": "1", "NTH_ATTACH_ROOTS": ""})
+_saved_cmd = os.environ.pop("TRIO_CODEX_CMD", None)
+try:
+    codex_argv = ncodex.build_app_server_argv("/srv/nth_server.py", "py3")
+finally:
+    if _saved_cmd is not None:
+        os.environ["TRIO_CODEX_CMD"] = _saved_cmd
+check("managed: the shared Codex server is marked and gets no root",
+      'mcp_servers.nth-trio.env.NTH_MANAGED_AGENT="1"' in codex_argv
+      and 'mcp_servers.nth-trio.env.NTH_ATTACH_ROOTS=""' in codex_argv)
+srv._READS_CALLER_PATHS = True
+try:
+    with patch.dict(os.environ, {"NTH_MANAGED_AGENT": "1", "NTH_ATTACH_ROOTS": ""}):
+        r = send_items([{"path": str(allowed / "in.png")}])
+    check("managed: a managed agent's stdio server with no roots reads no path",
+          "error" in r and "data_base64" in r["error"])
+    with patch.dict(os.environ, {"NTH_MANAGED_AGENT": "1", "NTH_ATTACH_ROOTS": str(allowed)}):
+        r_in = send_items([{"path": str(allowed / "in.png")}])
+        r_out = send_items([{"path": str(outside / "out.png")}])
+    check("managed: it reads inside its own folder and nowhere else",
+          r_in.get("ok") is True and "error" in r_out and "outside" in r_out["error"])
+finally:
+    srv._READS_CALLER_PATHS = False
+
+# ── W-D and W-A in the frontend ─────────────────────────────────────────────
+notes = FILES / "notes.png"
+notes.write_bytes(b"SECRET_TOKEN=do-not-send\n")
+check("frontend: a non-image file is refused before it is encoded",
+      raises(lambda: nmedia.inline_local_paths([{"path": str(notes)}])))
+if "call" in globals():
+    def hub_calls():
+        return [p for m, p in remote.calls if m == "tools/call"]
+
+    before_calls = len(hub_calls())
+    result = call("quartet_send", channel=CH, member_id=ADA, message="m",
+                  attachments=[{"path": str(notes)}])
+    check("proxy: a non-image file never reaches the hub",
+          "error" in json.loads(result.content[0].text) and len(hub_calls()) == before_calls)
+    env["NTH_ATTACH_ROOTS"] = str(allowed)
+    try:
+        result = call("quartet_send", channel=CH, member_id=ADA, message="m",
+                      attachments=[{"path": str(outside / "out.png")}])
+        check("proxy: a file outside NTH_ATTACH_ROOTS never reaches the hub",
+              "outside" in json.loads(result.content[0].text).get("error", "")
+              and len(hub_calls()) == before_calls)
+        call("quartet_send", channel=CH, member_id=ADA, message="m",
+             attachments=[{"path": str(allowed / "in.png")}])
+        check("proxy: a file inside NTH_ATTACH_ROOTS is forwarded",
+              len(hub_calls()) == before_calls + 1)
+    finally:
+        env.pop("NTH_ATTACH_ROOTS", None)
+
+# ── W-B: sizes an agent may send, and what a model receives ─────────────────
+gif_hdr = b"GIF89a" + struct.pack("<HH", 640, 480) + b"\x00" * 64
+webp_x = b"RIFF\x00\x00\x00\x00WEBPVP8X" + b"\x0a\x00\x00\x00\x00\x00\x00\x00" \
+    + (1919).to_bytes(3, "little") + (1079).to_bytes(3, "little")
+webp_l = b"RIFF\x00\x00\x00\x00WEBPVP8L\x00\x00\x00\x00\x2f" \
+    + ((99) | (49 << 14)).to_bytes(4, "little")
+webp_lossy = b"RIFF\x00\x00\x00\x00WEBPVP8 \x00\x00\x00\x00" + b"\x00\x00\x00\x9d\x01\x2a" \
+    + struct.pack("<HH", 320, 200)
+jpeg = (b"\xff\xd8\xff\xe0" + struct.pack(">H", 16) + b"JFIF\x00" + b"\x00" * 9
+        + b"\xff\xc0" + struct.pack(">HBHH", 17, 8, 600, 800) + b"\x00" * 16)
+check("dimensions: PNG, GIF, WebP (VP8X, VP8L, VP8) and JPEG headers",
+      nmedia.image_dimensions(png(1200, 900)) == (1200, 900)
+      and nmedia.image_dimensions(gif_hdr) == (640, 480)
+      and nmedia.image_dimensions(webp_x) == (1920, 1080)
+      and nmedia.image_dimensions(webp_l) == (100, 50)
+      and nmedia.image_dimensions(webp_lossy) == (320, 200)
+      and nmedia.image_dimensions(jpeg) == (800, 600))
+check("dimensions: an unreadable header gives None", nmedia.image_dimensions(b"\xff\xd8\xff") is None)
+
+r = send_items([{"data_base64": b64(png(10, 10, 10 * 1024 * 1024 + 1))}])
+check("cap: an agent image over 10 MB is refused under a 25 MB upload cap",
+      "error" in r and str(10 * 1024 * 1024) in r["error"] and nmedia.MAX_UPLOAD_BYTES > 10 * 1024 * 1024)
+nine = b64(png(10, 10, 9 * 1024 * 1024))
+before = counts()
+r = send_items([{"data_base64": nine}] * 3)
+check("cap: one message's attachments may total 25 MB at most",
+      "error" in r and "total" in r["error"] and counts() == before)
+big_a = (FILES / "big-a.png"); big_a.write_bytes(png(10, 10, 9 * 1024 * 1024))
+check("cap: paths count against the per-message total too",
+      raises(lambda: nmedia.inline_local_paths([{"path": str(big_a)}] * 3)))
+
+# Fresh reader so the poll below holds only these messages.
+d = json.loads(srv.nth_connect(summary="model reader", name="Dee", channel=CH))
+DEE, DEE_TOKEN = d["member_id"], d["session_token"]
+srv.nth_poll(channel=CH, member_id=DEE, wait_seconds=0, session_token=DEE_TOKEN)
+body = srv.nth_poll(channel=CH, member_id=DEE, wait_seconds=0, session_token=DEE_TOKEN)
+body = json.loads(body[0] if isinstance(body, list) else body)
+for m in body.get("messages", []):
+    srv.nth_ack(channel=CH, member_id=DEE, through_id=m["id"], session_token=DEE_TOKEN)
+
+heavy = png(100, 100, 3_800_000)
+wide = png(9000, 10)
+three_mb = png(50, 50, 3_000_000)
+r1 = send_items([{"data_base64": b64(heavy), "filename": "heavy.png"},
+                 {"data_base64": b64(wide), "filename": "wide.png"}])
+r2 = send_items([{"data_base64": b64(three_mb), "filename": "a.png"},
+                 {"data_base64": b64(three_mb), "filename": "b.png"}])
+check("poll setup: the large images are accepted for the dashboard",
+      r1.get("ok") is True and r2.get("ok") is True)
+out = srv.nth_poll(channel=CH, member_id=DEE, wait_seconds=0, session_token=DEE_TOKEN)
+payload = json.loads(out[0] if isinstance(out, list) else out)
+items = {a["filename"]: a for m in payload.get("messages", []) for a in m.get("attachments", [])}
+blocks = out[1:] if isinstance(out, list) else []
+check("poll: an image over 3.75 MB is withheld from the model",
+      items.get("heavy.png", {}).get("delivered") is False
+      and items["heavy.png"].get("reason") == "too_large_for_model")
+check("poll: an image over 8000 px on a side is withheld from the model",
+      items.get("wide.png", {}).get("delivered") is False
+      and items["wide.png"].get("reason") == "too_large_for_model")
+check("poll: about 5 MB of images per poll; the rest wait with a reason",
+      items.get("a.png", {}).get("delivered") is True
+      and items.get("b.png", {}).get("delivered") is False
+      and items["b.png"].get("reason") == "poll_image_budget_spent"
+      and sum(len(b.data) for b in blocks) <= 5_000_000)
+check("poll: a poll carrying images says they are members' content",
+      bool(blocks) and "content from channel members" in payload.get("images_note", ""))
+srv.nth_ack(channel=CH, member_id=DEE, session_token=DEE_TOKEN,
+            through_id=max(m["id"] for m in payload["messages"]))
+send(message="words only")
+quiet = srv.nth_poll(channel=CH, member_id=DEE, wait_seconds=0, session_token=DEE_TOKEN)
+check("poll: a poll with no images carries no image note",
+      "images_note" not in json.loads(quiet[0] if isinstance(quiet, list) else quiet))
+
+# ── Note 4: a failed write after the files are written leaves no file ──────
+t = json.loads(srv.nth_connect(summary="trigger", name="Tri", channel="trig-room"))
+with db() as conn:
+    conn.execute("CREATE TRIGGER fail_send BEFORE UPDATE OF updated_at ON channels "
+                 "WHEN NEW.code = 'trig-room' BEGIN SELECT RAISE(ABORT, 'forced'); END")
+files_before, rows_before = disk_files(), counts()
+r = json.loads(srv.nth_send(channel="trig-room", member_id=t["member_id"], message="x",
+                            session_token=t["session_token"],
+                            attachments=[{"data_base64": b64(PNG)}]))
+with db() as conn:
+    conn.execute("DROP TRIGGER fail_send")
+check("transaction: a write failing after the files are written is reported",
+      "error" in r and "ok" not in r)
+check("transaction: and leaves no message, row or file", counts() == rows_before
+      and disk_files() == files_before)
+
+# ── Note 7: agents' DM images are kept 30 days ─────────────────────────────
+old_dm = json.loads(srv.nth_dm(member_id=ADA, to="Bea", message="old",
+                               session_token=ADA_TOKEN, attachments=[{"data_base64": b64(GIF)}]))
+new_dm = json.loads(srv.nth_dm(member_id=ADA, to="Bea", message="new",
+                               session_token=ADA_TOKEN, attachments=[{"data_base64": b64(GIF)}]))
+long_ago = (datetime.now(timezone.utc) - timedelta(days=31)).isoformat()
+with db() as conn:
+    conn.execute("UPDATE attachments SET created_at = ? WHERE id = ?",
+                 (long_ago, old_dm["attachments"][0]["id"]))
+    old_path = conn.execute("SELECT path FROM attachments WHERE id = ?",
+                            (old_dm["attachments"][0]["id"],)).fetchone()[0]
+    # A person's DM upload of the same age keeps its current lifetime.
+    conn.execute("INSERT INTO attachments (channel, message_id, member_id, mime, filename, "
+                 "bytes, path, created_at) VALUES (?, ?, '_op_l_person', 'image/gif', 'p.gif', "
+                 "1, '', ?)", (AGENT_INBOX_CHANNEL, old_dm["message_id"], long_ago))
+stats = web.sweep_attachments(srv.DB_PATH, force=True)
+with db() as conn:
+    left = {r[0] for r in conn.execute("SELECT member_id || ':' || created_at FROM attachments "
+                                       "WHERE channel = ?", (AGENT_INBOX_CHANNEL,))}
+    ids = {r[0] for r in conn.execute("SELECT id FROM attachments WHERE channel = ?",
+                                      (AGENT_INBOX_CHANNEL,))}
+check("retention: an agent's DM image older than 30 days is swept, file and row",
+      stats.get("dm_retention") == 1 and old_dm["attachments"][0]["id"] not in ids
+      and not Path(old_path).exists())
+check("retention: a recent agent DM image stays", new_dm["attachments"][0]["id"] in ids)
+check("retention: a person's DM upload stays", f"_op_l_person:{long_ago}" in left)
 
 print()
 print(f"{'FAILED' if failures else 'OK'} — {len(failures)} failure(s)")

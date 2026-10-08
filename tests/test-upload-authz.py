@@ -31,6 +31,7 @@ SERVER = Path(__file__).resolve().parent.parent / "server"
 sys.path.insert(0, str(SERVER))
 import nth_server as srv    # noqa: E402
 import nth_web as web       # noqa: E402
+import nth_media as nmedia  # noqa: E402
 
 failures = []
 skips = []
@@ -168,10 +169,10 @@ try:
 
     # ── per-member quota ────────────────────────────────────────────────────
     # 4096 bytes are already stored above; a 6 KB ceiling admits nothing more.
-    _real_quota = web.MAX_MEMBER_ATTACH_BYTES
+    _real_quota = nmedia.MAX_MEMBER_ATTACH_BYTES
     try:
         # Everything uploaded so far already exceeds this ceiling.
-        web.MAX_MEMBER_ATTACH_BYTES = 6144
+        nmedia.MAX_MEMBER_ATTACH_BYTES = 6144
         st, body = upload(port, PNG, "second.png")
         check("quota: upload past the per-member ceiling is refused (413)", st == 413)
         check("quota: refusal names the reason",
@@ -180,11 +181,11 @@ try:
         # The ceiling is a SUM, not a per-request cap: raise it and the same
         # request succeeds. Without this, a test could pass against a bug that
         # rejects every second upload for any reason at all.
-        web.MAX_MEMBER_ATTACH_BYTES = 1024 * 1024
+        nmedia.MAX_MEMBER_ATTACH_BYTES = 1024 * 1024
         st, _b = upload(port, PNG, "third.png")
         check("quota: same upload succeeds once the ceiling is raised", st == 200)
     finally:
-        web.MAX_MEMBER_ATTACH_BYTES = _real_quota
+        nmedia.MAX_MEMBER_ATTACH_BYTES = _real_quota
 
 except OSError as e:
     print(f"SKIP: upload-authz (could not start server: {e})", file=sys.stderr)

@@ -335,6 +335,23 @@ finally:
     hub.stop()
     shutil.rmtree(_tmp, ignore_errors=True)
 
+# A deferred Reclaim used to raise NameError (an undefined note variable), so
+# the busy-database case returned a 500 instead of its explanation.
+class _BusyDb:
+    pass
+
+
+_fake = type("FakeHandler", (), {
+    "_db_logical_bytes": lambda self, db: 100,
+    "_vacuum": lambda self, db: False,
+})()
+try:
+    res = web.NthWebHandler._prune_reclaim(_fake, _BusyDb(), dry_run=False)
+    check("reclaim: a deferred VACUUM explains itself",
+          res.get("vacuum_deferred") is True and "run Reclaim later" in res.get("note", ""))
+except NameError as exc:
+    check(f"reclaim: a deferred VACUUM explains itself ({exc})", False)
+
 print()
 if failures:
     print(f"FAILED ({len(failures)}): " + ", ".join(failures))

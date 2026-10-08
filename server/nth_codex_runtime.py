@@ -41,7 +41,7 @@ TRIO_TOOL_NAMES = (
     "claim", "complete", "cancel", "release", "lock", "unlock",
     "set_status", "rename", "status", "roster", "history", "end",
     "list", "cull", "cleanup", "retract", "avatar_choices", "set_avatar",
-    "delivery_status", "listen",
+    "delivery_status", "listen", "page",
 )
 
 
@@ -71,6 +71,11 @@ def build_app_server_argv(nth_server_path: str = "",
             "-c", "mcp_servers.nth-trio.required=true",
             "-c", "mcp_servers.nth-trio.enabled_tools=" + json.dumps(tool_names),
             "-c", 'mcp_servers.nth-trio.default_tools_approval_mode="auto"',
+            # One server serves every managed Codex agent, each with its own
+            # working directory, so it attaches no file by path (nth_media);
+            # these agents send images as data_base64.
+            "-c", 'mcp_servers.nth-trio.env.NTH_MANAGED_AGENT="1"',
+            "-c", 'mcp_servers.nth-trio.env.NTH_ATTACH_ROOTS=""',
         ]
     return argv
 

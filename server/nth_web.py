@@ -330,13 +330,9 @@ def attach_dir_for(db_path: Path) -> Path:
     return Path(db_path).resolve().parent / "attachments"
 
 
-MAX_UPLOAD_BYTES = nmedia.MAX_UPLOAD_BYTES  # hard cap per file
-# Total attachment bytes one member may hold in one channel. The per-image cap
-# bounds a single request; nothing bounded the SUM, so any identity allowed to
-# upload could fill the disk one legal 10 MB image at a time. sweep_attachments
-# only reclaims UNLINKED rows, so anything linked to a message is permanent --
-# this quota is the only bound on an upload right.
-MAX_MEMBER_ATTACH_BYTES = nmedia.MAX_MEMBER_ATTACH_BYTES
+# The per-file cap (nmedia.MAX_UPLOAD_BYTES) and the per-member quota
+# (nmedia.MAX_MEMBER_ATTACH_BYTES) are read from nth_media at use, so the
+# dashboard and the channel server enforce one value each.
 # Attachment GC. An upload creates its row UNLINKED and /api/send links it, so
 # anything still unlinked long afterwards was abandoned — a paste thought better
 # of, a closed tab, a failed send. Nothing ever collected those, so they
@@ -1802,7 +1798,10 @@ def sweep_attachments(db_path: Path, force: bool = False) -> Dict[str, int]:
             return {"skipped": 1}
         _last_attach_gc = now
 
-    stats = {"abandoned": 0, "dead_channel": 0, "orphan_files": 0, "expired_pages": 0}
+    stats = {"abandoned": 0, "dead_channel": 0, "orphan_files": 0, "expired_pages": 0,
+             "dm_retention": 0}
+    dm_cutoff_iso = (datetime.now(timezone.utc)
+                     - timedelta(days=nmedia.DM_AGENT_ATTACH_RETENTION_DAYS)).isoformat()
     cutoff = datetime.now(timezone.utc) - timedelta(seconds=ATTACH_GC_GRACE_S)
     cutoff_iso = cutoff.isoformat()
     db = None
@@ -1831,6 +1830,18 @@ def sweep_attachments(db_path: Path, force: bool = False) -> Dict[str, int]:
                 (ATTACH_GC_MAX_DELETES - len(doomed),)).fetchall():
             if r["id"] not in seen:
                 doomed.append((r["id"], r["path"], "dead_channel"))
+        seen = {d[0] for d in doomed}
+        # Agents' DM images past retention. Every DM shares one transport
+        # channel, so without this an agent's quota there would be a lifetime
+        # allowance. Operator rows (`_op_` ids) keep their current lifetime.
+        for r in db.execute(
+                "SELECT id, path FROM attachments "
+                " WHERE channel = ? AND created_at < ? AND member_id NOT LIKE '\\_op\\_%' ESCAPE '\\' "
+                " LIMIT ?",
+                (AGENT_INBOX_CHANNEL, dm_cutoff_iso,
+                 max(0, ATTACH_GC_MAX_DELETES - len(doomed)))).fetchall():
+            if r["id"] not in seen:
+                doomed.append((r["id"], r["path"], "dm_retention"))
 
         # One transaction for the batch. Autocommitting each delete took the WAL
         # writer lock up to 500 times per sweep, interleaved with unlink()
@@ -1855,6 +1866,10 @@ def sweep_attachments(db_path: Path, force: bool = False) -> Dict[str, int]:
                         cur = db.execute(
                             "DELETE FROM attachments "
                             " WHERE id = ? AND message_id IS NULL", (att_id,))
+                    elif why == "dm_retention":
+                        cur = db.execute(
+                            "DELETE FROM attachments WHERE id = ? AND created_at < ?",
+                            (att_id, dm_cutoff_iso))
                     else:
                         cur = db.execute(
                             "DELETE FROM attachments WHERE id = ? AND NOT EXISTS "
@@ -3407,7 +3422,7 @@ def wake_agent(agent_id: str, supervisor, db_path: Path):
     db = sqlite3.connect(str(db_path), timeout=5)
     db.row_factory = sqlite3.Row
     try:
-        row = db.execute("SELECT name, base_prompt FROM agents WHERE id = ?",
+        row = db.execute("SELECT name, base_prompt, cwd FROM agents WHERE id = ?",
                          (agent_id,)).fetchone()
         if row is None:
             return None
@@ -3434,7 +3449,7 @@ def wake_agent(agent_id: str, supervisor, db_path: Path):
             build_agent_preamble(row["name"], channels, member_id=agent_id,
                                  reclaim_secret=reclaim_secret)
         return supervisor.wake(agent_id, system_prompt=preamble,
-                               mcp_config=build_mcp_config_for_hub(),
+                               mcp_config=build_mcp_config_for_hub(row["cwd"] or ""),
                                extra_dirs=[str(channel_attach_dir(c)) for c in channels])
 
 
@@ -3443,7 +3458,7 @@ def clear_agent(agent_id: str, supervisor, db_path: Path):
     db = sqlite3.connect(str(db_path), timeout=5)
     db.row_factory = sqlite3.Row
     try:
-        row = db.execute("SELECT name, base_prompt FROM agents WHERE id = ?",
+        row = db.execute("SELECT name, base_prompt, cwd FROM agents WHERE id = ?",
                          (agent_id,)).fetchone()
         if row is None:
             return None
@@ -3465,7 +3480,7 @@ def clear_agent(agent_id: str, supervisor, db_path: Path):
             build_agent_preamble(row["name"], channels, member_id=agent_id,
                                  reclaim_secret=reclaim_secret)
         return supervisor.clear(agent_id, system_prompt=preamble,
-                            mcp_config=build_mcp_config_for_hub(),
+                            mcp_config=build_mcp_config_for_hub(row["cwd"] or ""),
                             extra_dirs=[str(channel_attach_dir(c)) for c in channels])
 
 
@@ -3591,8 +3606,11 @@ class AgentIdleReaper(threading.Thread):
         self._stop_event.set()
 
 
-def build_mcp_config_for_hub() -> str:
-    return nsup.build_mcp_config(NTH_SERVER_PATH)
+def build_mcp_config_for_hub(cwd: str = "") -> str:
+    """The managed agent's MCP config. Its server may attach files by path from
+    the agent's own working directory only; an agent with no directory of its
+    own (it runs in the hub's) attaches none."""
+    return nsup.build_mcp_config(NTH_SERVER_PATH, attach_roots=[cwd] if cwd else [])
 
 
 class AgentRouter(threading.Thread):
@@ -4987,6 +5005,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
                     "retraction_reason = ? WHERE id = ? AND channel = ?",
                     (now, op_id, reason, mid, ch),
                 )
+                nmedia.purge_message_page(db, mid)
                 # The notice inherits the deleted message's recipients. Posting
                 # it as a broadcast told the whole channel that a DM existed,
                 # who wrote it and when it was withdrawn — content stays
@@ -5433,7 +5452,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
             preamble = (prompt + "\n\n" if prompt else "") + \
                 build_agent_preamble(name, all_channels, member_id=agent_id,
                                      reclaim_secret=reclaim_secret)
-            mcp_config = nsup.build_mcp_config(NTH_SERVER_PATH)
+            mcp_config = build_mcp_config_for_hub(cwd)
             # Grant Read access ONLY to this agent's own channels' attachment
             # dirs — build_spawn_argv no longer adds the whole shared ATTACH_DIR
             # root, which used to let any agent read every other channel's
@@ -7281,12 +7300,9 @@ class NthWebHandler(BaseHTTPRequestHandler):
                "freed_bytes": {"attachments": 0, "db": max(0, before - after)}}
         if not vacuumed:
             res["vacuum_deferred"] = True
-            # A bare `vacuum_deferred: true` next to `freed_bytes.db: 0` reads
-            # as failure, and the operator runs the whole prune again. The
-            # deletes DID commit; only the disk reclaim was postponed.
-            res["note"] = vacuum_note or (
-                "The deletions are saved. Disk space wasn't reclaimed yet "
-                "because the database was busy — run Reclaim later to finish.")
+            # Reclaim deletes nothing, so the note speaks only of the space.
+            res["note"] = ("Disk space wasn't reclaimed yet because the database "
+                           "was busy — run Reclaim later to finish.")
         return res
 
     def _prune_attachments(self, db, older_than_days, dry_run) -> Dict[str, Any]:
@@ -9222,8 +9238,8 @@ class NthWebHandler(BaseHTTPRequestHandler):
         except (TypeError, ValueError):
             self._error(400, "invalid Content-Length")
             return
-        if length <= 0 or length > MAX_UPLOAD_BYTES:
-            self._error(400, f"file is missing or larger than the {MAX_UPLOAD_BYTES // (1024 * 1024)} MB limit")
+        if length <= 0 or length > nmedia.MAX_UPLOAD_BYTES:
+            self._error(400, f"file is missing or larger than the {nmedia.MAX_UPLOAD_BYTES // (1024 * 1024)} MB limit")
             return
         try:
             data = self.rfile.read(length)
@@ -9257,7 +9273,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 "SELECT COALESCE(SUM(bytes), 0) AS b FROM attachments "
                 " WHERE channel = ? AND member_id = ?", (ch, op_id),
             ).fetchone()["b"]
-            if used + len(data) > MAX_MEMBER_ATTACH_BYTES:
+            if used + len(data) > nmedia.MAX_MEMBER_ATTACH_BYTES:
                 self._error(413, "attachment quota exceeded")
                 return
             now = now_iso()
@@ -10648,20 +10664,27 @@ def main() -> int:
     # Single-channel mode spins up its one event hub before serving.
     # One sweep at startup so a long-running install reclaims whatever leaked
     # while it was down, without waiting for someone to upload.
-    def _startup_sweep() -> None:
-        try:
-            _gc = sweep_attachments(db_path, force=True)
-            if any(_gc.get(k) for k in ("abandoned", "dead_channel", "orphan_files",
-                                        "expired_pages")):
-                print(f"attachments: reclaimed {_gc}", flush=True)
-        except Exception:
-            pass
+    # Then again every ATTACH_GC_MIN_INTERVAL_S: expired pages and agents' DM
+    # images past retention accrue on a hub nobody uploads to, and the sweep
+    # used to run only at startup and on upload.
+    def _sweep_loop() -> None:
+        force = True
+        while True:
+            try:
+                _gc = sweep_attachments(db_path, force=force)
+                if any(_gc.get(k) for k in ("abandoned", "dead_channel", "orphan_files",
+                                            "expired_pages", "dm_retention")):
+                    print(f"attachments: reclaimed {_gc}", flush=True)
+            except Exception:
+                pass
+            force = False
+            time.sleep(ATTACH_GC_MIN_INTERVAL_S)
 
     # On a daemon thread: this ran inline before the socket was bound, so on a
     # large install the dashboard, every channel and every API route were
     # unreachable for the duration (measured ~1.2s at 150k attachments, and it
     # grows with the install). Nothing downstream depends on its result.
-    threading.Thread(target=_startup_sweep, name="attach-gc", daemon=True).start()
+    threading.Thread(target=_sweep_loop, name="attach-gc", daemon=True).start()
 
     # Forward-compat: make sure the columns the dashboard reads and writes
     # exist before anything queries them, so we work against a database whose
