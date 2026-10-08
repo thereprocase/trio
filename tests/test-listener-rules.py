@@ -23,6 +23,8 @@ import re
 import string
 import sys
 import tempfile
+import time
+import types
 import unittest
 from unittest.mock import patch
 
@@ -126,6 +128,30 @@ class ClassifyPollTests(unittest.TestCase):
         ({'ended': 'yes'}, nl.INVALID),
         ({'ended': 'yes', 'event': 'no_new'}, nl.OK),
         ({'ended': False, 'event': 'no_new'}, nl.OK),
+        ({'ended': 0}, nl.INVALID),
+        ({'ended': None}, nl.INVALID),
+        ({'ended': None, 'event': 'no_new'}, nl.OK),
+        ({'ended': 'false', 'event': 'no_new'}, nl.OK),
+        # An error that is not text is still an error, and never a cull.
+        ({'error': {'message': 'You are not a member of this channel.'}}, nl.REFUSED),
+        ({'error': {'a': 1}}, nl.REFUSED),
+        ({'error': ['x']}, nl.REFUSED),
+        ({'error': 5}, nl.REFUSED),
+        ({'error': True}, nl.REFUSED),
+        ({'error': 'Invalid channel: You are not a member of this channel.'}, nl.REFUSED),
+        ({'error': 'YOU ARE NOT A MEMBER OF THIS CHANNEL.'}, nl.REFUSED),
+        ({'error': 'you are not a member of this channel.'}, nl.REFUSED),
+        # PIN, behaviour question: whatever `event` holds, a reply that has the key is a poll.
+        # None, a list, '' and {} are all OK, so a hub bug that nulls `event` reads as a
+        # healthy empty poll (status `listening`) rather than as INVALID. Falsy errors are
+        # no error: 0 and [] beside a real event are OK.
+        ({'event': None}, nl.OK),
+        ({'event': ''}, nl.OK),
+        ({'event': {}}, nl.OK),
+        ({'event': ['ended']}, nl.OK),
+        ({'event': 'no_new', 'error': 0}, nl.OK),
+        ({'event': 'no_new', 'error': []}, nl.OK),
+        ({'event': 'no_new', 'error': {}}, nl.OK),
         ({'event': 'channel_gone'}, nl.GONE),
         ({'event': 'channel_not_found'}, nl.GONE),
         ({'error': 'channel_not_found'}, nl.GONE),                          # an older hub's spelling
@@ -139,7 +165,9 @@ class ClassifyPollTests(unittest.TestCase):
                          {nl.OK, nl.INVALID, nl.REFUSED, nl.CULLED, nl.ENDED, nl.GONE})
 
     def test_only_the_hubs_token_errors_are_token_refusals(self):
-        for error in nl.TOKEN_REFUSALS:
+        self.assertEqual(set(nl.TOKEN_REFUSALS),
+                         {'Invalid or revoked session_token.', 'session_token does not match member_id.'})
+        for error in ('Invalid or revoked session_token.', 'session_token does not match member_id.'):
             self.assertEqual(nl.classify_poll({'error': error}), nl.REFUSED)
             self.assertTrue(nl.token_refused({'error': error}))
         for poll in ({'error': 'Channel code is required.'}, {'error': 'Invalid channel code "X".'},
@@ -275,6 +303,29 @@ class NoticeTests(unittest.TestCase):
                 with self.assertRaises((TypeError, ValueError)):
                     nth_notice._integer(bad)
 
+    def test_from_event_with_none_fields_names_them_as_the_placeholder_identifier(self):
+        # name(None) is the text "None": a notice never fails on a missing identifier.
+        ended = nth_notice.from_event('trio', {'event': 'delivery_ended', 'channel': None, 'member_id': None,
+                                               'reason': None})
+        self.assertEqual(ended.ended, nth_notice.LISTENER_FAILURE)
+        self.assertEqual(ended.line, 'Trio delivery has stopped for member None in trio channel None: listener '
+                                     'failure. No further wake will come for it. The listener failed. Tell the '
+                                     'user, and check trio_delivery_status.')
+        said = nth_notice.from_event('trio', {'channel': None, 'member_id': None, 'message_id': '4',
+                                              'first_message_id': '4', 'count': '1', 'mentioned': None,
+                                              'banged': None})
+        self.assertEqual(said.ended, '')
+        self.assertIn('for member None in channel None.', said.line)
+        self.assertNotIn('addressed', said.line)
+        self.assertIsNone(nth_notice.from_event('trio', {'channel': 'room', 'member_id': 'me', 'message_id': None,
+                                                         'first_message_id': '4', 'count': '1'}))
+        self.assertIsNone(nth_notice.from_event('trio', {'channel': 'room', 'member_id': 'me', 'message_id': '4',
+                                                         'first_message_id': None, 'count': '1'}))
+        # A None more_unread is no more unread.
+        self.assertIn('1 new trio message (id 4)', nth_notice.from_event('trio', {
+            'channel': 'room', 'member_id': 'me', 'message_id': '4', 'first_message_id': '4', 'count': '1',
+            'more_unread': None}).line)
+
     def test_from_event_survives_any_meta(self):
         rng = random.Random(53)
         junk = [None, True, False, 0, -1, 1.5, float('inf'), float('-inf'), float('nan'), 2 ** 80, '',
@@ -350,8 +401,8 @@ class StopMonitor(BaseException):
 class ScriptedHub:
     """Stands in for MCPSSEClient: scripted quartet_poll replies, then stop."""
 
-    def __init__(self, polls):
-        self.polls, self.calls = list(polls), []
+    def __init__(self, polls, status=None):
+        self.polls, self.calls, self.status = list(polls), [], status
 
     def __call__(self, *args, **kwargs):
         return self
@@ -368,23 +419,33 @@ class ScriptedHub:
     def call_tool(self, name, arguments=None, timeout=60):
         self.calls.append(name)
         if name == 'quartet_status':
-            return {'members': [{'id': 'me'}]}
+            return self.status if self.status is not None else {'members': [{'id': 'me'}]}
         if not self.polls:
             raise StopMonitor
         return self.polls.pop(0)
 
 
+def no_sleep_clock():
+    """The monitor's `time` module without its sleeps. Only nth_spoke_monitor's own name
+    is replaced; patching time.sleep itself would stop every thread in the process."""
+    return types.SimpleNamespace(monotonic=time.monotonic, time=time.time, sleep=lambda _: None)
+
+
 class SpokeMonitorTests(unittest.TestCase):
-    def run_monitor(self, polls):
+    def run_monitor(self, polls, status=None, status_interval=3600):
+        emitted, returned, _ = self.drive(polls, status, status_interval)
+        return emitted, returned
+
+    def drive(self, polls, status=None, status_interval=3600):
         import nth_spoke_monitor as spoke
-        emitted, hub = [], ScriptedHub(polls)
-        with patch.object(spoke, 'emit', emitted.append), patch.object(spoke.time, 'sleep', lambda _: None):
+        emitted, hub = [], ScriptedHub(polls, status)
+        with patch.object(spoke, 'emit', emitted.append), patch.object(spoke, 'time', no_sleep_clock()):
             try:
-                spoke.monitor(hub, 'room', 'me', 'about', 'token', 0, 3600)
+                spoke.monitor(hub, 'room', 'me', 'about', 'token', 0, status_interval)
                 returned = True
             except StopMonitor:
                 returned = False
-        return emitted, returned
+        return emitted, returned, hub.calls
 
     def test_a_cull_ends_the_monitor_with_a_culled_event(self):
         emitted, returned = self.run_monitor([{'error': 'You are not a member of this channel.'}])
@@ -405,6 +466,11 @@ class SpokeMonitorTests(unittest.TestCase):
         self.assertEqual(emitted[0]['event'], 'session_revoked')
         self.assertEqual((emitted[0]['reason'], emitted[0]['channel'], emitted[0]['member_id']),
                          ('refused', 'room', 'me'))
+        # The sentence that tells the agent what to do: tell the user, never reclaim.
+        import nth_spoke_monitor as spoke
+        self.assertEqual(emitted[0]['msg'], spoke.REFUSED_MSG)
+        self.assertIn('tell the user; never reconnect or reclaim on your own.', emitted[0]['msg'])
+        self.assertIn('This monitor has stopped.', emitted[0]['msg'])
 
     def test_a_request_refusal_ends_the_monitor_with_a_fixed_label(self):
         for error, label in (('Channel code is required.', 'missing_channel_code'),
@@ -436,7 +502,9 @@ class SpokeMonitorTests(unittest.TestCase):
             self.assertNotIn(word, emitted_words)
 
     def test_both_token_errors_are_session_revoked(self):
-        for error in nl.TOKEN_REFUSALS:
+        # The hub's two wordings, written out: a loop over the module's own constant would
+        # follow it if one were dropped.
+        for error in ('Invalid or revoked session_token.', 'session_token does not match member_id.'):
             with self.subTest(error=error):
                 emitted, _ = self.run_monitor([{'error': error}])
                 self.assertEqual([event['event'] for event in emitted], ['session_revoked'])
@@ -445,6 +513,50 @@ class SpokeMonitorTests(unittest.TestCase):
         # Classification puts the error first: a refused poll is not read as an end.
         emitted, _ = self.run_monitor([{'error': 'Invalid or revoked session_token.', 'event': 'ended'}])
         self.assertEqual([event['event'] for event in emitted], ['session_revoked'])
+
+    def test_an_error_that_is_not_text_is_a_request_refusal_with_the_unknown_label(self):
+        for error in ({'message': 'You are not a member of this channel.'}, ['x'], 5, True):
+            with self.subTest(error=error):
+                emitted, returned = self.run_monitor([{'error': error}])
+                self.assertTrue(returned)
+                self.assertEqual([(event['event'], event['reason']) for event in emitted],
+                                 [('poll_refused', 'unknown')])
+
+    def test_a_reply_that_names_no_event_ends_nothing_and_the_next_poll_is_made(self):
+        # PIN, behaviour question: {'event': None} and its kind classify OK (see
+        # ClassifyPollTests), so the monitor treats them as an empty poll: no event, no end.
+        emitted, returned, calls = self.drive([{'event': None}, {'event': ['ended']}, {'event': ''}])
+        self.assertFalse(returned)
+        self.assertEqual(emitted, [])
+        # Three scripted polls and the one that finds the script empty and stops the test.
+        self.assertEqual([call for call in calls if call == 'quartet_poll'], ['quartet_poll'] * 4)
+
+    def test_an_invalid_reply_costs_exactly_one_poll_each_and_emits_nothing(self):
+        emitted, returned, calls = self.drive([{'_raw': 'Error executing tool'}, None, [], {'event': 'no_new'}])
+        self.assertFalse(returned)
+        self.assertEqual(emitted, [])
+        self.assertEqual([call for call in calls if call == 'quartet_poll'], ['quartet_poll'] * 5)
+
+    def test_a_status_that_says_the_channel_is_gone_ends_the_monitor(self):
+        emitted, returned, calls = self.drive([{'event': 'no_new'}], status={'error': 'channel_not_found'},
+                                              status_interval=0)
+        self.assertTrue(returned)
+        self.assertEqual(emitted, [{'event': 'channel_gone'}])
+        self.assertEqual(calls, ['quartet_poll', 'quartet_status'])
+
+    def test_a_status_that_says_the_channel_ended_ends_the_monitor(self):
+        emitted, returned, calls = self.drive([{'event': 'no_new'}],
+                                              status={'status': 'ended', 'ended_by': 'Ender'}, status_interval=0)
+        self.assertTrue(returned)
+        self.assertEqual(emitted, [{'event': 'channel_ended', 'ended_by': 'Ender'}])
+        self.assertEqual(calls, ['quartet_poll', 'quartet_status'])
+
+    def test_a_status_without_this_member_is_an_error_and_not_an_end(self):
+        emitted, returned, calls = self.drive([{'event': 'no_new'}], status={'members': [{'id': 'other'}]},
+                                              status_interval=0)
+        self.assertFalse(returned)
+        self.assertEqual(emitted, [{'event': 'error', 'msg': 'Member not found in channel.'}])
+        self.assertEqual(calls, ['quartet_poll', 'quartet_status', 'quartet_poll'])
 
     def test_an_end_is_unchanged(self):
         emitted, returned = self.run_monitor([{'event': 'ended', 'ended_by': 'Ender', 'unread_count': 0}])
@@ -502,7 +614,7 @@ class OnceWaiterTests(unittest.TestCase):
                     'member_id': 'me', 'session_token': 'token'}
         import nth_spoke_monitor as spoke
         with patch('nth_sse_client.MCPSSEClient', ScriptedHub(polls)), patch.object(spoke.sys, 'stdout', once), \
-                patch.object(spoke.time, 'sleep', lambda _: None):
+                patch.object(spoke, 'time', no_sleep_clock()):
             try:
                 nth_watch.run(identity, 'about')
             except (self.Exited, StopMonitor):
@@ -552,19 +664,22 @@ class RelayTests(unittest.TestCase):
                 return {'turn': {'id': 'turn-' + str(len(self.calls))}}
             return {}
 
-    def run_relay(self, polls):
+    def run_relay(self, polls, once=False):
         import nth_codex_relay as relay
-        codex = self.Codex()
+        codex, hub = self.Codex(), ScriptedHub(polls)
+        self.hub = hub
         with tempfile.TemporaryDirectory() as temporary, \
                 patch.object(relay, 'CodexSocketClient', return_value=codex), \
-                patch.object(relay, 'MCPSSEClient', ScriptedHub(polls)):
+                patch.object(relay, 'MCPSSEClient', hub):
             try:
-                relay.run(self.BINDING, Path(temporary) / 'spool.sqlite', on_receipt=lambda receipt: None,
+                relay.run(self.BINDING, Path(temporary) / 'spool.sqlite', once=once,
+                          on_receipt=lambda receipt: None,
                           stop_event=type('Stop', (), {'is_set': lambda self: False, 'wait': lambda self, _: None})())
             except relay.MembershipEnded as exc:
                 return str(exc), codex.calls
             except StopMonitor:
                 return None, codex.calls
+        return None, codex.calls
 
     def test_every_terminal_outcome_ends_the_binding(self):
         for reply, expected in (({'error': 'Invalid or revoked session_token.'}, 'refused'),
@@ -577,11 +692,49 @@ class RelayTests(unittest.TestCase):
                 self.assertIn(expected, ended.lower())
                 self.assertNotIn('turn/start', calls)
 
+    def test_the_relay_says_refused_for_a_refusal_or_a_cull_and_ended_for_an_end(self):
+        refused = 'Channel refused the poll; check membership and session binding'
+        ended = 'Channel ended or disappeared'
+        for reply, expected in (({'error': 'Invalid or revoked session_token.'}, refused),
+                                ({'error': 'session_token does not match member_id.'}, refused),
+                                ({'error': 'Channel code is required.'}, refused),
+                                ({'error': ['x']}, refused),
+                                ({'error': 'You are not a member of this channel.'}, refused),
+                                ({'event': 'ended'}, ended), ({'ended': True}, ended),
+                                ({'event': 'channel_gone'}, ended), ({'event': 'channel_not_found'}, ended),
+                                ({'error': 'channel_not_found'}, ended)):
+            with self.subTest(reply=reply):
+                message_text, calls = self.run_relay([reply])
+                self.assertEqual(message_text, expected)
+                self.assertEqual(self.hub.calls.count('quartet_poll'), 1)
+                self.assertNotIn('turn/start', calls)
+
+    def test_a_truthy_ended_that_is_not_true_does_not_end_the_binding(self):
+        ended, calls = self.run_relay([{'ended': 'yes', 'event': 'no_new', 'messages': []}])
+        self.assertIsNone(ended)
+
+    def test_once_with_an_invalid_reply_returns_quietly_having_delivered_nothing(self):
+        # PIN, behaviour question: before the shared classifier a reply that was not a JSON
+        # object raised MembershipEnded in --once mode too. An INVALID reply is now "poll
+        # again", and --once has no next pass: it returns normally after one poll, exit 0,
+        # with nothing delivered and nothing said.
+        for reply in ({'_raw': 'Error executing tool'}, None, ['x']):
+            with self.subTest(reply=reply):
+                ended, calls = self.run_relay([reply], once=True)
+                self.assertIsNone(ended)
+                self.assertEqual(self.hub.calls.count('quartet_poll'), 1)
+                self.assertNotIn('turn/start', calls)
+
+    def test_once_with_a_terminal_reply_still_raises(self):
+        ended, _ = self.run_relay([{'error': 'You are not a member of this channel.'}], once=True)
+        self.assertIn('refused', ended)
+
     def test_an_invalid_reply_does_not_end_the_binding(self):
         ended, calls = self.run_relay([{'_raw': 'Error executing tool'}, None,
                                        {'event': 'new_messages', 'messages': [message(3, mentioned=True)]}])
         self.assertIsNone(ended)
         self.assertEqual(calls.count('turn/start'), 1)
+        self.assertEqual(self.hub.calls.count('quartet_poll'), 4)    # three scripted and the one that stops it
 
 
 if __name__ == '__main__':
