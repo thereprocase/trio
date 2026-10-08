@@ -3340,21 +3340,26 @@ def _push_tier(ident: "OperatorIdentity") -> str:
 
 def _push_delivering(db_path: Path) -> bool:
     """True when some hub process is sending pushes for this database: this
-    one, or another process holding an unexpired agent-control lease."""
-    if _PUSH_DISPATCHER is not None and _PUSH_DISPATCHER.is_alive():
+    one, or the current lease holder AND that holder has advertised a running
+    push dispatcher recently. A lease alone proves nothing about push: the
+    holder may be an older build, or lack the cryptography package."""
+    if (_PUSH_DISPATCHER is not None and _PUSH_DISPATCHER.is_alive()
+            and not _PUSH_DISPATCHER.stopped):
         return True
     try:
         db = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=2)
         try:
-            row = db.execute("SELECT holder, expires_at FROM agent_control_lease "
-                             "WHERE id=1").fetchone()
+            lease = db.execute("SELECT holder, expires_at FROM agent_control_lease "
+                               "WHERE id=1").fetchone()
+            marker = npush.dispatcher_marker(db)
         finally:
             db.close()
     except sqlite3.Error:
         return False
-    if row is None or float(row[1]) <= time.time():
+    if lease is None or float(lease[1]) <= time.time() or marker is None:
         return False
-    return _LEASE is None or row[0] != _LEASE.holder
+    holder, _version, heartbeat_at = marker
+    return holder == lease[0] and time.time() - heartbeat_at <= npush.MARKER_FRESH_S
 
 
 def _quiesce_agents() -> None:
@@ -6574,10 +6579,12 @@ class NthWebHandler(BaseHTTPRequestHandler):
             return
         named = ident.source != IDENTITY_SOURCE_PENDING
         subs: List[Dict[str, str]] = []
+        mine: List[Dict[str, str]] = []
         if named:
             db = sqlite3.connect(str(self.db_path), timeout=5)
             try:
                 subs = npush.subscriptions_for(db, ident.member_id, channel)
+                mine = npush.subscriptions_of(db, ident.member_id)
                 db.commit()
             except sqlite3.Error as exc:
                 sys.stderr.write(f"[nth_web push] status read failed: {exc}\n")
@@ -6597,6 +6604,9 @@ class NthWebHandler(BaseHTTPRequestHandler):
             # The caller's own endpoints only; they match them against their
             # browser's subscription to show which mode this device is on.
             "subscriptions": subs,
+            # Every channel this identity subscribes to, so a page that has to
+            # replace its browser endpoint can move all of them across.
+            "mine": mine,
             # Web push needs a secure context; over plain http the page can
             # only say where the https address is.
             "secure_url": SECURE_URL_HINT,
@@ -6610,8 +6620,11 @@ class NthWebHandler(BaseHTTPRequestHandler):
         if body is None:
             return
         mode = body.get("mode")
-        if mode not in npush.PUSH_MODES:
-            self._error(400, "mode must be one of: " + ", ".join(npush.PUSH_MODES))
+        if mode not in npush.SUBSCRIBE_MODES:
+            # Off is an unsubscribe: a row that can never deliver would only
+            # occupy quota.
+            self._error(400, "mode must be one of: " + ", ".join(npush.SUBSCRIBE_MODES)
+                        + " (use /api/push/unsubscribe to turn notifications off)")
             return
         channel = self._push_channel(body.get("channel"))
         if channel is None:
@@ -9998,26 +10011,31 @@ class AgentControlLease:
         finally:
             db.close()
 
-    def still_held(self) -> bool:
-        """Whether the database still names this hub as the unexpired holder.
+    def lease_state(self) -> str:
+        """npush.LEASE_HELD, LEASE_EXPIRED or LEASE_LOST, read-only.
 
-        Read-only, for the push dispatcher to ask before each send. A database
-        error answers True for the same reason renew() does: a locked read is
-        not evidence that another hub took over, and the TTL bounds the
-        overlap if one really did.
+        For the push dispatcher, asked before each tick. Only a row naming a
+        DIFFERENT holder (or no row at all) is a loss. Our own row past its
+        expiry means renewals are failing — a locked database, a suspend and
+        resume, a wall-clock step — and renew() deliberately keeps the lease
+        through those, so this answers EXPIRED and the dispatcher pauses
+        rather than giving up delivery for the life of the process. A database
+        error answers HELD for the same reason renew() returns True on one.
         """
         try:
             db = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True, timeout=2)
         except sqlite3.Error:
-            return True
+            return npush.LEASE_HELD
         try:
             row = db.execute("SELECT holder, expires_at FROM agent_control_lease "
                              "WHERE id=1").fetchone()
         except sqlite3.Error:
-            return True
+            return npush.LEASE_HELD
         finally:
             db.close()
-        return row is not None and row[0] == self.holder and float(row[1]) > time.time()
+        if row is None or row[0] != self.holder:
+            return npush.LEASE_LOST
+        return npush.LEASE_HELD if float(row[1]) > time.time() else npush.LEASE_EXPIRED
 
     def release(self) -> None:
         try:
@@ -10344,7 +10362,9 @@ def main() -> int:
     global _PUSH_DISPATCHER
     if _LEASE is not None and npush.available():
         _PUSH_DISPATCHER = npush.PushDispatcher(db_path, db_path.parent,
-                                                lease_check=_LEASE.still_held)
+                                                lease_check=_LEASE.lease_state,
+                                                holder=_LEASE.holder,
+                                                version=NTH_VERSION)
         _PUSH_DISPATCHER.start()
 
     def stop_hubs():

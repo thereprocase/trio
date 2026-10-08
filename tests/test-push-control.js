@@ -220,7 +220,7 @@ const click = el => (el._listeners.click || []).forEach(fn => fn({ type: 'click'
     state.dmKey = ''; state.dmThread = null;
   });
 
-  await check('a 409 (endpoint owned by another identity) replaces the browser subscription and retries', async () => {
+  await check('a 409 replaces the browser subscription, retries, and moves the identity\'s other channels', async () => {
     pushCapable(ANDROID);
     win.Notification.permission = 'granted';
     current = subscription;
@@ -235,6 +235,15 @@ const click = el => (el._listeners.click || []).forEach(fn => fn({ type: 'click'
         const text = JSON.stringify({ error: 'this device is subscribed under another identity' });
         return { ok: false, status: 409, text: async () => text, json: async () => JSON.parse(text) };
       }
+      if (url.startsWith('/api/push/status') && n > 0) {
+        // This identity also had #dev on the old endpoint.
+        calls.push({ url, method: 'GET', body: null });
+        const data = { enabled: true, delivering: true, named: true, subscriptions: [],
+                       mine: [{ channel: 'dev', endpoint: ENDPOINT, mode: 'mentions' },
+                              { channel: 'ops', endpoint: ENDPOINT + '-new', mode: 'all' }] };
+        const text = JSON.stringify(data);
+        return { ok: true, status: 200, text: async () => text, json: async () => data };
+      }
       return realFetch(url, init);
     };
     try {
@@ -246,9 +255,16 @@ const click = el => (el._listeners.click || []).forEach(fn => fn({ type: 'click'
       await settle();
       const posts = calls.filter(c => c.url === '/api/push/subscribe');
       assert.strictEqual(unsubscribed, 1);
-      assert.strictEqual(posts.length, 2);
+      assert.strictEqual(posts.length, 3);
       assert.strictEqual(posts[1].body.subscription.endpoint, ENDPOINT + '-new');
+      // The other channel moves to the new endpoint with its own mode...
+      assert.deepStrictEqual([posts[2].body.channel, posts[2].body.mode, posts[2].body.subscription.endpoint],
+                             ['dev', 'mentions', ENDPOINT + '-new']);
+      // ...and the old endpoint's rows are cleared.
+      const unsub = calls.find(c => c.url === '/api/push/unsubscribe');
+      assert.deepStrictEqual(unsub && unsub.body, { endpoint: ENDPOINT });
       assert.deepStrictEqual(pressed(s), ['all']);
+      assert.match(s.querySelector('.push-status').textContent, /#dev/);
     } finally { win.fetch = realFetch; }
   });
 

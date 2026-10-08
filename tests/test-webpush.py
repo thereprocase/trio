@@ -445,11 +445,21 @@ check("dispatch: first tick seeds the high-water mark and sends nothing", sent =
 
 import sqlite3  # noqa: E402
 db = sqlite3.connect(str(srv.DB_PATH))
-for i, mode in enumerate(("all", "mentions", "every5m", "off")):
+for i, mode in enumerate(("all", "mentions", "every5m", "all")):
     npush.upsert_subscription(db, channel=CH, endpoint=f"https://fcm.googleapis.com/fcm/send/d{i}",
                               p256dh=UA_PUBLIC, auth=UA_AUTH, member_id=f"_op_g_u{i}_x",
                               member_name=f"u{i}-guest", mode=mode)
+# An 'off' row can no longer be created through subscribe; one left by an
+# older build must still be ignored by the dispatcher.
+db.execute("UPDATE push_subscriptions SET mode = 'off' WHERE endpoint LIKE '%/d3'")
 db.commit()
+try:
+    npush.upsert_subscription(db, channel=CH, endpoint="https://fcm.googleapis.com/fcm/send/off",
+                              p256dh=UA_PUBLIC, auth=UA_AUTH, member_id="_op_g_off_x",
+                              member_name="off-guest", mode="off")
+    check("store: mode off is refused at subscribe (off means unsubscribe)", False)
+except ValueError:
+    check("store: mode off is refused at subscribe (off means unsubscribe)", True)
 disp.tick()
 check("dispatch: subscribing does not replay older messages", sent == [])
 
@@ -591,14 +601,54 @@ check("lease: the dispatcher stops itself", d.stopped)
 
 lease = web.AgentControlLease(srv.DB_PATH)
 check("lease: acquire on a fresh DB", lease.acquire() is None)
-check("lease: still_held while we hold it", lease.still_held())
+check("lease: lease_state is held while we hold it", lease.lease_state() == npush.LEASE_HELD)
 conn = sqlite3.connect(str(srv.DB_PATH))
 conn.execute("UPDATE agent_control_lease SET holder = 'other-host:1:abcd' WHERE id = 1")
 conn.commit()
 conn.close()
-check("lease: still_held is False once another hub holds it", not lease.still_held())
-d2 = fresh(Scripted(), lease_check=lease.still_held)
+check("lease: lease_state names the takeover", lease.lease_state() == npush.LEASE_LOST)
+d2 = fresh(Scripted(), lease_check=lease.lease_state)
 check("lease: a dispatcher wired to a lost lease stops on its first tick", d2.stopped)
+
+# Our own row past its expiry is a pause, never a stop: renew() keeps the
+# lease through a locked DB or a suspend, so delivery must come back.
+conn = sqlite3.connect(str(srv.DB_PATH))
+conn.execute("DELETE FROM agent_control_lease")
+conn.commit()
+conn.close()
+lease = web.AgentControlLease(srv.DB_PATH)
+lease.acquire()
+sc = Scripted()
+d3 = fresh(sc, lease_check=lease.lease_state)
+conn = sqlite3.connect(str(srv.DB_PATH))
+conn.execute("UPDATE agent_control_lease SET expires_at = ?", (time.time() - 1,))
+conn.commit()
+conn.close()
+check("lease: our own expired row reads as expired", lease.lease_state() == npush.LEASE_EXPIRED)
+say("while the lease is expired")
+check("lease: an expired own lease skips the tick", d3.tick() == 0 and not sc.calls)
+check("lease: an expired own lease leaves the dispatcher running", not d3.stopped)
+check("lease: the hub renews its own lease", lease.renew())
+d3.tick()
+check("lease: delivery resumes after renewal, including the held message",
+      not d3.stopped and [p["body"] for _e, p, _u in sc.calls] == ["while the lease is expired"])
+
+# A lease lost in the middle of a long batch stops the remaining sends.
+clear_subs()
+for i in range(4):
+    add_sub(f"mid{i}", member=f"_op_g_mid{i}_x")
+answers = iter([npush.LEASE_HELD, npush.LEASE_HELD, npush.LEASE_HELD])
+_recheck, _workers = npush.LEASE_RECHECK_S, npush.SEND_WORKERS
+npush.LEASE_RECHECK_S, npush.SEND_WORKERS = 0.0, 1
+try:
+    sc = Scripted()
+    d4 = fresh(sc, lease_check=lambda: next(answers, npush.LEASE_LOST))
+    say("long batch")
+    d4.tick()
+finally:
+    npush.LEASE_RECHECK_S, npush.SEND_WORKERS = _recheck, _workers
+check(f"lease: a takeover mid-batch stops the remaining sends ({len(sc.calls)} of 4)",
+      len(sc.calls) == 1 and d4.stopped)
 _was_enabled = web.NthWebHandler._agent_control_enabled
 web._PUSH_DISPATCHER = npush.PushDispatcher(srv.DB_PATH, Path(_TMP), sender=Scripted())
 victim = web._PUSH_DISPATCHER
@@ -831,6 +881,192 @@ for raw in ("https://FCM.GoogleAPIs.com/fcm/send/x", "https://fcm.googleapis.com
     aud = npush.verify_jwt(hdr[len("vapid t="):hdr.index(", k=")], keys.public_bytes)["aud"]
     check(f"vapid: aud is canonical for {raw.split('/')[2]}", aud == "https://fcm.googleapis.com")
 
+# ───────── Second review: caps, locks, commit order, aging, races ─────────
+
+# Cap per subscription inside one message row; no duplicates across ticks.
+clear_subs()
+for i in range(5):
+    add_sub(f"row{i}", member=f"_op_g_row{i}_x")
+_cap = npush.MAX_SENDS_PER_TICK
+npush.MAX_SENDS_PER_TICK = 2
+try:
+    sc = Scripted()
+    d = fresh(sc)
+    say("one message, five phones")
+    counts = []
+    for _ in range(4):
+        before = len(sc.calls)
+        d.tick()
+        counts.append(len(sc.calls) - before)
+    eps = [e for e, _p, _u in sc.calls]
+    check(f"cap: one row is split across ticks ({counts})", counts[:3] == [2, 2, 1])
+    check("cap: every phone gets the message exactly once",
+          sorted(eps) == sorted(f"{EP}row{i}" for i in range(5)))
+    say("the next one")
+    d.tick()
+    d.tick()
+    d.tick()
+    check("cap: the following message still reaches everyone once",
+          len([p for _e, p, _u in sc.calls if p["body"] == "the next one"]) == 5)
+
+    # Digests are capped too, and the rest stay pending.
+    clear_subs()
+    for i in range(3):
+        add_sub(f"dg{i}", mode="every5m", member=f"_op_g_dg{i}_x")
+    conn = sqlite3.connect(str(srv.DB_PATH))
+    conn.execute("UPDATE push_subscriptions SET pending_count = 4, pending_sender = 'Ada', "
+                 "last_sent_at = 0")
+    conn.commit()
+    conn.close()
+    sc = Scripted()
+    d = fresh(sc)
+    check("cap: due summaries beyond the cap wait for the next tick", len(sc.calls) == 2)
+    pending = [sub_row(f"dg{i}")["pending_count"] for i in range(3)]
+    check(f"cap: the waiting summary keeps its count ({pending})", sorted(pending) == [0, 0, 4])
+    d.tick()
+    check("cap: and goes out next tick", len(sc.calls) == 3)
+finally:
+    npush.MAX_SENDS_PER_TICK = _cap
+
+# Planning holds no write lock (only the final batch write does).
+clear_subs()
+add_sub("lock")
+sc = Scripted()
+d = fresh(sc)
+lock_seen = []
+
+
+def slow_decide(*a, **k):
+    probe = sqlite3.connect(str(srv.DB_PATH), timeout=0.1)
+    try:
+        probe.execute("BEGIN IMMEDIATE")
+        probe.execute("ROLLBACK")
+    except sqlite3.Error as exc:
+        lock_seen.append(repr(exc))
+    finally:
+        probe.close()
+    return _decide(*a, **k)
+
+
+npush.decide = slow_decide
+try:
+    say("planning")
+    d._next_sweep = 0.0          # make the orphan sweep run in this tick too
+    d.tick()
+finally:
+    npush.decide = _decide
+check("locks: a writer gets in while the dispatcher plans", not lock_seen, "; ".join(lock_seen))
+
+# high_water moves only after the state write commits.
+clear_subs()
+add_sub("commit", mode="all")
+sc = Scripted()
+d = fresh(sc)
+d.tick()
+hw_before = d.high_water
+say("written while the DB is locked")
+blocker = sqlite3.connect(str(srv.DB_PATH), timeout=5)
+blocker.execute("BEGIN IMMEDIATE")
+try:
+    d.tick()
+    raised = False
+except sqlite3.OperationalError:
+    raised = True
+blocker.rollback()
+blocker.close()
+check("commit: a failed state write surfaces as an error", raised)
+check("commit: high_water stays put when the write fails", d.high_water == hw_before)
+check("commit: nothing was sent for the unrecorded plan", not sc.calls)
+d.tick()
+check("commit: the message is delivered once the DB frees up",
+      [p["body"] for _e, p, _u in sc.calls] == ["written while the DB is locked"])
+
+clear_subs()
+add_sub("rq", mode="mentions")
+sc = Scripted()
+d = fresh(sc)
+sc.status[f"{EP}rq"] = 503
+say("!all retry me")
+d.tick()
+d._endpoint_backoff.clear()
+queued = len(d._retry)
+say("a second message to force a state write")
+blocker = sqlite3.connect(str(srv.DB_PATH), timeout=5)
+blocker.execute("BEGIN IMMEDIATE")
+try:
+    d.tick()
+except sqlite3.OperationalError:
+    pass
+blocker.rollback()
+blocker.close()
+check("commit: retries taken for a failed plan go back on the queue",
+      queued == 1 and len(d._retry) == 1)
+
+# Guest rows that never renew or deliver age out; trusted rows stay.
+clear_subs()
+add_sub("old-guest")
+add_sub("fresh-guest", member="_op_g_fresh_x")
+add_sub("old-owner", member="_op_t_owner_x", tier=npush.TIER_TRUSTED)
+clock[0] = 2_000_000_000.0     # a realistic epoch, so "a month ago" is positive
+long_ago = clock[0] - npush.GUEST_IDLE_S - 10
+conn = sqlite3.connect(str(srv.DB_PATH))
+conn.execute("UPDATE push_subscriptions SET updated_at = ?, last_ok_at = 0", (long_ago,))
+conn.execute("UPDATE push_subscriptions SET last_ok_at = ? WHERE endpoint LIKE '%fresh-guest'",
+             (clock[0],))
+conn.commit()
+conn.close()
+fresh(Scripted())
+check("aging: an idle guest row is removed", sub_row("old-guest") is None)
+check("aging: a guest row that still receives pushes stays", sub_row("fresh-guest") is not None)
+check("aging: an idle trusted row stays", sub_row("old-owner") is not None)
+
+# The quota check and insert are atomic.
+clear_subs()
+npush.TIER_QUOTAS[npush.TIER_GUEST] = (8, 3)
+results = []
+barrier = threading.Barrier(10)
+
+
+def racer(i):
+    conn = sqlite3.connect(str(srv.DB_PATH), timeout=10)
+    barrier.wait()
+    try:
+        npush.upsert_subscription(conn, channel=CH, endpoint=f"{EP}race{i}", p256dh=UA_PUBLIC,
+                                  auth=UA_AUTH, member_id=f"_op_g_race{i}_x",
+                                  member_name="r", mode="all")
+        results.append("ok")
+    except npush.SubscriptionLimit:
+        results.append("limit")
+    finally:
+        conn.close()
+
+
+try:
+    threads = [threading.Thread(target=racer, args=(i,)) for i in range(10)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+finally:
+    npush.TIER_QUOTAS.update(_quotas)
+conn = sqlite3.connect(str(srv.DB_PATH))
+n_rows = conn.execute("SELECT COUNT(*) FROM push_subscriptions").fetchone()[0]
+conn.close()
+check(f"race: ten racers for three guest slots leave exactly three rows ({n_rows})",
+      n_rows == 3 and results.count("ok") == 3)
+
+# The dispatcher advertises itself for the status endpoint.
+clear_subs()
+fresh(Scripted(), holder="hub-a:1:x", version="v-test")
+conn = sqlite3.connect(str(srv.DB_PATH))
+marker = npush.dispatcher_marker(conn)
+conn.execute("DELETE FROM push_dispatcher")
+conn.commit()
+conn.close()
+check("marker: the dispatcher records its holder and version",
+      marker is not None and marker[:2] == ("hub-a:1:x", "v-test"))
+clear_subs()
+
 # ───────── HTTP surface ─────────
 hub = web.EventHub(srv.DB_PATH, CH)
 server = None
@@ -973,20 +1209,42 @@ try:
               st == 200 and status.get("subscriptions") == [
                   {"endpoint": GOOD_SUB["endpoint"], "mode": "every5m"}], str(status))
         st, _hd, _raw = call(port, "POST", "/api/push/subscribe", {**SUB, "mode": "all"})
+        st, _hd, raw_nd = call(port, "GET", f"/api/push/status?channel={CH}")
         check("status: a server with no sending hub says it is not delivering",
-              as_json(raw).get("delivering") is False)
+              st == 200 and as_json(raw_nd).get("delivering") is False)
         _c = sqlite3.connect(str(srv.DB_PATH))
         web.AgentControlLease(srv.DB_PATH)._db().close()      # create the table
         _c.execute("INSERT OR REPLACE INTO agent_control_lease (id, holder, host, pid, "
                    "acquired_at, expires_at) VALUES (1, 'hub-a:1:x', 'hub-a', 1, 'now', ?)",
                    (time.time() + 60,))
+        _c.execute("DELETE FROM push_dispatcher")
         _c.commit()
-        st, _hd, raw2 = call(port, "GET", f"/api/push/status?channel={CH}")
-        check("status: a database driven by a live hub reports delivering",
-              as_json(raw2).get("delivering") is True)
+
+        def delivering():
+            _st, _h, body = call(port, "GET", f"/api/push/status?channel={CH}")
+            return as_json(body).get("delivering")
+        check("status: a lease holder that never advertised push is not delivering",
+              delivering() is False)
+        _c.execute("INSERT INTO push_dispatcher (id, holder, version, heartbeat_at) "
+                   "VALUES (1, 'hub-a:1:x', 'test', ?)", (time.time(),))
+        _c.commit()
+        check("status: the lease holder advertising a dispatcher is delivering",
+              delivering() is True)
+        _c.execute("UPDATE push_dispatcher SET heartbeat_at = ?",
+                   (time.time() - npush.MARKER_FRESH_S - 5,))
+        _c.commit()
+        check("status: a stale dispatcher advertisement does not count", delivering() is False)
+        _c.execute("UPDATE push_dispatcher SET holder = 'hub-b:2:y', heartbeat_at = ?",
+                   (time.time(),))
+        _c.commit()
+        check("status: an advertisement from a hub that lost the lease does not count",
+              delivering() is False)
         _c.execute("DELETE FROM agent_control_lease")
+        _c.execute("DELETE FROM push_dispatcher")
         _c.commit()
         _c.close()
+        st, _hd, _raw = call(port, "POST", "/api/push/subscribe", {**SUB, "mode": "off"})
+        check("subscribe: mode off is refused over HTTP (400)", st == 400)
         st, _hd, raw = call(port, "GET", f"/api/push/status?channel={CH}")
         check("status: changing the mode replaces, never duplicates",
               as_json(raw).get("subscriptions") == [{"endpoint": GOOD_SUB["endpoint"], "mode": "all"}])
