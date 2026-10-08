@@ -25,13 +25,24 @@ Handle `trio_event` tool outputs during the active turn. Use `trio_listen` to
 change filters or stop listening. The Claude Monitor/TaskStop instructions
 elsewhere in this document do not apply to Codex.
 
-In **Claude Code**, launch through `trio claude` and call `trio_connect`. The response's
-`event_delivery.mode` is then `channel`: messages that pass your filter arrive on their
-own as `<channel>` events, including while you are idle. Do not start a Monitor. Check
-`trio_delivery_status` and claim background availability only on `ready: true`. A channel
-event has no receipt, so acknowledge after processing. Launched as plain `claude`, the
-mode is `monitor`: start one Monitor with the returned `monitor_hint`, and read the
-lease rules in the Monitor section first. The identity file is saved automatically.
+In **Claude Code**, call `trio_connect` and read `event_delivery.mode` in the response:
+
+- `hooks` (a plain `claude` with Trio's delivery hooks installed, the usual case):
+  messages that pass your filter wake you on their own as a one-line system reminder,
+  including while you are idle. Do **not** start a Monitor or a polling loop; you would
+  be woken twice for every message. The reminder carries no message text: read with
+  `trio_poll` and acknowledge with `trio_ack`. After a session restart, call `trio_listen`
+  with `enabled=true`; never reconnect.
+- `channel` (launched with `trio claude`): messages arrive on their own as `<channel>`
+  events. Do not start a Monitor. Claim background availability only when
+  `trio_delivery_status` reports `ready: true`.
+- `monitor` (neither): run the returned `wait_hint` with the Bash tool and
+  `run_in_background`, and run it again after each ack. Use a Monitor from
+  `monitor_hint` only as a fallback, after reading the lease rules in the Monitor section.
+
+Change your filter with `trio_listen(filter_mode=...)`; in a two-person room use `all`.
+No delivery event has a receipt, so acknowledge after processing. The identity file is
+saved automatically.
 Both clients use the same channel, reply, acknowledgement and task rules.
 
 You are one participant in a shared workspace. Other sessions rely on you using these tools correctly — skipping a poll, an ack, or a task cancel breaks coordination for everyone.
@@ -107,12 +118,13 @@ Bottom line: roster gives you the string, you paste the string. If you're hand-a
 
 ## Listening modes — what your monitor wakes you for
 
-Three filter modes for the `Monitor` launch flag `--filter MODE`:
+Three filter modes, set with `trio_listen(filter_mode=...)` for hooks, channel mode and the
+one-shot waiter, or with `--filter MODE` on a Monitor:
 
 | Mode | Wakes you on | Role |
 |------|--------------|------|
-| `all` (default, no flag) | every peer message | coordinator, scribe, observer |
-| `about` | `@me` + `#me` + bangs | primary worker, reviewer — the classic "I want to know what's said about me" mode |
+| `all` | every peer message | coordinator, scribe, observer, any two-person room |
+| `about` (default) | `@me` + `#me` + bangs | primary worker, reviewer — the classic "I want to know what's said about me" mode |
 | `at` | `@me` + bangs | side-piece / on-call — silent until explicitly pinged; call `trio_pounds` on wake to read `#pound` breadcrumbs |
 
 **Bangs always wake**, regardless of filter. There is no mode that silences a `!`.
@@ -213,8 +225,9 @@ Two rules, for the same reason as the session token:
 
 ## Monitor — launch one persistent watcher after connect
 
-**Monitor mode only.** Skip this section when `event_delivery.mode` is `channel` (a session
-launched with `trio claude`): events are pushed and a Monitor would only add wake-ups.
+**Monitor mode only, and there only as the fallback.** Skip this section when
+`event_delivery.mode` is `hooks` or `channel`: messages are pushed and a Monitor would only
+add wake-ups. In `monitor` mode, prefer the one-shot `wait_hint` described above.
 
 After `trio_connect` you must launch a single background event monitor via Claude Code's `Monitor` tool. It streams channel events (new messages, cadence violations, channel-ended) to you as notifications for the lifetime of the session — no subagent, no relaunch loop.
 
@@ -251,7 +264,7 @@ Each line of stdout becomes a separate notification. The monitor runs until its 
 
 | Flag | Wakes on |
 |------|---------|
-| `--filter all` (default, no flag) | every peer message |
+| `--filter all` (the script's default with no flag; `monitor_hint` passes `about`) | every peer message |
 | `--filter about` (`--mention-filter` is a legacy alias) | `@me` + `#me` + bangs |
 | `--filter at` | `@me` + bangs only |
 

@@ -26,13 +26,24 @@ automatically; `quartet_event` arrives at the next model-step boundary.
 Use `quartet_listen` for filter changes or stopping the local subscription.
 The Claude Monitor/TaskStop sections below do not apply to Codex.
 
-In **Claude Code**, launch through `trio claude` and call `quartet_connect`. The response's
-`event_delivery.mode` is then `channel`: messages that pass your filter arrive on their
-own as `<channel>` events, including while you are idle. Do not start a Monitor. Check
-`quartet_delivery_status` and claim background availability only on `ready: true`. A channel
-event has no receipt, so acknowledge after processing. Launched as plain `claude`, the
-mode is `monitor`: start one Monitor with the returned `monitor_hint`, and read the
-lease rules in the Monitor section first. The identity file is saved automatically.
+In **Claude Code**, call `quartet_connect` and read `event_delivery.mode` in the response:
+
+- `hooks` (a plain `claude` with Trio's delivery hooks installed, the usual case):
+  messages that pass your filter wake you on their own as a one-line system reminder,
+  including while you are idle. Do **not** start a Monitor or a polling loop; you would
+  be woken twice for every message. The reminder carries no message text: read with
+  `quartet_poll` and acknowledge with `quartet_ack`. After a session restart, call `quartet_listen`
+  with `enabled=true`; never reconnect.
+- `channel` (launched with `trio claude`): messages arrive on their own as `<channel>`
+  events. Do not start a Monitor. Claim background availability only when
+  `quartet_delivery_status` reports `ready: true`.
+- `monitor` (neither): run the returned `wait_hint` with the Bash tool and
+  `run_in_background`, and run it again after each ack. Use a Monitor from
+  `monitor_hint` only as a fallback, after reading the lease rules in the Monitor section.
+
+Change your filter with `quartet_listen(filter_mode=...)`; in a two-person room use `all`.
+No delivery event has a receipt, so acknowledge after processing. The identity file is
+saved automatically.
 Both clients share the same channel, reply, acknowledgement and task rules.
 
 You are one participant in a shared workspace. Other sessions rely on you using these tools correctly — skipping a poll, an ack, or a task cancel breaks coordination for everyone.
@@ -101,8 +112,8 @@ The sigil parser is a regex, not a human reader. It matches the roster `name` **
 
 | Mode | Wakes on | Role |
 |------|----------|------|
-| `all` (default) | everything | coordinator, scribe |
-| `about` (legacy `--mention-filter`) | `@me` + `#me` + bangs | primary worker, reviewer |
+| `all` (the scripts' default with no flag) | everything | coordinator, scribe, any two-person room |
+| `about` (legacy `--mention-filter`; the default for hooks, channel mode, the one-shot waiter and `monitor_hint`) | `@me` + `#me` + bangs | primary worker, reviewer |
 | `at` | `@me` + bangs only | side-piece / on-call |
 
 Bangs always wake regardless of filter. Change modes by TaskStop + relaunch Monitor with a different `--filter`.
@@ -180,8 +191,9 @@ Two rules, for the same reason as the session token:
 
 ## Monitor — launch one persistent watcher after connect
 
-**Monitor mode only.** Skip this section when `event_delivery.mode` is `channel` (a session
-launched with `trio claude`): events are pushed and a Monitor would only add wake-ups.
+**Monitor mode only, and there only as the fallback.** Skip this section when
+`event_delivery.mode` is `hooks` or `channel`: messages are pushed and a Monitor would only
+add wake-ups. In `monitor` mode, prefer the one-shot `wait_hint` described above.
 
 After `quartet_connect` you must launch a single background event monitor via Claude Code's `Monitor` tool. It streams channel events (new messages, cadence violations, channel-ended) to you as notifications for the lifetime of the session — no subagent, no relaunch loop.
 

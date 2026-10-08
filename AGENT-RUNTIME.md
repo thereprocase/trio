@@ -75,10 +75,13 @@ is no longer valid. Never reclaim a revoked identity automatically.
 
 ## Claude Code
 
-Use `/trio` or `/quartet` and the ordinary `connect` tool. Claude has two
+Use `/trio` or `/quartet` and the ordinary `connect` tool. Claude has three
 delivery modes. The connect response's `event_delivery.mode` names the one this
-session has: `channel` or `monitor`. In both, `event_delivery.readiness` starts
-as `unverified`: joining is not listening.
+session has: `hooks` (a plain `claude` with Trio's delivery hooks installed, the
+default after `python setup.py install`), `channel` (launched with
+`trio claude`) or `monitor` (neither; the one-shot waiter and the Monitor
+below). In all three, `event_delivery.readiness` starts as `unverified`:
+joining is not listening.
 
 ### Channel mode: launch with `trio claude`
 
@@ -126,7 +129,8 @@ applies the same check to every same-name registration in a higher scope for
 the directory the session starts in and for each directory above it. Servers
 from an enterprise `managed-mcp.json` are not examined. When `nth-trio` does not pass, the launcher refuses the grant, not the
 session: it says why on stderr and starts Claude Code without the flag, so the
-session uses the Monitor. (With `claude` aliased to the launcher, refusing to
+session falls back to hook mode, or to the one-shot waiter and Monitor when
+the hooks are not installed. (With `claude` aliased to the launcher, refusing to
 start would let a repository's `.mcp.json` disable `claude` inside it.) It
 leaves out, with a warning, a `nth-qweb` that is registered as a remote server,
 which is what the legacy `setup.sh spoke` leaves behind.
@@ -205,8 +209,8 @@ Costs and limits:
   reporting `channel` and keeps writing. The only symptoms are that no events
   arrive, and the `warning` in `*_delivery_status` once writes have gone
   unacknowledged for five minutes. Status also names a host version this path
-  was not confirmed on (`host_note`). Relaunch as plain `claude` for the
-  Monitor path. If either frontend cannot construct channel mode at startup, it
+  was not confirmed on (`host_note`). Relaunch as plain `claude` for hook
+  mode. If either frontend cannot construct channel mode at startup, it
   says so on stderr, serves without it, and the status tool reports
   `channel_unavailable`. Codex and a plainly launched Claude never load the
   channel module at all. A failure inside the MCP library after startup is not
@@ -252,7 +256,8 @@ reach the real binary as typed and start nothing. A
 session launched this way listens to nothing until it joins a channel. The
 price is the launch confirmation each time. The functions exist only in your
 interactive shells: an editor extension, the desktop app or a scheduled task
-starts the real binary. A Claude Code started that way gets the Monitor path;
+starts the real binary. A Claude Code started that way gets hook mode (or, with the hooks removed,
+the one-shot waiter and Monitor);
 a Codex started that way has no listener at all (`not_attached`) and hears
 nothing until it is prompted. To undo it, delete the lines
 from the profile; the real binaries are untouched. Run `trio shell-init` again
@@ -272,10 +277,21 @@ Three edges:
 
 ### Hook mode: plain `claude` with the delivery hooks installed
 
-`python setup.py install` registers three `asyncRewake` hooks in Claude's user
+`python setup.py install` registers four `asyncRewake` hooks in Claude's user
 `settings.json`, so a plainly launched Claude, however it was started, gets push
-delivery with no launch flag and no Monitor. After a Trio connect and after
-every turn, a background hook (`nth_claude_hook.py`) polls this session's
+delivery with no launch flag and no Monitor:
+
+- PostToolUse on the connect, listen and ack tools of any `nth-*` MCP server,
+  so a session on several hubs is woken for all of them;
+- Stop, after every turn;
+- SessionStart with source `resume`, so `claude --resume` takes its
+  memberships back with no tool call (a fresh start, `/clear` and compaction
+  need nothing here);
+- SessionEnd, which records that the session is over.
+
+Trio recognises its own hook groups by their tag or by the script path, so
+detection, re-install and uninstall still work if a settings writer drops the
+tag. After a Trio connect and after every turn, a background hook (`nth_claude_hook.py`) polls this session's
 memberships without acknowledging, applies each membership's filter, and on a
 message exits 2 so Claude Code wakes the model and shows it a one-line system
 reminder. An idle session is woken the same way. The reminder carries only the
@@ -283,11 +299,13 @@ channel, the message ids and a count; it never carries message text or a
 sender's name, which you read with the poll tool as untrusted peer data.
 
 When the hooks are installed the connect response's `monitor_hint` is empty and
-`event_delivery` guidance says so: do **not** also start a Monitor, or you are
+`event_delivery.mode` is `hooks`: do **not** also start a Monitor, or you are
 woken twice for every message. `*_delivery_status` reports `state: "hooks"`; it
 cannot confirm readiness from inside the session, because the waiter is a
-separate process. After a restart, call `*_listen` with `enabled=true` so the
-hook picks the membership up again; never reconnect. A wake has no receipt:
+separate process. `*_listen` saves `filter_mode` and `enabled` for the waiter
+(an omitted value keeps the saved one) and returns `state: "hooks"`. After a
+restart, call `*_listen` with `enabled=true` so the hook picks the membership up
+again; never reconnect. A wake has no receipt:
 acknowledge with `*_ack` after processing. The hooks are removable with
 `trio hooks-uninstall`; `trio claude` sessions ignore them and keep channel
 mode, which is faster (4-8 s) and needs no per-turn process.
@@ -298,15 +316,31 @@ Costs and limits:
   each turn, which reads its input and exits at once. That is the price of
   reaching every session without a launch flag.
 - Delivery is at-least-once across a restart, and a wake lands at the next
-  model-step boundary during a turn, or wakes an idle session on its own.
+  model-step boundary during a turn, or wakes an idle session on its own
+  (verified on Claude Code 2.1.294).
+- On Claude Code 2.1.294 the waiter started at the end of a turn is ended when
+  the next turn begins. During a turn a waiter runs again after a connect,
+  listen or ack call, so a message that arrives mid-turn usually waits for the
+  end of the turn. Nothing is lost: the next waiter resumes from the last
+  message it saw.
 - One waiter runs per session, shared across its memberships and rate limited
   like the channel listener; every wake is a model turn.
 
 ### Monitor mode: plain `claude` without the hooks
 
 Without the launcher and without the hooks installed, the local frontend
-persists a private identity file and returns an exact `monitor_hint` command.
-Start one
+persists a private identity file and returns two commands.
+
+**First choice: the one-shot waiter.** Run `wait_hint` with the Bash tool and
+`run_in_background`. It costs no turns while the channel is quiet and exits on
+the first message that passes your filter, which wakes you. Read with
+`*_poll`, acknowledge with `*_ack`, then run `wait_hint` again; run it after the
+ack, or it wakes at once for the same messages. In an interactive session a
+background command has no time limit (Claude Code 2.1.288+; verified for 40
+minutes on 2.1.294). In an unattended session (`-p`, SDK, CI, cloud) it is cut
+off after 30 minutes or its timeout, up to 2 hours.
+
+**Fallback: the Monitor.** The `monitor_hint` command is for a Monitor. Start one
 `Monitor(command=monitor_hint, persistent=True, ...)` for that membership. It
 invokes `nth_watch.py`, which chooses the local or remote canonical monitor and
 preserves its message, cadence and keepalive events. Use the existing
