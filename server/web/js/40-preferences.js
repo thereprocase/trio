@@ -30,6 +30,7 @@
     { id: 'inspired-slack', mode: 'light', family: 'inspired', label: 'Threaded' },
     { id: 'inspired-trailhead', mode: 'dark', family: 'inspired', label: 'Trailhead' },
     { id: 'inspired-high-tide', mode: 'light', family: 'inspired', label: 'High Tide' },
+    { id: 'inspired-rescue', mode: 'light', family: 'inspired', label: 'Rescue' },
   ];
   const lightThemes = themes.filter(theme => theme.mode === 'light');
   const darkThemes = themes.filter(theme => theme.mode === 'dark');
@@ -61,7 +62,17 @@
   // independent chime *sound preset* — see Trio.notifications.SOUNDS.
   const NOTIFICATION_TIERS = ['dm', 'mention', 'ref', 'plain'];
   const SOUND_IDS = ['ping', 'alert', 'tick'];
-  const defaults = { theme: 'light-1', lightTheme: 'light-1', darkTheme: 'dark-3', font: 'default', compact: false, messageNumbers: false, notifications: true, chime: false, chimeVolume: 0.5, dictation: true, sttMode: 'local', staleThreadDays: 7, messageTimes: 'local',
+  // The hub's default theme (NTH_APP_DEFAULT_THEME), which nth_web writes on
+  // <html data-default-theme>. It is what a visitor with no saved theme sees
+  // and where "Reset to defaults" returns. It also becomes that mode's side of
+  // the light/dark toggle, so toggling there and back lands on it again.
+  const BUILTIN_THEME = 'light-1';
+  const hubTheme = (() => {
+    const id = document.documentElement?.dataset?.defaultTheme;
+    return themeIds.includes(id) ? id : BUILTIN_THEME;
+  })();
+  const hubThemeMode = themes.find(theme => theme.id === hubTheme).mode;
+  const defaults = { theme: hubTheme, lightTheme: hubThemeMode === 'light' ? hubTheme : 'light-1', darkTheme: hubThemeMode === 'dark' ? hubTheme : 'dark-3', font: 'default', compact: false, messageNumbers: false, notifications: true, chime: false, chimeVolume: 0.5, dictation: true, sttMode: 'local', staleThreadDays: 7, messageTimes: 'local',
     chimeTierDm: true, chimeTierMention: true, chimeTierRef: true, chimeTierPlain: false,
     notifyTierDm: true, notifyTierMention: true, notifyTierRef: false, notifyTierPlain: false,
     chimeSoundDm: 'alert', chimeSoundMention: 'ping', chimeSoundRef: 'tick', chimeSoundPlain: 'tick' };
@@ -75,10 +86,21 @@
     if (Array.isArray(schema[key])) return schema[key].includes(value) ? value : defaults[key];
     return value ?? defaults[key];
   }
+  // Only the settings a visitor actually changed are stored. Writing the whole
+  // object would pin today's theme the first time someone flips an unrelated
+  // switch, and a hub that later changed its default theme would never reach
+  // them, although they never chose one.
+  function storedRaw() {
+    const raw = JSON.parse(localStorage.getItem(KEY) || '{}');
+    return raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+  }
   function readFromStorage() {
     try {
-      const raw = JSON.parse(localStorage.getItem(KEY) || '{}');
-      const legacyTheme = raw.theme === 'dark' ? defaults.darkTheme : raw.theme === 'light' ? defaults.lightTheme : null;
+      const raw = storedRaw();
+      // The bare 'light'/'dark' values predate the presets and meant light-1 and
+      // dark-3; the head script in index.html maps them identically, so the
+      // first paint and the booted page agree.
+      const legacyTheme = raw.theme === 'dark' ? 'dark-3' : raw.theme === 'light' ? 'light-1' : null;
       const next = { ...defaults, ...raw };
       if (legacyTheme) next.theme = legacyTheme;
       if (!raw.lightTheme) next.lightTheme = raw.theme && raw.theme.startsWith('light-') ? raw.theme : defaults.lightTheme;
@@ -122,8 +144,9 @@
   }
   function save(change) {
     const current = read(); const next = { ...current };
-    for (const k of Object.keys(schema)) if (change[k] !== undefined) next[k] = cast(k, change[k]);
-    localStorage.setItem(KEY, JSON.stringify(next));
+    let stored; try { stored = storedRaw(); } catch { stored = {}; }
+    for (const k of Object.keys(schema)) if (change[k] !== undefined) { next[k] = cast(k, change[k]); stored[k] = next[k]; }
+    localStorage.setItem(KEY, JSON.stringify(stored));
     apply(next);
     Trio.events.dispatchEvent(new CustomEvent('preferences:changed', { detail: next }));
     return next;
@@ -251,5 +274,5 @@
   function init() { apply(); }
   function mount() { init(); }
   function unmount() {}
-  Trio.preferences = { init, mount, unmount, apply, save, selectTheme, toggle, reset, read, diagnostics, renderPage, themeGridColumns, themes, lightThemes, darkThemes, inspiredThemes };
+  Trio.preferences = { init, mount, unmount, apply, save, selectTheme, toggle, reset, read, diagnostics, renderPage, themeGridColumns, themes, lightThemes, darkThemes, inspiredThemes, defaultTheme: hubTheme };
 })();

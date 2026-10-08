@@ -9823,11 +9823,54 @@ APP_THEME = _env_color("NTH_APP_THEME", DEFAULT_APP_THEME)
 # The splash screen an installed app shows while it starts.
 APP_BACKGROUND = _env_color("NTH_APP_BACKGROUND", DEFAULT_APP_BACKGROUND)
 
+# The theme a visitor sees before choosing one. The client owns the theme
+# list (40-preferences.js), so the ids are read from there rather than copied:
+# a second list here would let a renamed theme pass validation and then fall
+# back silently in the browser.
+DEFAULT_THEME_ID = "light-1"
+
+
+def _known_themes() -> Dict[str, str]:
+    """Theme id -> picker label, in picker order, from 40-preferences.js."""
+    source = _read_web_source("js/40-preferences.js")
+    block = re.search(r"const themes = \[(.*?)\];", source, re.DOTALL)
+    themes = dict(re.findall(r"\{\s*id:\s*'([a-z0-9-]+)'[^}]*?label:\s*'([^']+)'",
+                             block.group(1))) if block else {}
+    if DEFAULT_THEME_ID not in themes:
+        raise RuntimeError("server/web/js/40-preferences.js: could not read the theme list")
+    return themes
+
+
+KNOWN_THEMES = _known_themes()
+
+
+def _env_theme(name: str, default: str) -> str:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    if raw.lower() in KNOWN_THEMES:
+        return raw.lower()
+    choices = ", ".join(f"{tid} ({label})" for tid, label in KNOWN_THEMES.items())
+    sys.stderr.write(f"[nth_web] {name}={raw!r} is not a theme id; using {default}. "
+                     f"Theme ids: {choices}\n")
+    return default
+
+
+APP_DEFAULT_THEME = _env_theme("NTH_APP_DEFAULT_THEME", DEFAULT_THEME_ID)
+
 
 def _apply_app_identity(page: str) -> str:
-    """Put this hub's name and colour into the page head. The markers are the
-    built-in values, so a page that lost one raises at import."""
+    """Put this hub's name, colour and default theme into the page head. The
+    markers are the built-in values, so a page that lost one raises at import.
+
+    The default theme goes on <html> twice: data-theme so the first paint
+    already uses it, and data-default-theme so the client knows what "no saved
+    choice" and "Reset to defaults" mean on this hub. The head script then
+    swaps in a saved theme before anything paints."""
     for old, new in (
+            ('<html lang="en" data-theme="light-1">',
+             f'<html lang="en" data-theme="{APP_DEFAULT_THEME}" '
+             f'data-default-theme="{APP_DEFAULT_THEME}">'),
             ("<title>nth — chat with your agents</title>",
              "<title>nth — chat with your agents</title>" if APP_NAME == DEFAULT_APP_NAME
              else f"<title>{html.escape(APP_NAME)}</title>"),

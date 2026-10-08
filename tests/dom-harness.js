@@ -582,8 +582,12 @@ function buildScript() {
   `;
 }
 
-function load() {
+// `setup(window)` runs after the fake browser is built and before any module
+// executes, for state the page has before its scripts run: what nth_web wrote
+// on <html> (data-default-theme) or a preference already in localStorage.
+function load({ setup } = {}) {
   const sandbox = buildSandbox();
+  if (setup) setup(sandbox);
   const context = vm.createContext(sandbox);
   const script = buildScript();
   let bootError = null;
