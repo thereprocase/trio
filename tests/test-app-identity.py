@@ -225,6 +225,17 @@ with tempfile.TemporaryDirectory() as tmp:
     check("each 1024 entry is decided on its own sibling",
           "icon-maskable-1024.png" not in listed(got["manifest"]), listed(got["manifest"]))
 
+with tempfile.TemporaryDirectory() as tmp:
+    (Path(tmp) / "icon-1024.png").write_bytes(png(1024, 1024, b"orphan"))
+    (Path(tmp) / "icon-maskable-512.png").write_bytes(png(64, 64))  # refused: built-in
+    got, err = probe({"NTH_APP_ICON_DIR": tmp})
+    check("a custom 1024 without a custom 512 is left out of the manifest",
+          "icon-1024.png" not in listed(got["manifest"]), listed(got["manifest"]))
+    check("and the start-up log says why",
+          "icon-1024.png: custom but icon-512.png is built-in; not listed in the manifest" in err, err)
+    check("a refused 512 counts as built-in, so the built-in 1024 beside it stays listed",
+          "icon-maskable-1024.png" in listed(got["manifest"]), listed(got["manifest"]))
+
 # A platform without O_NONBLOCK / O_NOCTTY (Windows) still loads custom icons.
 with tempfile.TemporaryDirectory() as tmp:
     plain = png(192, 192, b"plain")

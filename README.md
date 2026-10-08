@@ -450,7 +450,8 @@ it to about 12, since launchers truncate), and `NTH_APP_NAME` takes up to 60.
 (180x180) and `badge-96.png`, each at the size in its name and at most 1 MB.
 Android draws its launch splash from the 1024 files; a set without them still
 works, and the manifest then stops at 512 so the splash keeps the hub's own
-artwork at a lower resolution. A file that breaks these rules, or a missing one,
+artwork at a lower resolution. A 1024 file without its custom 512 sibling is
+left out of the manifest too, and the start-up log says so. A file that breaks these rules, or a missing one,
 leaves that icon built-in; at
 start the `nth-web` log lists which icons are custom and which are built-in,
 and names each file it refused.

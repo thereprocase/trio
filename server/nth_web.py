@@ -9983,6 +9983,10 @@ PWA_ICONS = {name: _app_icon(name, _APP_ICON_DIR) for name in PWA_ICON_NAMES}
 if _APP_ICON_DIR is not None:
     # One line per start, so a misspelt file name shows up as "built-in".
     _custom = [n for n in PWA_ICON_NAMES if not _is_builtin_icon(n)]
+    for _large, _sibling in PWA_ICON_LARGE.items():
+        if _large in _custom and _sibling not in _custom:
+            sys.stderr.write(f"[nth_web] NTH_APP_ICON_DIR {_large}: custom but {_sibling} "
+                             "is built-in; not listed in the manifest\n")
     sys.stderr.write(f"[nth_web] NTH_APP_ICON_DIR: custom {', '.join(_custom) or 'none'}; "
                      f"built-in {', '.join(n for n in PWA_ICON_NAMES if n not in _custom) or 'none'}\n")
 PWA_MANIFEST = _app_manifest()
