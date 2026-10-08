@@ -237,6 +237,8 @@
     // channel + dmKey are final. openChannel fires the router before this point,
     // so the router hook alone would load stale state (Bug C).
     Trio.composer?.refresh?.();
+    // The one-time phone-notification offer is per channel (47-push.js).
+    Trio.push?.onboard?.();
     if (Trio.startEvents) { Trio.startEvents(state.channel); routeFeedClaimed = true; }
     // If the details drawer is open, re-render it for the conversation we just
     // switched to. Otherwise it keeps the previous conversation's topic /

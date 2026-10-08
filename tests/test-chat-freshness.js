@@ -50,8 +50,8 @@ check('markup: the connection pill is no longer a competing live region', () => 
 });
 check('layout: optional rows cannot displace messages or composer', () => {
   const expected = [
-    ['conversation-header', 1], ['private-banner', 2], ['messages', 3],
-    ['chat-freshness', 4], ['composer-shell', 5],
+    ['conversation-header', 1], ['private-banner', 2], ['push-onboard', 3],
+    ['messages', 4], ['chat-freshness', 5], ['composer-shell', 6],
   ];
   for (const [name, row] of expected) {
     assert.ok(new RegExp(`conversation-shell>\\.${name}\\{grid-row:${row}\\}`).test(SHELL_CSS),

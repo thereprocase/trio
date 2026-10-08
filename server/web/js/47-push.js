@@ -17,6 +17,9 @@
     ['every5m', 'Every 5 min'],
     ['off', 'Off'],
   ];
+  // The mode the page picks when it chooses for the person: the onboarding
+  // banner's Turn on, and Turn back on when nothing is remembered.
+  const DEFAULT_MODE = 'mentions';
   const MODE_HELP = {
     all: 'A notification for every new message in this channel.',
     mentions: 'Only when someone @-mentions you or @all, or DMs you.',
@@ -50,6 +53,22 @@
   // visitor has no rows to show; a blocker already says what is wrong).
   function droppedNotice({ rememberedMode, subscribedHere, named, blocked }) {
     return !!rememberedMode && rememberedMode !== 'off' && !subscribedHere && named !== false && !blocked;
+  }
+
+  // The first-time banner in the conversation view (below) is offered once
+  // per channel per device. Any choice made about this channel, from the
+  // banner or the panel, retires it; from then on the dropped-device notice is
+  // the only thing that asks again. Without localStorage (some private
+  // modes) a choice still holds for the rest of this page's life.
+  const ONBOARD_PREFIX = 'nth.push.onboarded.';
+  const onboardedHere = new Set();       // filled only when localStorage refuses a write
+  function onboarded(channel) {
+    let stored = null;
+    try { stored = localStorage.getItem(ONBOARD_PREFIX + channel); } catch { /* fall back to this page's memory */ }
+    return !!stored || onboardedHere.has(channel);
+  }
+  function markOnboarded(channel) {
+    try { localStorage.setItem(ONBOARD_PREFIX + channel, '1'); } catch { onboardedHere.add(channel); }
   }
 
   // "14:05" today, "14:05, Mar 3" on another day this year, with the year
@@ -146,8 +165,9 @@
     section.querySelectorAll('.push-mode').forEach(btn => {
       btn.addEventListener('click', () => choose(section, channel, btn.getAttribute('data-push-mode')));
     });
-    section.querySelector('.push-resubscribe')?.addEventListener('click', () => choose(section, channel, remembered(channel) || 'all', { fresh: true }));
-    section.querySelector('.push-dismiss')?.addEventListener('click', () => { remember(channel, 'off'); showDropped(section, false); });
+    // Mentions is the starting choice wherever the page picks a mode itself.
+    section.querySelector('.push-resubscribe')?.addEventListener('click', () => choose(section, channel, remembered(channel) || DEFAULT_MODE, { fresh: true }));
+    section.querySelector('.push-dismiss')?.addEventListener('click', () => { remember(channel, 'off'); markOnboarded(channel); showDropped(section, false); });
     section.querySelector('.push-show-text')?.addEventListener('change', () => toggleText(section, channel));
     section.querySelector('.push-test')?.addEventListener('click', () => sendTest(section, channel));
     showDropped(section, false);
@@ -182,6 +202,8 @@
   function showDropped(section, on) {
     const el = section.querySelector('.push-dropped');
     if (el) el.hidden = !on;
+    // One offer at a time: the restore notice wins over the first-time banner.
+    if (on) hideOnboardFor(section.dataset.channel);
   }
   // This device's row on this channel (null when not subscribed): the text
   // choice it carries, and when the push service last accepted a notification
@@ -258,16 +280,61 @@
     }
   }
 
-  // `fresh` replaces the browser subscription even without a conflict: the
-  // "Turn back on" offer uses it, because the endpoint the hub dropped is the
-  // one the push service kept refusing.
-  async function choose(section, channel, mode, { fresh = false } = {}) {
-    // Ask for permission FIRST and synchronously in the tap: iOS refuses the
-    // prompt once the handler has awaited anything.
-    let permission = Promise.resolve(window.Notification?.permission);
+  // ── Subscribe flow, shared by the panel and the onboarding banner ────
+  // Call synchronously at the top of the tap handler, before anything is
+  // awaited: iOS refuses the prompt once the handler has awaited anything.
+  function askPermission(mode) {
     if (mode !== 'off' && supported() && Notification.permission === 'default') {
-      permission = Notification.requestPermission();
+      return Notification.requestPermission();
     }
+    return Promise.resolve(window.Notification?.permission);
+  }
+
+  // Subscribes this device to `channel` once `permission` (from askPermission)
+  // resolves. Returns { permission } alone when it was not granted, in which
+  // case nothing changed; otherwise also the hub's answer, a note about other
+  // channels that moved along, and whether the browser endpoint was replaced.
+  // `showText` is sent only when it is a boolean, so an unknown checkbox state
+  // never overwrites a stored choice. `fresh` replaces the browser
+  // subscription even without a conflict: the "Turn back on" offer uses it,
+  // because the endpoint the hub dropped is the one the push service kept
+  // refusing.
+  async function subscribeDevice(channel, mode, permission, { fresh = false, showText } = {}) {
+    const answer = await permission;
+    if (answer !== 'granted') return { permission: answer };
+    const body = s => ({ subscription: s.toJSON(), channel, mode,
+                         ...(typeof showText === 'boolean' ? { show_text: showText } : {}) });
+    let result = null;
+    let note = '';
+    // Nothing to replace when the browser no longer holds a subscription.
+    let replace = fresh && !!(await browserSubscription(false).catch(() => null));
+    let sub = await browserSubscription(true);
+    if (!replace) {
+      try {
+        result = await api.post('/api/push/subscribe', body(sub), false);
+      } catch (e) {
+        // 409: this browser's endpoint already belongs to another identity
+        // (the cookie changed). Replace the browser subscription so this
+        // identity gets an endpoint of its own; the old rows then expire at
+        // the push service and the hub prunes them.
+        if (e?.status !== 409) throw e;
+        replace = true;
+      }
+    }
+    if (replace) {
+      const oldEndpoint = sub.endpoint;
+      await sub.unsubscribe();
+      sub = await browserSubscription(true);
+      result = await api.post('/api/push/subscribe', body(sub), false);
+      note = await moveOtherChannels(channel, oldEndpoint, sub);
+    }
+    remember(channel, mode);
+    markOnboarded(channel);
+    return { permission: answer, result, note, replaced: replace };
+  }
+
+  async function choose(section, channel, mode, { fresh = false } = {}) {
+    const permission = askPermission(mode);
     disable(section, true);
     try {
       if (mode === 'off') {
@@ -276,49 +343,28 @@
         // so turning one channel off removes only that channel's row.
         if (sub) await api.post('/api/push/unsubscribe', { endpoint: sub.endpoint, channel }, false);
         remember(channel, 'off');
+        markOnboarded(channel);
+        hideOnboardFor(channel);
         showDropped(section, false);
         showMode(section, 'off');
         showDevice(section, null);
         return;
       }
-      if ((await permission) !== 'granted') {
+      const box = section.querySelector('.push-show-text');
+      const showText = box && textKnown.get(section) ? !!box.checked : undefined;
+      const outcome = await subscribeDevice(channel, mode, permission, { fresh, showText });
+      if (outcome.permission !== 'granted') {
         setStatus(section, 'Notifications were not allowed, so nothing changed.');
         return;
       }
-      const box = section.querySelector('.push-show-text');
-      const body = s => ({ subscription: s.toJSON(), channel, mode,
-                           ...(box && textKnown.get(section) ? { show_text: !!box.checked } : {}) });
-      let result = null;
-      let note = '';
-      // Nothing to replace when the browser no longer holds a subscription.
-      let replace = fresh && !!(await browserSubscription(false).catch(() => null));
-      let sub = await browserSubscription(true);
-      if (!replace) {
-        try {
-          result = await api.post('/api/push/subscribe', body(sub), false);
-        } catch (e) {
-          // 409: this browser's endpoint already belongs to another identity
-          // (the cookie changed). Replace the browser subscription so this
-          // identity gets an endpoint of its own; the old rows then expire at
-          // the push service and the hub prunes them.
-          if (e?.status !== 409) throw e;
-          replace = true;
-        }
-      }
-      if (replace) {
-        const oldEndpoint = sub.endpoint;
-        await sub.unsubscribe();
-        sub = await browserSubscription(true);
-        result = await api.post('/api/push/subscribe', body(sub), false);
-        note = await moveOtherChannels(channel, oldEndpoint, sub);
-      }
-      remember(channel, mode);
+      hideOnboardFor(channel);
       showDropped(section, false);
       showMode(section, mode);
       // The hub answers with the stored choice, which is what an omitted
       // show_text kept.
-      const showText = typeof result?.show_text === 'boolean' ? result.show_text : !!box?.checked;
-      showDevice(section, { mode, show_text: showText, last_ok_at: replace ? null : deviceRows.get(section)?.last_ok_at || null });
+      const { result, note, replaced } = outcome;
+      const storedText = typeof result?.show_text === 'boolean' ? result.show_text : !!box?.checked;
+      showDevice(section, { mode, show_text: storedText, last_ok_at: replaced ? null : deviceRows.get(section)?.last_ok_at || null });
       if (note) setStatus(section, section.querySelector('.push-status').textContent + ' ' + note);
     } catch (e) {
       setStatus(section, e?.message || 'Could not change phone notifications.');
@@ -387,6 +433,145 @@
     return moved.length ? 'Also kept on for ' + moved.join(', ') + '.' : '';
   }
 
+  // ── First-time banner in the conversation view ──────────────────────
+  // Browsers show the notification prompt only from a tap, so the page cannot
+  // simply turn Mentions on for an installed app. Instead it offers it once per
+  // channel, in the conversation, where the tap can happen. Only an installed
+  // app is offered: in a browser tab the panel explains what installing gives.
+  //
+  // Pure, so the rules can be tested without a browser. `status` is null while
+  // the hub's answer is loading or after it failed: no offer on a guess.
+  function onboardOffer({ installed, blocked, status, subscribedHere, dismissed, dropped }) {
+    return !!installed && !blocked && !!status && status.enabled !== false
+      && status.named !== false && status.delivering !== false
+      && !subscribedHere && !dismissed && !dropped;
+  }
+
+  const ONBOARD_TEXT = 'Get a notification when someone @mentions you here?';
+  const ONBOARD_WHERE = 'Change it any time in Channel details → Phone notifications.';
+  // Said when the person refused the prompt. Re-enabling lives in the system
+  // or browser settings; the page can only point there.
+  function deniedHint() {
+    return isIos()
+      ? 'Notifications are turned off for this app. To allow them, open Settings → Notifications → nth on this device, then pick a mode in Channel details → Phone notifications.'
+      : 'Notifications are turned off for this site. To allow them, set Notifications to Allow in this site\'s settings in your browser, then pick a mode in Channel details → Phone notifications.';
+  }
+
+  let onboardSeq = 0;          // newest check wins; older answers are dropped
+  let onboardChannel = '';     // the channel the banner is about
+  let onboardPhase = '';       // '' hidden, 'offer', 'busy', 'result'
+  function onboardEl() { return document.getElementById('push-onboard'); }
+  function hideOnboard() {
+    const el = onboardEl();
+    if (el) { el.hidden = true; el.innerHTML = ''; }
+    onboardPhase = '';
+  }
+  function hideOnboardFor(channel) {
+    if (channel && channel === onboardChannel && onboardPhase) hideOnboard();
+  }
+  function drawOnboard(text, actions, where) {
+    const el = onboardEl();
+    if (!el) return null;
+    el.innerHTML = `<p class="push-onboard-text">${esc(text)}</p>`
+      + `<div class="push-onboard-actions">${actions}</div>`
+      + (where ? `<p class="push-onboard-where">${esc(where)}</p>` : '');
+    el.hidden = false;
+    return el;
+  }
+  function offerOnboard(channel, text = ONBOARD_TEXT) {
+    const el = drawOnboard(text,
+      '<button type="button" class="btn sm primary push-onboard-on">Turn on</button> '
+      + '<button type="button" class="btn sm push-onboard-later">Not now</button>', ONBOARD_WHERE);
+    if (!el) return;
+    onboardPhase = 'offer';
+    el.querySelector('.push-onboard-on')?.addEventListener('click', () => turnOnFromBanner(channel));
+    el.querySelector('.push-onboard-later')?.addEventListener('click', () => { markOnboarded(channel); hideOnboard(); });
+  }
+  function resultOnboard(channel, text, { showMe = false } = {}) {
+    const el = drawOnboard(text,
+      (showMe ? '<button type="button" class="btn sm push-onboard-show">Show me</button> ' : '')
+      + '<button type="button" class="btn sm push-onboard-close">OK</button>', '');
+    if (!el) return;
+    onboardPhase = 'result';
+    el.querySelector('.push-onboard-show')?.addEventListener('click', showPanel);
+    el.querySelector('.push-onboard-close')?.addEventListener('click', hideOnboard);
+  }
+
+  // Decide whether to offer the banner for the conversation now open. Called
+  // by 20-workspace each time a conversation loads.
+  async function onboard() {
+    const state = Trio.state || {};
+    const channel = state.dmKey ? '' : (state.channel || '');
+    // A result the person is still reading stays put if the same channel loads again.
+    if (channel && channel === onboardChannel && onboardPhase && onboardPhase !== 'offer') return;
+    const ticket = ++onboardSeq;
+    onboardChannel = channel;
+    hideOnboard();
+    const installed = isStandalone();
+    if (!channel || state.readOnly || !installed || onboarded(channel)) return;
+    const blocked = !!blocker('');
+    if (blocked) return;
+    let status = null;
+    try { status = await api.get('/api/push/status?channel=' + encodeURIComponent(channel), false); }
+    catch { return; }
+    if (ticket !== onboardSeq) return;
+    let sub = null;
+    try { if (Notification.permission === 'granted') sub = await browserSubscription(false); }
+    catch { /* no registration yet: not subscribed */ }
+    if (ticket !== onboardSeq) return;
+    const endpoint = sub?.endpoint || '';
+    const subscribedHere = !!endpoint && (status?.subscriptions || []).some(s => s.endpoint === endpoint);
+    const panel = document.getElementById('channel-drawer-push');
+    const droppedShowing = panel?.dataset?.channel === channel
+      && panel.querySelector?.('.push-dropped')?.hidden === false;
+    const dropped = droppedShowing || droppedNotice({
+      rememberedMode: remembered(channel), subscribedHere, named: status?.named, blocked,
+    });
+    if (onboardOffer({ installed, blocked, status, subscribedHere, dismissed: onboarded(channel), dropped })) {
+      offerOnboard(channel);
+    }
+  }
+
+  async function turnOnFromBanner(channel) {
+    const permission = askPermission(DEFAULT_MODE);
+    const el = onboardEl();
+    onboardPhase = 'busy';
+    el?.querySelectorAll('.push-onboard-on, .push-onboard-later').forEach(b => { b.disabled = true; });
+    let outcome = null;
+    try {
+      outcome = await subscribeDevice(channel, DEFAULT_MODE, permission);
+    } catch (e) {
+      const why = String(e?.message || 'Could not turn on notifications').replace(/[.\s]*$/, '.');
+      if (channel === onboardChannel) offerOnboard(channel, why + ' Try again?');
+      return;
+    }
+    // An open panel for this channel shows the new state.
+    const panel = document.getElementById('channel-drawer-push');
+    if (outcome.permission === 'granted' && panel?.dataset?.channel === channel) refresh(panel, channel);
+    if (channel !== onboardChannel) return;
+    if (outcome.permission === 'granted') {
+      resultOnboard(channel, `Done. You'll get a notification when someone @mentions you in #${channel}.`
+        + (outcome.note ? ' ' + outcome.note : ''), { showMe: true });
+    } else if (outcome.permission === 'denied') {
+      markOnboarded(channel);
+      resultOnboard(channel, deniedHint());
+    } else {
+      // The prompt was closed without an answer; the browser will ask again.
+      offerOnboard(channel, 'The prompt closed without an answer. Tap Turn on to see it again.');
+    }
+  }
+
+  // Opens Channel details and brings the Phone notifications panel into view.
+  function showPanel() {
+    hideOnboard();
+    Trio.workspace?.showDetails?.();
+    const section = document.getElementById('channel-drawer-push');
+    if (!section) return;
+    section.setAttribute('tabindex', '-1');
+    section.focus?.({ preventScroll: true });
+    section.scrollIntoView?.({ block: 'start' });
+  }
+
   // ── Service worker wiring ─────────────────────────────────────────────
   // Registered on every load, not only when someone subscribes: Chrome's
   // install prompt and the notification-click hand-off both need it present.
@@ -401,5 +586,5 @@
     if (window.isSecureContext) ensureRegistration().catch(() => { /* push stays unavailable; the page works as before */ });
   }
 
-  Trio.push = { mount, render, MODES, blocker, isIos, isStandalone, supported, keyBytes, droppedNotice, lastDelivered };
+  Trio.push = { mount, render, onboard, MODES, DEFAULT_MODE, blocker, isIos, isStandalone, supported, keyBytes, droppedNotice, onboardOffer, lastDelivered };
 })();

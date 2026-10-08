@@ -599,6 +599,228 @@ const click = el => (el._listeners.click || []).forEach(fn => fn({ type: 'click'
     } finally { win.fetch = realFetchForDevice; }
   });
 
+  // ── First-time banner in the conversation view ──────────────────────
+  // push.onboard() is what 20-workspace calls on every conversation load; it
+  // reads Trio.state and fills #push-onboard.
+  const onboardBanner = () => cx.document.getElementById('push-onboard');
+  const drawerPanel = () => cx.document.getElementById('channel-drawer-push');
+  const realMatchMedia = win.matchMedia;
+  // An Android phone with the app installed, notification permission not yet
+  // asked, no browser subscription, and nothing remembered.
+  function installedPhone({ installed = true, ua = ANDROID } = {}) {
+    pushCapable(ua);
+    win.matchMedia = q => ({ matches: installed && /display-mode: standalone/.test(q), addEventListener() {}, removeEventListener() {} });
+    pushManager.subscribe = opts => { subscription.options.applicationServerKey = opts.applicationServerKey.buffer; current = subscription; return Promise.resolve(current); };
+    subscription.unsubscribe = () => { current = null; return Promise.resolve(true); };
+    current = null;
+    win.localStorage.clear();
+    const panel = drawerPanel();
+    panel.dataset.channel = ''; panel.innerHTML = '';
+    // A confirmation left up by an earlier test is dismissed the way a person would.
+    const ok = onboardBanner().querySelector('.push-onboard-close');
+    if (ok) click(ok);
+  }
+  async function openConversation(channel, extra = {}) {
+    Object.assign(Trio.state, { channel, dmKey: '', dmThread: null, readOnly: false, ...extra });
+    push.onboard();
+    await settle();
+  }
+  function restoreOnboard() {
+    win.fetch = realFetchForDevice;
+    win.matchMedia = realMatchMedia;
+    win.navigator.standalone = undefined;
+    current = subscription;
+  }
+
+  await check('onboardOffer: installed, loaded, unsubscribed, not dismissed, nothing else showing', () => {
+    const base = { installed: true, blocked: false, status: { enabled: true, named: true, subscriptions: [] },
+                   subscribedHere: false, dismissed: false, dropped: false };
+    assert.strictEqual(push.onboardOffer(base), true);
+    assert.strictEqual(push.onboardOffer({ ...base, installed: false }), false, 'browser tab');
+    assert.strictEqual(push.onboardOffer({ ...base, blocked: true }), false, 'blocked or denied');
+    assert.strictEqual(push.onboardOffer({ ...base, status: null }), false, 'status loading or failed');
+    assert.strictEqual(push.onboardOffer({ ...base, status: { ...base.status, enabled: false } }), false, 'hub cannot push');
+    assert.strictEqual(push.onboardOffer({ ...base, status: { ...base.status, named: false } }), false, 'unnamed visitor');
+    assert.strictEqual(push.onboardOffer({ ...base, status: { ...base.status, delivering: false } }), false, 'no hub sending');
+    assert.strictEqual(push.onboardOffer({ ...base, subscribedHere: true }), false, 'already subscribed');
+    assert.strictEqual(push.onboardOffer({ ...base, dismissed: true }), false, 'Not now');
+    assert.strictEqual(push.onboardOffer({ ...base, dropped: true }), false, 'dropped notice');
+  });
+
+  await check('banner: an installed app with no subscription here is offered Mentions once', async () => {
+    installedPhone();
+    deviceServer();
+    try {
+      await openConversation('dev');
+      const el = onboardBanner();
+      assert.ok(visible(el), 'banner not shown');
+      assert.strictEqual(el.querySelector('.push-onboard-text').textContent, 'Get a notification when someone @mentions you here?');
+      assert.strictEqual(el.querySelector('.push-onboard-on').textContent, 'Turn on');
+      assert.strictEqual(el.querySelector('.push-onboard-later').textContent, 'Not now');
+      assert.strictEqual(el.querySelector('.push-onboard-where').textContent, 'Change it any time in Channel details → Phone notifications.');
+      // The iOS Home Screen app reports itself through navigator.standalone.
+      installedPhone({ installed: false, ua: IPHONE });
+      win.navigator.standalone = true;
+      deviceServer();
+      await openConversation('dev');
+      assert.ok(visible(onboardBanner()), 'iOS Home Screen app not offered');
+    } finally { restoreOnboard(); }
+  });
+
+  await check('banner: a browser tab shows nothing (Android tab and iOS Safari tab)', async () => {
+    for (const ua of [ANDROID, IPHONE]) {
+      installedPhone({ installed: false, ua });
+      const server = deviceServer();
+      try {
+        await openConversation('dev');
+        assert.ok(!visible(onboardBanner()), 'banner shown in a tab: ' + ua);
+        assert.ok(!server.calls.length, 'a tab need not ask the hub anything');
+      } finally { restoreOnboard(); }
+    }
+  });
+
+  await check('banner: a DM, an archived channel and a subscribed device show nothing', async () => {
+    installedPhone();
+    const server = deviceServer();
+    try {
+      await openConversation('dev', { dmKey: 'dm-1' });
+      assert.ok(!visible(onboardBanner()), 'shown in a DM');
+      await openConversation('dev', { readOnly: true });
+      assert.ok(!visible(onboardBanner()), 'shown in an archived channel');
+      win.Notification.permission = 'granted';
+      current = subscription;
+      server.rows = [{ endpoint: ENDPOINT, mode: 'all', show_text: false, last_ok_at: null }];
+      await openConversation('dev');
+      assert.ok(!visible(onboardBanner()), 'shown to a subscribed device');
+    } finally { restoreOnboard(); }
+  });
+
+  await check('banner: Not now hides it for this channel on this device, and only this channel', async () => {
+    installedPhone();
+    const server = deviceServer();
+    try {
+      await openConversation('dev');
+      click(onboardBanner().querySelector('.push-onboard-later'));
+      assert.ok(!visible(onboardBanner()), 'still shown after Not now');
+      assert.strictEqual(win.localStorage.getItem('nth.push.onboarded.dev'), '1', 'not persisted');
+      assert.ok(!server.calls.some(c => c.url === '/api/push/subscribe'), 'Not now subscribed');
+      await openConversation('dev');
+      assert.ok(!visible(onboardBanner()), 'came back on the same channel');
+      await openConversation('ops');
+      assert.ok(visible(onboardBanner()), 'another channel lost its offer');
+    } finally { restoreOnboard(); }
+  });
+
+  await check('banner: Turn on asks inside the tap, subscribes with mentions, and Show me opens the panel', async () => {
+    installedPhone();
+    const server = deviceServer();
+    const realShowDetails = Trio.workspace.showDetails;
+    let opened = 0;
+    Trio.workspace.showDetails = () => { opened++; };
+    try {
+      await openConversation('dev');
+      permissionCalls = 0;
+      click(onboardBanner().querySelector('.push-onboard-on'));
+      assert.strictEqual(permissionCalls, 1, 'requestPermission was not called inside the gesture');
+      await settle();
+      const posts = server.calls.filter(c => c.url === '/api/push/subscribe');
+      assert.strictEqual(posts.length, 1);
+      assert.deepStrictEqual([posts[0].body.channel, posts[0].body.mode], ['dev', 'mentions']);
+      assert.ok(!('show_text' in posts[0].body), 'the banner has no text choice to send');
+      const el = onboardBanner();
+      assert.ok(visible(el), 'no confirmation');
+      assert.match(el.querySelector('.push-onboard-text').textContent, /@mentions you in #dev/);
+      const panel = drawerPanel();
+      let focused = 0, scrolled = 0;
+      panel.focus = () => { focused++; }; panel.scrollIntoView = () => { scrolled++; };
+      click(el.querySelector('.push-onboard-show'));
+      assert.strictEqual(opened, 1, 'Channel details not opened');
+      assert.deepStrictEqual([focused, scrolled], [1, 1], 'panel not brought into view');
+      assert.ok(!visible(el), 'banner left up after Show me');
+      // The choice is made: the offer does not come back, and the panel
+      // remembers the mode for the dropped-device notice.
+      await openConversation('dev');
+      assert.ok(!visible(onboardBanner()), 'offered again after subscribing');
+      assert.strictEqual(win.localStorage.getItem('nth.push.subscribed.dev'), 'mentions');
+    } finally {
+      Trio.workspace.showDetails = realShowDetails;
+      delete drawerPanel().focus; delete drawerPanel().scrollIntoView;
+      restoreOnboard();
+    }
+  });
+
+  await check('banner: a refused prompt says where to allow notifications, without error words', async () => {
+    installedPhone();
+    const server = deviceServer();
+    win.Notification.requestPermission = () => { win.Notification.permission = 'denied'; return Promise.resolve('denied'); };
+    try {
+      await openConversation('dev');
+      click(onboardBanner().querySelector('.push-onboard-on'));
+      await settle();
+      assert.ok(!server.calls.some(c => c.url === '/api/push/subscribe'), 'subscribed without permission');
+      const text = onboardBanner().querySelector('.push-onboard-text').textContent;
+      assert.ok(visible(onboardBanner()), 'hint not shown');
+      assert.match(text, /site's settings in your browser/);
+      assert.match(text, /Channel details → Phone notifications/);
+      assert.doesNotMatch(text, /error|fail|denied|could not/i);
+      assert.ok(!onboardBanner().querySelector('.push-onboard-show'), 'nothing to show yet');
+    } finally { restoreOnboard(); }
+  });
+
+  await check('banner: stays hidden while the dropped-device notice applies or shows', async () => {
+    installedPhone();
+    const server = deviceServer();
+    try {
+      // Remembered here, row gone: the panel's restore notice owns this channel.
+      win.localStorage.setItem('nth.push.subscribed.dev', 'all');
+      await openConversation('dev');
+      assert.ok(!visible(onboardBanner()), 'banner competes with the dropped notice');
+      // An offer already up gives way when the panel shows the notice.
+      win.localStorage.clear();
+      await openConversation('dev');
+      assert.ok(visible(onboardBanner()), 'precondition: offer shown');
+      win.localStorage.setItem('nth.push.subscribed.dev', 'all');
+      push.render(drawerPanel(), 'dev');
+      await settle();
+      assert.ok(visible(drawerPanel().querySelector('.push-dropped')), 'precondition: dropped notice shown');
+      assert.ok(!visible(onboardBanner()), 'both offers on screen');
+      assert.ok(!server.calls.some(c => c.url === '/api/push/subscribe'));
+    } finally { restoreOnboard(); }
+  });
+
+  await check('banner: hidden while the status is loading and after it failed', async () => {
+    installedPhone();
+    deviceServer();
+    const answered = win.fetch;
+    let release;
+    win.fetch = (url, init) => url.startsWith('/api/push/status')
+      ? new Promise(resolve => { release = () => resolve(answered(url, init)); })
+      : answered(url, init);
+    try {
+      await openConversation('dev');
+      assert.ok(!visible(onboardBanner()), 'shown before the status arrived');
+      release();
+      await settle();
+      assert.ok(visible(onboardBanner()), 'not shown once the status arrived');
+      win.fetch = async (url, init) => {
+        if (url.startsWith('/api/push/status')) {
+          const text = JSON.stringify({ error: 'hub busy' });
+          return { ok: false, status: 503, text: async () => text, json: async () => JSON.parse(text) };
+        }
+        return answered(url, init);
+      };
+      await openConversation('ops');
+      assert.ok(!visible(onboardBanner()), 'shown after the status failed');
+    } finally { restoreOnboard(); }
+  });
+
+  await check('the panel and the workspace use the same starting mode, and conversations ask for the banner', () => {
+    assert.strictEqual(push.DEFAULT_MODE, 'mentions');
+    const workspace = require('fs').readFileSync(require('path').resolve(__dirname, '..', 'server', 'web', 'js', '20-workspace.js'), 'utf8');
+    const load = workspace.slice(workspace.indexOf('function loadConversation('), workspace.indexOf('function openDm('));
+    assert.match(load, /Trio\.push\?\.onboard\?\.\(\)/, 'loadConversation does not offer the banner');
+  });
+
   // The service worker, run as shipped against a fake worker global.
   function loadWorker(windows) {
     const listeners = {}; const opened = []; const focused = []; const posted = [];
