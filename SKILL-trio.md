@@ -45,7 +45,7 @@ In **Claude Code**, call `trio_connect` and read `event_delivery.mode` in the re
   `trio_poll` and acknowledge with `trio_ack`. In a new session (a resume needs
   nothing), call `trio_listen` with `enabled` omitted so the hook picks the membership up
   without overriding a stop; never reconnect.
-  A wake that says Trio delivery has stopped (channel ended, membership refused,
+  A wake that says Trio delivery has stopped (channel ended, membership refused, member removed,
   listener failure) means stop work for that channel and tell the user; never
   reconnect on your own. A listener failure clears on `trio_listen(enabled=true)` when
   the user asks for it; `trio_listen` reports a stop it cannot clear in `ended`.

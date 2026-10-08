@@ -16,8 +16,10 @@ import sys
 import threading
 
 from nth_codex_socket import CodexSocketClient
-from nth_spoke_monitor import MCPSSEClient
-from nth_event_sources import create_source, select_messages  # select_messages re-exported for existing callers
+from nth_sse_client import MCPSSEClient
+from nth_event_sources import create_source
+from nth_listener import (CULLED, ENDED, FILTERS, GONE, REFUSED, classify_poll,
+                          select_messages)  # select_messages re-exported for existing callers
 
 
 class UncertainDelivery(RuntimeError):
@@ -112,7 +114,7 @@ def load_binding(path):
         if not isinstance(binding.get(key), str) or not binding[key]:
             raise ValueError('Binding requires ' + key)
     binding.setdefault('filter', 'at')
-    if binding['filter'] not in ('all', 'about', 'at'):
+    if binding['filter'] not in FILTERS:
         raise ValueError('Relay filter must be all, about or at')
     return binding
 
@@ -147,9 +149,11 @@ def run(binding, spool_path, *, once=False, stop_event=None, on_status=None,
             }, timeout=45)
             # Check membership on every pass, including before draining a spool.
             # Never auto-reclaim a revoked session or leak tokens through errors.
-            if not isinstance(poll, dict) or poll.get('error'):
+            # An INVALID reply selects nothing and is polled again.
+            outcome = classify_poll(poll)
+            if outcome in (REFUSED, CULLED):
                 raise MembershipEnded('Channel refused the poll; check membership and session binding')
-            if poll.get('ended') or poll.get('event') in ('ended', 'channel_not_found', 'channel_gone'):
+            if outcome in (ENDED, GONE):
                 raise MembershipEnded('Channel ended or disappeared')
             if is_cancelled():
                 return

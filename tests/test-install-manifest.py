@@ -9,7 +9,9 @@ checkout — where every sibling is present — and the installed copy dies on
 
 So this does not hand-maintain a third list to drift alongside the other two.
 It reads setup.sh, then walks the import graph of what setup.sh says it
-installs, and requires the closure to be installed too.
+installs, and requires the closure to be installed too. It then stages each
+list, and a real `setup.py` install, and imports nth_web and every delivery
+entry point (hooks, monitor, relay, frontends) from the staged tree.
 
 Usage: python tests/test-install-manifest.py
 """
@@ -169,6 +171,94 @@ def staged_import(label: str, installed: set) -> None:
 staged_import("hub-service", hub_service)
 staged_import("hub/spoke", hub_spoke)
 
+# ── Delivery entry points ──────────────────────────────────────────────
+# nth_web is not the only thing an install runs. The delivery hooks, the spoke
+# monitor, the one-shot waiter, the Codex relay and the stdio frontends are each
+# started by path from the installed tree, and they share modules nth_web never
+# imports (nth_sse_client, nth_listener, nth_notice). A tree missing one of those
+# still serves the dashboard while every hook exits silently, so import each entry
+# point from each installed tree. A third-party package missing from this
+# interpreter (mcp, websockets) skips that one module; a missing sibling fails.
+DELIVERY_ENTRY_POINTS = (
+    "nth_sse_client", "nth_listener", "nth_notice",
+    "nth_claude_hook", "nth_codex_hook", "nth_spoke_monitor", "nth_watch",
+    "nth_event_sources", "nth_codex_relay", "nth_event_service",
+    "nth_claude_channel", "nth_quartet_proxy",
+)
+ENTRY_POINT_PROBE = r"""
+import importlib, json, sys
+from pathlib import Path
+here = Path(sys.argv[1])
+report = {}
+for module in sys.argv[2:]:
+    try:
+        importlib.import_module(module)
+        report[module] = "ok"
+    except ModuleNotFoundError as exc:
+        sibling = (here / ((exc.name or "").split(".")[0] + ".py")).exists() or exc.name in sys.argv[2:]
+        report[module] = ("missing " + str(exc.name)) if sibling or (exc.name or "").startswith(("nth_", "codex_")) \
+            else ("skip " + str(exc.name))
+    except Exception as exc:
+        report[module] = "error " + type(exc).__name__ + ": " + str(exc)[:120]
+print(json.dumps(report))
+"""
+
+
+def entry_points_import(label: str, tree: Path, home: Path) -> None:
+    env = dict(os.environ, NTH_HOME=str(home), NTH_QUIET="1", PYTHONPATH=str(tree))
+    proc = subprocess.run([sys.executable, "-c", ENTRY_POINT_PROBE, str(tree), *DELIVERY_ENTRY_POINTS],
+                          capture_output=True, text=True, timeout=120, env=env, cwd=str(home))
+    try:
+        report = json.loads(proc.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        report = {}
+    check(f"{label}: the delivery entry-point probe ran"
+          + (f" — {(proc.stderr or '').strip()[-160:]}" if not report else ""), bool(report))
+    for module in DELIVERY_ENTRY_POINTS:
+        outcome = report.get(module, "not reported")
+        if outcome.startswith("skip"):
+            print(f"SKIP: {label}: import {module} ({outcome[5:]} is not installed here)")
+            continue
+        check(f"{label}: import {module} from the installed tree"
+              + ("" if outcome == "ok" else f" — {outcome}"), outcome == "ok")
+
+
+import json  # noqa: E402
+
+for label, installed in (("hub-service", hub_service), ("hub/spoke", hub_spoke)):
+    staging = Path(tempfile.mkdtemp(prefix="nth_entry_"))
+    try:
+        dest = staging / "server"
+        dest.mkdir()
+        for f in sorted(installed):
+            if (SERVER / f).exists():
+                shutil.copy(SERVER / f, dest / f)
+        (staging / "home").mkdir()
+        entry_points_import(label, dest, staging / "home")
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+
+# ── setup.py ───────────────────────────────────────────────────────────
+# The native installer copies server/ as a tree rather than by name, so it has no
+# list to drift. Prove it: install into an empty home with no client registered,
+# then require every server module in the installed copy and import the delivery
+# entry points from there.
+import importlib.util  # noqa: E402
+
+spec = importlib.util.spec_from_file_location("native_setup_manifest", ROOT / "setup.py")
+native_setup = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(native_setup)
+staging = Path(tempfile.mkdtemp(prefix="nth_setup_py_"))
+try:
+    result = native_setup.install(staging, clients=(), skip_dependencies=True, register_codex=False)
+    installed_server = Path(result["server"])
+    absent = sorted(p.name for p in SERVER.glob("*.py") if not (installed_server / p.name).exists())
+    check("setup.py installs every server module"
+          + (f" — MISSING: {', '.join(absent)}" if absent else ""), not absent)
+    entry_points_import("setup.py", installed_server, Path(result["runtime"]))
+finally:
+    shutil.rmtree(staging, ignore_errors=True)
+
 print()
 if failures:
     print(f"FAILED ({len(failures)}): " + "; ".join(failures))
@@ -176,4 +266,4 @@ if failures:
           "installed nth_web.py that cannot import its own dependency fails "
           "at startup, and only on an installed copy — never in the repo.")
     sys.exit(1)
-print("OK — setup.sh installs the full import closure of what it ships")
+print("OK — setup.sh and setup.py install the full import closure of what they ship")

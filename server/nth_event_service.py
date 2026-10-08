@@ -19,6 +19,7 @@ import time
 
 from nth_codex_relay import run, MembershipEnded, Spool, UncertainDelivery
 from nth_codex_socket import CodexSocketClient
+from nth_listener import FILTERS
 
 
 def home():
@@ -72,7 +73,7 @@ def register(binding, *, replace=False):
     for field in ('endpoint', 'thread_id', 'url', 'channel', 'member_id', 'session_token'):
         if not isinstance(binding.get(field), str) or not binding[field]:
             raise ValueError('Binding requires ' + field)
-    if binding['filter'] not in ('all', 'about', 'at'):
+    if binding['filter'] not in FILTERS:
         raise ValueError('Invalid listening filter')
     if binding['source'] not in ('local', 'quartet'):
         raise ValueError('Invalid channel source')
@@ -123,7 +124,7 @@ def configure_listener(channel, member_id, session_token, *, filter_mode=None, e
             row = db.execute('SELECT config FROM bindings WHERE id=?', (entry['id'],)).fetchone()
             b = json.loads(row['config'])
             if filter_mode:
-                if filter_mode not in ('all', 'about', 'at'):
+                if filter_mode not in FILTERS:
                     raise ValueError('Invalid listening filter')
                 b['filter'] = filter_mode
             db.execute('''UPDATE bindings SET config=?,enabled=?,revision=revision+1,

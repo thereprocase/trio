@@ -19,6 +19,7 @@ os.environ['CLAUDE_CONFIG_DIR'] = tempfile.mkdtemp(prefix='trio-test-claude-conf
 SERVER_DIR = Path(__file__).resolve().parents[1] / 'server'
 sys.path.insert(0, str(SERVER_DIR))
 import nth_claude_channel as channel_module
+import nth_listener as listener_module
 from nth_claude_channel import ChannelHub, METHOD, UNCONFIRMED, channel_mode, format_event
 
 TOKEN = 'test-capability'
@@ -102,15 +103,17 @@ class ChannelTests(unittest.TestCase):
         self.writer = RecordingWriter()
         self.hubs = []
         # Production waits are seconds long. The loop reads them at run time.
-        self.timing = patch.multiple(channel_module, MIN_POLL_GAP_SECONDS=.02, STUCK_BACKLOG_WAITS=(.05,),
-                                     STUCK_BACKLOG_DUTY=0, REPLACE_JOIN_SECONDS=.5,
-                                     REFUSAL_GRACE_SECONDS=.05)
-        self.timing.start()
+        self.timing = [patch.multiple(listener_module, MIN_POLL_GAP_SECONDS=.02, STUCK_BACKLOG_WAITS=(.05,),
+                                      STUCK_BACKLOG_DUTY=0, REFUSAL_GRACE_SECONDS=.05),
+                       patch.multiple(channel_module, REPLACE_JOIN_SECONDS=.5)]
+        for timing in self.timing:
+            timing.start()
 
     def tearDown(self):
         for hub in self.hubs:
             hub.stop_all()
-        self.timing.stop()
+        for timing in reversed(self.timing):
+            timing.stop()
         self.loop.call_soon_threadsafe(self.loop.stop)
         self.thread.join(timeout=5)
         self.loop.close()
@@ -240,7 +243,7 @@ class ChannelTests(unittest.TestCase):
         flood = {'event': 'new_messages', 'messages': [mention(i) for i in range(1, 8)]}
         hub = self.hub([flood])
         self.source.idle = flood
-        with patch.object(channel_module, 'MAX_BATCH_MESSAGES', 2):
+        with patch.object(listener_module, 'MAX_BATCH_MESSAGES', 2):
             hub.start('test', 'receiver', TOKEN, 'at')
             self.assertTrue(wait_until(lambda: self.writer.sent))
             time.sleep(.3)
@@ -255,7 +258,7 @@ class ChannelTests(unittest.TestCase):
     def test_a_large_batch_is_capped_by_size_as_well_as_by_count(self):
         big = [dict(mention(i), content='x' * 3000) for i in range(1, 6)]
         hub = self.hub([{'event': 'new_messages', 'messages': big}])
-        with patch.object(channel_module, 'MAX_BATCH_CHARS', 7000):
+        with patch.object(listener_module, 'MAX_BATCH_CHARS', 7000):
             hub.start('test', 'receiver', TOKEN, 'at')
             self.assertTrue(wait_until(lambda: self.writer.sent))
         self.assertEqual(self.pushed_ids(), [1, 2])
@@ -271,7 +274,7 @@ class ChannelTests(unittest.TestCase):
         time.sleep(.2)
         self.assertEqual(len(self.writer.sent), 1)
         note = self.writer.sent[0].params
-        self.assertLessEqual(len(note['content']), channel_module.MAX_BATCH_CHARS)
+        self.assertLessEqual(len(note['content']), listener_module.MAX_BATCH_CHARS)
         # One message is too large on its own: it is shortened and flagged, the rest
         # are announced by count, and the agent is told to read before it acknowledges.
         self.assertEqual((note['meta']['count'], note['meta']['more_unread'], note['meta']['truncated']),
@@ -289,13 +292,13 @@ class ChannelTests(unittest.TestCase):
         other.start('test', 'receiver', TOKEN, 'at')
         self.assertTrue(wait_until(lambda: self.writer.sent))
         note = self.writer.sent[0].params
-        self.assertLessEqual(len(note['content']), channel_module.MAX_BATCH_CHARS)
+        self.assertLessEqual(len(note['content']), listener_module.MAX_BATCH_CHARS)
         self.assertEqual((note['meta']['count'], note['meta']['truncated']), ('5', 'false'))
 
     def test_notifications_are_rate_limited_and_the_held_ones_arrive_together(self):
         hub = self.hub([{'event': 'new_messages', 'messages': [mention(2)]}])
         self.source.idle = {'event': 'new_messages', 'messages': [mention(i) for i in (2, 4, 5, 6)]}
-        with patch.multiple(channel_module, PUSH_BURST=1, PUSH_REFILL_SECONDS=.4):
+        with patch.multiple(listener_module, PUSH_BURST=1, PUSH_REFILL_SECONDS=.4):
             hub.start('test', 'receiver', TOKEN, 'at')
             self.assertTrue(wait_until(lambda: self.pushed_ids() == [2, 4, 5, 6]))
         self.assertEqual(len(self.writer.sent), 2)
@@ -317,7 +320,7 @@ class ChannelTests(unittest.TestCase):
     def test_an_unread_backlog_never_makes_the_loop_spin(self):
         hub = self.hub([])
         self.source.idle = {'event': 'new_messages', 'messages': [MESSAGES[0]]}   # ambient, filter declines it
-        with patch.multiple(channel_module, MIN_POLL_GAP_SECONDS=.1, STUCK_BACKLOG_WAITS=(.2, .4)):
+        with patch.multiple(listener_module, MIN_POLL_GAP_SECONDS=.1, STUCK_BACKLOG_WAITS=(.2, .4)):
             hub.start('test', 'receiver', TOKEN, 'at')
             time.sleep(1.0)
         self.assertLess(len(self.source.calls), 8)
@@ -336,7 +339,7 @@ class ChannelTests(unittest.TestCase):
         hub = ChannelHub('quartet', 'quartet', 'http://hub.example/sse', factory)
         hub.attach(self.loop, self.writer)
         self.hubs.append(hub)
-        with patch.object(channel_module, 'MIN_POLL_GAP_SECONDS', .1):
+        with patch.object(listener_module, 'MIN_POLL_GAP_SECONDS', .1):
             hub.start('test', 'receiver', TOKEN, 'at')
             time.sleep(.65)
         self.assertLess(len(calls), 10)
@@ -347,7 +350,7 @@ class ChannelTests(unittest.TestCase):
         failed = {'_raw': 'Error executing tool quartet_poll: database is locked'}
         hub = self.hub([failed, failed, failed])
         self.source.idle = failed
-        with patch.object(channel_module, 'RETRY_STEP_SECONDS', .05):
+        with patch.object(listener_module, 'RETRY_STEP_SECONDS', .05):
             hub.start('test', 'receiver', TOKEN, 'about')
             self.assertTrue(wait_until(lambda: len(self.source.calls) >= 4))
             status = delivery_status('test', 'receiver', TOKEN, hub=hub)
@@ -371,7 +374,7 @@ class ChannelTests(unittest.TestCase):
                 hub.start('test', 'receiver', TOKEN, 'at')
                 self.assertTrue(wait_until(lambda: self.writer.sent))
                 note = self.writer.sent[0].params
-                self.assertLessEqual(len(note['content']), channel_module.MAX_BATCH_CHARS)
+                self.assertLessEqual(len(note['content']), listener_module.MAX_BATCH_CHARS)
                 self.assertEqual((note['meta']['message_id'], note['meta']['truncated'], note['meta']['mentioned']),
                                  (str(message['id']), 'true', 'true'))
                 self.assertIn('read it in full with quartet_poll', note['content'])
@@ -414,12 +417,36 @@ class ChannelTests(unittest.TestCase):
         self.assertIn('Never reconnect or reclaim it on your own', notice['content'])
         self.assertTrue(wait_until(lambda: self.source.closed))
 
+    def test_a_culled_member_ends_at_once_as_removed(self):
+        # "You are not a member" is a cull, not a refusal: there is no reclaim race to
+        # wait out, and the notice says the member was removed.
+        hub = self.hub([{'error': 'You are not a member of this channel.'}])
+        with patch.object(listener_module, 'REFUSAL_GRACE_SECONDS', 30):
+            hub.start('test', 'receiver', TOKEN)
+            self.assertTrue(wait_until(lambda: self.state(hub)['status'] == 'ended', timeout=3))
+            # The status turns `ended` just before the notice is written: wait for the write.
+            self.assertTrue(wait_until(lambda: len(self.writer.sent) == 1, timeout=3))
+        self.assertEqual(self.state(hub)['error'], 'member removed')
+        time.sleep(.1)
+        self.assertEqual(len(self.writer.sent), 1)
+        notice = self.writer.sent[0].params
+        self.assertEqual(notice['meta']['reason'], 'member removed')
+        self.assertIn('it was removed', notice['content'])
+        self.assertIn('Never reconnect or reclaim it on your own', notice['content'])
+
+    def test_a_reply_that_is_not_a_poll_result_is_retried_not_ended(self):
+        hub = self.hub([None, ['not', 'a', 'poll'], {'event': 'no_new', 'messages': []}])
+        with patch.object(listener_module, 'RETRY_STEP_SECONDS', .05):
+            hub.start('test', 'receiver', TOKEN)
+            self.assertTrue(wait_until(lambda: self.state(hub)['status'] == 'listening'))
+        self.assertEqual(self.writer.sent, [])
+
     def test_a_reclaim_by_this_session_is_not_reported_as_a_refusal(self):
         from nth_event_access import delivery_status
         # The hub revokes the old token before its connect response reaches this
         # frontend, so the old listener can be refused a moment before it is replaced.
         hub = self.hub([{'error': 'Invalid or revoked session_token.'}])
-        with patch.object(channel_module, 'REFUSAL_GRACE_SECONDS', .6):
+        with patch.object(listener_module, 'REFUSAL_GRACE_SECONDS', .6):
             hub.start('test', 'receiver', TOKEN)
             self.assertTrue(wait_until(lambda: self.state(hub)['error'] == 'membership refused'))
             # Refused and waiting to be replaced: not ready, and nothing said yet.
@@ -452,14 +479,14 @@ class ChannelTests(unittest.TestCase):
 
     def test_transport_errors_reconnect_without_leaking_details(self):
         hub = self.hub([RuntimeError('token=' + TOKEN), {'event': 'new_messages', 'messages': [MESSAGES[1]]}])
-        with patch.object(channel_module, 'RETRY_STEP_SECONDS', .05):
+        with patch.object(listener_module, 'RETRY_STEP_SECONDS', .05):
             hub.start('test', 'receiver', TOKEN, 'about')
             self.assertTrue(wait_until(lambda: self.pushed_ids() == [2]))
         self.assertNotIn(TOKEN, json.dumps(hub.status('test', 'receiver', TOKEN)))
         # The zero-wait first poll is spent only by a poll that succeeded.
         self.assertTrue(wait_until(lambda: len(self.source.calls) >= 3))
         self.assertEqual([call['wait_seconds'] for call in self.source.calls[:3]],
-                         [0, 0, channel_module.POLL_WAIT_SECONDS])
+                         [0, 0, listener_module.POLL_WAIT_SECONDS])
 
     def test_closed_transport_ends_delivery_and_keeps_the_message_unseen(self):
         self.writer.closed = True
@@ -476,7 +503,7 @@ class ChannelTests(unittest.TestCase):
         self.assertTrue(wait_until(lambda: self.state(hub)['status'] == 'listening', 2))
         self.assertTrue(wait_until(lambda: len(self.source.calls) >= 2))
         self.assertEqual([call['wait_seconds'] for call in self.source.calls[:2]],
-                         [0, channel_module.POLL_WAIT_SECONDS])
+                         [0, listener_module.POLL_WAIT_SECONDS])
 
     # ---- writing ---------------------------------------------------------------
 
@@ -755,7 +782,7 @@ class ChannelTests(unittest.TestCase):
             def close(self):
                 self.closed += 1
 
-        with patch('nth_spoke_monitor.MCPSSEClient', FlakyClient):
+        with patch('nth_sse_client.MCPSSEClient', FlakyClient):
             poll, close = channel_module.quartet_poll_factory({'url': 'http://hub.example/sse'})
         client = FlakyClient.instances[0]
         for _ in range(4):

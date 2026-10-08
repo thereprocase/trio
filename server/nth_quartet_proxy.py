@@ -14,7 +14,7 @@ import sys
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp import types
-from nth_spoke_monitor import MCPSSEClient
+from nth_sse_client import MCPSSEClient
 from nth_media import RichContentError, inline_local_paths
 from nth_event_access import (adapt_response_guidance, claude_channel_requested,
                               native_connect_response, delivery_status, listen, uses_monitor)
