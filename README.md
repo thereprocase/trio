@@ -365,10 +365,13 @@ tokens in `server/web/css/00-tokens.css`.
 
 ## Dictation
 
-The dashboard composer has a mic button with two modes, chosen in **Settings → Dictation**:
+The dashboard composer has a mic button. **Preferences → Speech-to-text engine** picks how it transcribes:
 
-- **local** (default): a sidecar process on the machine running `nth_web.py` transcribes the audio, and the audio stays on that machine.
-- **web**: the browser's own speech recognition, which sends audio to your browser vendor.
+- **Auto** (default): Local when the hub reports a working Whisper engine, otherwise Browser, decided at the moment you tap.
+- **Local**: a sidecar process on the machine running `nth_web.py` transcribes the audio, and the audio stays on that machine. If the hub cannot run it, the mic says so before recording and offers Browser for that one recording; it never switches on its own.
+- **Browser**: the browser's own speech recognition, which sends audio to your browser vendor.
+
+Browser dictation stops by itself after a few seconds of silence (Android Chrome does this even in continuous mode); the text stays in the box and another tap carries on after it. Dictation only fills the box. Nothing is sent until you press Send.
 
 Local mode needs two extra packages on the machine serving the dashboard, installed separately from `setup.sh`:
 
@@ -379,7 +382,7 @@ brew install ffmpeg         # the engine shells out to ffmpeg to decode audio
 
 The model (~1.5 GB) downloads on first use and is cached afterwards.
 
-If they're missing, the dashboard runs as usual and the mic offers to switch you to browser dictation. It waits for you to choose, since that mode sends your voice to a third party. **Settings → Dictation → Test ›** reports exactly which piece is missing.
+If they're missing, the dashboard runs as usual: Auto uses browser dictation, and the Local option in Preferences is marked as not installed on this hub. `GET /api/stt/health` reports exactly which piece is missing (its `detail` field).
 
 | Variable | Default | Purpose |
 |----------|---------|---------|

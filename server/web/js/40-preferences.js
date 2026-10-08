@@ -72,11 +72,11 @@
     return themeIds.includes(id) ? id : BUILTIN_THEME;
   })();
   const hubThemeMode = themes.find(theme => theme.id === hubTheme).mode;
-  const defaults = { theme: hubTheme, lightTheme: hubThemeMode === 'light' ? hubTheme : 'light-1', darkTheme: hubThemeMode === 'dark' ? hubTheme : 'dark-3', font: 'default', compact: false, messageNumbers: false, notifications: true, chime: false, chimeVolume: 0.5, dictation: true, sttMode: 'local', staleThreadDays: 7, messageTimes: 'local',
+  const defaults = { theme: hubTheme, lightTheme: hubThemeMode === 'light' ? hubTheme : 'light-1', darkTheme: hubThemeMode === 'dark' ? hubTheme : 'dark-3', font: 'default', compact: false, messageNumbers: false, notifications: true, chime: false, chimeVolume: 0.5, dictation: true, sttMode: 'auto', staleThreadDays: 7, messageTimes: 'local',
     chimeTierDm: true, chimeTierMention: true, chimeTierRef: true, chimeTierPlain: false,
     notifyTierDm: true, notifyTierMention: true, notifyTierRef: false, notifyTierPlain: false,
     chimeSoundDm: 'alert', chimeSoundMention: 'ping', chimeSoundRef: 'tick', chimeSoundPlain: 'tick' };
-  const schema = { theme: themeIds, lightTheme: lightThemeIds, darkTheme: darkThemeIds, font: ['default','serif','mono'], compact: 'boolean', messageNumbers: 'boolean', notifications: 'boolean', chime: 'boolean', chimeVolume: 'number', dictation: 'boolean', sttMode: ['local','web'], staleThreadDays: 'number', messageTimes: ['local','utc'],
+  const schema = { theme: themeIds, lightTheme: lightThemeIds, darkTheme: darkThemeIds, font: ['default','serif','mono'], compact: 'boolean', messageNumbers: 'boolean', notifications: 'boolean', chime: 'boolean', chimeVolume: 'number', dictation: 'boolean', sttMode: ['auto','local','web'], staleThreadDays: 'number', messageTimes: ['local','utc'],
     chimeTierDm: 'boolean', chimeTierMention: 'boolean', chimeTierRef: 'boolean', chimeTierPlain: 'boolean',
     notifyTierDm: 'boolean', notifyTierMention: 'boolean', notifyTierRef: 'boolean', notifyTierPlain: 'boolean',
     chimeSoundDm: SOUND_IDS, chimeSoundMention: SOUND_IDS, chimeSoundRef: SOUND_IDS, chimeSoundPlain: SOUND_IDS };
@@ -133,6 +133,12 @@
       if (legacyTheme) next.theme = legacyTheme;
       if (!raw.lightTheme) next.lightTheme = modeOf(next.theme) === 'light' ? next.theme : defaults.lightTheme;
       if (!raw.darkTheme) next.darkTheme = modeOf(next.theme) === 'dark' ? next.theme : defaults.darkTheme;
+      // sttMode used to default to 'local'. An old full save that held it is
+      // already cleared by migrateFullSave; any other unmarked 'local' also
+      // predates Auto and is almost certainly the untouched default, which on
+      // a hub without Whisper recorded every dictation into a dead end. A
+      // format:2 'local' was written by a deliberate choice and stays.
+      if (raw.format === undefined && raw.sttMode === 'local') next.sttMode = 'auto';
       for (const k of Object.keys(schema)) next[k] = cast(k, next[k]);
       return next;
     } catch { return { ...defaults }; }
@@ -216,18 +222,6 @@
     return next;
   }
   function diagnostics() { const note = typeof Notification !== 'undefined' ? Notification.permission : 'unavailable'; return { online: navigator.onLine ? 'yes' : 'no', channel: (Trio.store ? Trio.store.get('session.channel') : Trio.state.channel) || '', theme: readFromStorage().theme, agents: ((Trio.store ? Trio.store.get('agents.list') : Trio.state.agents) || []).length, notifications: note, stt: Trio.state.sttHealth || 'checking' }; }
-  async function checkStt() {
-    // secure_url rides on this response: on an insecure origin the mic is
-    // unavailable and the only useful thing to tell the operator is the
-    // address that WOULD work, which the browser cannot know and the server
-    // can. The composer reads it from state when explaining a dead mic button.
-    try {
-      const h = await Trio.api.get('/api/stt/health');
-      Trio.state.sttHealth = h && h.ok ? 'ready' : 'unavailable';
-      Trio.state.secureUrl = (h && h.secure_url) || '';
-    }
-    catch { Trio.state.sttHealth = 'unavailable'; }
-  }
   function renderPage(panel) {
     panel._themeLayoutObserver?.disconnect();
     panel.replaceChildren();
@@ -262,9 +256,12 @@
     historySelect.addEventListener('change', () => save({ staleThreadDays: Number(historySelect.value) }));
     historyRow.append(historyText, historySelect); behavior.append(historyRow);
     const sttRow = document.createElement('div'); sttRow.className = 'pref-row';
-    const sttText = document.createElement('div'); sttText.className = 'pr-txt'; sttText.innerHTML = '<div class="l">Speech-to-text engine</div><div class="d">Local runs Whisper on this machine and keeps audio off the network. Browser uses your browser\'s built-in speech recognition (routed through its vendor\'s cloud service) — faster to start, no local model needed.</div>';
+    const sttText = document.createElement('div'); sttText.className = 'pr-txt'; sttText.innerHTML = '<div class="l">Speech-to-text engine</div><div class="d">Local runs Whisper on the hub and keeps audio off the network. Browser uses your browser\'s built-in speech recognition (routed through its vendor\'s cloud service). Auto uses Local when the hub has it and Browser otherwise.</div>';
+    // Say on the option itself when the hub cannot run Local, so the choice
+    // is not discovered by tapping the mic. The composer owns the check.
+    const hubLocal = Trio.composer?.sttHealthNow?.()?.available;
     const sttSelect = document.createElement('select'); sttSelect.className = 'pref-select'; sttSelect.setAttribute('aria-label', 'Speech-to-text engine');
-    [['local','Local (Whisper, on-device)'],['web','Browser (built-in speech recognition)']].forEach(([value,label]) => { const opt = document.createElement('option'); opt.value = value; opt.textContent = label; if (p.sttMode === value) opt.selected = true; sttSelect.append(opt); });
+    [['auto','Auto (Local when available, else Browser)'],['local', hubLocal === false ? 'Local (Whisper) — not installed on this hub' : 'Local (Whisper, on the hub)'],['web','Browser (built-in speech recognition)']].forEach(([value,label]) => { const opt = document.createElement('option'); opt.value = value; opt.textContent = label; if (p.sttMode === value) opt.selected = true; sttSelect.append(opt); });
     sttSelect.addEventListener('change', () => save({ sttMode: sttSelect.value }));
     sttRow.append(sttText, sttSelect); behavior.append(sttRow);
     const notifyGroup = document.createElement('section'); notifyGroup.className = 'pref-group';

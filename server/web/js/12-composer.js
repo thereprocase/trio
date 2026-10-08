@@ -475,28 +475,81 @@
     'aborted': '',   // user pressed stop; not a failure worth a toast
     'language-not-supported': 'This browser cannot transcribe the configured language.',
   };
-  // Accumulates a SpeechRecognition session into composer text.
+  // Joins two pieces of transcript with one space, except between CJK
+  // characters, which are written without spaces (NTH_STT_LANG can be ja/zh).
+  const CJK = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/u;
+  function joinSpeech(a, b) {
+    if (!a) return b; if (!b) return a;
+    return CJK.test(a.slice(-1)) && CJK.test(b[0]) ? a + b : a + ' ' + b;
+  }
+  const speechKey = s => s.toLowerCase();
+  // One piece "repeats" another when it equals it or starts with it — the two
+  // shapes Android Chrome produces (a duplicated final, or a cumulative final
+  // that restates everything said so far and adds the new words).
+  const repeats = (piece, earlier) => !!earlier && speechKey(piece).startsWith(speechKey(earlier));
+  // Collapses a run of transcript pieces into text. A piece that repeats the
+  // whole text so far, or just the previous piece, REPLACES it; anything else
+  // is appended. Trade-off: someone who says "Yes." and then, as a separate
+  // utterance, "Yes, and…" loses the first "Yes." — rare, and a duplicated
+  // sentence on every Android pause was not.
+  function collapseSpeech(pieces) {
+    let segments = [];
+    for (const raw of pieces) {
+      const piece = String(raw || '').replace(/\s+/g, ' ').trim();
+      if (!piece) continue;
+      if (repeats(piece, segments.reduce(joinSpeech, ''))) segments = [piece];
+      else if (repeats(piece, segments[segments.length - 1])) segments[segments.length - 1] = piece;
+      else segments.push(piece);
+    }
+    return segments.reduce(joinSpeech, '');
+  }
+  // Composer text after dictating `spoken`: the text that was already in the
+  // box, then the dictation, then nothing extra when nothing was heard.
+  function withBaseline(baseline, spoken) {
+    if (!spoken) return baseline;
+    if (!baseline) return spoken;
+    return /\s$/.test(baseline) ? baseline + spoken : baseline + ' ' + spoken;
+  }
+  // Turns a SpeechRecognition session into composer text.
   //
-  // The subtlety that bit us: each result event carries only the results from
-  // `resultIndex` onward, so `finalText` must accumulate across events — but
-  // the BOX must be rewritten from a fixed baseline every time, never appended
-  // to. The original read the box back with inputValue() and appended the
-  // running transcript to whatever was already there, so every event re-added
-  // the whole sentence so far: "today / today is / today is a / today is a
-  // beautiful"… concatenated, not replaced. Interim results make this fire on
-  // nearly every word, so the output grew quadratically with what you said.
+  // Two things bit us, in this order.
   //
-  // Baseline is captured once at session start, so text the operator had
-  // already typed is preserved and dictation appends after it exactly once.
+  // 1. The box must be rewritten from a fixed baseline on every event, never
+  //    appended to. The original read the box back and appended the running
+  //    transcript, so every interim event re-added the whole sentence so far
+  //    ("today today is today is a…"). Baseline is captured once at session
+  //    start, so text the operator had already typed is kept exactly once.
+  //
+  // 2. Android Chrome does not follow the desktop result model. Desktop keeps
+  //    one growing results list, finals never change, and resultIndex points at
+  //    the first new entry — so accumulating finals from resultIndex worked
+  //    there. On Android, finals arrive duplicated or cumulative ("hello",
+  //    then "hello world"), and resultIndex does not advance the same way, so
+  //    the same accumulator produced "hello hello world". So the text is now
+  //    REBUILT from the whole results list on every event (resultIndex is
+  //    ignored) and repeated pieces are collapsed (collapseSpeech).
+  //
+  // Rebuilding from the list would lose words if a browser ever started a
+  // fresh list mid-session. Finals are immutable in the spec, so a final that
+  // vanishes, or turns into unrelated text, means the list was replaced: the
+  // previous finals are carried forward instead of dropped.
   function makeSpeechAccumulator(baseline) {
-    let finalText = '';
-    return function absorb(results, resultIndex) {
-      let interim = '';
-      for (let i = resultIndex; i < results.length; i++) {
-        const transcript = results[i][0].transcript;
-        if (results[i].isFinal) finalText += transcript; else interim += transcript;
-      }
-      return (baseline + ' ' + finalText + interim).trim();
+    let carried = '';
+    let previousFinals = [];
+    return function absorb(results) {
+      const list = Array.from({ length: results.length }, (_, i) => ({
+        text: String(results[i]?.[0]?.transcript || '').replace(/\s+/g, ' ').trim(),
+        isFinal: !!results[i]?.isFinal,
+      }));
+      const replaced = previousFinals.some((before, i) => {
+        if (before == null) return false;
+        const now = list[i];
+        if (!now) return true;
+        return !repeats(now.text, before) && !repeats(before, now.text);
+      });
+      if (replaced) carried = collapseSpeech([carried, ...previousFinals]);
+      previousFinals = list.map(r => (r.isFinal ? r.text : null));
+      return withBaseline(baseline, collapseSpeech([carried, ...list.map(r => r.text)]));
     };
   }
   // These messages run to ~200 characters and name an action. The 3500ms
@@ -558,6 +611,99 @@
     return typeof window.SpeechRecognition === 'function' || typeof window.webkitSpeechRecognition === 'function';
   }
   function hasLocalDictation() { return !!window.navigator?.mediaDevices?.getUserMedia && typeof window.MediaRecorder === 'function'; }
+  // Whether the hub can actually transcribe (/api/stt/health). The local
+  // engine records first and uploads after Stop, so choosing it on a hub
+  // without Whisper — every Linux hub, since mlx_whisper is Apple-silicon
+  // only — cost the user their whole utterance before saying anything.
+  // Fetched once at mount and refreshed in the background when stale, so the
+  // tap itself can decide synchronously and keep its user gesture (Safari
+  // refuses SpeechRecognition.start() outside one).
+  const STT_HEALTH_TTL_MS = 60000;
+  let sttHealthCache = null, sttHealthPending = null;
+  function refreshSttHealth() {
+    if (sttHealthPending) return sttHealthPending;
+    // Plain fetch rather than api.get: a guest who has not picked a name gets
+    // a 403 here, and api.get answers that by prompting for a name — not
+    // something a background check may do. Any failure reads as "unknown".
+    sttHealthPending = fetch(apiUrl('/api/stt/health'))
+      .then(response => (response.ok ? response.json() : null))
+      .catch(() => null)
+      .then(h => {
+        // A failed check keeps the last real answer; it only restarts the clock.
+        const available = h && typeof h.available === 'boolean' ? h.available : (sttHealthCache?.available ?? null);
+        const detail = h ? (h.detail || '') : (sttHealthCache?.detail || '');
+        sttHealthCache = { available, detail, at: Date.now() };
+        if (h) {
+          state.sttHealth = available ? 'ready' : 'unavailable';
+          state.secureUrl = h.secure_url || '';
+        }
+        return sttHealthCache;
+      })
+      .finally(() => { sttHealthPending = null; });
+    return sttHealthPending;
+  }
+  // The cached answer (possibly stale, possibly null); kicks a refresh when stale.
+  function sttHealthNow() {
+    if (!sttHealthCache || Date.now() - sttHealthCache.at > STT_HEALTH_TTL_MS) refreshSttHealth();
+    return sttHealthCache;
+  }
+  // Resolves to the health answer, or to the cached one after `ms`.
+  function awaitSttHealth(ms) {
+    return Promise.race([refreshSttHealth(), new Promise(resolve => setTimeout(() => resolve(sttHealthCache), ms))]);
+  }
+  function localUnavailableMessage(detail) {
+    return /not installed/i.test(detail || '')
+      ? "Local Whisper isn't installed on this hub."
+      : `Local Whisper isn't working on this hub (${detail || 'no reason given'}).`;
+  }
+  // Which engine a tap should start. Pure, so the decision is testable.
+  //   mode            'auto' | 'local' | 'web' (the preference)
+  //   hubLocal        true / false / null — /api/stt/health `available`, null = not known yet
+  //   detail          the health `detail` text, for the explicit-local message
+  //   canRecord       this browser can record for the local engine
+  //   canRecognise    this browser has usable SpeechRecognition
+  // Returns { engine: 'local' | 'web' | 'none', message, offerBrowser }.
+  //
+  // Auto prefers local when the hub says it works, and otherwise goes straight
+  // to the browser engine in the same tap — including while the health answer
+  // is still unknown, because the browser engine cannot lose a recording and
+  // waiting for the answer would cost the gesture.
+  //
+  // An explicit Local choice is never switched to the browser engine behind
+  // the user's back: Local is the "audio stays on my hub" setting. When it
+  // cannot work, say so before recording and offer the browser engine as a
+  // button, which is a choice the user makes for that one recording.
+  function chooseDictationEngine({ mode, hubLocal, detail, canRecord, canRecognise }) {
+    if (mode === 'web') {
+      return canRecognise ? { engine: 'web' }
+        : { engine: 'none', message: "This browser has no speech recognition. Set the speech-to-text engine to Auto in Preferences." };
+    }
+    if (mode === 'local') {
+      if (hubLocal === false) return { engine: 'none', message: localUnavailableMessage(detail), offerBrowser: canRecognise };
+      if (!canRecord) return { engine: 'none', message: "This browser can't record audio for local Whisper.", offerBrowser: canRecognise };
+      return { engine: 'local' };
+    }
+    if (hubLocal === true && canRecord) return { engine: 'local' };
+    if (canRecognise) return { engine: 'web' };
+    if (hubLocal === null && canRecord) return { engine: 'local' };
+    return { engine: 'none', message: hubLocal === false
+      ? "Local Whisper isn't installed on this hub, and this browser has no speech recognition. Chrome, Edge or Safari can dictate here."
+      : unavailableReason() };
+  }
+  function sttMode() {
+    const mode = Trio.preferences?.read?.().sttMode;
+    return mode === 'local' || mode === 'web' ? mode : 'auto';
+  }
+  // Writes dictated text into the box. The caret goes to the end only if the
+  // box already has focus: focusing it here would raise the phone keyboard
+  // over the conversation in the middle of talking. The draft is saved like
+  // typed text, so switching conversations no longer discards a dictation.
+  function applyDictatedText(text) {
+    const el = input(); if (!el) return;
+    const focused = document.activeElement === el;
+    setValue(text, focused ? text.length : null);
+    updateSendState(); saveDraft(); renderTargetHint();
+  }
   // Simple 5-bar level meter driven by an AnalyserNode — enough to show
   // "yes, your voice is registering" without a full waveform canvas. Reuses
   // whatever MediaStream the caller already opened; browser-engine mode has
@@ -644,7 +790,7 @@
     const Speech = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!Speech) throw new Error('Browser speech recognition is unavailable');
     const myGen = dictationGen; // captured now — stopDictation()/unmount() bump this
-    recognition = new Speech(); recognition.continuous = true; recognition.interimResults = true;
+    const rec = recognition = new Speech(); recognition.continuous = true; recognition.interimResults = true;
     // Same language as the server-side Whisper path. Left unset, the browser
     // transcribes in ITS OWN locale — so an NTH_STT_LANG=fr deployment would
     // return French from /api/stt/transcribe and English from the browser,
@@ -653,8 +799,25 @@
     // Baseline captured BEFORE start: every event rewrites the box from it
     // rather than appending to the box's own contents (see the accumulator).
     const absorb = makeSpeechAccumulator(inputValue());
-    recognition.onresult = event => { inputValue(absorb(event.results, event.resultIndex)); updateSendState(); };
-    recognition.onend = () => { recognition = null; stopMeter(); document.body.classList.remove('dictating'); setDictationButtonState(false); };
+    // A session's events only count while it is the live one, or after the
+    // user's Stop (recognition === null), when the last final arrives late.
+    // Without the check, a quick Stop-then-start let the OLD session's late
+    // onend null out the NEW session and reset the button mid-recording. The
+    // conversation check keeps a late final out of a thread opened since.
+    const startedIn = conversationId();
+    const mine = () => (recognition === rec || recognition === null) && conversationId() === startedIn;
+    recognition.onresult = event => { if (mine()) applyDictatedText(absorb(event.results, event.resultIndex)); };
+    // Android Chrome ends a session by itself after a few seconds of silence,
+    // continuous=true or not. We let it end: the button goes back to the mic,
+    // and the text stays in the box for the user to send or extend with
+    // another tap. Restarting automatically was the alternative, but Android
+    // plays its system beep on every start, so each pause to think would
+    // beep, and a silent phone left recording would beep every few seconds
+    // (with a "no speech" error each time) until someone noticed.
+    recognition.onend = () => {
+      if (recognition !== rec) return;
+      recognition = null; stopMeter(); document.body.classList.remove('dictating'); setDictationButtonState(false);
+    };
     // Without this handler EVERY failure of this engine was silent: the error
     // event went unhandled, onend fired immediately after and reset the button
     // to idle, and the user was left looking at a mic that had apparently done
@@ -671,6 +834,11 @@
     // first-ever grant that raced two simultaneous browser permission
     // prompts for what looks like one user action.
     recognition.onstart = () => {
+      // No meter on Android: there the recogniser runs in a system service
+      // that shares the one microphone, and a second capture opened by the
+      // page is reported to starve it. The red pulsing button still shows
+      // that it is listening.
+      if (/Android/i.test(window.navigator.userAgent || '')) return;
       window.navigator.mediaDevices?.getUserMedia?.({ audio: true }).then(s => {
         // Stale by the time this resolved (stopped/unmounted, or a newer
         // dictation session started) — don't leak a mic stream + AudioContext
@@ -718,7 +886,7 @@
             ? 'Nothing was picked up — try again and start speaking right after you tap the mic.'
             : 'That was too quiet to transcribe. Move closer to the mic and try again.',
             DICTATION_TOAST_MS);
-        } else { inputValue((inputValue() + ' ' + text).trim()); updateSendState(); }
+        } else applyDictatedText(withBaseline(inputValue(), text));
       } catch (error) {
         // This runs AFTER the user has stopped speaking. The old code
         // responded by starting browserDictation() right here — which
@@ -739,12 +907,9 @@
         // exists to delete. An explicit button makes the switch a thing the
         // user chose, once, for this recording only. (LOTC/Frodo, critical)
         const reason = humanEngineError(error.message) || 'Local transcription failed';
+        refreshSttHealth(); // the hub may have lost its engine; let the next tap know
         if (hasBrowserDictation()) {
-          Trio.ui.toast(reason, DICTATION_TOAST_MS, {
-            label: 'Use browser dictation',
-            onClick: () => browserDictation().catch(
-              fallback => Trio.ui.toast(fallback.message, DICTATION_TOAST_MS)),
-          });
+          Trio.ui.toast(reason, DICTATION_TOAST_MS, offerBrowserAction());
         } else Trio.ui.toast(reason, DICTATION_TOAST_MS);
       } finally {
         stopTracks();
@@ -764,18 +929,41 @@
     // click rather than tearing down a session that hasn't started.
     if (starting) return;
     if (recognition || recorder?.state === 'recording') return stopDictation();
-    const mode = Trio.preferences?.read?.().sttMode || 'local';
-    if (mode === 'web') return browserDictation();
+    const mode = sttMode();
+    const canRecord = hasLocalDictation(), canRecognise = hasBrowserDictation();
+    let health = sttHealthNow();
+    // Only an explicit Local choice (which must refuse BEFORE recording when
+    // the hub cannot transcribe) or a browser with no speech recognition at
+    // all waits for an unknown answer. Everything else decides right now,
+    // inside the tap — no await may come before browserDictation() here.
+    if (health?.available == null && canRecord && (mode === 'local' || (mode === 'auto' && !canRecognise))) {
+      starting = true;
+      try { health = await awaitSttHealth(3000); } finally { starting = false; }
+    }
+    const choice = chooseDictationEngine({ mode, hubLocal: health?.available ?? null, detail: health?.detail, canRecord, canRecognise });
+    if (choice.engine === 'web') return browserDictation();
+    if (choice.engine === 'none') {
+      Trio.ui.toast(choice.message, DICTATION_TOAST_MS, choice.offerBrowser ? offerBrowserAction() : null);
+      return;
+    }
     try { return await localDictation(); }
     catch (error) {
-      if (!hasBrowserDictation()) throw error;
-      // Unlike the post-recording case, this failure happens BEFORE anything
-      // was recorded and inside the click, so falling straight through to the
-      // browser engine loses no audio and keeps the user gesture Safari needs.
-      Trio.ui.toast((humanEngineError(error.message) || 'Local dictation failed')
-        + '. Falling back to browser speech recognition.', DICTATION_TOAST_MS);
+      const reason = humanEngineError(error.message) || 'Local dictation failed';
+      if (!canRecognise) throw new Error(reason);
+      // Explicit Local: say what broke and offer the browser engine; never
+      // switch to it on the user's behalf (see chooseDictationEngine).
+      if (mode === 'local') { Trio.ui.toast(reason, DICTATION_TOAST_MS, offerBrowserAction()); return; }
+      // Auto: this failure happens BEFORE anything was recorded, so falling
+      // through to the browser engine loses no audio.
+      Trio.ui.toast(reason + '. Using browser speech recognition instead.', DICTATION_TOAST_MS);
       return browserDictation();
     }
+  }
+  function offerBrowserAction() {
+    return {
+      label: 'Use browser dictation',
+      onClick: () => browserDictation().catch(fallback => Trio.ui.toast(fallback.message, DICTATION_TOAST_MS)),
+    };
   }
   const domListeners = [];
   let unroute;
@@ -986,6 +1174,8 @@
       toggleDictation().catch(error => Trio.ui.toast(error?.message || 'Dictation failed', DICTATION_TOAST_MS));
     };
     if (dictation && dictateBtn) { dictateBtn.addEventListener('click', onDictate); domListeners.push([dictateBtn, 'click', onDictate]); }
+    // Ask the hub early so the first tap can already pick the right engine.
+    if (dictation && dictationAvailable) refreshSttHealth();
     // Aux (targets/images) loading is driven by loadConversation → refresh(),
     // which runs after channel/dmKey are final; the router hook only needs the
     // text draft + input state (kept as-is to avoid touching existing flows).
@@ -1013,5 +1203,5 @@
   // around them need a live MediaRecorder and SpeechRecognition, which the
   // harness deliberately does not fake, but the decisions they encode are the
   // part that regressed and they are testable on their own.
-  Trio.composer = { init, mount, unmount, render: renderTargets, refresh, send, setTargets, insertTarget, targetOrder, toggleTarget, clearTargets, toggleAllTargets, upload, toggleDictation, stopDictation, buildSendPayload, syncReadOnly, setDictationButtonState, speechErrorMessage, hasBrowserDictation, makeSpeechAccumulator, unavailableReason, humanEngineError };
+  Trio.composer = { init, mount, unmount, render: renderTargets, refresh, send, setTargets, insertTarget, targetOrder, toggleTarget, clearTargets, toggleAllTargets, upload, toggleDictation, stopDictation, buildSendPayload, syncReadOnly, setDictationButtonState, speechErrorMessage, hasBrowserDictation, makeSpeechAccumulator, unavailableReason, humanEngineError, chooseDictationEngine, collapseSpeech, sttHealthNow, refreshSttHealth };
 })();
