@@ -28,12 +28,21 @@ import os
 import shutil
 import sys
 import tempfile
-import time
 from pathlib import Path
 
 SERVER = Path(__file__).resolve().parent.parent / "server"
 sys.path.insert(0, str(SERVER))
-os.environ.setdefault("NTH_HOME", tempfile.mkdtemp(prefix="nth_churn_"))
+os.environ["NTH_HOME"] = tempfile.mkdtemp(prefix="nth_churn_")
+# Run inside a Claude Code session, nth_connect stamps that session's id as the
+# member's fingerprint, and the roster joins it against the statusline
+# publisher's directory: the test member then carries the PARENT session's live
+# context ring. Its used_pct moves on every statusline render, and the ring
+# drops out once its file is 60s old. Both are real changes to the key, so the
+# "heartbeat-only" window below broadcast whenever one landed inside it. The
+# member gets no fingerprint and the publisher directory is empty.
+os.environ.pop("CLAUDE_CODE_SESSION_ID", None)
+os.environ.pop("CLAUDE_SESSION_ID", None)
+os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp(prefix="nth_churn_state_")
 
 import nth_web as web    # noqa: E402
 
@@ -182,6 +191,7 @@ check("the key is order-SENSITIVE, so callers must supply stable SQL order",
 # against a real DB and watch the wire.
 import queue as _queue          # noqa: E402
 import sqlite3 as _sqlite3      # noqa: E402
+import threading as _threading  # noqa: E402
 
 import nth_server as srv        # noqa: E402
 
@@ -189,21 +199,50 @@ _tmp = Path(tempfile.mkdtemp(prefix="nth_churn_wire_"))
 srv.DB_DIR, srv.DB_PATH = _tmp, _tmp / "nth.db"
 _j = json.loads(srv.nth_connect(summary="wired", name="Wired", channel="wire-ch"))
 _ch, _me = _j["channel"], _j["member_id"]
+check("the test member is not bound to a live Claude session's context ring",
+      web.CONTEXT_USAGE_DIR.is_relative_to(os.environ["XDG_STATE_HOME"]))
 
 _hub = web.EventHub(srv.DB_PATH, _ch)
+
+# Each poll tick reads the roster, then broadcasts what changed. Counting the
+# reads lets the checks below wait for whole ticks instead of a fixed window: a
+# window that a loaded machine overran read the previous step's broadcast as
+# this step's, and one it never reached passed without the loop having run.
+_ticks, _tick = [0], _threading.Condition()
+_read_roster = _hub._fetch_roster
+
+
+def _counted_read(db):
+    # subscribe() and _prime_payloads read the roster too, on the caller's
+    # thread; only the poll loop's reads are ticks.
+    if _threading.current_thread() is _hub._thread:
+        with _tick:
+            _ticks[0] += 1
+            _tick.notify_all()
+    return _read_roster(db)
+
+
+_hub._fetch_roster = _counted_read
 _hub.start()
 _q = _hub.subscribe(include_history=False)
 
 
-def _drain(seconds=web.DB_POLL_INTERVAL * 6):
-    """Collect every payload the hub emits over the next few ticks."""
-    out, deadline = [], time.monotonic() + seconds
-    while time.monotonic() < deadline:
+def _drain(timeout=30.0):
+    """Every payload the hub emitted through one full tick that began after this call.
+
+    The read numbered n+1 starts after this call, so after any write the caller
+    has committed; that tick's broadcast is done once read n+2 starts.
+    """
+    with _tick:
+        target = _ticks[0] + 2
+        if not _tick.wait_for(lambda: _ticks[0] >= target, timeout):
+            raise AssertionError(f"the hub's poll loop did not complete a tick within {timeout}s")
+    out = []
+    while True:
         try:
-            out.append(json.loads(_q.get(timeout=0.1)))
+            out.append(json.loads(_q.get_nowait()))
         except _queue.Empty:
-            continue
-    return out
+            return out
 
 
 def _write(sql, params):
@@ -216,7 +255,7 @@ def _write(sql, params):
 
 
 try:
-    _drain()   # let the hub settle and emit its first-tick roster
+    _drain()   # discard the primed snapshot and the first tick's roster
 
     # A bare heartbeat tick — exactly what nth_monitor.py writes every 10s.
     _write("UPDATE members SET last_seen = ? WHERE channel = ? AND id = ?",
