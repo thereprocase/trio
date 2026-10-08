@@ -195,6 +195,8 @@ def image_dimensions(data: bytes) -> Optional[Tuple[int, int]]:
         elif data[:4] == b"RIFF" and data[8:12] == b"WEBP":
             chunk = data[12:16]
             if chunk == b"VP8X":
+                if len(data) < 30:
+                    return None
                 w = int.from_bytes(data[24:27], "little") + 1
                 h = int.from_bytes(data[27:30], "little") + 1
             elif chunk == b"VP8L" and data[20:21] == b"\x2f":
@@ -214,11 +216,20 @@ def image_dimensions(data: bytes) -> Optional[Tuple[int, int]]:
     return (w, h) if w > 0 and h > 0 else None
 
 
+# Bounds on the header walk: real files have a few dozen segments and a few
+# fill bytes, and this runs inside a send's write transaction.
+_JPEG_MAX_SEGMENTS = 10000
+_JPEG_MAX_FILL = 64 * 1024
+
+
 def _jpeg_dimensions(data: bytes) -> Optional[Tuple[int, int]]:
-    i, size = 2, len(data)
-    for _ in range(10000):          # a header has far fewer segments than this
+    i, size, fill = 2, len(data), 0
+    for _ in range(_JPEG_MAX_SEGMENTS):
         while i < size and data[i] == 0xFF and i + 1 < size and data[i + 1] == 0xFF:
             i += 1                  # fill bytes
+            fill += 1
+            if fill > _JPEG_MAX_FILL:
+                return None
         if i + 4 > size or data[i] != 0xFF:
             return None
         marker = data[i + 1]
@@ -561,15 +572,23 @@ def unlink_quietly(paths) -> None:
 
 
 # ── Images delivered to a model on poll ──────────────────────────────────
-# Limits that keep an image block within what a model API accepts: about 5 MB
-# of base64 per image (3.75 MB raw), 8000 pixels on a side, and about 5 MB raw
-# per poll response in total. An image outside them is listed with
-# delivered: false and a reason, and stays viewable in the dashboard.
+# An image block the model API refuses stays in the receiving agent's history
+# and fails every later request, so poll sends only images the API accepts:
+#   * at most 3.75 MB raw, which is 5 MB once base64-encoded, the API's
+#     per-image limit;
+#   * at most 2000 pixels on a side, the API's limit for a request carrying
+#     more than 20 images, which a long session with images reaches;
+#   * with dimensions read from the header: an image whose size cannot be
+#     read is one the API may refuse.
+# One poll carries at most 3.75 MB of images, so one response stays under
+# 5 MB of base64. The API also caps a whole request at 32 MB, which a long
+# session full of images can still reach; that total is the receiving
+# client's to manage, and the hub cannot see it.
 MAX_MODEL_IMAGE_BYTES = 3_750_000
-MAX_MODEL_IMAGE_SIDE = 8000
-MAX_POLL_IMAGE_BYTES = 5_000_000
+MAX_MODEL_IMAGE_SIDE = 2000
+MAX_POLL_IMAGE_BYTES = 3_750_000
 TOO_LARGE_FOR_MODEL = "too_large_for_model"
-POLL_BUDGET_SPENT = "poll_image_budget_spent"
+UNREADABLE_IMAGE = "unreadable_image"
 
 
 def model_image_refusal(data: bytes) -> Optional[str]:
@@ -577,7 +596,9 @@ def model_image_refusal(data: bytes) -> Optional[str]:
     if len(data) > MAX_MODEL_IMAGE_BYTES:
         return TOO_LARGE_FOR_MODEL
     dims = image_dimensions(data)
-    if dims and max(dims) > MAX_MODEL_IMAGE_SIDE:
+    if dims is None or min(dims) <= 0:
+        return UNREADABLE_IMAGE
+    if max(dims) > MAX_MODEL_IMAGE_SIDE:
         return TOO_LARGE_FOR_MODEL
     return None
 
@@ -727,9 +748,9 @@ def sweep_expired_pages(db: sqlite3.Connection, now: Optional[datetime] = None) 
 
 
 def sweep_orphan_pages(db: sqlite3.Connection) -> int:
-    """Delete pages whose channel no longer exists. The distinct channels come
-    from the (channel, member_id) index, so this reads one entry per channel
-    with pages, then deletes by channel."""
+    """Delete pages whose channel no longer exists. The distinct channels are
+    read from the (channel, member_id) index, which never touches the page
+    rows or their HTML; then each missing channel's pages are deleted."""
     try:
         gone = [r[0] for r in db.execute(
             "SELECT DISTINCT p.channel FROM pages p "

@@ -58,8 +58,11 @@ srv.ATTACH_DIR = Path(_tmp) / "attachments"
 web.ATTACH_DIR = srv.ATTACH_DIR
 
 # The sniffer reads only the signature, so padding makes inert test images.
-PNG = b"\x89PNG\r\n\x1a\n" + b"\x01" * 2040            # 2048 bytes
-GIF = b"GIF89a" + b"\x02" * 1018                        # 1024 bytes
+# Real headers (a model is sent only images whose size it can read); the
+# padding after them is inert, so no encoder is needed.
+PNG = (b"\x89PNG\r\n\x1a\n" + (13).to_bytes(4, "big") + b"IHDR"
+       + (64).to_bytes(4, "big") + (48).to_bytes(4, "big")).ljust(2048, b"\x01")
+GIF = (b"GIF89a" + (32).to_bytes(2, "little") + (32).to_bytes(2, "little")).ljust(1024, b"\x02")
 FILES = Path(tempfile.mkdtemp(prefix="nth_agent_files_"))
 
 
@@ -116,7 +119,7 @@ check("frontend: a data_base64 item passes through unchanged",
       nmedia.inline_local_paths([{"data_base64": b64(GIF), "filename": "g.gif"}])
       == [{"data_base64": b64(GIF), "filename": "g.gif"}])
 
-# The hub never reads paths (this module was imported, not run as stdio).
+# The hub never reads paths (this module was imported, so _READS_CALLER_PATHS stays False).
 check("hub: path reads are off unless the stdio entry point turns them on",
       srv._READS_CALLER_PATHS is False)
 r = send(message="from the hub's view", attachments=[{"path": str(shot)}])
@@ -505,47 +508,156 @@ big_a = (FILES / "big-a.png"); big_a.write_bytes(png(10, 10, 9 * 1024 * 1024))
 check("cap: paths count against the per-message total too",
       raises(lambda: nmedia.inline_local_paths([{"path": str(big_a)}] * 3)))
 
-# Fresh reader so the poll below holds only these messages.
-d = json.loads(srv.nth_connect(summary="model reader", name="Dee", channel=CH))
-DEE, DEE_TOKEN = d["member_id"], d["session_token"]
-srv.nth_poll(channel=CH, member_id=DEE, wait_seconds=0, session_token=DEE_TOKEN)
-body = srv.nth_poll(channel=CH, member_id=DEE, wait_seconds=0, session_token=DEE_TOKEN)
-body = json.loads(body[0] if isinstance(body, list) else body)
-for m in body.get("messages", []):
-    srv.nth_ack(channel=CH, member_id=DEE, through_id=m["id"], session_token=DEE_TOKEN)
+# Fresh readers so each poll below holds only these messages.
+def fresh_reader(name):
+    d = json.loads(srv.nth_connect(summary="model reader", name=name, channel=CH))
+    mid, tok = d["member_id"], d["session_token"]
+    for _ in range(2):
+        out = srv.nth_poll(channel=CH, member_id=mid, wait_seconds=0, session_token=tok)
+        body = json.loads(out[0] if isinstance(out, list) else out)
+        for m in body.get("messages", []):
+            srv.nth_ack(channel=CH, member_id=mid, through_id=m["id"], session_token=tok)
+    return mid, tok
 
+
+def poll_as(mid, tok):
+    out = srv.nth_poll(channel=CH, member_id=mid, wait_seconds=0, session_token=tok)
+    payload = json.loads(out[0] if isinstance(out, list) else out)
+    items = {a["filename"]: a for m in payload.get("messages", []) for a in m.get("attachments", [])}
+    return payload, items, (out[1:] if isinstance(out, list) else [])
+
+
+DEE, DEE_TOKEN = fresh_reader("Dee")
 heavy = png(100, 100, 3_800_000)
-wide = png(9000, 10)
-three_mb = png(50, 50, 3_000_000)
+wide = png(2001, 10)
 r1 = send_items([{"data_base64": b64(heavy), "filename": "heavy.png"},
                  {"data_base64": b64(wide), "filename": "wide.png"}])
-r2 = send_items([{"data_base64": b64(three_mb), "filename": "a.png"},
-                 {"data_base64": b64(three_mb), "filename": "b.png"}])
-check("poll setup: the large images are accepted for the dashboard",
-      r1.get("ok") is True and r2.get("ok") is True)
-out = srv.nth_poll(channel=CH, member_id=DEE, wait_seconds=0, session_token=DEE_TOKEN)
-payload = json.loads(out[0] if isinstance(out, list) else out)
-items = {a["filename"]: a for m in payload.get("messages", []) for a in m.get("attachments", [])}
-blocks = out[1:] if isinstance(out, list) else []
+check("poll setup: the large images are accepted for the dashboard", r1.get("ok") is True)
+payload, items, blocks = poll_as(DEE, DEE_TOKEN)
 check("poll: an image over 3.75 MB is withheld from the model",
       items.get("heavy.png", {}).get("delivered") is False
       and items["heavy.png"].get("reason") == "too_large_for_model")
-check("poll: an image over 8000 px on a side is withheld from the model",
+check("poll: an image over 2000 px on a side is withheld from the model",
       items.get("wide.png", {}).get("delivered") is False
       and items["wide.png"].get("reason") == "too_large_for_model")
-check("poll: about 5 MB of images per poll; the rest wait with a reason",
-      items.get("a.png", {}).get("delivered") is True
-      and items.get("b.png", {}).get("delivered") is False
-      and items["b.png"].get("reason") == "poll_image_budget_spent"
-      and sum(len(b.data) for b in blocks) <= 5_000_000)
-check("poll: a poll carrying images says they are members' content",
-      bool(blocks) and "content from channel members" in payload.get("images_note", ""))
 srv.nth_ack(channel=CH, member_id=DEE, session_token=DEE_TOKEN,
             through_id=max(m["id"] for m in payload["messages"]))
+
+# W1: two 3 MB images in two messages. The first poll carries one; the second
+# message stays unread, and the next poll carries it.
+three_mb = png(50, 50, 3_000_000)
+ra = send_items([{"data_base64": b64(three_mb), "filename": "a.png"}], message="first")
+rb = send_items([{"data_base64": b64(three_mb), "filename": "b.png"}], message="second")
+payload, items, blocks = poll_as(DEE, DEE_TOKEN)
+ids = [m["id"] for m in payload.get("messages", [])]
+check("budget: the first poll carries the first image and stops before the second message",
+      ids == [ra["message_id"]] and items.get("a.png", {}).get("delivered") is True
+      and "b.png" not in items and len(blocks) == 1 and payload.get("more_pending") is True)
+check("budget: one poll carries at most 3.75 MB of images",
+      sum(len(b.data) for b in blocks) <= 3_750_000)
+check("poll: a poll carrying images says they are members' content",
+      bool(blocks) and "content from channel members" in payload.get("images_note", ""))
+srv.nth_ack(channel=CH, member_id=DEE, session_token=DEE_TOKEN, through_id=ids[-1])
+payload, items, blocks = poll_as(DEE, DEE_TOKEN)
+check("budget: the next poll carries the second image",
+      [m["id"] for m in payload.get("messages", [])] == [rb["message_id"]]
+      and items.get("b.png", {}).get("delivered") is True and len(blocks) == 1
+      and blocks[0].data == three_mb and "more_pending" not in payload)
+srv.nth_ack(channel=CH, member_id=DEE, session_token=DEE_TOKEN, through_id=rb["message_id"])
+
+# The same when a row has no stored size (the file is read, then deferred).
+rn1 = send_items([{"data_base64": b64(three_mb), "filename": "n1.png"}], message="n1")
+rn2 = send_items([{"data_base64": b64(three_mb), "filename": "n2.png"}], message="n2")
+with db() as conn:
+    conn.execute("UPDATE attachments SET bytes = NULL WHERE message_id IN (?, ?)",
+                 (rn1["message_id"], rn2["message_id"]))
+payload, items, blocks = poll_as(DEE, DEE_TOKEN)
+check("budget: without a stored size, the message past the budget still waits",
+      [m["id"] for m in payload.get("messages", [])] == [rn1["message_id"]]
+      and payload.get("more_pending") is True)
+srv.nth_ack(channel=CH, member_id=DEE, session_token=DEE_TOKEN, through_id=rn1["message_id"])
+payload, items, blocks = poll_as(DEE, DEE_TOKEN)
+check("budget: and the next poll carries it",
+      items.get("n2.png", {}).get("delivered") is True)
+srv.nth_ack(channel=CH, member_id=DEE, session_token=DEE_TOKEN, through_id=rn2["message_id"])
+
+# A first message whose images alone exceed the budget still goes out, with the
+# overflow marked, so a poll never stalls on it.
+rc = send_items([{"data_base64": b64(three_mb), "filename": "c1.png"},
+                 {"data_base64": b64(three_mb), "filename": "c2.png"}], message="pair")
+payload, items, blocks = poll_as(DEE, DEE_TOKEN)
+check("budget: a first message over the budget is delivered, its overflow marked",
+      [m["id"] for m in payload.get("messages", [])] == [rc["message_id"]]
+      and items.get("c1.png", {}).get("delivered") is True
+      and items.get("c2.png", {}).get("reason") == "too_large_for_model"
+      and "more_pending" not in payload)
+srv.nth_ack(channel=CH, member_id=DEE, session_token=DEE_TOKEN, through_id=rc["message_id"])
+
+# The legacy auto-ack path acks only what the response carried.
+EVE = json.loads(srv.nth_connect(summary="legacy reader", name="Eve", channel=CH))["member_id"]
+for _ in range(3):
+    srv.nth_poll(channel=CH, member_id=EVE, wait_seconds=0)
+re1 = send_items([{"data_base64": b64(three_mb), "filename": "e1.png"}], message="e1")
+re2 = send_items([{"data_base64": b64(three_mb), "filename": "e2.png"}], message="e2")
+out1 = srv.nth_poll(channel=CH, member_id=EVE, wait_seconds=0)
+out2 = srv.nth_poll(channel=CH, member_id=EVE, wait_seconds=0)
+got1 = [m["id"] for m in json.loads(out1[0] if isinstance(out1, list) else out1).get("messages", [])]
+got2 = [m["id"] for m in json.loads(out2[0] if isinstance(out2, list) else out2).get("messages", [])]
+check("budget: without a session token the deferred message is not acked, and comes next",
+      got1 == [re1["message_id"]] and got2 == [re2["message_id"]])
+
+# Note 4: a file is read only when its stored size says it can be sent.
+DEE2, DEE2_TOKEN = fresh_reader("Dee2")
+send_items([{"data_base64": b64(heavy), "filename": "skip-heavy.png"}], message="h")
+send_items([{"data_base64": b64(three_mb), "filename": "r1.png"}], message="r1")
+send_items([{"data_base64": b64(three_mb), "filename": "r2.png"}], message="r2")
+reads = []
+_real_read = srv._read_attachment_file
+srv._read_attachment_file = lambda ch, path: (reads.append(Path(path).name), _real_read(ch, path))[1]
+try:
+    payload, items, blocks = poll_as(DEE2, DEE2_TOKEN)
+finally:
+    srv._read_attachment_file = _real_read
+check("reads: an image over the per-image cap and one past the budget are never read",
+      len(reads) == 1 and items.get("skip-heavy.png", {}).get("reason") == "too_large_for_model"
+      and items.get("r1.png", {}).get("delivered") is True and "r2.png" not in items)
+
+# W2: an image whose size cannot be read never reaches a model.
+check("unreadable: PNG magic with junk, truncated VP8X, endless JPEG fill, zero height",
+      nmedia.model_image_refusal(b"\x89PNG\r\n\x1a\n" + b"\x01" * 64) == "unreadable_image"
+      and nmedia.image_dimensions(webp_x[:29]) is None
+      and nmedia.image_dimensions(b"\xff\xd8" + b"\xff" * (70 * 1024) + jpeg[2:]) is None
+      and nmedia.model_image_refusal(png(100, 0)) == "unreadable_image")
+DEE3, DEE3_TOKEN = fresh_reader("Dee3")
+send_items([{"data_base64": b64(b"\x89PNG\r\n\x1a\n" + b"\x01" * 64), "filename": "junk.png"}])
+payload, items, blocks = poll_as(DEE3, DEE3_TOKEN)
+check("unreadable: a header-less image is listed with reason unreadable_image",
+      items.get("junk.png", {}).get("delivered") is False
+      and items["junk.png"].get("reason") == "unreadable_image" and not blocks)
+srv.nth_ack(channel=CH, member_id=DEE3, session_token=DEE3_TOKEN,
+            through_id=max(m["id"] for m in payload["messages"]))
 send(message="words only")
-quiet = srv.nth_poll(channel=CH, member_id=DEE, wait_seconds=0, session_token=DEE_TOKEN)
+quiet = srv.nth_poll(channel=CH, member_id=DEE3, wait_seconds=0, session_token=DEE3_TOKEN)
 check("poll: a poll with no images carries no image note",
       "images_note" not in json.loads(quiet[0] if isinstance(quiet, list) else quiet))
+
+# Note 7: the cheap checks run before any attachment is read or decoded.
+prepared_calls = []
+_real_prepare = nmedia.prepare_attachments
+nmedia.prepare_attachments = lambda *a, **k: (prepared_calls.append(1), _real_prepare(*a, **k))[1]
+try:
+    bad = [json.loads(srv.nth_send(channel=CH, member_id=ADA, message="x", session_token="nope",
+                                   attachments=[{"data_base64": b64(PNG)}])),
+           json.loads(srv.nth_send(channel="no-such-room", member_id=ADA, message="x",
+                                   attachments=[{"data_base64": b64(PNG)}])),
+           json.loads(srv.nth_send(channel=CH, member_id="stranger", message="x",
+                                   attachments=[{"data_base64": b64(PNG)}])),
+           json.loads(srv.nth_dm(member_id=ADA, to="Bea", message="x", session_token="nope",
+                                 attachments=[{"data_base64": b64(PNG)}]))]
+finally:
+    nmedia.prepare_attachments = _real_prepare
+check("order: a bad token, channel or member is refused before attachments are decoded",
+      all("error" in b for b in bad) and prepared_calls == [])
 
 # ── Note 4: a failed write after the files are written leaves no file ──────
 t = json.loads(srv.nth_connect(summary="trigger", name="Tri", channel="trig-room"))
