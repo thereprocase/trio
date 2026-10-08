@@ -6655,8 +6655,8 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 member_id=ident.member_id, member_name=ident.display_name, mode=mode,
                 tier=_push_tier(ident), show_text=show_text)
             db.commit()
-            # Read back, because an omitted show_text kept whatever was stored
-            # and the page shows the device's real choice, not a guess.
+            # Read back, because an omitted show_text kept whatever was stored,
+            # so the page shows the stored choice.
             stored = npush.own_subscription(db, member_id=ident.member_id,
                                             endpoint=endpoint, channel=channel)
             db.commit()
