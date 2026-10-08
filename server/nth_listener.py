@@ -97,6 +97,27 @@ def token_refused(poll):
     return isinstance(poll, dict) and poll.get('error') in TOKEN_REFUSALS
 
 
+# The hub's refusals that are about the request rather than the token, by fixed label.
+# A label is all that leaves this module: the hub's own text may come from a remote,
+# possibly hostile, hub and never reaches a model-facing event.
+MISSING_CHANNEL_CODE = 'missing_channel_code'
+BAD_CHANNEL_CODE = 'bad_channel_code'
+UNKNOWN_REFUSAL = 'unknown'
+
+
+def refusal_label(poll):
+    """A fixed label for a refused reply's error: MISSING_CHANNEL_CODE, BAD_CHANNEL_CODE
+    or UNKNOWN_REFUSAL. Never any part of the error text itself."""
+    error = poll.get('error') if isinstance(poll, dict) else None
+    if not isinstance(error, str):
+        return UNKNOWN_REFUSAL
+    if error == 'Channel code is required.':
+        return MISSING_CHANNEL_CODE
+    if error.startswith('Invalid channel code "'):
+        return BAD_CHANNEL_CODE
+    return UNKNOWN_REFUSAL
+
+
 def select_messages(poll, filter_mode):
     # Filter the newly returned message itself, not stale batch-level flags.
     # Fetch all visible messages so @someone-else plus !me cannot be filtered
