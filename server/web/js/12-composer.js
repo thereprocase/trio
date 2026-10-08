@@ -155,8 +155,9 @@
   // Open the pending-upload previews as one gallery in the shared lightbox,
   // starting on the clicked thumbnail.
   function openPreviewLightbox(url) {
+    // Images only: an uploaded PDF or ZIP also has a url, and the lightbox shows <img>.
     const gallery = state.pendingAttachments
-      .filter(a => a && a.url)
+      .filter(a => a && a.url && INLINE_IMAGE.test(a.mime || ''))
       .map(a => ({ url: a.url, alt: a.filename || 'attachment' }));
     const at = gallery.findIndex(g => g.url === url);
     Trio.lightbox.open(gallery, at < 0 ? 0 : at);

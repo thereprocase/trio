@@ -320,7 +320,16 @@ def channel_attach_dir(channel: str, base: Optional[Path] = None) -> Path:
 def attach_dir_for(db_path: Path) -> Path:
     """Attachment root for a given database file."""
     return Path(db_path).resolve().parent / "attachments"
-MAX_UPLOAD_BYTES = int(os.environ.get("NTH_UPLOAD_MAX_BYTES", 25 * 1024 * 1024))  # hard cap per file
+def _env_bytes(name: str, default: int) -> int:
+    """A positive byte count from the environment; the default when unset or malformed."""
+    try:
+        value = int(os.environ.get(name, "") or default)
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
+MAX_UPLOAD_BYTES = _env_bytes("NTH_UPLOAD_MAX_BYTES", 25 * 1024 * 1024)  # hard cap per file
 # Total attachment bytes one member may hold in one channel. The per-image cap
 # bounds a single request; nothing bounded the SUM, so any identity allowed to
 # upload could fill the disk one legal 10 MB image at a time. sweep_attachments
@@ -352,6 +361,28 @@ ALLOWED_ATTACH_MIME = {
     "application/zip": ".zip",
     "text/plain": ".txt",
 }
+# Extensions a download may keep, by sniffed type. The type comes from the bytes and
+# the name from the client, so without this a text file could be saved as run.bat or
+# Invoice.hta and run on a double-click. Any other extension gets the type's own added.
+ATTACH_NAME_EXTENSIONS = {
+    "image/png": {".png"}, "image/jpeg": {".jpg", ".jpeg"}, "image/gif": {".gif"},
+    "image/webp": {".webp"}, "image/heic": {".heic"}, "image/heif": {".heif", ".heic"},
+    "application/pdf": {".pdf"},
+    "application/zip": {".zip", ".docx", ".xlsx", ".pptx", ".odt", ".ods", ".odp"},
+    "text/plain": {".txt", ".csv", ".log", ".md"},
+}
+
+
+def attachment_filename(raw_name: str, mime: str) -> str:
+    """The stored name for an upload: sanitised, and ending in an extension the sniffed
+    type allows, so what the operator saves is the kind of file its bytes are."""
+    ext = ALLOWED_ATTACH_MIME[mime]
+    name = re.sub(r"[^\w.\- ]", "_", raw_name)[:120].strip(" .") or ("file" + ext)
+    if Path(name).suffix.lower() not in ATTACH_NAME_EXTENSIONS.get(mime, {ext}):
+        name = name[:120 - len(ext)] + ext
+    return name
+
+
 _HEIC_BRANDS = {b"heic", b"heix", b"hevc", b"hevx", b"heim", b"heis", b"hevm", b"hevs"}
 _HEIF_BRANDS = {b"mif1", b"msf1"}
 
@@ -1785,8 +1816,9 @@ def sniff_attachment_mime(data: bytes) -> Optional[str]:
         try:
             sample.decode("utf-8")
         except UnicodeDecodeError as exc:
-            # A sample cut mid-character is still text; anything else is not.
-            if exc.start < len(sample) - 3:
+            # Only a sample that cut a longer file mid-character may end in a partial one.
+            cut = len(data) > len(sample) and exc.reason == "unexpected end of data"
+            if not cut:
                 return None
         return "text/plain"
     return None
@@ -9163,7 +9195,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
         # X-Filename is percent-encoded by the client (HTTP headers must be
         # ISO-8859-1, but filenames — e.g. macOS screenshots — carry Unicode).
         raw_name = unquote(self.headers.get("X-Filename", "") or "")
-        filename = re.sub(r"[^\w.\- ]", "_", raw_name)[:120] or ("image" + ext)
+        filename = attachment_filename(raw_name, mime)
 
         db = None
         try:
@@ -9406,14 +9438,18 @@ class NthWebHandler(BaseHTTPRequestHandler):
             if not resolved.is_relative_to(chan_root):
                 self._error(404, "not found")
                 return
-            data = resolved.read_bytes()
+            # Streamed, not read whole: with 25 MB files, parallel fetches of one
+            # attachment would otherwise each hold a full copy in memory.
+            handle = open(resolved, "rb")
+            size = os.fstat(handle.fileno()).st_size
         except OSError:
             self._error(404, "file missing")
             return
         self.send_response(200)
         self.send_header("Content-Type", row["mime"])
-        self.send_header("Content-Length", str(len(data)))
-        self.send_header("Cache-Control", "public, max-age=31536000, immutable")
+        self.send_header("Content-Length", str(size))
+        # Access-controlled content (DM files, unpublished uploads): no shared caches.
+        self.send_header("Cache-Control", "private, max-age=31536000, immutable")
         self.send_header("X-Content-Type-Options", "nosniff")
         if row["mime"] not in ALLOWED_IMAGE_MIME:
             # Not an image the page shows: hand it to the user as a file. A PDF or
@@ -9426,9 +9462,11 @@ class NthWebHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Security-Policy", "sandbox; default-src 'none'")
         self.end_headers()
         try:
-            self.wfile.write(data)
+            shutil.copyfileobj(handle, self.wfile, 256 * 1024)
         except (BrokenPipeError, ConnectionResetError, OSError):
             pass
+        finally:
+            handle.close()
 
 
 # ───────── HTML / JS / CSS (served as /) ─────────
