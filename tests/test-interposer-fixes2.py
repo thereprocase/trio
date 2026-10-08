@@ -23,6 +23,12 @@ KEY, SESSION, FIXTURES = cases.KEY, cases.SESSION, cases.FIXTURES
 
 
 class Round2Tests(cases.InterposerCase):
+    def setUp(self):
+        # Offline verify expands inherited units' %t socket paths as well as
+        # ours. A long TMPDIR would exceed Unix's 108-byte sockaddr_un limit.
+        with patch.object(tempfile, 'tempdir', '/tmp'):
+            super().setUp()
+
     def units(self):
         self.fake_systemctl(running=False)
         self.assertIs(setup.install_interposer_units(self.root,sys.executable,ROOT / 'server',wire.home()),True)

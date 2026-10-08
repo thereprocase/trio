@@ -12,7 +12,7 @@ async function check(name, fn) {
 const flush = () => new Promise(resolve => setImmediate(resolve));
 function page(health = { available: true }) {
   const cx = load(), win = cx.window, T = cx.hooks.Trio, C = T.composer;
-  const p = { cx, win, T, C, health, toasts: [], requests: [], streams: [], recorders: [], browsers: [], timers: [], controllers: [], respond: 'success' };
+  const p = { cx, win, T, C, nativeToast: T.ui.toast, health, toasts: [], requests: [], streams: [], recorders: [], browsers: [], timers: [], controllers: [], respond: 'success' };
   win.isSecureContext = true; win.AudioContext = undefined; win.webkitAudioContext = undefined;
   T.state.channel = 'alpha'; T.preferences.save({ sttMode: 'auto' });
   T.ui.toast = (message, ms, action) => p.toasts.push({ message, ms, action });
@@ -98,6 +98,68 @@ function page(health = { available: true }) {
     await offer.action.find(a => a.label === 'Use browser dictation').onClick();
     assert.strictEqual(p.browsers.length, 1); p.C.stopDictation();
     assert.strictEqual(p.C.dictationState(), '');
+  });
+  for (const outcome of ['success', 'failure']) {
+    await check('watchdog protects reload before final audio and transfers to ' + outcome, async () => {
+      const p = page(); await p.ready();
+      let reloads = 0; p.win.location.reload = () => reloads++;
+      const fetch = p.win.fetch;
+      p.win.fetch = (url, options) => url === '/api/version'
+        ? Promise.resolve({ ok: true, json: async () => ({ build: 'test-build' }) }) : fetch(url, options);
+      await p.C.toggleDictation(); const old = p.recorders[0]; p.lostStop = true;
+      p.C.stopDictation(); p.fire(5000);
+      const watchdogState = p.C.dictationState();
+      const waiting = p.toasts.at(-1);
+      assert.strictEqual(waiting.ms, 0);
+      assert.deepStrictEqual([waiting.action.label], ['Discard']);
+      assert.strictEqual(await p.T.appRefresh.reloadApp(), false);
+      assert.strictEqual(watchdogState, 'awaiting');
+      assert.ok(/final audio.*discard/i.test(p.toasts.at(-1).message));
+      assert.strictEqual(reloads, 0);
+      p.respond = outcome;
+      old.ondataavailable({ data: new Blob(['recoverable audio']) });
+      const stopped = old.onstop();
+      assert.strictEqual(p.C.dictationState(), 'transcribing', 'no unprotected handoff to upload');
+      await stopped;
+      assert.strictEqual(await p.requests[0].body.text(), 'recoverable audio');
+      assert.strictEqual(p.C.dictationState(), outcome === 'success' ? '' : 'kept');
+      if (outcome === 'failure') {
+        assert.strictEqual(await p.T.appRefresh.reloadApp(), false);
+        p.toasts.find(t => Array.isArray(t.action) && t.action.some(a => a.label === 'Retry')).action
+          .find(a => a.label === 'Discard').onClick();
+      }
+      assert.strictEqual(await p.T.appRefresh.reloadApp(), true);
+      assert.strictEqual(reloads, 1);
+    });
+  }
+  await check('Discard of retired audio frees reload and ignores late callbacks without touching a newer mic', async () => {
+    const p = page(); await p.ready();
+    let reloads = 0; p.win.location.reload = () => reloads++;
+    const fetch = p.win.fetch;
+    p.win.fetch = (url, options) => url === '/api/version'
+      ? Promise.resolve({ ok: true, json: async () => ({ build: 'test-build' }) }) : fetch(url, options);
+    await p.C.toggleDictation(); const old = p.recorders[0]; p.lostStop = true;
+    const data = old.ondataavailable, stop = old.onstop;
+    p.C.stopDictation(); p.fire(5000);
+    p.toasts.at(-1).action.onClick();
+    assert.strictEqual(p.C.dictationState(), '');
+    assert.strictEqual(await p.T.appRefresh.reloadApp(), true);
+    await p.C.toggleDictation();
+    data({ data: new Blob(['discarded audio']) }); await stop();
+    assert.strictEqual(p.requests.length, 0);
+    assert.strictEqual(p.C.dictationState(), 'recording');
+    assert.strictEqual(p.streams.at(-1).stopped, 0);
+  });
+  await check('retired-audio notice is removed when late audio becomes a request', async () => {
+    const p = page();
+    // Use the real UI module belonging to this page, rather than a captured fixture.
+    p.T.ui.toast = p.nativeToast;
+    await p.ready(); await p.C.toggleDictation(); const old = p.recorders[0]; p.lostStop = true;
+    p.C.stopDictation(); p.fire(5000);
+    const host = p.cx.document.getElementById('trio-toasts');
+    assert.strictEqual(host.children.length, 1);
+    old.ondataavailable({ data: new Blob(['late audio']) }); await old.onstop();
+    assert.strictEqual(host.children.length, 0, 'waiting notice does not outlive recovery');
   });
   await check('slow stop after watchdog recovers its final audio when idle', async () => {
     const p = page(); await p.ready(); p.T.state.drafts.alpha = 'note';
@@ -193,7 +255,7 @@ function page(health = { available: true }) {
     const p = page(); await p.ready(); await p.C.toggleDictation();
     p.lostStop = true; const oldStop = p.recorders[0].onstop;
     p.C.stopDictation(); assert.strictEqual(p.C.dictationState(), 'transcribing');
-    p.fire(5000); assert.strictEqual(p.C.dictationState(), '');
+    p.fire(5000); assert.strictEqual(p.C.dictationState(), 'awaiting');
     assert.strictEqual(p.cx.document.getElementById('dictate-btn').disabled, false);
     await p.C.toggleDictation(); await oldStop();
     assert.strictEqual(p.requests.length, 0); assert.strictEqual(p.C.dictationState(), 'recording');
