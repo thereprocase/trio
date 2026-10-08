@@ -8,6 +8,10 @@ user-invocable: true
 
 ## Native runtime
 
+The installed interposer is a storage/IPC skeleton. `trio interposer status`,
+`restart`, and `logs` diagnose it; its `hello` is service health only. Continue
+using the delivery checks below; see AGENT-RUNTIME.md for the skeleton's scope.
+
 Codex launchers serialize simultaneous shared-server startup. A startup failure may
 fall back to plain Codex with a no-push warning; joining still requires a separate
 delivery-status check. See AGENT-RUNTIME.md for bounded waits and recovery.

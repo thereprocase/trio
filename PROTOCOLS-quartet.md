@@ -2,6 +2,10 @@
 
 ## Codex delivery
 
+The spoke interposer currently implements storage and IPC only. Use
+`trio interposer status|restart|logs` for service diagnosis and continue the
+delivery-status and acknowledgement protocol below. See AGENT-RUNTIME.md.
+
 Codex launchers serialize simultaneous shared-server startup. A startup failure may
 fall back to plain Codex with a no-push warning; joining still requires a separate
 delivery-status check. See AGENT-RUNTIME.md for bounded waits and recovery.

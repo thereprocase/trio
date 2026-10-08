@@ -27,6 +27,55 @@ def settings():
     return json.loads(path.read_text(encoding='utf-8-sig')) if path.exists() else {}
 
 
+def interposer_control(action):
+    from nth_interposer_wire import connect, home as interposer_home, WireError
+    try:
+        if action == 'logs':
+            path = interposer_home() / 'logs' / 'interposer.log'
+            if path.exists():
+                # Bound memory even if a long-lived service's log grew large.
+                from collections import deque
+                with path.open(encoding='utf-8') as stream:
+                    print(''.join(deque(stream, maxlen=100)), end='')
+            else:
+                print('No interposer log yet.')
+            return 0
+        if action == 'restart':
+            unit = Path.home() / '.config' / 'systemd' / 'user' / 'trio-interposer.service'
+            if sys.platform.startswith('linux') and unit.exists() and shutil.which('systemctl'):
+                subprocess.run(['systemctl', '--user', 'restart', 'trio-interposer.service'],
+                               check=True, timeout=15)
+            else:
+                try:
+                    with connect(timeout=2) as client:
+                        pid = client.hello['pid']
+                    if type(pid) is not int or pid <= 1 or pid == os.getpid():
+                        raise WireError('invalid service pid')
+                    os.kill(pid, signal.SIGTERM)
+                    deadline = time.monotonic() + 10
+                    while time.monotonic() < deadline:
+                        try:
+                            with connect(timeout=.5) as client:
+                                if client.hello['pid'] != pid:
+                                    break
+                        except (OSError, EOFError):
+                            break
+                        time.sleep(.05)
+                    else:
+                        raise WireError('interposer did not stop within 10 seconds')
+                except (FileNotFoundError, ConnectionRefusedError, ProcessLookupError):
+                    pass
+            with connect(spawn=True) as client:
+                print(json.dumps({'restarted': True, 'hello': client.hello}, indent=2))
+            return 0
+        with connect() as client:
+            print(json.dumps({'hello': client.hello, **client.call('list')}, indent=2))
+        return 0
+    except (OSError, WireError, EOFError, subprocess.SubprocessError) as exc:
+        print('Interposer unavailable: ' + type(exc).__name__ + '; see trio interposer logs', file=sys.stderr)
+        return 1
+
+
 def background_options():
     return ({'creationflags': subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP}
             if os.name == 'nt' else {'start_new_session': True})
@@ -663,6 +712,8 @@ def main(argv=None):
         return run_foreground(command, env=claude_environment())
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest='command', required=True)
+    interposer = sub.add_parser('interposer', help='Inspect and control the spoke interposer')
+    interposer.add_argument('action', choices=['status', 'restart', 'logs'])
     sub.add_parser('start', help='Start the local event service')
     sub.add_parser('status', help='Show Codex delivery health without credentials (Claude channel '
                                   'listeners live inside the Claude session: ask the agent to call '
@@ -698,7 +749,9 @@ def main(argv=None):
     if extra and args.command != 'codex':
         parser.error('unrecognized arguments: ' + ' '.join(extra))
     os.umask(0o077)
-    if args.command == 'status':
+    if args.command == 'interposer':
+        return interposer_control(args.action)
+    elif args.command == 'status':
         print(json.dumps({'listeners': public_status(),
                           'claude_channels': 'not shown here: a channel listener lives inside the Claude '
                                              'session, so ask the agent to call *_delivery_status'}, indent=2))
