@@ -9,7 +9,7 @@ user settings for four events:
     tool   PostToolUse on the Trio/Quartet connect, listen and ack tools of any
            nth-* server: note which membership this session holds, then wait
     stop   Stop, after every turn: wait again if this session holds memberships
-    start  SessionStart on resume: a resumed session takes its memberships back
+    start  SessionStart on startup/resume: observe; resume takes memberships back
            and waits again, with no tool call needed
     end    SessionEnd: this session is over, its waiter leaves
 
@@ -73,7 +73,7 @@ UNSUPERVISED_LIFETIME_SECONDS = 24 * 3600.0
 # finds it, without disturbing hooks the user or another tool registered.
 HOOK_TAG = 'nth-trio-delivery'
 HOOK_EVENTS = (('PostToolUse', 'tool', r'mcp__nth-[A-Za-z0-9-]+__(trio|quartet)_(connect|listen|ack)'),
-               ('Stop', 'stop', None), ('SessionStart', 'start', 'resume'), ('SessionEnd', 'end', None))
+               ('Stop', 'stop', None), ('SessionStart', 'start', 'startup|resume'), ('SessionEnd', 'end', None))
 HOOK_SCRIPT = 'nth_claude_hook.py'
 # Claude Code enforces a hook's `timeout` (600 s by default) even on asyncRewake hooks,
 # and cancels the hook at expiry. Unset, an idle session would be deaf ten minutes

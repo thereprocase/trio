@@ -4,6 +4,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import socket
 import socketserver
 import sqlite3
@@ -11,6 +12,7 @@ import subprocess
 import sys
 import threading
 import time
+import tomllib
 import unittest
 from unittest.mock import Mock, patch
 
@@ -68,18 +70,24 @@ class FixTests(unittest.TestCase):
         directory=wire.private_dir(wire.home()/'events/hooks')
         (directory/('membership-'+KEY+'.json')).write_text(json.dumps(dict(filter='all',enabled=True,ended='')))
         (directory/('session-'+SESSION+'.json')).write_text(json.dumps(dict(client='claude',memberships={KEY:dict(source='quartet',channel='room',member_id='member')},
-                high_water={KEY:80},acked={KEY:70},ended=False)))
+                high_water={KEY:80},acked={KEY:70},ended=False,
+                servers={KEY:'nth-obsolete'},joined={KEY:9999999999})))
+        before=dict(self.store.db.execute('SELECT * FROM holdings WHERE session=? AND key=?',(SESSION,KEY)).fetchone())
         self.store.import_hooks(directory)
         row=self.store.snapshot()['memberships'][0]
         self.assertEqual((row['filter'],row['enabled'],row['ended'],row['announced_through'],row['acked_through']),('all',1,'',80,70))
         self.assertEqual((row['shadow_filter'],row['shadow_enabled'],row['shadow_ended'],row['shadow_announced_through'],row['shadow_acked_through']),('at',0,'channel ended',10,12))
         self.assertEqual(self.store.session(SESSION)['state'],'idle')
+        holding=self.store.db.execute('SELECT * FROM holdings WHERE session=? AND key=?',(SESSION,KEY)).fetchone()
+        self.assertEqual((holding['server'],holding['joined']),(before['server'],before['joined']))
         self.assertFalse(self.store.db.execute("SELECT 1 FROM meta WHERE key='hooks_import_cutover'").fetchone())
 
     def test_registered_host_and_in_turn_survive_import_and_register(self):
         self.attach()
         service.dispatch(self.store,dict(registration(),host_pid=os.getpid()))
         stamp=claude.process_stamp(os.getpid())
+        self.assertEqual(self.store.session(SESSION)['state'],'idle')
+        self.assertEqual(self.store.live_sessions(),1)
         self.op('turn',session=SESSION,phase='started')
         service.dispatch(self.store,registration())
         self.assertEqual(self.store.session(SESSION)['state'],'in_turn')
@@ -93,11 +101,23 @@ class FixTests(unittest.TestCase):
 
     def test_imported_holdings_cannot_become_owner(self):
         self.attach()
-        with self.store.db:
-            self.store.db.execute("INSERT INTO sessions(session,state) VALUES ('imported-holder','idle_unreachable')")
-            self.store.db.execute("INSERT INTO holdings(session,key,server,joined) VALUES ('imported-holder',?,'nth-qweb',999)",(KEY,))
+        path=wire.private_dir(wire.home()/'events/hooks')/('session-'+SESSION2+'.json')
+        path.write_text(json.dumps(dict(client='claude',memberships={KEY:dict(source='quartet',channel='room',member_id='member')},
+                                       servers={KEY:'nth-qweb'},joined={KEY:9999999999})))
+        self.store.import_hooks()
+        service.dispatch(self.store,registration(SESSION2))
+        self.assertEqual(self.store.session(SESSION2)['state'],'idle')
+        self.assertEqual(self.store.db.execute('SELECT attached FROM holdings WHERE session=? AND key=?',(SESSION2,KEY)).fetchone()[0],0)
         self.op('session.end',session=SESSION)
         self.assertIsNone(self.store.snapshot()['memberships'][0]['owner_session'])
+
+    def test_unregistered_attached_holder_cannot_become_owner(self):
+        self.attach()
+        with self.store.db:
+            self.store.db.execute("INSERT INTO sessions(session,state) VALUES ('unregistered-holder','idle')")
+            self.store.db.execute("INSERT INTO holdings(session,key,server,joined,attached) VALUES ('unregistered-holder',?,'nth-qweb',9999999999,1)",(KEY,))
+        self.op('session.end',session=SESSION)
+        self.assertIsNone(self.runtime.member(KEY)['owner_session'])
 
     def test_import_unchanged_files_is_cheap_and_skips_stay_reported(self):
         path=wire.private_dir(wire.home()/'events/hooks')/('membership-'+KEY+'.json')
@@ -106,6 +126,17 @@ class FixTests(unittest.TestCase):
         changes=self.store.db.total_changes
         self.store.import_hooks()
         self.assertEqual(self.store.db.total_changes,changes)
+        with self.store.db:
+            self.store.db.execute('UPDATE memberships SET shadow_enabled=0,shadow_filter=? WHERE key=?',('about',KEY))
+        # Same inode and size: only mtime distinguishes this valid rewrite.
+        old=path.stat()
+        payload=path.read_text().replace('false','true ')
+        path.write_text(payload)
+        os.utime(path,ns=(old.st_atime_ns,old.st_mtime_ns+1000000000))
+        self.assertEqual((path.stat().st_ino,path.stat().st_size),(old.st_ino,old.st_size))
+        self.store.import_hooks()
+        row=self.store.snapshot()['memberships'][0]
+        self.assertEqual((row['enabled'],row['shadow_enabled'],row['shadow_filter']),(1,0,'about'))
         bad=path.with_name('membership-'+KEY2+'.json')
         bad.write_text('not json')
         self.store.import_hooks()
@@ -128,6 +159,137 @@ class FixTests(unittest.TestCase):
         row=shadow.records('would')[0]
         self.assertEqual((row['session'],row['ranges'][0]['last']),(SESSION2,17))
 
+    def test_buffer_failure_keeps_watermark_and_allows_retry(self):
+        self.attach()
+        listener=self.runtime.pollers[KEY]
+        listener.stop();listener.thread.join(1)
+        self.op('turn',session=SESSION,phase='started')
+        observed=[]
+        def fail_buffer(*args):
+            observed.append(self.runtime.member(KEY)['shadow_announced_through'])
+            self.assertTrue(self.store.lock._is_owned())
+            raise RuntimeError('synthetic buffer failure')
+        with patch.object(self.runtime,'accumulate',side_effect=fail_buffer):
+            with self.assertRaises(RuntimeError):listener._fresh([message(41,mentioned=True)])
+        self.assertEqual(observed,[0])
+        self.assertEqual(self.runtime.member(KEY)['shadow_announced_through'],0)
+        self.assertEqual(self.runtime.buffers,{})
+        from nth_interposer_runtime import ShadowListener
+        replacement=ShadowListener(self.runtime,self.runtime.member(KEY),dict(source='quartet',url=URL))
+        self.assertEqual([m['id'] for m in replacement._fresh([message(41,mentioned=True)])],[41])
+        self.assertEqual(self.runtime.member(KEY)['shadow_announced_through'],41)
+        self.runtime.release(SESSION,force=True,flush=True)
+        self.assertEqual(shadow.records('would')[0]['ranges'][0]['last'],41)
+
+    def test_handoff_waits_for_buffer_before_advancing_watermark(self):
+        self.attach()
+        listener=self.runtime.pollers[KEY]
+        listener.stop();listener.thread.join(1)
+        service.dispatch(self.store,registration(SESSION2))
+        entered,attempted,done=threading.Event(),threading.Event(),threading.Event()
+        errors=[]
+        accumulate=self.runtime.accumulate
+        def boundary(row,selected):
+            self.assertEqual(self.runtime.member(KEY)['shadow_announced_through'],0)
+            entered.set()
+            self.assertTrue(attempted.wait(1))
+            self.assertFalse(done.wait(.05))
+            accumulate(row,selected)
+        def handoff():
+            entered.wait(1);attempted.set()
+            try:self.op('membership.attach',session=SESSION2,key=KEY,server='nth-second',via='connect')
+            except Exception as exc:errors.append(exc)
+            finally:done.set()
+        worker=threading.Thread(target=handoff);worker.start()
+        try:
+            with patch.object(self.runtime,'accumulate',side_effect=boundary):
+                listener._fresh([message(43,mentioned=True)])
+        finally:worker.join(2)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(errors,[])
+        self.runtime.release(SESSION2,force=True)
+        row=shadow.records('would')[0]
+        self.assertEqual((row['session'],row['ranges'][0]['last'],row['ranges'][0]['server']),(SESSION2,43,'nth-second'))
+
+    def test_failed_evidence_retains_buffer_counters_and_retries(self):
+        self.attach()
+        self.runtime.accumulate(self.runtime.member(KEY),[message(47,mentioned=True)])
+        before=json.loads(json.dumps(self.runtime.buffers))
+        with patch('nth_interposer_runtime.append',return_value=False):
+            self.runtime.release(SESSION,force=True)
+        self.assertEqual(self.runtime.buffers,before)
+        row=self.runtime.member(KEY)
+        self.assertEqual((row['shadow_notices'],row['shadow_ids']),(0,0))
+        self.runtime.release(SESSION,force=True)
+        self.assertEqual(self.runtime.buffers,{})
+        self.assertEqual([(r['ranges'][0]['first'],r['ranges'][0]['last']) for r in shadow.records('would')],[(47,47)])
+        row=self.runtime.member(KEY)
+        self.assertEqual((row['shadow_notices'],row['shadow_ids']),(1,1))
+
+    def test_ended_buffer_protects_session_at_cap_until_release(self):
+        import nth_interposer_store as storage
+        self.attach()
+        listener=self.runtime.pollers[KEY]
+        listener.stop();listener.thread.join(1)
+        self.op('turn',session=SESSION,phase='started')
+        listener._fresh([message(31,mentioned=True)])
+        with patch.object(storage,'MAX_SESSIONS',2):
+            service.dispatch(self.store,registration(SESSION2))
+            with patch('nth_interposer_runtime.append',return_value=False):
+                self.op('session.end',session=SESSION)
+                with self.assertRaises(wire.WireError) as error:
+                    service.dispatch(self.store,registration('session-extra'),self.runtime)
+                self.assertEqual(error.exception.code,'session_limit')
+                self.assertEqual(self.store.session(SESSION)['state'],'ended')
+                self.assertEqual(self.runtime.member(KEY)['shadow_announced_through'],31)
+                self.runtime.reconcile()
+                self.assertIn(SESSION,self.runtime.buffers)
+            self.runtime.release(SESSION,force=True)
+            service.dispatch(self.store,registration('session-extra'),self.runtime)
+            self.assertNotIn(SESSION,[r['session'] for r in self.store.snapshot()['sessions']])
+        self.assertEqual(shadow.records('would')[0]['ranges'][0]['last'],31)
+
+    def test_release_after_ownership_mutation_uses_current_owner_and_sink(self):
+        self.attach()
+        self.runtime.accumulate(self.runtime.member(KEY),[message(37,mentioned=True)])
+        service.dispatch(self.store,registration(SESSION2,'codex'))
+        # Direct mutation deliberately reproduces the interval before reconcile.
+        self.store.attach(request('membership.attach',session=SESSION2,key=KEY,server='nth-second',via='connect'))
+        self.op('turn',session=SESSION,phase='ended')
+        self.assertEqual(shadow.records('would'),[])
+        self.runtime.release(SESSION2,force=True)
+        row=shadow.records('would')[0]
+        self.assertEqual((row['session'],row['client'],row['sink']),(SESSION2,'codex','queue'))
+        self.assertEqual(row['ranges'][0]['server'],'nth-second')
+
+    def test_dispatch_serializes_ownership_change_with_reconcile(self):
+        self.attach()
+        service.dispatch(self.store,registration(SESSION2))
+        self.runtime.accumulate(self.runtime.member(KEY),[message(39,mentioned=True)])
+        changed,attempted,finished=threading.Event(),threading.Event(),threading.Event()
+        original=self.store.attach
+        errors=[]
+        def pause(req):
+            result=original(req)
+            changed.set()
+            self.assertTrue(attempted.wait(1))
+            self.assertFalse(finished.wait(.05))
+            return result
+        def release():
+            changed.wait(1);attempted.set()
+            try:self.op('turn',session=SESSION,phase='ended')
+            except Exception as exc:errors.append(exc)
+            finally:finished.set()
+        worker=threading.Thread(target=release);worker.start()
+        try:
+            with patch.object(self.store,'attach',side_effect=pause):
+                self.op('membership.attach',session=SESSION2,key=KEY,server='nth-second',via='connect')
+        finally:worker.join(2)
+        self.assertEqual(errors,[])
+        self.assertFalse(worker.is_alive())
+        self.runtime.release(SESSION2,force=True)
+        self.assertEqual(shadow.records('would')[0]['session'],SESSION2)
+
     def test_ended_last_owner_preserves_buffer(self):
         self.attach()
         self.runtime.accumulate(self.runtime.member(KEY),[message(19,mentioned=True)])
@@ -143,11 +305,69 @@ class FixTests(unittest.TestCase):
         self.assertEqual(self.runtime.buffers,{})
 
     def test_idle_exit_flushes_existing_buffer(self):
-        self.attach()
-        self.runtime.accumulate(self.runtime.member(KEY),[message(29,mentioned=True)])
-        self.store.end(SESSION)
-        self.runtime.close()
+        self.drive_service_exit('idle')
         self.assertEqual(shadow.records('would')[0]['ranges'][0]['last'],29)
+
+    def drive_service_exit(self, mode, registered_idle=False):
+        self.identity()
+        captured=[]
+        stop=threading.Event()
+        clock=[100.0]
+        handled=[]
+        def seeded(store,log):
+            runtime=Runtime(store,log,self.hub.factory)
+            store.setup_hub('nth-qweb',URL)
+            store.register(registration())
+            store.attach(request('membership.attach',session=SESSION,key=KEY,server='nth-qweb',via='connect'))
+            if not registered_idle:
+                store.turn(request('turn',session=SESSION,phase='started'))
+                runtime.accumulate(runtime.member(KEY),[message(29,mentioned=True)])
+                if mode=='idle':store.end(SESSION)
+            runtime.tick=Mock()
+            captured.append(runtime)
+            return runtime
+        def handle(_server):
+            handled.append(clock[0]);clock[0]+=10
+            if mode=='exception':raise RuntimeError('synthetic service failure')
+            if mode=='stop' or len(handled)==3:stop.set()
+        with patch('nth_interposer_runtime.Runtime',side_effect=seeded),\
+             patch.object(service.Server,'handle_request',handle),\
+             patch.object(service.time,'monotonic',side_effect=lambda:clock[0]):
+            if mode=='exception':
+                with self.assertRaises(RuntimeError):service.serve(idle_seconds=1,stop=stop)
+            else:service.serve(idle_seconds=1,stop=stop)
+        self.assertEqual(captured[0].buffers,{})
+        self.assertEqual(len(handled),3 if registered_idle else 1)
+
+    def test_service_stop_flushes_in_turn_buffer(self):
+        self.drive_service_exit('stop')
+        self.assertEqual(shadow.records('would')[0]['ranges'][0]['last'],29)
+
+    def test_service_exception_flushes_in_turn_buffer(self):
+        self.drive_service_exit('exception')
+        self.assertEqual(shadow.records('would')[0]['ranges'][0]['last'],29)
+
+    def test_registered_idle_session_survives_service_idle_deadline(self):
+        self.drive_service_exit('idle',registered_idle=True)
+        self.assertEqual(shadow.records('would'),[])
+
+    def test_claude_settle_window_coalesces_staggered_hubs(self):
+        self.attach()
+        self.attach(KEY2,server='nth-second',url='https://other.example/sse')
+        for listener in self.runtime.pollers.values():listener.stop();listener.thread.join(1)
+        with patch('nth_interposer_runtime.time.monotonic',return_value=100):
+            self.runtime.accumulate(self.runtime.member(KEY),[message(1,mentioned=True)])
+        with patch('nth_interposer_runtime.time.monotonic',return_value=100.1):
+            self.runtime.release(SESSION)
+            self.assertEqual(shadow.records('would'),[])
+            self.runtime.accumulate(self.runtime.member(KEY2),[message(2,mentioned=True)])
+        with patch('nth_interposer_runtime.time.monotonic',return_value=100.299):
+            self.runtime.release(SESSION)
+            self.assertEqual(shadow.records('would'),[])
+        with patch('nth_interposer_runtime.time.monotonic',return_value=100.301):self.runtime.release(SESSION)
+        rows=shadow.records('would')
+        self.assertEqual(len(rows),1)
+        self.assertEqual({r['key'] for r in rows[0]['ranges']},{KEY,KEY2})
 
     def test_resume_or_live_stamp_revives_but_ended_attach_refused(self):
         self.attach()
@@ -205,8 +425,15 @@ class FixTests(unittest.TestCase):
         with self.assertRaises(wire.WireError):
             self.store.setup_hub('nth-overflow',URL)
         with patch.object(hubs,'config_hubs',return_value=iter([('nth-extra',URL),('nth-setup-0',URL)])):
-            self.store.import_hubs(log=Mock())
+            with patch.object(self.store,'setup_hub',wraps=self.store.setup_hub) as setup_hub:
+                self.store.import_hubs(log=Mock())
+                self.assertEqual(setup_hub.call_args_list[-1].args,('nth-setup-0',URL))
         self.assertEqual(len(self.store.snapshot()['hubs']),32)
+        # Fresh second entry must actually acquire trust after an invalid first.
+        with self.store.db:self.store.db.execute('DELETE FROM hubs')
+        with patch.object(hubs,'config_hubs',return_value=iter([('invalid',URL),('nth-valid',URL)])):
+            self.store.import_hubs(log=Mock())
+        self.assertEqual([(r['server'],r['url'],r['trust']) for r in self.store.snapshot()['hubs']],[('nth-valid',URL,'setup')])
 
     def test_approval_exact_url_echo_and_restricted_recheck(self):
         self.store.announce('nth-qweb',URL)
@@ -237,16 +464,27 @@ class FixTests(unittest.TestCase):
         config={'mcpServers':{'nth-second':{'command':'python','args':['/install/nth_quartet_proxy.py','--url','https://other.example/sse']}}}
         (staged/'.claude.json').write_text(json.dumps(config))
         directory=staged/'.codex';directory.mkdir()
-        (directory/'config.toml').write_text('[mcp_servers.nth-third]\ncommand="python"\nargs=["/install/nth_quartet_proxy.py","--url","https://third.example/sse"]\n')
-        setup.install(staged,clients=('claude',),quartet_url=URL,skip_dependencies=True,skip_systemd=True)
+        (directory/'config.toml').write_text('# retained comment\n[mcp_servers.nth-second]\ncommand="python"\nargs=["/install/nth_quartet_proxy.py","--url","https://other.example/sse"]\ncustom="keep"\nenv={KEEP="yes", NTH_SERVER_NAME="wrong"}\n')
+        # The CLI is stubbed; only staged files are ever installed or changed.
+        with patch.object(setup.subprocess,'run',return_value=Mock(returncode=0)):
+            setup.install(staged,clients=('claude','codex'),codex_binary='/fixture/codex',quartet_url=URL,skip_dependencies=True,skip_systemd=True)
         store=Store(staged/'.claude/nth/events/interposer.sqlite')
         try:
-            self.assertEqual({r['server'] for r in store.snapshot()['hubs']},{'nth-qweb','nth-second','nth-third'})
+            self.assertEqual({r['server'] for r in store.snapshot()['hubs']},{'nth-qweb','nth-second'})
         finally:
             store.close()
         data=json.loads((staged/'.claude.json').read_text())
         self.assertEqual(data['mcpServers']['nth-second']['env']['NTH_SERVER_NAME'],'nth-second')
         self.assertEqual(data['mcpServers']['nth-qweb']['env']['NTH_SERVER_NAME'],'nth-qweb')
+        retained=tomllib.loads((directory/'config.toml').read_text())['mcp_servers']['nth-second']
+        self.assertEqual(retained['env'],{'KEEP':'yes','NTH_SERVER_NAME':'nth-second'})
+        self.assertEqual(retained['custom'],'keep')
+        self.assertIn('# retained comment',(directory/'config.toml').read_text())
+        import nth_quartet_proxy as proxy
+        with patch.dict(os.environ,retained['env']),patch.object(wire,'tell') as tell:
+            _,client,_=proxy.create_server(retained['args'][-1])
+            tell.assert_called_once_with('hub.announce',server='nth-second',url=retained['args'][-1])
+            client.close()
         with patch.object(cli,'settings',return_value={'quartet_url':URL}):
             self.assertTrue(any('NTH_SERVER_NAME="nth-qweb"' in arg for arg in cli.mcp_overrides('unix:///fixture')))
 
@@ -256,6 +494,38 @@ class FixTests(unittest.TestCase):
             server,client,hub=proxy.create_server(URL)
             tell.assert_called_once_with('hub.announce',server='nth-second',url=URL)
             client.close()
+
+    def test_retained_codex_hub_env_table_variants(self):
+        spec=importlib.util.spec_from_file_location('env_setup',ROOT/'setup.py')
+        setup=importlib.util.module_from_spec(spec);spec.loader.exec_module(setup)
+        path=self.root/'config.toml'
+        for env in ('', 'env={KEEP="yes"}', '[mcp_servers."nth-second".env]\nKEEP="yes"',
+                    '[mcp_servers."nth-second".env]\nKEEP="yes"\nNTH_SERVER_NAME="old"'):
+            with self.subTest(env=env):
+                path.write_text('# comment\n[mcp_servers."nth-second"]\ncommand="python"\nargs=["nth_quartet_proxy.py","--url","'+URL+'"]\n'+env+'\n[mcp_servers.unrelated]\ncommand="keep"\n')
+                before=tomllib.loads(path.read_text())['mcp_servers']['unrelated']
+                setup.name_codex_hubs(path)
+                data=tomllib.loads(path.read_text())
+                self.assertEqual(data['mcp_servers']['nth-second']['env']['NTH_SERVER_NAME'],'nth-second')
+                if env:self.assertEqual(data['mcp_servers']['nth-second']['env']['KEEP'],'yes')
+                self.assertEqual(data['mcp_servers']['unrelated'],before)
+                self.assertIn('# comment',path.read_text())
+                original=path.read_bytes();setup.name_codex_hubs(path)
+                self.assertEqual(path.read_bytes(),original)
+
+    def test_installed_claude_startup_and_resume_matchers_register(self):
+        spec=importlib.util.spec_from_file_location('hook_setup',ROOT/'setup.py')
+        setup=importlib.util.module_from_spec(spec);spec.loader.exec_module(setup)
+        staged=self.root/'startup-install'
+        setup.install(staged,clients=('claude',),skip_dependencies=True,skip_systemd=True)
+        settings=json.loads((staged/'.claude/settings.json').read_text())
+        hooks=settings['hooks']['SessionStart']
+        for source in ('startup','resume'):
+            selected=[entry for entry in hooks if re.search(entry.get('matcher',''),source)]
+            self.assertEqual(len(selected),1)
+            with patch.object(claude,'shadow_register') as register,patch('sys.stdin',io.StringIO(json.dumps(dict(session_id=SESSION,source=source)))):
+                self.assertEqual(claude.main(['start']),0)
+                register.assert_called_once_with(SESSION,resume=source=='resume')
 
     def evidence(self, side, mid, t, key=KEY, session=SESSION):
         with patch.object(shadow.time,'time',return_value=t):
@@ -299,6 +569,18 @@ class FixTests(unittest.TestCase):
         self.assertEqual((result['window']['from'],result['window']['through']),(3,97))
         self.assertEqual([r['first'] for r in result['missing_in_would']],[5])
         self.assertEqual([r['first'] for r in result['missing_in_actual']],[5])
+
+    def test_diff_matches_pairs_across_window_and_since_boundaries(self):
+        self.anchor()
+        for mid,actual,would in ((17,2,4),(23,96,98),(29,49,51)):
+            self.evidence('actual',mid,actual)
+            self.evidence('would',mid,would)
+        for since in (None,50):
+            with patch.object(shadow.time,'time',return_value=100):result=shadow.compare(since)
+            self.assertTrue(result['comparable'])
+            self.assertEqual(result['missing_in_actual'],[])
+            self.assertEqual(result['missing_in_would'],[])
+            self.assertEqual(result['median_release_delay'],2)
 
     def test_diff_malformed_rows_and_human_json_output(self):
         self.anchor()
@@ -380,6 +662,23 @@ class FixTests(unittest.TestCase):
             with self.subTest(host=host),self.assertRaises(wire.WireError):
                 self.store.announce('nth-bad','http://'+host+'/sse')
 
+    def test_transition_prefix_ranges_refused_at_all_boundaries(self):
+        for address in ('64:ff9b::cb00:710a','2002:cb00:710a::','64:ff9b::a9fe:a9fe','2002:a9fe:a9fe::'):
+            url='https://['+address+']/sse'
+            answer=[(socket.AF_INET6,socket.SOCK_STREAM,6,'',(address,443,0,0))]
+            with self.subTest(address=address),patch.object(hubs.socket,'getaddrinfo',return_value=answer):
+                self.assertTrue(hubs.restricted_address(address))
+                with self.assertRaises(wire.WireError):self.store.announce('nth-second',url)
+                with self.store.db:
+                    self.store.db.execute('DELETE FROM hubs')
+                    self.store.db.execute("INSERT INTO hubs(server,url,trust,state) VALUES (?,?,'announced','pending')",('nth-second',url))
+                with self.assertRaises(wire.WireError):self.store.approve('nth-second',url)
+                with patch.object(hubs.socket,'socket') as create,self.assertRaises(wire.WireError):
+                    hubs.connection_guard(url)((address,443))
+                create.assert_not_called()
+                self.store.setup_hub('nth-second',url)
+                self.assertEqual(self.store.announce('nth-second',url)['trust'],'setup')
+
     def test_connection_guard_pins_dns_answers(self):
         answer=[(socket.AF_INET,socket.SOCK_STREAM,6,'',('203.0.113.10',443))]
         sock=Mock()
@@ -390,6 +689,25 @@ class FixTests(unittest.TestCase):
         client.connection_guard=Mock()
         self.assertIs(client._make_conn(1)._create_connection,client.connection_guard)
         client.close()
+
+    def test_connection_guard_refuses_rebinding_mixed_answers_and_reconnect(self):
+        public=[(socket.AF_INET,socket.SOCK_STREAM,6,'',('203.0.113.10',443))]
+        restricted=[(socket.AF_INET,socket.SOCK_STREAM,6,'',('169.254.169.254',443))]
+        guard=hubs.connection_guard(URL)
+        sock=Mock()
+        for answers in ([public,restricted],[public,public+restricted],[restricted], [public+restricted]):
+            with self.subTest(answers=answers),patch.object(hubs.socket,'getaddrinfo',side_effect=answers),\
+                 patch.object(hubs.socket,'socket') as create:
+                with self.assertRaises(wire.WireError):guard(('hub.example',443))
+                create.assert_not_called()
+        with patch.object(hubs.socket,'getaddrinfo',side_effect=[public,public,public,restricted]),\
+             patch.object(hubs.socket,'socket',return_value=sock):
+            self.assertIs(guard(('hub.example',443)),sock)
+            with self.assertRaises(wire.WireError):guard(('hub.example',443))
+            sock.connect.assert_called_once_with(('203.0.113.10',443))
+        with patch.object(hubs.socket,'getaddrinfo') as dns,patch.object(hubs.socket,'socket') as create:
+            with self.assertRaises(wire.WireError):guard(('other.example',443))
+            dns.assert_not_called();create.assert_not_called()
 
     def test_shadow_factory_propagates_connection_guard(self):
         self.store.setup_hub('nth-qweb',URL)
@@ -411,23 +729,28 @@ class FixTests(unittest.TestCase):
 
     def test_sse_endpoint_requires_exact_origin(self):
         client=MCPSSEClient(URL)
-        for endpoint in ('https://other.example/messages','http://hub.example/messages','https://hub.example:444/messages','//other.example/messages'):
+        for endpoint in ('https://other.example/messages','http://hub.example/messages','https://hub.example:444/messages','//other.example/messages',
+                         'https://user@hub.example/messages','https://user:password@hub.example/messages'):
             with self.subTest(endpoint=endpoint),self.assertRaises(ValueError):
                 client._handle_event('endpoint',endpoint)
         self.assertIsNone(client.endpoint_url)
         self.assertFalse(client.endpoint_ready.is_set())
         client._handle_event('endpoint','https://HUB.EXAMPLE:443/messages')
         self.assertTrue(client.endpoint_ready.is_set())
-        client.endpoint_url='https://other.example/messages'
-        with patch.object(client,'_make_conn') as connect,self.assertRaises(ValueError):
-            client._post({'session_token':cases.SECRET})
-        connect.assert_not_called()
+        for endpoint in ('https://other.example/messages','https://user:password@hub.example/messages'):
+            client.endpoint_url=endpoint
+            with patch.object(client,'_make_conn') as connect,self.assertRaises(ValueError):
+                client._post({'session_token':cases.SECRET})
+            connect.assert_not_called()
         client.close()
 
     def test_fifo_symlink_oversize_quarantine_and_tmp_cleanup(self):
         inbox=wire.private_dir(wire.home()/'events/inbox')
         os.mkfifo(inbox/'fifo.json')
-        (inbox/'link.json').symlink_to(self.root/'absent')
+        target=self.root/'valid-request'
+        data=wire.encode_frame(registration('session-linked'))
+        target.write_bytes(data)
+        (inbox/'link.json').symlink_to(target)
         (inbox/'large.json').write_bytes(b'x'*(wire.MAX_FRAME+1))
         tmp=inbox/'old.tmp';tmp.write_text('partial');os.utime(tmp,(0,0))
         wire.tell('session.register',**{k:v for k,v in registration().items() if k not in ('v','id','op')})
@@ -436,6 +759,58 @@ class FixTests(unittest.TestCase):
         self.assertEqual({p.name for p in (inbox/'bad').glob('*.json')},{'fifo.json','link.json','large.json'})
         self.assertFalse(tmp.exists())
         self.assertEqual(self.store.session(SESSION)['state'],'idle')
+        self.assertNotIn('session-linked',[r['session'] for r in self.store.snapshot()['sessions']])
+        self.assertEqual(target.read_bytes(),data)
+
+    def test_readable_fifo_refused_before_reading_valid_frame(self):
+        path=wire.private_dir(wire.home()/'events/inbox')/'readable.json'
+        os.mkfifo(path)
+        fd=os.open(path,os.O_RDWR|os.O_NONBLOCK)
+        try:
+            os.write(fd,wire.encode_frame(registration('session-fifo')))
+            self.runtime.drain()
+            self.assertTrue((path.parent/'bad'/path.name).exists())
+            self.assertNotIn('session-fifo',[r['session'] for r in self.store.snapshot()['sessions']])
+        finally:os.close(fd)
+
+    def test_shadow_fifo_paths_never_delay_actual_delivery_or_would_release(self):
+        directory=wire.private_dir(wire.home()/'events/shadow')
+        for side in ('actual','would'):
+            path=directory/(side+'.jsonl');os.mkfifo(path)
+            script='''import sys,io,os,logging
+sys.path.insert(0,sys.argv[1])
+import nth_claude_hook as hook
+import nth_interposer_shadow as shadow
+from nth_interposer_store import Store
+from nth_interposer_runtime import Runtime
+if sys.argv[2]=='actual':
+    hook.SAY=sys.stderr
+    sink=hook.StderrSink()
+    sink.shadow_record=('session-alpha',[],[],1)
+    assert sink.deliver(['synthetic live notice'])
+else:
+    store=Store()
+    store.register(dict(session='session-alpha',client='claude',host_pid=None,sink='rewake',host_ok=True,problem=''))
+    runtime=Runtime(store,logging.getLogger('test'))
+    runtime.accumulate(dict(owner_session='session-alpha',key='0123456789abcdef01234567',source='local',channel='room',member_id='member'),[dict(id=1,mentioned=True)])
+    runtime.release('session-alpha',force=True)
+    assert runtime.buffers
+    store.close()
+'''
+            try:
+                completed=subprocess.run([sys.executable,'-c',script,str(ROOT/'server'),side],capture_output=True,text=True,timeout=2)
+                self.assertEqual(completed.returncode,0,completed.stderr)
+                if side=='actual':self.assertEqual(completed.stderr,'synthetic live notice\n')
+            finally:path.unlink()
+
+    def test_shadow_append_rejects_readable_fifo_descriptor(self):
+        path=wire.private_dir(wire.home()/'events/shadow')/'actual.jsonl'
+        os.mkfifo(path)
+        fd=os.open(path,os.O_RDWR|os.O_NONBLOCK)
+        try:
+            self.assertFalse(shadow.append('actual',SESSION,'claude','rewake',[],[],1))
+            with self.assertRaises(BlockingIOError):os.read(fd,4096)
+        finally:os.close(fd)
 
     def test_drain_replace_race_keeps_processing(self):
         inbox=wire.private_dir(wire.home()/'events/inbox')

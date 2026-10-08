@@ -19,6 +19,8 @@ def normalized_host(host):
 def restricted_address(value):
     address = ipaddress.ip_address(value)
     if address.version == 6:
+        if any(address in ipaddress.ip_network(prefix) for prefix in ('64:ff9b::/96', '2002::/16')):
+            return True
         embedded = address.ipv4_mapped or address.sixtofour
         if address in ipaddress.ip_network('64:ff9b::/96'):
             embedded = ipaddress.IPv4Address(int(address) & 0xffffffff)

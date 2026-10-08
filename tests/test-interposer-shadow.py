@@ -70,7 +70,7 @@ class ScriptedHub:
 
 class ShadowTests(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(prefix='ip3-')
+        self.temp = tempfile.TemporaryDirectory(prefix='ip3-', dir='/tmp')
         self.root = Path(self.temp.name)
         self.environment = patch.dict(os.environ, dict(os.environ, HOME=str(self.root),
             NTH_HOME=str(self.root / 'nth'), XDG_RUNTIME_DIR=str(self.root / 'rt'),
@@ -458,15 +458,22 @@ class ShadowTests(unittest.TestCase):
 
     def test_c8_repoint_preserves_trusted_url(self):
         self.attach()
+        self.eventually(lambda:len(self.hub.calls)>=2)
+        first=self.runtime.pollers[KEY]
+        self.op('membership.configure',key=KEY,enabled=False)
+        first.thread.join(1)
+        self.assertFalse(first.thread.is_alive())
+        baseline=len(self.hub.calls)
         new='https://untrusted.example/sse'
         with self.assertLogs('trio.interposer',level='WARNING') as logs:
             row=self.store.announce('nth-qweb',new)
         self.assertEqual((row['url'],row['pending_url'],row['trust']),(URL,new,'setup'))
         self.assertEqual(logs.records[0].getMessage(),'hub change pending')
-        self.op('membership.configure',key=KEY,enabled=False)
         self.op('membership.configure',key=KEY,enabled=True)
-        self.eventually(lambda:len(self.hub.calls)>=2)
-        self.assertEqual({url for url,_ in self.hub.calls},{URL})
+        self.eventually(lambda:len(self.hub.calls)>baseline)
+        self.assertIsNot(self.runtime.pollers[KEY],first)
+        self.assertEqual({url for url,_ in self.hub.calls[baseline:]},{URL})
+        self.assertEqual(self.store.snapshot()['hubs'][0]['pending_url'],new)
         self.start_socket()
         with wire.connect() as client:
             for op in ('status','list'):
@@ -568,6 +575,8 @@ class ShadowTests(unittest.TestCase):
         with self.store.db:
             self.store.db.execute('INSERT INTO memberships(key,source,url,channel,member_id,owner_session) VALUES (?,?,?,?,?,?)',
                                   (KEY,'quartet',URL,'room','member',SESSION))
+            self.store.db.execute('INSERT INTO holdings(session,key,server,joined,attached) VALUES (?,?,?,1,1)',(SESSION,KEY,'nth-qweb'))
+        self.assertFalse(self.runtime.allowed(self.runtime.member(KEY)))
         self.runtime.reconcile()
         self.assertEqual(self.runtime.pollers,{})
         self.assertEqual(self.hub.calls,[])

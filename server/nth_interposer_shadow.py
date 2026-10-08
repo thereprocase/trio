@@ -66,9 +66,11 @@ def append(side, session, client, sink, ranges, ended, lines):
                 return False
             if path.exists() and path.stat().st_size + len(data) > ROTATE_BYTES:
                 os.replace(path, path.with_suffix('.jsonl.1'))
-            fd = os.open(path, os.O_CREAT | os.O_APPEND | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
-            os.fchmod(fd, 0o600)
+            fd = os.open(path, os.O_CREAT | os.O_APPEND | os.O_WRONLY | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
             with os.fdopen(fd, 'ab') as stream:
+                if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                    return False
+                os.fchmod(stream.fileno(), 0o600)
                 stream.write(data)
         return True
     except Exception:
@@ -157,14 +159,19 @@ def compare(since=None):
     missing = {'missing_in_would':[],'missing_in_actual':[]}
     if not all(logs.values()):
         return {**missing,'sessions':{},'median_release_delay':None,'window':None,'comparable':False}
-    # Exclude startup/shutdown edges and in-flight coalescing, then apply --since.
+    # Match against all retained evidence. Only reporting is windowed: settling
+    # can place a counterpart just beyond a boundary, including --since.
     lower = max(min(r['t'] for r in rows) for rows in logs.values())+COMPARE_MARGIN
     upper = min(max(r['t'] for r in rows) for rows in logs.values())-COMPARE_MARGIN
     if since is not None:
         lower = max(lower,time.time()-since)
     counts,ids,timed,owners = {},{'actual':{},'would':{}},{'actual':{},'would':{}},{}
+    retained = {'actual':{},'would':{}}
     for side,rows in logs.items():
         for row in sorted(rows,key=lambda r:r['t']):
+            for item in row['ranges']:
+                retained[side].setdefault(item['key'],[]).append((item['first'],item['last']))
+                timed[side].setdefault(item['key'],[]).append((item['first'],item['last'],row['t']))
             if not lower<=row['t']<=upper:
                 continue
             count = counts.setdefault(row['session'],{'actual_notices':0,'would_notices':0})
@@ -173,17 +180,18 @@ def compare(since=None):
                 key = item['key']
                 span = item['first'],item['last']
                 ids[side].setdefault(key,[]).append(span)
-                timed[side].setdefault(key,[]).append((*span,row['t']))
                 if side=='would' or key not in owners:
                     owners[key] = row['session']
     delays = []
     # Membership identity is the mailbox; holder session changes are not missing IDs.
     for key in sorted(ids['actual'].keys()|ids['would'].keys()):
         for side,other in (('actual','would'),('would','actual')):
-            for first,last in subtract(ids[side].get(key,[]),ids[other].get(key,[])):
+            for first,last in subtract(ids[side].get(key,[]),retained[other].get(key,[])):
                 missing['missing_in_'+other].append(dict(session=owners[key],key=key,first=first,last=last))
         for first,last,actual in timed['actual'].get(key,[]):
-            matched = [would for start,end,would in timed['would'].get(key,[]) if max(first,start)<=min(last,end)]
+            matched = [would for start,end,would in timed['would'].get(key,[])
+                       if max(first,start)<=min(last,end) and
+                       (lower<=actual<=upper or lower<=would<=upper)]
             if matched:
                 delays.append(min(matched)-actual)
     return {**missing,'sessions':counts,'median_release_delay':statistics.median(delays) if delays else None,

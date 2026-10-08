@@ -457,10 +457,10 @@ class RegistrationTests(unittest.TestCase):
         self.assertEqual(hook.uninstall_hooks(settings), len(hook.HOOK_EVENTS))
         self.assertNotIn('hooks', settings)
 
-    def test_resume_is_registered_as_a_waking_session_start_hook(self):
+    def test_startup_and_resume_are_registered_as_session_start_hooks(self):
         settings = self.install({})
         group = settings['hooks']['SessionStart'][0]
-        self.assertEqual(group['matcher'], 'resume')
+        self.assertEqual(group['matcher'], 'startup|resume')
         self.assertEqual(group['hooks'][0]['args'][-1], 'start')
         self.assertTrue(group['hooks'][0]['asyncRewake'])
 

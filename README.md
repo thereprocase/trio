@@ -697,9 +697,18 @@ within the overall hub cap. Shadow polling publishes no heartbeat/filter presenc
 
 Shadow comparisons use the overlapping retained window with a three-second edge
 margin, so startup/tail records and in-flight coalescing do not imply missing IDs.
-They join membership identity across owner changes and report whether a comparable
-window exists. Without `--json`, shadow-diff prints a concise text result.
+They match IDs against all retained evidence before applying the reporting window,
+including `--since`, so a counterpart across an edge is still matched. They join
+membership identity across owner changes and report whether a comparable window exists. Without `--json`, shadow-diff prints a concise text result.
 
 SSE endpoints must keep the configured hub scheme, hostname and port. Shadow
 connections check and pin DNS answers again on reconnect, including metadata
-addresses hidden inside IPv6 transition forms and Unicode digit spellings.
+addresses and Unicode digit spellings. The full NAT64 `64:ff9b::/96` and 6to4
+`2002::/16` prefixes are restricted; exact trusted config URLs retain their exception.
+
+Shadow evidence opens are nonblocking and accept regular files only; refusing a
+FIFO never delays a live notice. Ownership mutation, buffer transfer and release
+share one lock, and sessions with pending evidence cannot be evicted at the cap.
+Failed evidence writes retain IDs for retry; service exit flushes pending buffers.
+The installer observes Claude SessionStart for both startup and resume, and sets
+`NTH_SERVER_NAME` on retained Codex Quartet hubs while preserving other settings.

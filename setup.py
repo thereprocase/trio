@@ -5,10 +5,12 @@ import datetime
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import shutil
 import subprocess
 import sys
+import tomllib
 
 
 ROOT = Path(__file__).resolve().parent
@@ -39,6 +41,60 @@ def copy_file(source, destination):
         return
     backup(destination)
     shutil.copy2(source, destination)
+
+
+def name_codex_hubs(path):
+    """Patch retained proxy env tables without rewriting unrelated TOML/comments."""
+    if not path.exists():
+        return
+    text = path.read_text(encoding='utf-8')
+    servers = tomllib.loads(text).get('mcp_servers', {})
+    names = {name for name, entry in servers.items()
+             if name.startswith('nth-') and isinstance(entry, dict)
+             and any('nth_quartet_proxy' in str(arg) for arg in entry.get('args', []))}
+    # Decode headers through TOML itself so quoted server names work as well.
+    headers = list(re.finditer(r'^\s*\[(?!\[)([^\n]+)\][ \t]*(?:#[^\n]*)?$', text, re.M))
+    replacements = []
+    for index, header in enumerate(headers):
+        try:
+            tree = tomllib.loads(header.group(0) + '\n__nth_header__=true\n').get('mcp_servers', {})
+        except tomllib.TOMLDecodeError:
+            continue
+        for name in names & tree.keys():
+            table = tree[name]
+            is_env = isinstance(table.get('env'), dict)
+            if not is_env and '__nth_header__' not in table:
+                continue
+            start = header.end()
+            end = headers[index + 1].start() if index + 1 < len(headers) else len(text)
+            body = text[start:end]
+            value = json.dumps(name)
+            if is_env:
+                assignment = re.search(r'^([ \t]*NTH_SERVER_NAME[ \t]*=[ \t]*)(?:"[^"\n]*"|\'[^\'\n]*\')', body, re.M)
+                if assignment:
+                    body = body[:assignment.start()] + assignment.group(1) + value + body[assignment.end():]
+                else:
+                    body = '\nNTH_SERVER_NAME = ' + value + body
+            elif isinstance(servers[name].get('env'), dict):
+                # Nested env tables are handled by their own header above.
+                inline = re.search(r'^([ \t]*env[ \t]*=[ \t]*\{)(.*?)\}', body, re.M | re.S)
+                if not inline:
+                    continue
+                contents = re.sub(r'(?:NTH_SERVER_NAME|"NTH_SERVER_NAME"|\'NTH_SERVER_NAME\')[ \t]*=[ \t]*(?:"[^"\n]*"|\'[^\'\n]*\')[ \t]*,?', '', inline.group(2)).strip().strip(',')
+                body = body[:inline.start()] + inline.group(1) + 'NTH_SERVER_NAME = ' + value + (', ' + contents if contents else '') + '}' + body[inline.end():]
+            else:
+                body += '\n[mcp_servers.' + json.dumps(name) + '.env]\nNTH_SERVER_NAME = ' + value + '\n'
+            replacements.append((start, end, body))
+    for start, end, body in reversed(replacements):
+        text = text[:start] + body + text[end:]
+    # Validate the edit before touching the original; retain a backup on changes.
+    tomllib.loads(text)
+    if text != path.read_text(encoding='utf-8'):
+        backup(path)
+        temporary = path.with_name(path.name + '.tmp-' + STAMP)
+        temporary.write_text(text, encoding='utf-8')
+        temporary.chmod(path.stat().st_mode & 0o777)
+        temporary.replace(path)
 
 
 def install(target_home, *, quartet_url='', clients=('claude', 'codex'),
@@ -134,6 +190,7 @@ def install(target_home, *, quartet_url='', clients=('claude', 'codex'),
                             '--env', 'TRIO_CODEX_HOME=' + str(codex_home),
                             '--', str(python), *arguments],
                            env=dict(os.environ, CODEX_HOME=str(codex_home)), check=True)
+        name_codex_hubs(codex_home / 'config.toml')
         codex_hooks = install_codex_hooks(codex_home, python, server / 'nth_codex_hook.py', runtime)
     else:
         codex_hooks = None
