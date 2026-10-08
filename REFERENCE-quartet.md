@@ -30,7 +30,16 @@ with no channel listener available reports `hooks`, `monitor` or `channel_unavai
 hint. `quartet_listen` answers with `ready` and `hint` as well. In channel mode, after a session restart the state is
 `not_attached` until `quartet_listen(enabled=true)` is called with the saved credentials. In hooks
 mode the state is always `hooks`, and `quartet_listen` returns `identity_key`, `filter_mode`, `enabled`
-and `ended`.
+and `ended`. A plain Codex with Trio's Codex hooks installed (no `trio codex` endpoint) also
+reports mode `hooks`; there `quartet_delivery_status` reads the calling session's waiter
+status (Codex sends the session id with each call): `listening` with `ready: true` and
+`waiter: "running"` while its live waiter polls the membership; `hooks` with
+`waiter: "none"` when none does (hooks not yet trusted, or a turn started by a wake) or
+`waiter: "other_session"` and `waiter_session` when another Codex session's waiter serves it;
+`paused` when the unattended-wake budget is spent (the user types once to resume);
+`delivering` while a wake is queued; `unavailable` with `problem` when the hooks cannot wake
+this session; `stopped` or `ended` from the saved membership config. A Claude waiter never
+counts. `delivery` states that a wake is queued with `codex queue` and has no receipt.
 
 For Codex, connect proves membership only; its delivery mode is configuration,
 not readiness. Check `quartet_delivery_status` before claiming background delivery.
