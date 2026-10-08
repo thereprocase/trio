@@ -556,13 +556,13 @@ esac
 
 # Tool base names — every @mcp.tool registration in nth_server.py except
 # permission_prompt, which Claude Code calls itself as the permission gate and
-# the model never does (28 tools). tests/test-agent-pages.py checks this list
+# the model never does (29 tools). tests/test-agent-pages.py checks this list
 # against the registrations.
 # `pounds` was missing here through v8.0.1 while SKILL told `at`-mode agents
 # to call it on every wake, so the one routinely-called tool was the one that
 # always prompted.
 TOOL_BASES=(connect send poll ack claim complete cancel release lock unlock set_status rename status roster history end list cull cleanup retract pounds
-            dm ask avatar_choices set_avatar delivery_status listen page)
+            dm ask avatar_choices set_avatar delivery_status listen page image)
 
 # Build allowlist arrays
 TRIO_TOOLS=()
