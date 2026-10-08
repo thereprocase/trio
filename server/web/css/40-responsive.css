@@ -74,6 +74,18 @@
   /* The mic and attach buttons are 34px squares, under the ~44px a fingertip
      needs; the mic is the one you tap again, without looking, to stop. */
   .composer-actions .comp-tool{ width:44px; height:44px; }
+  .composer-actions .send-btn{ min-width:44px; height:44px; flex-shrink:0; }
+}
+
+/* A pending transcription can outlast a channel switch. Keep its explanation
+   on a full-width row so it cannot squeeze the phone's mic or push Send out. */
+@media (max-width:640px){
+  .composer-actions{ flex-wrap:wrap; }
+  .composer-actions .dictate-wrap{ display:contents; }
+  .composer-actions .comp-tool{ flex-shrink:0; }
+  .composer-actions .dictate-status:not([hidden]){
+    order:1; flex:0 0 100%; white-space:normal; overflow-wrap:anywhere;
+  }
 }
 
 /* The conversation gutter narrows on a phone; --gutter drives BOTH the message

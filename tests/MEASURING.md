@@ -1,9 +1,16 @@
 # Measuring the web UI
 
-`tests/dom-harness.js` is a fake DOM. It has no layout engine, so **no test in this
-repo can observe geometry** — overflow, occlusion, touch-target size, stacking.
-That is not a gap in the tests, it is a gap in what the tests *can* see, and it
-means responsive work has to be checked against a real browser.
+`tests/dom-harness.js` is a fake DOM. It has no layout engine, so its tests cannot
+observe geometry — overflow, occlusion, touch-target size, stacking. Responsive
+work needs a real browser check.
+
+`node tests/test-composer-phone-layout.js` supplies one such check: headless
+Chromium loads the production markup, ordered CSS, and composer/UI setters at
+360, 390 and 412 px with touch emulation. It checks idle and both pending
+transcription messages, full Send/status bounds, 44 px targets, and accessible
+announcements. It uses temporary browser profiles, avoids external font requests,
+and skips cleanly when Chromium is absent. Set `CHROMIUM_BIN` to select a browser;
+the driver uses Node 22+'s built-in WebSocket. The full suite runs it automatically.
 
 This file is the list of ways that checking has produced confident wrong answers.
 Every entry was hit for real during the 2026-08-22 mobile sprint, and every one
