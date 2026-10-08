@@ -4270,6 +4270,10 @@ class NthWebHandler(BaseHTTPRequestHandler):
             self._handle_push_unsubscribe()
         elif parsed.path == "/api/push/move":
             self._handle_push_move()
+        elif parsed.path == "/api/push/settings":
+            self._handle_push_settings()
+        elif parsed.path == "/api/push/test":
+            self._handle_push_test()
         elif parsed.path == "/api/cull":
             self._handle_cull()
         elif parsed.path == "/api/member/filter":
@@ -6580,7 +6584,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
         if channel is None:
             return
         named = ident.source != IDENTITY_SOURCE_PENDING
-        subs: List[Dict[str, str]] = []
+        subs: List[Dict[str, Any]] = []
         mine: List[Dict[str, str]] = []
         if named:
             db = sqlite3.connect(str(self.db_path), timeout=5)
@@ -6604,7 +6608,8 @@ class NthWebHandler(BaseHTTPRequestHandler):
             "named": named,
             "modes": list(npush.PUSH_MODES),
             # The caller's own endpoints only; they match them against their
-            # browser's subscription to show which mode this device is on.
+            # browser's subscription to show which mode this device is on,
+            # whether it shows message text, and when a push last got through.
             "subscriptions": subs,
             # Every channel this identity subscribes to, so a page that has to
             # replace its browser endpoint can move all of them across.
@@ -6628,6 +6633,12 @@ class NthWebHandler(BaseHTTPRequestHandler):
             self._error(400, "mode must be one of: " + ", ".join(npush.SUBSCRIBE_MODES)
                         + " (use /api/push/unsubscribe to turn notifications off)")
             return
+        # Optional: omitted keeps the row's current choice, so the page's quiet
+        # renewal never resets it. A new row hides message text.
+        show_text = body.get("show_text")
+        if show_text is not None and not isinstance(show_text, bool):
+            self._error(400, "show_text must be true or false")
+            return
         channel = self._push_channel(body.get("channel"))
         if channel is None:
             return
@@ -6641,7 +6652,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
             npush.upsert_subscription(
                 db, channel=channel, endpoint=endpoint, p256dh=p256dh, auth=auth,
                 member_id=ident.member_id, member_name=ident.display_name, mode=mode,
-                tier=_push_tier(ident))
+                tier=_push_tier(ident), show_text=show_text)
             db.commit()
         except npush.SubscriptionLimit as exc:
             self._error(429, str(exc))
@@ -6688,6 +6699,128 @@ class NthWebHandler(BaseHTTPRequestHandler):
         finally:
             db.close()
         self._json({"ok": True, "moved": moved})
+
+    def _push_own_target(self, body: Dict[str, Any]) -> Optional[Tuple[str, str]]:
+        """(channel, endpoint) named by a device-settings request, or None with
+        the error already sent."""
+        if not isinstance(body, dict):
+            self._error(400, "expected a JSON object")
+            return None
+        endpoint = body.get("endpoint")
+        if not isinstance(endpoint, str) or not endpoint or len(endpoint) > npush.MAX_ENDPOINT_LEN:
+            self._error(400, "endpoint required")
+            return None
+        channel = self._push_channel(body.get("channel"))
+        if channel is None:
+            return None
+        return channel, endpoint
+
+    def _handle_push_settings(self) -> None:
+        """Change whether this device's notifications show message text,
+        without re-subscribing. Only the identity that owns the row can."""
+        ident = self._push_identity()
+        if ident is None:
+            return
+        body = self._read_json_body(max_bytes=4096)
+        if body is None:
+            return
+        target = self._push_own_target(body)
+        if target is None:
+            return
+        channel, endpoint = target
+        show_text = body.get("show_text")
+        if not isinstance(show_text, bool):
+            self._error(400, "show_text must be true or false")
+            return
+        db = sqlite3.connect(str(self.db_path), timeout=5)
+        try:
+            changed = npush.set_show_text(db, member_id=ident.member_id, endpoint=endpoint,
+                                          channel=channel, show_text=show_text)
+            db.commit()
+        except sqlite3.Error as exc:
+            sys.stderr.write(f"[nth_web push] settings failed: {exc}\n")
+            self._error(500, "could not save notification settings")
+            return
+        finally:
+            db.close()
+        if not changed:
+            # Missing and someone else's look the same, so the answer never
+            # confirms that another identity's endpoint exists.
+            self._error(404, f"this device is not subscribed to notifications for #{channel}")
+            return
+        self._json({"ok": True, "channel": channel, "show_text": show_text})
+
+    def _handle_push_test(self) -> None:
+        """Send one test notification to the caller's own subscription.
+
+        Ownership is checked before the rate limit, so nobody can spend
+        another device's test slot, and the send goes through send_push, so
+        the push-service allowlist applies exactly as it does to deliveries.
+        """
+        ident = self._push_identity()
+        if ident is None or self._push_unavailable():
+            return
+        body = self._read_json_body(max_bytes=4096)
+        if body is None:
+            return
+        target = self._push_own_target(body)
+        if target is None:
+            return
+        channel, endpoint = target
+        db = sqlite3.connect(str(self.db_path), timeout=5)
+        try:
+            sub = npush.own_subscription(db, member_id=ident.member_id,
+                                         endpoint=endpoint, channel=channel)
+            db.commit()
+        except sqlite3.Error as exc:
+            sys.stderr.write(f"[nth_web push] test lookup failed: {exc}\n")
+            self._error(500, "could not read notification settings")
+            return
+        finally:
+            db.close()
+        if sub is None:
+            self._error(404, f"this device is not subscribed to notifications for #{channel}")
+            return
+        wait = npush.TEST_LIMITER.take(endpoint)
+        if wait > 0:
+            self._error(429, f"wait {max(1, int(wait + 0.999))} s before sending another test")
+            return
+        try:
+            keys = npush.vapid_for(self._push_state_dir())
+        except (OSError, RuntimeError, ValueError) as exc:
+            # The exception type only: the message could quote key material.
+            sys.stderr.write(f"[nth_web push] VAPID key unavailable: {type(exc).__name__}\n")
+            self._error(503, "the hub's push signing key could not be loaded, so no "
+                             "notification can be sent; check the hub's log")
+            return
+        try:
+            status = npush.send_push(endpoint, sub["p256dh"], sub["auth"],
+                                     npush.test_payload(channel), keys, npush.push_contact())
+        except (OSError, RuntimeError, ValueError) as exc:
+            # The type only: an endpoint is a bearer URL and must stay out of logs.
+            sys.stderr.write(f"[nth_web push] test send failed: {type(exc).__name__}\n")
+            status = 0
+        now = time.time()
+        db = sqlite3.connect(str(self.db_path), timeout=5)
+        try:
+            npush.record_test_outcome(db, channel=channel, endpoint=endpoint,
+                                      status=status, now=now)
+            db.commit()
+        except sqlite3.Error as exc:
+            # The push already went (or did not); only the record is lost.
+            sys.stderr.write(f"[nth_web push] test outcome not recorded: {exc}\n")
+        finally:
+            db.close()
+        if 200 <= status < 300:
+            self._json({"ok": True, "channel": channel, "last_ok_at": now})
+        elif status in (404, 410):
+            self._error(410, "this device's subscription has expired at the push service; "
+                             "turn notifications on again to renew it")
+        elif status == 0:
+            self._error(502, "could not reach the push service; check this hub's "
+                             "internet connection and try again")
+        else:
+            self._error(502, f"the push service refused the test notification (HTTP {status})")
 
     def _handle_push_unsubscribe(self) -> None:
         ident = self._push_identity()

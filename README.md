@@ -357,6 +357,20 @@ example `https://YOUR_HOST.YOUR_TAILNET.ts.net:8765/`.
 Then open a channel, tap **Channel details → Phone notifications**, and pick a
 mode. The first choice asks for notification permission.
 
+**What a notification shows.** The title names the channel (or "DM") and the
+sender. The message text itself stays off the lock screen: the body reads
+"New message" unless you tick **Show message text on the lock screen**, a
+per-device, per-channel choice that is off by default and saves as soon as you
+tick it. Subscriptions from before this choice existed start with text hidden.
+
+**Checking a device.** Under the modes, the panel shows when a notification
+last reached this device ("Last delivered: 14:05", or "never") and a **Send
+test** button that sends one test notification to this device only, at most
+once every ten seconds. If the hub has stopped sending to this device (the push
+service refused it repeatedly, or reported the subscription gone), the panel
+says so the next time you open it and offers **Turn back on**, which makes a
+fresh subscription with the mode you had.
+
 **Why the https name.** Service workers and push subscriptions exist only on a
 secure context. `--tailscale-tls` (the `hub-service` default) serves the
 dashboard with a certificate for the machine's MagicDNS name; the tailnet IP or
@@ -393,7 +407,8 @@ dashboard still saves your choice, and its control says when no hub is sending. 
 failure, or that the hub holds back while its lease is in doubt, is kept and
 sent later; a plain message in that position is dropped, since plain messages
 are delivered at most once and the next one reaches the phone as usual. A
-subscription the service rejects three times in a row is dropped. Opening a
+subscription the service rejects three times in a row is dropped, and the
+device's panel offers to turn it back on. Opening a
 channel's details renews this device's subscription quietly, with its current
 mode. Guests share a small subscription pool of their own, which leaves the
 owner and members their room, and a guest subscription that has neither been
