@@ -320,7 +320,7 @@ def channel_attach_dir(channel: str, base: Optional[Path] = None) -> Path:
 def attach_dir_for(db_path: Path) -> Path:
     """Attachment root for a given database file."""
     return Path(db_path).resolve().parent / "attachments"
-MAX_UPLOAD_BYTES = 10 * 1024 * 1024     # 10 MB hard cap per image
+MAX_UPLOAD_BYTES = int(os.environ.get("NTH_UPLOAD_MAX_BYTES", 25 * 1024 * 1024))  # hard cap per file
 # Total attachment bytes one member may hold in one channel. The per-image cap
 # bounds a single request; nothing bounded the SUM, so any identity allowed to
 # upload could fill the disk one legal 10 MB image at a time. sweep_attachments
@@ -335,10 +335,25 @@ ATTACH_GC_GRACE_S = 24 * 3600      # an unlinked upload is abandoned after this
 ATTACH_GC_MIN_INTERVAL_S = 600     # at most one sweep per process per 10 min
 ATTACH_GC_MAX_DELETES = 500        # deletions per sweep
 ATTACH_GC_MAX_SCAN = 2000          # files stat'd per sweep, resumed round-robin
+# Images every browser renders, shown inline in the conversation.
 ALLOWED_IMAGE_MIME = {
     "image/png": ".png", "image/jpeg": ".jpg",
     "image/gif": ".gif", "image/webp": ".webp",
 }
+# Everything a participant may attach. The type always comes from the bytes
+# (sniff_attachment_mime), never from the client. Anything outside
+# ALLOWED_IMAGE_MIME is served as a download and never rendered by the page.
+# Office documents are ZIP containers and arrive as application/zip under their
+# own filename; phones send photos as HEIC/HEIF, which only some browsers show.
+ALLOWED_ATTACH_MIME = {
+    **ALLOWED_IMAGE_MIME,
+    "image/heic": ".heic", "image/heif": ".heif",
+    "application/pdf": ".pdf",
+    "application/zip": ".zip",
+    "text/plain": ".txt",
+}
+_HEIC_BRANDS = {b"heic", b"heix", b"hevc", b"hevx", b"heim", b"heis", b"hevm", b"hevs"}
+_HEIF_BRANDS = {b"mif1", b"msf1"}
 
 # ── Local speech-to-text (optional; powers /api/stt/*) ──
 # Transcription runs via a persistent nth_stt_worker.py sidecar that keeps the
@@ -422,6 +437,11 @@ MONITOR_FILTER_MODES = ("all", "about", "at")
 # filesystem. A self-declared guest is excluded: these endpoints answer
 # questions about local disk, and the server can bind 0.0.0.0 under --tailnet.
 LOCAL_PATH_ALLOWED_SOURCES = (IDENTITY_SOURCE_LOOPBACK, IDENTITY_SOURCE_TAILSCALE)
+# Identity tiers allowed to attach images. A member listed by the hub owner is a
+# Tailscale-proven person like the operator, and an upload is metered by the per-member
+# quota, so they may attach screenshots; they still hold no local-path or cull power.
+# A self-declared guest stays excluded: anyone who can reach the port can be one.
+UPLOAD_ALLOWED_SOURCES = LOCAL_PATH_ALLOWED_SOURCES + (IDENTITY_SOURCE_MEMBER,)
 
 def _is_loopback_ip(remote_ip: str) -> bool:
     """True iff remote_ip is a loopback address (127.0.0.0/8, ::1, or an
@@ -1741,6 +1761,35 @@ def cull_member(db: sqlite3.Connection, channel: str, caller_id: str,
     return {"culled": target_name, "culled_id": target_id,
             "released_tasks": released_ids,
             "released_locks": released_locks}, None
+
+
+def sniff_attachment_mime(data: bytes) -> Optional[str]:
+    """Attachment MIME from the content, or None if the type is not accepted.
+    Images first (sniff_image_mime), then PDF, ZIP, HEIC/HEIF, and plain text:
+    UTF-8 with no NUL byte, the only type recognised by the absence of a header."""
+    mime = sniff_image_mime(data)
+    if mime:
+        return mime
+    if data[:5] == b"%PDF-":
+        return "application/pdf"
+    if data[:4] in (b"PK\x03\x04", b"PK\x05\x06"):
+        return "application/zip"
+    if data[4:8] == b"ftyp":
+        brand = data[8:12]
+        if brand in _HEIC_BRANDS:
+            return "image/heic"
+        if brand in _HEIF_BRANDS:
+            return "image/heif"
+    sample = data[:65536]
+    if sample and b"\x00" not in sample:
+        try:
+            sample.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            # A sample cut mid-character is still text; anything else is not.
+            if exc.start < len(sample) - 3:
+                return None
+        return "text/plain"
+    return None
 
 
 def sniff_image_mime(data: bytes) -> Optional[str]:
@@ -9228,8 +9277,8 @@ class NthWebHandler(BaseHTTPRequestHandler):
         # weakest identity this server mints -- under --tailnet (the deployed
         # mode) that is anyone who can reach the port and type a name. Gating
         # only on PENDING let them write 10 MB per request, unmetered.
-        if ident.source not in LOCAL_PATH_ALLOWED_SOURCES:
-            self._error(403, "only a trusted operator (local or tailnet) can upload")
+        if ident.source not in UPLOAD_ALLOWED_SOURCES:
+            self._error(403, "only the operator or a member the hub owner listed can upload")
             return
         # Same reason as _serve_attachment: the channel comes from the request,
         # not from a process-wide attribute that landing mode never sets.
@@ -9246,7 +9295,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
             self._error(400, "invalid Content-Length")
             return
         if length <= 0 or length > MAX_UPLOAD_BYTES:
-            self._error(400, "image is missing or larger than the 10 MB limit")
+            self._error(400, f"file is missing or larger than the {MAX_UPLOAD_BYTES // (1024 * 1024)} MB limit")
             return
         try:
             data = self.rfile.read(length)
@@ -9256,11 +9305,11 @@ class NthWebHandler(BaseHTTPRequestHandler):
         if len(data) != length:
             self._error(400, "incomplete upload")
             return
-        mime = sniff_image_mime(data)
-        if mime not in ALLOWED_IMAGE_MIME:
-            self._error(400, "unsupported image type (png/jpeg/gif/webp only)")
+        mime = sniff_attachment_mime(data)
+        if mime not in ALLOWED_ATTACH_MIME:
+            self._error(400, "unsupported file type (images, HEIC, PDF, ZIP/Office, or plain text)")
             return
-        ext = ALLOWED_IMAGE_MIME[mime]
+        ext = ALLOWED_ATTACH_MIME[mime]
         # X-Filename is percent-encoded by the client (HTTP headers must be
         # ISO-8859-1, but filenames — e.g. macOS screenshots — carry Unicode).
         raw_name = unquote(self.headers.get("X-Filename", "") or "")
@@ -9475,7 +9524,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 # fixed, well-known channel code, so guessing an id was enough.
                 # Before publication the attachment is still in someone's
                 # composer, so only its uploader may fetch it.
-                "SELECT a.mime AS mime, a.path AS path, a.member_id AS owner, "
+                "SELECT a.mime AS mime, a.path AS path, a.member_id AS owner, a.filename AS filename, "
                 "       a.message_id AS message_id, "
                 "       m.member_id AS sender, m.recipients AS recipients "
                 "  FROM attachments a "
@@ -9516,6 +9565,15 @@ class NthWebHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "public, max-age=31536000, immutable")
         self.send_header("X-Content-Type-Options", "nosniff")
+        if row["mime"] not in ALLOWED_IMAGE_MIME:
+            # Not an image the page shows: hand it to the user as a file. A PDF or
+            # text opened in place would run under this origin; a sandbox CSP
+            # covers any viewer that ignores the download hint.
+            name = row["filename"] or ("attachment" + ALLOWED_ATTACH_MIME.get(row["mime"], ""))
+            ascii_name = re.sub(r'[^\w.\- ]', "_", name.encode("ascii", "replace").decode("ascii"))
+            self.send_header("Content-Disposition",
+                             f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(name)}")
+            self.send_header("Content-Security-Policy", "sandbox; default-src 'none'")
         self.end_headers()
         try:
             self.wfile.write(data)

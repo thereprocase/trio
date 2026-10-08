@@ -360,3 +360,7 @@ body.compact .day-separator, body.compact .unread-divider { margin:4px 0; }
   line-height:1.4;
   text-align:center;
 }
+.attachment-thumb.attachment-file{width:auto;min-width:120px;max-width:220px;display:flex;align-items:center;padding:0 28px 0 10px;cursor:default;background:var(--bg-sink)}
+.attachment-file-name{font-size:12px;color:var(--ink-2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.message-attachment.message-attachment-file{display:inline-flex;align-items:center;padding:6px 10px;border:1px solid var(--line);border-radius:var(--r-sm);font-size:13px;color:var(--ink);text-decoration:none;max-width:320px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.message-attachment.message-attachment-file:hover{border-color:var(--accent)}
