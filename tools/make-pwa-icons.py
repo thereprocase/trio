@@ -19,8 +19,14 @@ The SVGs are built with the standard library. Rendering the PNGs needs
 `rsvg-convert` (librsvg) on the machine that regenerates them; the hub never
 runs this script, so the server gains no dependency.
 
-Usage: python3 tools/make-pwa-icons.py [output_dir]
+A hub can carry its own icon set (NTH_APP_ICON_DIR on nth-web), so one phone
+can tell two installed hubs apart. --preset recolours the tile and halo and
+--emblem adds a corner badge; render a set into its own directory and point
+that hub at it.
+
+Usage: python3 tools/make-pwa-icons.py [output_dir] [--preset NAME] [--emblem cross]
 """
+import argparse
 import math
 import shutil
 import subprocess
@@ -40,6 +46,20 @@ ARCS = [
 ]
 
 DEFAULT_OUT = Path(__file__).resolve().parent.parent / "server" / "web" / "icons"
+
+# Tile palettes: (background gradient start, end, halo). "gridline" is the
+# built-in icon.
+PRESETS = {
+    "gridline": ("#10261f", "#04090a", "#7cf5c8"),
+    "ember": ("#3a1014", "#0b0405", "#ff8a5c"),
+    "dusk": ("#1d1636", "#06040c", "#a98bff"),
+    "ocean": ("#0b2038", "#03070d", "#5fb7ff"),
+}
+
+# Corner badges, drawn in glyph coordinates so the maskable icon keeps them
+# inside the safe zone: (fill, ring) of a disc low on the right of the bubble.
+EMBLEM_CENTRE, EMBLEM_RADIUS = (378, 362), 60
+EMBLEMS = ("none", "cross")
 
 RENDERS = (
     ("icon.svg", "icon-512.png", 512),
@@ -119,20 +139,37 @@ def colour_glyph():
     return "".join(grads) + tail_gradient, bloom + crisp
 
 
-def tile(rounded, scale=1.0):
+def emblem(kind):
+    """A white cross on a red disc with a white ring, or nothing."""
+    if kind != "cross":
+        return ""
+    (x, y), r = EMBLEM_CENTRE, EMBLEM_RADIUS
+    arm, half = r * 0.62, r * 0.2
+    cross = (f"M {x - half:.1f} {y - arm:.1f} H {x + half:.1f} V {y - half:.1f} "
+             f"H {x + arm:.1f} V {y + half:.1f} H {x + half:.1f} V {y + arm:.1f} "
+             f"H {x - half:.1f} V {y + half:.1f} H {x - arm:.1f} V {y - half:.1f} "
+             f"H {x - half:.1f} Z")
+    return (f'<circle cx="{x}" cy="{y}" r="{r + 10}" fill="#04090a" opacity="0.55"/>'
+            f'<circle cx="{x}" cy="{y}" r="{r}" fill="#e8304a" stroke="#fff" stroke-width="9"/>'
+            f'<path d="{cross}" fill="#fff"/>')
+
+
+def tile(rounded, scale=1.0, preset="gridline", emblem_kind="none"):
     """The full icon: Gridline tile, halo, and the glyph scaled about the centre."""
+    bg0, bg1, halo = PRESETS[preset]
     defs, art = colour_glyph()
+    art += emblem(emblem_kind)
     grid = "".join(f'<path d="M {v} 0 V 512 M 0 {v} H 512"/>' for v in range(32, 512, 32))
     clip = f'<rect width="512" height="512" rx="{112 if rounded else 0}"/>'
     offset = 256 * (1 - scale)
     return (
         '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><defs>\n'
         '<linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">'
-        '<stop offset="0" stop-color="#10261f"/><stop offset="1" stop-color="#04090a"/>'
+        f'<stop offset="0" stop-color="{bg0}"/><stop offset="1" stop-color="{bg1}"/>'
         '</linearGradient>\n'
         '<radialGradient id="halo" cx="0.5" cy="0.47" r="0.42">'
-        '<stop offset="0" stop-color="#7cf5c8" stop-opacity="0.22"/>'
-        '<stop offset="1" stop-color="#7cf5c8" stop-opacity="0"/></radialGradient>\n'
+        f'<stop offset="0" stop-color="{halo}" stop-opacity="0.22"/>'
+        f'<stop offset="1" stop-color="{halo}" stop-opacity="0"/></radialGradient>\n'
         '<radialGradient id="sparkfill" cx="0.5" cy="0.5" r="0.5">'
         '<stop offset="0" stop-color="#fff"/><stop offset="1" stop-color="#e6fff6"/>'
         '</radialGradient>\n'
@@ -153,12 +190,18 @@ def badge():
 
 
 def main() -> None:
-    out = Path(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT_OUT
+    parser = argparse.ArgumentParser(description="Generate the dashboard's web-app icons.")
+    parser.add_argument("output_dir", nargs="?", type=Path, default=DEFAULT_OUT)
+    parser.add_argument("--preset", choices=sorted(PRESETS), default="gridline")
+    parser.add_argument("--emblem", choices=EMBLEMS, default="none")
+    args = parser.parse_args()
+    out = args.output_dir
     out.mkdir(parents=True, exist_ok=True)
+    look = dict(preset=args.preset, emblem_kind=args.emblem)
     sources = {
-        "icon.svg": tile(True),
-        "icon-maskable.svg": tile(False, 0.78),
-        "apple-touch.svg": tile(False, 0.92),
+        "icon.svg": tile(True, **look),
+        "icon-maskable.svg": tile(False, 0.78, **look),
+        "apple-touch.svg": tile(False, 0.92, **look),
         "badge.svg": badge(),
     }
     for name, svg in sources.items():

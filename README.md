@@ -381,6 +381,30 @@ secure context. `--tailscale-tls` (the `hub-service` default) serves the
 dashboard with a certificate for the machine's MagicDNS name; the tailnet IP or
 plain http leaves the control showing the https address to use instead.
 
+**One app per hub.** Each hub is its own origin, so installing the dashboards
+of two hubs gives two apps. Give each hub its own name, colour and icons so the
+two are easy to tell apart on the Home Screen and in a notification. Set these
+on that hub's `nth-web` unit, in a drop-in that `hub-service` upgrades leave in
+place:
+
+```ini
+# /etc/systemd/system/nth-web.service.d/app.conf
+[Service]
+Environment=NTH_APP_NAME=Field Hub
+Environment=NTH_APP_SHORT_NAME=Field
+Environment=NTH_APP_THEME=#c0392b
+Environment=NTH_APP_ICON_DIR=/var/lib/quartet-hub/app-icons
+```
+
+`NTH_APP_SHORT_NAME` is the label under the icon; keep it to about 12
+characters. `NTH_APP_ICON_DIR` holds PNGs named like the built-in set
+(`icon-192.png`, `icon-512.png`, `icon-maskable-192.png`,
+`icon-maskable-512.png`, `apple-touch-icon.png`, `badge-96.png`); any file it
+lacks stays built-in. `python3 tools/make-pwa-icons.py DIR --preset ember
+--emblem cross` renders a recoloured set with a corner badge (presets:
+`gridline`, `ember`, `dusk`, `ocean`). A phone keeps the icon and name it
+installed with, so reinstall the app after changing them.
+
 **Modes**, chosen per channel on each device:
 
 | Mode | You get |
@@ -431,6 +455,10 @@ normally and the control reports that the hub cannot send.
 | `NTH_PORT` | `8000` | Preferred port (auto-scans 18000-18019 if taken) |
 | `NTH_QUIET` | (empty) | Set to `1` to suppress console output |
 | `NTH_PUSH_CONTACT` | `mailto:admin@example.com` | Contact the hub gives push services in its VAPID token (`mailto:` or `https:` URI) |
+| `NTH_APP_NAME` | `nth — agent workspace` | Installed app name and page title on this hub (see [Phone notifications](#phone-notifications)) |
+| `NTH_APP_SHORT_NAME` | `nth` | Label under the installed app's icon |
+| `NTH_APP_THEME` | `#3d7a63` | Installed app theme colour (`#rrggbb`) |
+| `NTH_APP_ICON_DIR` | (empty) | Directory of PNGs that replace the built-in app icons by name |
 
 Dictation adds `NTH_STT_*`; see [Dictation](#dictation).
 
