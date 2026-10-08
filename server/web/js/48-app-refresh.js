@@ -106,6 +106,7 @@
     const dictation = Trio.composer?.dictationState?.() || '';
     if (dictation === 'recording') return 'Dictation is still listening. Stop it first, then reload.';
     if (dictation === 'transcribing') return 'Your dictation is still being transcribed. Reload once its text appears in the box.';
+    if (dictation === 'awaiting') return 'A recording is waiting for final audio. Wait for it to finish or discard it before reloading.';
     if (dictation === 'kept') return 'A recording is kept for Retry. Retry it, use browser dictation, or discard it first: reloading would lose it.';
     return '';
   }

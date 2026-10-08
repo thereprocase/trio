@@ -35,6 +35,7 @@
   // True while a finished recording is being sent to /api/stt/transcribe.
   let transcribing = false;
   const keptClips = new Set(); // page-memory audio must be visible to reload protection
+  const retiredRecordings = new Set(); // final audio may arrive after the stop watchdog
   const byId = id => document.getElementById(id);
   const input = () => byId('input');
   // The message box is a contenteditable div so @-mentions render as inline
@@ -1049,11 +1050,23 @@
     // Release the reservation, but retain handlers/chunks for a slow final event.
     if (localRecording !== recording) return;
     recording.retired = true;
+    retiredRecordings.add(recording);
     releaseRecording(recording);
     transcribing = false;
     document.body.classList.remove('dictating');
     setDictationButtonState(false);
-    Trio.ui.toast('Hub recording is taking too long to finish. Late audio will be recovered when it arrives.', DICTATION_TOAST_MS);
+    recording.dismissNotice = Trio.ui.toast(
+      'Hub recording is still waiting for final audio. Late audio will be recovered; discard it if you want to reload now.',
+      0, { label: 'Discard', onClick: () => discardRetiredRecording(recording) }, { dismissible: false });
+  }
+  function discardRetiredRecording(recording) {
+    retiredRecordings.delete(recording);
+    recording.finished = true;
+    recording.retired = false;
+    recording.chunks.length = 0;
+    recording.recorder.ondataavailable = null;
+    recording.recorder.onstop = null;
+    if (typeof recording.dismissNotice === 'function') recording.dismissNotice();
   }
   function discardClip(clip) {
     keptClips.delete(clip);
@@ -1155,7 +1168,12 @@
           releaseRecording(recording);
           transcribing = false; // transfer only this recording's reservation
         }
-        return transcribeClip({ audio, startedIn, finalize, completed: false });
+        // Start the request or register its kept clip before releasing retirement
+        // protection. A delayed old event must never alter a newer session.
+        const request = transcribeClip({ audio, startedIn, finalize, completed: false });
+        retiredRecordings.delete(recording);
+        if (typeof recording.dismissNotice === 'function') recording.dismissNotice();
+        return request;
       };
       ownedRecorder.start();
       document.body.classList.add('dictating'); setDictationButtonState(true);
@@ -1460,6 +1478,7 @@
   function dictationState() {
     if (transcribing) return 'transcribing';
     if (recognition || recorder?.state === 'recording') return 'recording';
+    if (retiredRecordings.size) return 'awaiting';
     return keptClips.size ? 'kept' : '';
   }
   // dom-harness.js recommends extracting pure helpers: the dictation paths

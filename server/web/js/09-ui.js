@@ -39,6 +39,7 @@
     // showPopover throws if already open — swallow that and keep appending.
     if (host.showPopover) { try { host.showPopover(); } catch {} }
     if (timeout > 0) setTimeout(dismiss, timeout);
+    return dismiss;
   }
   // `body` is raw HTML, unlike `title` — callers MUST pre-escape any
   // user-controlled content (via `esc()` here or `Trio.markdown.escapeHtml`)
