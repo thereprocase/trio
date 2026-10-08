@@ -357,6 +357,12 @@ example `https://YOUR_HOST.YOUR_TAILNET.ts.net:8765/`.
 Then open a channel, tap **Channel details → Phone notifications**, and pick a
 mode. The first choice asks for notification permission.
 
+In the installed app, a channel this device has no subscription for shows a
+small banner once, offering notifications for @mentions there: **Turn on** asks
+for permission and subscribes with the Mentions mode, and **Not now** retires
+the offer for that channel on this device. The panel in Channel details holds
+every other choice.
+
 **What a notification shows.** The title names the channel (or "DM") and the
 sender. The message text itself stays off the lock screen: the body reads
 "New message" unless you tick **Show message text on the lock screen**, a
