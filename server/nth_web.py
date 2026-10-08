@@ -335,7 +335,7 @@ MAX_UPLOAD_BYTES = _env_bytes("NTH_UPLOAD_MAX_BYTES", 25 * 1024 * 1024)  # hard 
 # upload could fill the disk one legal 10 MB image at a time. sweep_attachments
 # only reclaims UNLINKED rows, so anything linked to a message is permanent --
 # this quota is the only bound on an upload right.
-MAX_MEMBER_ATTACH_BYTES = int(os.environ.get("NTH_ATTACH_QUOTA_BYTES", 200 * 1024 * 1024))
+MAX_MEMBER_ATTACH_BYTES = _env_bytes("NTH_ATTACH_QUOTA_BYTES", 200 * 1024 * 1024)
 # Attachment GC. An upload creates its row UNLINKED and /api/send links it, so
 # anything still unlinked long afterwards was abandoned — a paste thought better
 # of, a closed tab, a failed send. Nothing ever collected those, so they
@@ -9591,27 +9591,32 @@ class NthWebHandler(BaseHTTPRequestHandler):
             # Streamed, not read whole: with 25 MB files, parallel fetches of one
             # attachment would otherwise each hold a full copy in memory.
             handle = open(resolved, "rb")
-            size = os.fstat(handle.fileno()).st_size
         except OSError:
             self._error(404, "file missing")
             return
-        self.send_response(200)
-        self.send_header("Content-Type", row["mime"])
-        self.send_header("Content-Length", str(size))
-        # Access-controlled content (DM files, unpublished uploads): no shared caches.
-        self.send_header("Cache-Control", "private, max-age=31536000, immutable")
-        self.send_header("X-Content-Type-Options", "nosniff")
-        if row["mime"] not in ALLOWED_IMAGE_MIME:
-            # Not an image the page shows: hand it to the user as a file. A PDF or
-            # text opened in place would run under this origin; a sandbox CSP
-            # covers any viewer that ignores the download hint.
-            name = row["filename"] or ("attachment" + ALLOWED_ATTACH_MIME.get(row["mime"], ""))
-            ascii_name = re.sub(r'[^\w.\- ]', "_", name.encode("ascii", "replace").decode("ascii"))
-            self.send_header("Content-Disposition",
-                             f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(name)}")
-            self.send_header("Content-Security-Policy", "sandbox; default-src 'none'")
-        self.end_headers()
         try:
+            size = os.fstat(handle.fileno()).st_size
+        except OSError:
+            handle.close()
+            self._error(404, "file missing")
+            return
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", row["mime"])
+            self.send_header("Content-Length", str(size))
+            # Access-controlled content (DM files, unpublished uploads): no shared caches.
+            self.send_header("Cache-Control", "private, max-age=31536000, immutable")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            if row["mime"] not in ALLOWED_IMAGE_MIME:
+                # Not an image the page shows: hand it to the user as a file. A PDF or
+                # text opened in place would run under this origin; a sandbox CSP
+                # covers any viewer that ignores the download hint.
+                name = row["filename"] or ("attachment" + ALLOWED_ATTACH_MIME.get(row["mime"], ""))
+                ascii_name = re.sub(r'[^\w.\- ]', "_", name.encode("ascii", "replace").decode("ascii"))
+                self.send_header("Content-Disposition",
+                                 f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(name)}")
+                self.send_header("Content-Security-Policy", "sandbox; default-src 'none'")
+            self.end_headers()
             shutil.copyfileobj(handle, self.wfile, 256 * 1024)
         except (BrokenPipeError, ConnectionResetError, OSError):
             pass
