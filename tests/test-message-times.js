@@ -250,7 +250,7 @@ function stubUi({ fail = false } = {}) {
     document.dispatchEvent(fakeEvent('touchend', time));
     assert.deepStrictEqual(seen.copied, ['2026-10-08T14:25:12.262Z']);
   });
-  await check('a quick touch tap copies through its click, and a scroll disarms a hold', async () => {
+  await check('a quick touch tap copies through its click', async () => {
     const seen = stubUi();
     const tap = stampOf(H.cardFor(msg(28, PY_ISO)));
     document.dispatchEvent(fakeEvent('pointerdown', tap, { pointerType: 'touch', clientX: 5, clientY: 5 }));
@@ -258,12 +258,55 @@ function stubUi({ fail = false } = {}) {
     assert.deepStrictEqual(seen.copied, [], 'a short release is not a long press');
     document.dispatchEvent(fakeEvent('click', tap));
     assert.strictEqual(seen.copied.length, 1, 'the tap copies via click');
-    const scrolled = stampOf(H.cardFor(msg(29, PY_ISO)));
-    document.dispatchEvent(fakeEvent('pointerdown', scrolled, { pointerType: 'touch', clientX: 5, clientY: 5 }));
+  });
+  // The sequence a real browser sends when a hold turns into a scroll: a few
+  // small pointermoves under the threshold, then pointercancel as the scroll
+  // takes over, and from then on only touch events and scroll events — no
+  // more pointermoves — before touchend.
+  async function holdThenScrollStart(node) {
+    document.dispatchEvent(fakeEvent('pointerdown', node, { pointerType: 'touch', clientX: 5, clientY: 5 }));
     await hold();
-    document.dispatchEvent(fakeEvent('pointermove', scrolled, { clientX: 5, clientY: 80 }));
-    document.dispatchEvent(fakeEvent('pointerup', scrolled, { pointerType: 'touch' }));
-    assert.strictEqual(seen.copied.length, 1, 'a hold that turned into a scroll copies nothing');
+    document.dispatchEvent(fakeEvent('pointermove', node, { clientX: 5, clientY: 9 }));
+    document.dispatchEvent(fakeEvent('pointermove', node, { clientX: 5, clientY: 14 }));
+    document.dispatchEvent(fakeEvent('pointercancel', node));
+  }
+  await check('a hold that becomes a scroll copies nothing: pointercancel, touchmove >= 10 px, touchend', async () => {
+    const seen = stubUi();
+    const node = stampOf(H.cardFor(msg(29, PY_ISO)));
+    await holdThenScrollStart(node);
+    document.dispatchEvent(fakeEvent('touchmove', node, { touches: [{ clientX: 5, clientY: 40 }] }));
+    document.dispatchEvent(fakeEvent('touchend', node));
+    await tick();
+    assert.deepStrictEqual(seen.copied, []);
+  });
+  await check('a hold that becomes a scroll copies nothing: pointercancel, scroll event, touchend', async () => {
+    const seen = stubUi();
+    const node = stampOf(H.cardFor(msg(30, PY_ISO)));
+    await holdThenScrollStart(node);
+    document.dispatchEvent(fakeEvent('scroll', document.getElementById('messages')));
+    document.dispatchEvent(fakeEvent('touchend', node));
+    await tick();
+    assert.deepStrictEqual(seen.copied, []);
+  });
+  await check('touchmove jitter under 10 px after pointercancel keeps the arm', async () => {
+    const seen = stubUi();
+    const node = stampOf(H.cardFor(msg(31, PY_ISO)));
+    await holdThenScrollStart(node);
+    document.dispatchEvent(fakeEvent('touchmove', node, { touches: [{ clientX: 7, clientY: 11 }] }));
+    document.dispatchEvent(fakeEvent('touchend', node));
+    assert.deepStrictEqual(seen.copied, ['2026-10-08T14:25:12.262Z']);
+  });
+  await check('a keyboard menu key after an earlier, finished touch does not arm a copy', async () => {
+    const seen = stubUi();
+    const node = stampOf(H.cardFor(msg(32, PY_ISO)));
+    document.dispatchEvent(fakeEvent('pointerdown', node, { pointerType: 'touch', clientX: 5, clientY: 5 }));
+    document.dispatchEvent(fakeEvent('pointerup', node, { pointerType: 'touch' }));
+    const menuKey = fakeEvent('contextmenu', node);
+    document.dispatchEvent(menuKey);
+    assert.strictEqual(menuKey.prevented, false, 'the browser menu opens as usual');
+    document.dispatchEvent(fakeEvent('touchend', node));
+    document.dispatchEvent(fakeEvent('pointerup', node, { pointerType: 'mouse' }));
+    assert.deepStrictEqual(seen.copied, []);
   });
   await check('Android contextmenu from touch arms the copy for the release; a mouse right-click keeps the browser menu', async () => {
     const seen = stubUi();

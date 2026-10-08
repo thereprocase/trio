@@ -92,8 +92,8 @@
     return dayFormat(as).format(d) + ' ' + time;
   }
   // Full date and time with one zone marker: "Thu, Oct 8 10:25:12" locally,
-  // "Thu, Oct 8 14:25:12Z" in UTC. For any label that needs both halves (an
-  // expiry, a deadline) instead of joining day() and clock() by hand.
+  // "Thu, Oct 8 14:25:12Z" in UTC. Use it for any label that needs both
+  // halves (an expiry, a deadline).
   function dateTime(value, opts = {}) { return label(value, { ...opts, withDay: true }); }
 
   // A <time> node for DOM-built views. `prefix` is an optional node placed
@@ -129,7 +129,9 @@
   // card's own click handler, which would otherwise navigate away.
   const LONG_PRESS_MS = 500;
   const REPEAT_GUARD_MS = 800;
-  let lastPointerType = '';
+  // True from a touch pointerdown until that touch ends, so only a touch
+  // long-press's contextmenu arms a copy (a keyboard menu key never does).
+  let touchActive = false;
   let pressTimer = null;
   let pressStart = { x: 0, y: 0 };
   // A long press only ARMS the copy. Clipboard writes need user activation,
@@ -168,17 +170,20 @@
     });
   }
   function clearPress() { if (pressTimer) { clearTimeout(pressTimer); pressTimer = null; } }
+  function disarm() { clearPress(); armed = null; }
+  // Small finger jitter must not cancel a long press; a scroll will.
+  function movedFar(x, y) { return Math.hypot((x || 0) - pressStart.x, (y || 0) - pressStart.y) >= 10; }
   function onPointerDown(event) {
-    lastPointerType = event.pointerType || '';
+    touchActive = event.pointerType === 'touch';
     swallowClick = null;
-    armed = null;
-    clearPress();
-    const node = target(event);
-    if (!node || event.pointerType !== 'touch') return;
+    disarm();
+    if (!touchActive) return;
     pressStart = { x: event.clientX || 0, y: event.clientY || 0 };
-    pressTimer = setTimeout(() => { pressTimer = null; armed = node; }, LONG_PRESS_MS);
+    const node = target(event);
+    if (node) pressTimer = setTimeout(() => { pressTimer = null; armed = node; }, LONG_PRESS_MS);
   }
   function onRelease(event) {
+    touchActive = false;
     clearPress();
     if (!armed) return;
     const node = armed;
@@ -191,10 +196,11 @@
     const node = target(event);
     if (!node) return;
     if (event.type === 'keydown' && event.key !== 'Enter' && event.key !== ' ') return;
-    // Right-click with a mouse keeps the browser menu. A touch long-press
-    // surfaces as contextmenu on Android; it suppresses the native menu and
-    // arms the copy for the release, like the long-press timer does.
-    if (event.type === 'contextmenu' && lastPointerType !== 'touch') return;
+    // Right-click with a mouse and the keyboard menu key keep the browser
+    // menu. A touch long-press surfaces as contextmenu on Android; it
+    // suppresses the native menu and arms the copy for the release, like the
+    // long-press timer does.
+    if (event.type === 'contextmenu' && !touchActive) return;
     event.preventDefault?.();
     event.stopPropagation?.();
     clearPress();
@@ -210,15 +216,22 @@
     // pointerup and touchend both end a touch; whichever arrives first copies.
     document.addEventListener('pointerup', onRelease, true);
     document.addEventListener('touchend', onRelease, true);
-    // A cancel after the press has armed is the browser taking over the
-    // gesture; touchend still follows, so only the pending timer is dropped.
+    document.addEventListener('touchcancel', () => { touchActive = false; disarm(); }, true);
+    // pointercancel is the browser taking over the touch: a hold that stays
+    // still keeps its arm (touchend still follows and copies), but a scroll
+    // may be starting. After the cancel no more pointermoves arrive, so the
+    // scroll is caught through touchmove and the scroll event instead.
     document.addEventListener('pointercancel', clearPress, true);
     document.addEventListener('pointermove', event => {
-      // Small finger jitter must not cancel a long press; a scroll will.
-      if (Math.hypot((event.clientX || 0) - pressStart.x, (event.clientY || 0) - pressStart.y) < 10) return;
-      clearPress();
-      armed = null;
+      if (movedFar(event.clientX, event.clientY)) disarm();
     }, true);
+    document.addEventListener('touchmove', event => {
+      const touch = event.touches?.[0] || event.changedTouches?.[0];
+      if (touch && movedFar(touch.clientX, touch.clientY)) disarm();
+    }, { capture: true, passive: true });
+    // Scroll does not bubble; the capture phase still sees it from any
+    // scrolling element.
+    document.addEventListener('scroll', disarm, { capture: true, passive: true });
   }
 
   Trio.time = { parse, iso, clock, day, dayKey, label, dateTime, element, html, mode, copyInstant };
