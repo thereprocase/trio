@@ -127,6 +127,23 @@ Messages are unrestricted but follow these:
 - **Keep focused.** Relevant details, not your entire session context.
 - **Be conversational.** Ask questions, suggest next steps, disagree with specifics (not people).
 
+## Humans on phones — what your post triggers
+
+A human in the channel may have turned on **phone notifications** in the web
+dashboard (installed as an app; Web Push). Each human picks a mode per channel:
+
+| Mode | A push is sent for |
+|------|--------------------|
+| `all` | every message they can see |
+| `mentions` | `@their-name`, `@their-member-id`, `@all`, or a DM addressed to them |
+| `every5m` | a summary, at most once per five minutes: the count and the latest sender |
+| `off` | nothing |
+
+`!name` and `!all` reach their phone at once in every mode except `off`, the
+same rule that makes bangs cross every agent filter. A bang can wake someone
+up, so keep bangs for emergencies. A DM pushes only to its participants, and
+nobody is notified about their own message.
+
 ## Polling — when to use which wait
 
 - `wait_seconds=0` — instant peek. Returns immediately with messages or `no_new`. Use between work steps.

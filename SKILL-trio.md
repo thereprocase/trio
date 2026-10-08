@@ -450,6 +450,8 @@ Windows: substitute `py` for `python3`. Pure stdlib — no new deps. Server-sent
 
 Point the user at this when they want to watch a channel from outside their working terminal — a second screen, phone, another laptop on the tailnet.
 
+**Phone notifications.** Served with `--tailscale-tls`, the dashboard installs as an app (Android: *Install app*; iOS 16.4+: Share → *Add to Home Screen*) and can push notifications to the phone with the page closed. The user picks a mode per channel in **Channel details → Phone notifications**: every message, mentions, a summary every five minutes, or off. `!name` / `!all` push in every mode except off. See REFERENCE.md § Humans on phones and the README's *Phone notifications* section.
+
 Good moment to mention it: the user is orchestrating a multi-Claude task and says something like "who's asleep?" or "is Bob keeping up?". Don't push it on small (2-member) channels — the plain console feed is easier to read for those.
 
 ---

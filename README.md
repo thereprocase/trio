@@ -89,6 +89,7 @@ The hub and its channel semantics stay authoritative. The local Quartet frontend
 - **Stale member detection**: liveness from heartbeats (5 min stale, 15 min dead)
 - **Conversation export**: end a channel and export it to markdown
 - **Dictation**: mic button in the dashboard composer; see [Dictation](#dictation)
+- **Phone notifications**: install the dashboard as an app and get Web Push notifications per channel; see [Phone notifications](#phone-notifications)
 - **Cross-platform**: Linux, macOS, and Windows. The MCP server uses the `mcp` SDK (plus `uvicorn` on hubs); the operator tools (`nth_web.py`, `nth_console.py`, `nth_doctor.py`) use only the standard library
 
 ## Installation
@@ -196,7 +197,7 @@ Once the dashboard process is running, it's at:
 > Requires HTTPS Certificates enabled for your tailnet:
 > <https://login.tailscale.com/admin/dns>.
 
-The dashboard supports operator input (type messages, post tasks with `$task`, @-mention with Tab completion), 20 themes, desktop notifications, sound chimes, and a mobile layout.
+The dashboard supports operator input (type messages, post tasks with `$task`, @-mention with Tab completion), 20 themes, desktop notifications, sound chimes, a mobile layout, and installs as an app with [phone notifications](#phone-notifications).
 
 ![The task board: open tasks with counts for claimed, blocked and done](https://thereprocase.github.io/media/trio/tasks-midnight.png)
 
@@ -216,6 +217,7 @@ Restart Claude Code and launch it with `trio claude`. `setup.sh spoke` registers
 
 - **Database:** `~/.claude/nth/nth.db` (SQLite, WAL mode)
 - **Exports:** `~/.claude/nth/conversations/` (markdown, one per ended channel)
+- **Phone notifications:** subscriptions in the `push_subscriptions` table of `nth.db`; the hub's VAPID signing key in `push-vapid-key.pem` beside it (mode 0600, created on first use)
 
 ## Tools Reference (21 tools)
 
@@ -314,6 +316,56 @@ If they're missing, the dashboard runs as usual and the mic offers to switch you
 | `NTH_STT_MAX_CONCURRENT` | `2` | Simultaneous transcriptions |
 | `NTH_STT_SILENCE_RMS` | `0.002` | Below this RMS a clip counts as silence |
 
+## Phone notifications
+
+The web dashboard is an installable web app. Installed on a phone, it receives
+notifications for channels you choose while the page is closed, through the
+standard Web Push service built into the phone's browser.
+
+**Setup on the phone.** Open the dashboard at its https MagicDNS address, for
+example `https://YOUR_HOST.YOUR_TAILNET.ts.net:8765/`.
+
+- **Android (Chrome):** menu → *Install app* (or *Add to Home screen*).
+- **iPhone / iPad (Safari, iOS 16.4 or later):** Share → *Add to Home Screen*,
+  then open nth from the Home Screen icon. iOS offers web push only to apps
+  added to the Home Screen, so the control explains this when the page is open
+  in a Safari tab.
+
+Then open a channel, tap **Channel details → Phone notifications**, and pick a
+mode. The first choice asks for notification permission.
+
+**Why the https name.** Service workers and push subscriptions exist only on a
+secure context. `--tailscale-tls` (the `hub-service` default) serves the
+dashboard with a certificate for the machine's MagicDNS name; the tailnet IP or
+plain http leaves the control showing the https address to use instead.
+
+**Modes**, chosen per channel on each device:
+
+| Mode | You get |
+|------|---------|
+| Every message | a notification for each new message you can see |
+| Mentions | a notification when someone writes `@your-name`, `@your-member-id` or `@all`, or DMs you |
+| Every 5 min | one summary at most every five minutes: how many messages arrived and who sent the latest |
+| Off | nothing |
+
+Bangs (`!your-name`, `!all`) notify at once in every mode except Off, matching
+the rule that bangs cross every agent filter. You are never notified about your
+own messages, DMs push only to their participants, and notifications for one
+channel share a tag, so a burst replaces itself on the lock screen.
+
+**Privacy.** Each push is encrypted end to end to your phone's browser
+(RFC 8291: ECDH P-256 key agreement, AES-128-GCM). The push service (Google
+FCM, Apple, Mozilla or Microsoft) relays ciphertext it cannot read; the hub
+signs each request with its own VAPID key (RFC 8292). The hub only sends to
+those push services' hosts. Any named participant can subscribe: the owner,
+members, and guests who have picked a name.
+
+**Who sends.** The hub process that drives the database (the landing-mode
+dashboard holding the agent-control lease) delivers the pushes, polling for new
+messages every two seconds. Push needs the `cryptography` package in the hub's
+Python, which the MCP SDK already pulls in through PyJWT; without it the dashboard runs
+normally and the control reports that the hub cannot send.
+
 ## Environment Variables
 
 | Variable | Default | Purpose |
@@ -323,6 +375,7 @@ If they're missing, the dashboard runs as usual and the mic offers to switch you
 | `NTH_HOST` | `127.0.0.1` | Bind address (SSE wrapper overrides to `0.0.0.0`) |
 | `NTH_PORT` | `8000` | Preferred port (auto-scans 18000-18019 if taken) |
 | `NTH_QUIET` | (empty) | Set to `1` to suppress console output |
+| `NTH_PUSH_CONTACT` | `mailto:admin@example.com` | Contact the hub gives push services in its VAPID token (`mailto:` or `https:` URI) |
 
 Dictation adds `NTH_STT_*`; see [Dictation](#dictation).
 
