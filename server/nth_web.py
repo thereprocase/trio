@@ -10505,7 +10505,9 @@ _BUILD_MARKER = '<meta name="nth-build" content="">'
 if _BUILD_MARKER not in INDEX_HTML:
     raise RuntimeError(f"server/web/index.html lost its build marker: {_BUILD_MARKER}")
 INDEX_HTML = INDEX_HTML.replace(_BUILD_MARKER, f'<meta name="nth-build" content="{APP_BUILD}">', 1)
-APP_VERSION_JSON = json.dumps({"build": APP_BUILD, "version": NTH_VERSION}).encode("utf-8")
+# Only the build id: the poller needs nothing else, and this route answers
+# without an identity check.
+APP_VERSION_JSON = json.dumps({"build": APP_BUILD}).encode("utf-8")
 
 # Static, identical for every viewer, and fetched by the browser without the
 # page's cookies (a manifest request is credentials-less by default), so these
