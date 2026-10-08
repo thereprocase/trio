@@ -20,6 +20,7 @@ import base64
 import binascii
 import os
 import re
+import unicodedata
 import secrets
 import sqlite3
 import stat
@@ -394,6 +395,10 @@ _GENERIC_NAME_WORDS = {
     "test", "new", "copy", "scan", "figure", "fig", "graph", "chart", "plot", "diagram",
     "export", "frame", "render", "result", "at", "am", "pm",
     "png", "jpg", "jpeg", "gif", "webp",
+    # Camera, phone and messaging defaults, and "screenshot" in other languages.
+    "pxl", "dsc", "dscn", "dcim", "whatsapp", "signal", "telegram", "bildschirmfoto",
+    "снимок", "экрана", "スクリーンショット", "截图", "截屏", "屏幕截图", "captura",
+    "pantalla", "écran", "schermata",
 }
 _IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".webp")
 # Letter runs in any script. A run of CJK ideographs or kana is a word on its
@@ -408,7 +413,10 @@ def require_descriptive_name(name: str) -> str:
     """The name, when it says what the image shows; else RichContentError.
     Generic words (image, screenshot, untitled, file, ...), dates, numbers, a
     bare hash or a UUID leave nothing descriptive, so such a name is refused."""
-    stem = name.strip().lower() if name and name.strip() else ""
+    # Combining marks (Indic vowel signs, Arabic harakat) would split a word
+    # into fragments, so they are dropped before counting letter runs.
+    stem = "".join(c for c in (name or "").strip().lower()
+                   if not unicodedata.category(c).startswith("M"))
     for ext in _IMAGE_EXTENSIONS:
         if stem.endswith(ext):
             stem = stem[:-len(ext)]

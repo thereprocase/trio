@@ -2535,7 +2535,7 @@ def _attachment_meta(channel: str, a) -> dict:
         if dims:
             width, height = dims
             item["width"], item["height"] = width, height
-        elif head is not None and len(head) <= _HEADER_READ_BYTES:
+        elif len(head) <= _HEADER_READ_BYTES:
             # The whole file was read and holds no readable size.
             item.update(fetchable=False, reason=nmedia.UNREADABLE_IMAGE)
             return item
