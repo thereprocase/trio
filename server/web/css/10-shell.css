@@ -443,6 +443,15 @@ h1,h2,h3,h4{ margin:0; font-weight:600; }
 .channel-drawer-actions .btn:hover{ background:var(--surface-hover); }
 .channel-drawer-actions .btn.danger{ border-color:color-mix(in oklab,var(--danger) 55%,var(--line)); color:var(--danger); }
 .channel-drawer-actions .btn.danger:hover{ background:var(--danger-tint); }
+/* Phone notifications (47-push.js): a four-way segmented choice. Unpressed
+   buttons share the drawer's outline style; the active mode takes .primary. */
+.push-modes{ display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:8px; }
+.push-modes .btn{ justify-content:center; border:1px solid var(--line); background:transparent; color:var(--ink); }
+.push-modes .btn:hover{ background:var(--surface-hover); }
+.push-modes .btn.primary{ border-color:var(--accent); background:var(--accent); color:#fff; }
+.push-modes .btn:disabled{ opacity:.55; cursor:not-allowed; }
+.push-hint{ margin-bottom:10px; padding:10px 12px; border-radius:var(--r-xs); background:var(--accent-tint); color:var(--ink-2); font-size:13px; line-height:1.45; }
+.push-status{ margin-top:9px; color:var(--ink-3); font-size:13px; line-height:1.45; }
 .channel-drawer-empty{ color:var(--ink-3); font-size:13.5px; }
 .channel-drawer-empty-inline{ color:var(--ink-3); font-weight:500; font-size:13px; }
 @media (max-width:880px){

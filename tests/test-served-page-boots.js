@@ -86,6 +86,9 @@ async function request(base, url, init = {}) {
       res.on('end', () => resolve({
         ok: res.statusCode >= 200 && res.statusCode < 300,
         status: res.statusCode,
+        // Node's lower-cased header object, under its own name so nothing
+        // mistakes it for a fetch Headers instance.
+        nodeHeaders: res.headers,
         text: async () => body,
         json: async () => JSON.parse(body),
       }));
@@ -231,7 +234,7 @@ process.on('exit', cleanup);
   if (!Trio) return;
   for (const ns of ['store', 'api', 'router', 'markdown', 'conversation',
                     'composer', 'workspace', 'agents', 'preferences',
-                    'lifecycle', 'fileLinks', 'sidebar', 'boot']) {
+                    'lifecycle', 'fileLinks', 'sidebar', 'push', 'boot']) {
     check(`  Trio.${ns} is registered`, !!Trio[ns]);
   }
 
@@ -256,6 +259,34 @@ process.on('exit', cleanup);
   }
   check('  an unknown path still 404s',
         (await request(BASE, '/no-such-page')).status === 404);
+
+  // The installable-app assets the page links must resolve on the same server.
+  // A <link rel="manifest"> pointing at a 404 leaves the page working and the
+  // install button silently absent, which no other check here would notice.
+  const manifestHref = (page.match(/<link rel="manifest" href="([^"]+)"/) || [])[1];
+  check('the page links a web app manifest', !!manifestHref);
+  const manifestRes = await request(BASE, manifestHref || '/manifest.webmanifest');
+  const manifest = await manifestRes.json().catch(() => ({}));
+  check('  the manifest is served and standalone',
+        manifestRes.status === 200 && manifest.display === 'standalone');
+  for (const icon of manifest.icons || []) {
+    check(`  manifest icon ${icon.src} resolves`, (await request(BASE, icon.src)).status === 200);
+  }
+  const swRes = await request(BASE, '/sw.js');
+  check('  /sw.js is served with root scope allowed',
+        swRes.status === 200 && swRes.nodeHeaders['service-worker-allowed'] === '/');
+
+  // The phone-notification control against the REAL status endpoint: the
+  // client reads `subscriptions` and `secure_url` from it, so a field renamed
+  // on either side shows up here rather than as a blank control on a phone.
+  const pushSection = new harness.FakeElement('section');
+  Trio.push.render(pushSection, 'served');
+  for (let i = 0; i < 40 && !pushSection.querySelector('.push-status')?.textContent; i++) await sleep(25);
+  check('the phone-notification control renders against the live server',
+        pushSection.querySelectorAll('.push-mode').length === 4
+        && /This device|https/.test(pushSection.querySelector('.push-status').textContent
+                                   + pushSection.querySelector('.push-hint').textContent),
+        pushSection.querySelector('.push-status')?.textContent);
 
   // Messages arrive on the SSE stream, not from /api/meta. Read the real
   // stream and hand each frame to the client's own dispatcher — the exact

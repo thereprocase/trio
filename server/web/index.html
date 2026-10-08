@@ -4,6 +4,16 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, interactive-widget=resizes-content">
   <title>nth — chat with your agents</title>
+  <!-- Installable app: manifest + icons for Android/desktop, apple-* tags for
+       iOS, where web push works only from a Home Screen app (iOS 16.4+). -->
+  <link rel="manifest" href="/manifest.webmanifest">
+  <meta name="theme-color" content="#3d7a63">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="nth">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+  <link rel="icon" type="image/png" sizes="192x192" href="/icons/icon-192.png">
   <script>
     /* Apply the saved theme/font BEFORE first paint, so a boot hiccup can never
        leave the hardcoded default theme showing. Mirrors 40-preferences
