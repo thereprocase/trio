@@ -5,8 +5,8 @@ decides with these, so each rule is pinned here once:
 
   * the filter matrix, including "@other !me";
   * every classify_poll outcome, from synthetic replies and, where the mcp SDK is
-    present, from the real hub's replies to a cull, an end, a revoked token and a
-    deleted channel;
+    present, from the real hub's replies to a cull, an end, a revoked token, a bad
+    channel code and a cleaned-up channel;
   * nth_notice: integers and sanitized ids only, whatever a peer chose;
   * how the spoke monitor, the one-shot waiter and the Codex relay act on each
     outcome, including the two fixes: a Quartet cull now ends the one-shot waiter,
@@ -113,9 +113,18 @@ class ClassifyPollTests(unittest.TestCase):
         ({'error': 'session_token does not match member_id.'}, nl.REFUSED),
         ({'error': 'Invalid channel code "X".'}, nl.REFUSED),
         ({'error': 'You are not a member of this channel.'}, nl.CULLED),
-        ({'error': 'you are NOT A MEMBER of this channel'}, nl.CULLED),
+        # Matched whole: anything else is a refusal, never a guessed cull.
+        ({'error': 'you are NOT A MEMBER of this channel'}, nl.REFUSED),
+        ({'error': 'You are not a member of this channel'}, nl.REFUSED),
+        ({'error': 'Note: You are not a member of this channel.'}, nl.REFUSED),
+        ({'error': ['You are not a member of this channel.']}, nl.REFUSED),
         ({'event': 'ended', 'ended_by': 'someone', 'unread_count': 2}, nl.ENDED),
         ({'ended': True}, nl.ENDED),                                        # a hub older than `event`
+        # Only a JSON true ends: a truthy string or number is not an end.
+        ({'ended': 1}, nl.INVALID),
+        ({'ended': 'yes'}, nl.INVALID),
+        ({'ended': 'yes', 'event': 'no_new'}, nl.OK),
+        ({'ended': False, 'event': 'no_new'}, nl.OK),
         ({'event': 'channel_gone'}, nl.GONE),
         ({'event': 'channel_not_found'}, nl.GONE),
         ({'error': 'channel_not_found'}, nl.GONE),                          # an older hub's spelling
@@ -127,6 +136,16 @@ class ClassifyPollTests(unittest.TestCase):
                 self.assertEqual(nl.classify_poll(poll), expected)
         self.assertEqual({expected for _, expected in self.CASES},
                          {nl.OK, nl.INVALID, nl.REFUSED, nl.CULLED, nl.ENDED, nl.GONE})
+
+    def test_only_the_hubs_token_errors_are_token_refusals(self):
+        for error in nl.TOKEN_REFUSALS:
+            self.assertEqual(nl.classify_poll({'error': error}), nl.REFUSED)
+            self.assertTrue(nl.token_refused({'error': error}))
+        for poll in ({'error': 'Channel code is required.'}, {'error': 'Invalid channel code "X".'},
+                     {'error': 'invalid or revoked session_token'}, {'error': 'You are not a member of this channel.'},
+                     {'event': 'no_new'}, None, 'Invalid or revoked session_token.'):
+            with self.subTest(poll=poll):
+                self.assertFalse(nl.token_refused(poll))
 
     def test_terminal_outcomes(self):
         self.assertEqual(set(nl.TERMINAL), {nl.REFUSED, nl.CULLED, nl.ENDED, nl.GONE})
@@ -183,19 +202,29 @@ class RealHubRepliesTests(unittest.TestCase):
         self.assertEqual(nl.classify_poll(reply), nl.ENDED)
         self.assertIn('unread_count', reply)
 
-    def test_a_deleted_channel_is_gone(self):
+    def test_a_cleaned_up_channel_reads_as_culled_today(self):
+        # nth_cleanup deletes the member rows with the channel, and nth_poll checks the
+        # member before the channel, so the real deletion path never says channel_gone.
+        # Known item for PR 7: check the channel first in nth_poll; this becomes GONE.
         member, token = self.join('rules-gone', 'Stayer')
-        db = self.srv.get_db()
-        try:
-            db.execute("DELETE FROM channels WHERE code = 'rules-gone'")
-            db.commit()
-        finally:
-            db.close()
-        self.assertEqual(nl.classify_poll(self.poll('rules-gone', member, token)), nl.GONE)
+        self.srv.nth_end(channel='rules-gone', member_id=member)
+        self.assertTrue(json.loads(self.srv.nth_cleanup(channel='rules-gone')).get('ok'))
+        self.assertEqual(nl.classify_poll(self.poll('rules-gone', member)), nl.CULLED)
+        self.assertEqual(nl.classify_poll(self.poll('rules-gone', member, token)), nl.CULLED)
 
-    def test_a_wrong_token_is_refused(self):
+    def test_a_wrong_token_is_a_token_refusal(self):
         member, _ = self.join('rules-token', 'Holder')
-        self.assertEqual(nl.classify_poll(self.poll('rules-token', member, 'not-a-token')), nl.REFUSED)
+        reply = self.poll('rules-token', member, 'not-a-token')
+        self.assertEqual(nl.classify_poll(reply), nl.REFUSED)
+        self.assertTrue(nl.token_refused(reply))
+
+    def test_a_bad_channel_code_is_refused_but_not_a_token_refusal(self):
+        member, token = self.join('rules-code', 'Coder')
+        for channel in ('', 'BAD CODE'):
+            with self.subTest(channel=channel):
+                reply = self.poll(channel, member, token)
+                self.assertEqual(nl.classify_poll(reply), nl.REFUSED)
+                self.assertFalse(nl.token_refused(reply))
 
 
 class NoticeTests(unittest.TestCase):
@@ -236,10 +265,48 @@ class NoticeTests(unittest.TestCase):
                                                'reason': nth_notice.MEMBER_REMOVED})
         self.assertEqual(ended.ended, nth_notice.MEMBER_REMOVED)
 
+    def test_integers_are_strict(self):
+        for good, value in (('0', 0), ('42', 42), (7, 7), (2 ** 53 - 1, 2 ** 53 - 1)):
+            self.assertEqual(nth_notice._integer(good), value)
+        for bad in (True, False, -1, 2 ** 53, '-1', '+1', ' 5', '5 ', '1_000', '\u0665', '\uff15', '',
+                    '1e3', 1.0, float('inf'), float('nan'), None, [1], {'n': 1}, b'5'):
+            with self.subTest(value=bad):
+                with self.assertRaises((TypeError, ValueError)):
+                    nth_notice._integer(bad)
+
+    def test_from_event_survives_any_meta(self):
+        rng = random.Random(53)
+        junk = [None, True, False, 0, -1, 1.5, float('inf'), float('-inf'), float('nan'), 2 ** 80, '',
+                'inf', '1e999', '\u0665', '9' * 400, [], ['1'], {}, {'x': 1}, b'1', object()]
+        keys = ('event', 'reason', 'channel', 'member_id', 'message_id', 'first_message_id', 'count',
+                'more_unread', 'mentioned', 'banged')
+        for meta in junk:
+            self.assertIsNone(nth_notice.from_event('trio', meta))
+        for _ in range(500):
+            meta = {key: rng.choice(junk + ['1', '7', 'delivery_ended', 'true', 'channel ended'])
+                    for key in keys if rng.random() < .8}
+            notice = nth_notice.from_event('quartet', meta, rng.choice(junk))
+            if notice is not None:
+                self.assertTrue(notice.line.isascii())
+                self.assertNotIn('\n', notice.line)
+                self.assertNotIn('<', notice.line)
+        ended = {'event': 'delivery_ended', 'channel': float('inf'), 'member_id': [1], 'reason': float('nan')}
+        self.assertIn('listener failure', nth_notice.from_event('trio', ended).line)
+
+    def test_from_event_turns_an_overflow_into_no_notice(self):
+        # _integer refuses floats before int() could overflow on inf, so this pins the
+        # last line of defence directly, on both branches.
+        meta = {'channel': 'room', 'member_id': 'me', 'message_id': '9', 'first_message_id': '8', 'count': '2'}
+        with patch.object(nth_notice, '_integer', side_effect=OverflowError):
+            self.assertIsNone(nth_notice.from_event('trio', meta))
+        with patch.object(nth_notice, 'ended_notice', side_effect=OverflowError):
+            self.assertIsNone(nth_notice.from_event('trio', {'event': 'delivery_ended', 'reason': 'channel ended'}))
+
     def test_from_event_refuses_what_is_not_an_integer(self):
         base = {'channel': 'room', 'member_id': 'me', 'message_id': '9', 'first_message_id': '8', 'count': '2'}
         for field, value in (('message_id', 'nine'), ('count', None), ('first_message_id', True),
-                             ('more_unread', '1; drop')):
+                             ('more_unread', '1; drop'), ('count', float('inf')), ('message_id', 2 ** 53),
+                             ('count', '-3'), ('message_id', 5.0)):
             with self.subTest(field=field, value=value):
                 self.assertIsNone(nth_notice.from_event('trio', dict(base, **{field: value})))
         self.assertIsNone(nth_notice.from_event('trio', {'channel': 'room'}))
@@ -338,6 +405,28 @@ class SpokeMonitorTests(unittest.TestCase):
         self.assertEqual((emitted[0]['reason'], emitted[0]['channel'], emitted[0]['member_id']),
                          ('refused', 'room', 'me'))
 
+    def test_a_request_refusal_ends_the_monitor_without_blaming_the_token(self):
+        for error in ('Channel code is required.', 'Invalid channel code "BAD <x>".'):
+            with self.subTest(error=error):
+                emitted, returned = self.run_monitor([{'error': error}])
+                self.assertTrue(returned)
+                self.assertEqual(len(emitted), 1)
+                self.assertEqual(emitted[0]['event'], 'poll_refused')
+                self.assertNotIn('<', emitted[0]['error'])
+                self.assertNotIn('"', emitted[0]['error'])
+                self.assertNotIn('token', emitted[0]['msg'].replace('session token', ''))
+
+    def test_both_token_errors_are_session_revoked(self):
+        for error in nl.TOKEN_REFUSALS:
+            with self.subTest(error=error):
+                emitted, _ = self.run_monitor([{'error': error}])
+                self.assertEqual([event['event'] for event in emitted], ['session_revoked'])
+
+    def test_an_error_beside_an_end_is_the_error(self):
+        # Classification puts the error first: a refused poll is not read as an end.
+        emitted, _ = self.run_monitor([{'error': 'Invalid or revoked session_token.', 'event': 'ended'}])
+        self.assertEqual([event['event'] for event in emitted], ['session_revoked'])
+
     def test_an_end_is_unchanged(self):
         emitted, returned = self.run_monitor([{'event': 'ended', 'ended_by': 'Ender', 'unread_count': 0}])
         self.assertTrue(returned)
@@ -389,6 +478,11 @@ class OnceWaiterTests(unittest.TestCase):
         printed, codes = self.wait_once([{'error': 'You are not a member of this channel.'}])
         self.assertEqual(codes, [0])
         self.assertEqual(json.loads(printed)['event'], 'culled')
+
+    def test_a_request_refusal_wakes_the_waiter(self):
+        printed, codes = self.wait_once([{'error': 'Channel code is required.'}])
+        self.assertEqual(codes, [0])
+        self.assertEqual(json.loads(printed)['event'], 'poll_refused')
 
     def test_a_deleted_channel_wakes_the_waiter(self):
         printed, codes = self.wait_once([{'event': 'channel_gone'}])

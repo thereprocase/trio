@@ -20,7 +20,8 @@ import sys
 # through them; error lines are transient while the monitor keeps running.
 # cadence is left out too: the monitors remember that they fired it only in
 # memory, so every relaunch would fire it again at once and loop on wakes.
-WAKE_EVENTS = {'new_messages', 'channel_ended', 'channel_gone', 'culled', 'session_revoked'}
+WAKE_EVENTS = {'new_messages', 'channel_ended', 'channel_gone', 'culled', 'session_revoked',
+               'poll_refused'}
 
 
 class OnceStdout(io.TextIOBase):

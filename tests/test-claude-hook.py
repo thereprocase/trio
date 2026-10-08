@@ -3,6 +3,8 @@ import io
 import json
 import os
 from pathlib import Path
+import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -481,6 +483,43 @@ class RegistrationTests(unittest.TestCase):
     def test_uninstall_of_a_clean_settings_is_a_no_op(self):
         self.assertEqual(hook.uninstall_hooks({}), 0)
         self.assertEqual(hook.uninstall_hooks({'permissions': {'allow': []}}), 0)
+
+
+class PartialInstallTests(unittest.TestCase):
+    """A hook run from an install missing a shared module leaves quietly: its stderr
+    reaches the model as a system reminder, so a traceback there is the failure."""
+
+    def run_hook(self, script, event, missing):
+        with tempfile.TemporaryDirectory() as temporary:
+            tree = Path(temporary) / 'server'
+            tree.mkdir()
+            for source in SERVER_DIR.glob('*.py'):
+                if source.name != missing:
+                    shutil.copy(source, tree / source.name)
+            home = Path(temporary) / 'home'
+            home.mkdir()
+            payload = json.dumps({'session_id': SESSION, 'tool_name': 'mcp__nth-trio__trio_connect',
+                                  'tool_response': '{}'})
+            return subprocess.run([sys.executable, str(tree / script), '--home', str(home), event],
+                                  input=payload, capture_output=True, text=True, timeout=60, cwd=temporary,
+                                  env=dict(clean_env(), PYTHONDONTWRITEBYTECODE='1'))
+
+    def test_either_hook_exits_zero_and_silent_without_a_shared_module(self):
+        for script in ('nth_claude_hook.py', 'nth_codex_hook.py'):
+            for missing in ('nth_listener.py', 'nth_notice.py'):
+                for event in ('tool', 'stop'):
+                    with self.subTest(script=script, missing=missing, event=event):
+                        result = self.run_hook(script, event, missing)
+                        self.assertEqual((result.returncode, result.stderr, result.stdout), (0, '', ''))
+
+    def test_imported_as_a_module_a_missing_dependency_still_raises(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            shutil.copy(SERVER_DIR / 'nth_claude_hook.py', Path(temporary) / 'nth_claude_hook.py')
+            result = subprocess.run([sys.executable, '-c', 'import nth_claude_hook'], cwd=temporary,
+                                    capture_output=True, text=True, timeout=60,
+                                    env=dict(clean_env(), PYTHONPATH=temporary, PYTHONDONTWRITEBYTECODE='1'))
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('ModuleNotFoundError', result.stderr)
 
 
 if __name__ == "__main__":

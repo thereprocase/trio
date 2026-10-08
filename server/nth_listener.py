@@ -44,8 +44,12 @@ CULLED = 'culled'
 ENDED = 'ended'
 GONE = 'gone'
 TERMINAL = (REFUSED, CULLED, ENDED, GONE)
-# The hub's reply to a poll by a member whose row is gone: an operator culled it.
-NOT_A_MEMBER = 'not a member of this channel'
+# The hub's exact reply to a poll by a member whose row is gone. Matched whole: a
+# reworded or unrelated error stays a refusal, never a guessed cull.
+NOT_A_MEMBER = 'You are not a member of this channel.'
+# The hub's exact replies to a poll whose session token it will not accept. Every
+# other refusal (a malformed channel code, a missing one) is about the request.
+TOKEN_REFUSALS = ('Invalid or revoked session_token.', 'session_token does not match member_id.')
 
 
 def classify_poll(poll):
@@ -63,6 +67,11 @@ def classify_poll(poll):
     A cull also revokes the member's session tokens in that channel, and the hub checks
     the token before the member row, so a poll that carries a token sees a cull as
     REFUSED. CULLED is what a tokenless poll sees.
+
+    A channel deleted by nth_cleanup also reads as CULLED, with or without a token:
+    cleanup deletes the member rows, and nth_poll checks the member before the
+    channel, so GONE never comes back for it. Known item for PR 7: check the channel
+    before the member in nth_poll (hub side), and this becomes GONE.
     """
     if not isinstance(poll, dict):
         return INVALID
@@ -70,16 +79,22 @@ def classify_poll(poll):
     if error:
         if error == 'channel_not_found':
             return GONE
-        if isinstance(error, str) and NOT_A_MEMBER in error.lower():
+        if error == NOT_A_MEMBER:
             return CULLED
         return REFUSED
-    if poll.get('ended') or poll.get('event') == 'ended':
+    if poll.get('ended') is True or poll.get('event') == 'ended':
         return ENDED
     if poll.get('event') in ('channel_gone', 'channel_not_found'):
         return GONE
     if 'event' not in poll:
         return INVALID
     return OK
+
+
+def token_refused(poll):
+    """True when a REFUSED reply refused the session token itself (revoked, displaced or
+    not this member's), rather than the request."""
+    return isinstance(poll, dict) and poll.get('error') in TOKEN_REFUSALS
 
 
 def select_messages(poll, filter_mode):

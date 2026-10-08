@@ -44,7 +44,7 @@ class OnceStdoutTests(unittest.TestCase):
         self.assertEqual(codes, [0])
 
     def test_channel_end_and_revocation_wake(self):
-        for event in ('channel_ended', 'channel_gone', 'culled', 'session_revoked'):
+        for event in ('channel_ended', 'channel_gone', 'culled', 'session_revoked', 'poll_refused'):
             real, codes, out = self.stream()
             with self.assertRaises(Stop):
                 print(json.dumps({'event': event}), file=out)
