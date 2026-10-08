@@ -80,22 +80,36 @@ def from_event(prefix, meta, server=None):
     event is malformed. The event's content, which is peer text, is never read."""
     if not isinstance(meta, dict):
         return None
-    if meta.get('event') == 'delivery_ended':
-        shown = shown_reason(str(meta.get('reason') or ''))
-        return Notice(ended_notice(prefix, meta.get('channel'), meta.get('member_id'), shown, server), shown)
     try:
+        if meta.get('event') == 'delivery_ended':
+            shown = shown_reason(str(meta.get('reason') or ''))
+            return Notice(ended_notice(prefix, meta.get('channel'), meta.get('member_id'), shown, server),
+                          shown)
         first, last = _integer(meta['first_message_id']), _integer(meta['message_id'])
         count = _integer(meta['count']) + _integer(meta.get('more_unread') or 0)
-    except (KeyError, TypeError, ValueError):
+        addressed = 'true' in (meta.get('mentioned'), meta.get('banged'))
+        return Notice(message_notice(prefix, meta.get('channel'), meta.get('member_id'), first, last, count,
+                                     addressed, server), '')
+    except (KeyError, TypeError, ValueError, OverflowError):
         return None
-    addressed = 'true' in (meta.get('mentioned'), meta.get('banged'))
-    return Notice(message_notice(prefix, meta.get('channel'), meta.get('member_id'), first, last, count,
-                                 addressed, server), '')
+
+
+# Message ids and counts are SQLite integers that JSON carries exactly: below 2**53.
+MAX_INTEGER = 2 ** 53
 
 
 def _integer(value):
-    """An integer from an int or a decimal string; anything else raises. Booleans are refused:
-    True would otherwise print as 1."""
+    """A non-negative integer below MAX_INTEGER, from an int or a string of ASCII digits.
+    Anything else raises: booleans (True would print as 1), floats (inf, nan, 1e300),
+    signs, spaces and non-ASCII digits that int() would otherwise accept."""
     if isinstance(value, bool):
         raise TypeError('not an integer')
-    return int(value)
+    if isinstance(value, str):
+        if not (value.isascii() and value.isdigit()):
+            raise ValueError('not a decimal integer')
+        value = int(value)
+    elif not isinstance(value, int):
+        raise TypeError('not an integer')
+    if not 0 <= value < MAX_INTEGER:
+        raise ValueError('integer out of range')
+    return value

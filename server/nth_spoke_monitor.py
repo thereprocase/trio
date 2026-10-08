@@ -17,10 +17,13 @@
 #   {"event": "culled",         "member_id": "...", "channel": "..."}
 #   {"event": "session_revoked", "member_id": "...", "channel": "...",
 #    "reason": "refused", "msg": "..."}
+#   {"event": "poll_refused",   "member_id": "...", "channel": "...",
+#    "error": "...", "msg": "..."}
 #   {"event": "error",          "msg": "..."}
 #
-# channel_ended, channel_gone, culled and session_revoked are terminal: the
-# monitor exits after emitting one. nth_listener.classify_poll decides which.
+# channel_ended, channel_gone, culled, session_revoked and poll_refused are
+# terminal: the monitor exits after emitting one. nth_listener.classify_poll
+# decides which.
 #
 # Filters: --filter all|about|at (same semantics as nth_monitor; bangs
 # always wake regardless of filter). Legacy --mention-filter == --filter about.
@@ -64,7 +67,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # The hub client lives in nth_sse_client; it is re-exported here because services
 # and tests imported it from this script before it moved.
 from nth_sse_client import MCPSSEClient, RECONNECT_BACKOFF, SSE_READ_TIMEOUT  # noqa: E402,F401
-from nth_listener import classify_poll  # noqa: E402
+from nth_listener import attribute, classify_poll, token_refused  # noqa: E402
 
 # --- Tunables (match nth_monitor.py where applicable) ---------------------
 DEFAULT_URL          = "http://localhost:8000/sse"
@@ -77,6 +80,10 @@ REFUSED_MSG = ("The hub refused this membership: its session token was revoked "
                "(a cull, a reclaim and your own reconnect all revoke it). This "
                "monitor has stopped. If you did not just reconnect, tell the user; "
                "never reconnect or reclaim on your own.")
+POLL_REFUSED_MSG = ("The hub refused this monitor's poll for the reason in `error`, which "
+                    "is not about your session token. This monitor has stopped. Check the "
+                    "channel code and member id it was launched with, and tell the user if "
+                    "you cannot correct them.")
 
 # Sleeping-mode keywords: import the canonical set when the script runs from
 # the installed server dir (its normal home), fall back to a verbatim copy when
@@ -351,10 +358,16 @@ def monitor(client, channel, member_id, filter_mode, session_token,
             emit({"event": "culled", "member_id": member_id, "channel": channel})
             return
         if outcome == "refused":
-            # A cull revokes the member's sessions, so a poll WITH a token sees a
-            # cull as a refused token; so do a reclaim and the agent's own reconnect.
-            emit({"event": "session_revoked", "member_id": member_id,
-                  "channel": channel, "reason": "refused", "msg": REFUSED_MSG})
+            if token_refused(poll):
+                # A cull revokes the member's sessions, so a poll WITH a token sees a
+                # cull as a refused token; so do a reclaim and the agent's own reconnect.
+                emit({"event": "session_revoked", "member_id": member_id,
+                      "channel": channel, "reason": "refused", "msg": REFUSED_MSG})
+            else:
+                # Refused for the request itself (a malformed or missing channel code).
+                # The hub's text is passed on sanitized: it is a hub's, possibly remote.
+                emit({"event": "poll_refused", "member_id": member_id, "channel": channel,
+                      "error": attribute(poll.get("error"), 120), "msg": POLL_REFUSED_MSG})
             return
         if outcome == "ok":
             ev = poll.get("event")

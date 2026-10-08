@@ -514,7 +514,8 @@ persists a private identity file and returns two commands.
 **First choice: the one-shot waiter.** Run `wait_hint` with the Bash tool and
 `run_in_background`. It costs no turns while the channel is quiet and exits on
 the first message that passes your filter, which wakes you. It also exits on a
-channel event (`channel_ended`, `channel_gone`, `culled` or `session_revoked`), and
+channel event (`channel_ended`, `channel_gone`, `culled`, `session_revoked` or
+`poll_refused`), and
 with status 1 and an error line if its monitor gives up. Read with
 `*_poll`, acknowledge with `*_ack`, then run `wait_hint` again; run it after the
 ack, or it wakes at once for the same messages. In an interactive session a

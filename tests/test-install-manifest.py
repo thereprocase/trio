@@ -177,27 +177,29 @@ staged_import("hub/spoke", hub_spoke)
 # started by path from the installed tree, and they share modules nth_web never
 # imports (nth_sse_client, nth_listener, nth_notice). A tree missing one of those
 # still serves the dashboard while every hook exits silently, so import each entry
-# point from each installed tree. A third-party package missing from this
-# interpreter (mcp, websockets) skips that one module; a missing sibling fails.
+# point from each installed tree. Only a package in OPTIONAL_PACKAGES may be
+# missing from this interpreter, and that skips the module loudly; anything else
+# missing fails.
 DELIVERY_ENTRY_POINTS = (
     "nth_sse_client", "nth_listener", "nth_notice",
     "nth_claude_hook", "nth_codex_hook", "nth_spoke_monitor", "nth_watch",
     "nth_event_sources", "nth_codex_relay", "nth_event_service",
     "nth_claude_channel", "nth_quartet_proxy",
 )
+# The only third-party packages an entry point may lack on this interpreter. A
+# missing package outside this list, or a missing sibling module, is a failure.
+OPTIONAL_PACKAGES = ("mcp", "websockets")
 ENTRY_POINT_PROBE = r"""
 import importlib, json, sys
-from pathlib import Path
-here = Path(sys.argv[1])
+optional = set(sys.argv[1].split(","))
 report = {}
 for module in sys.argv[2:]:
     try:
         importlib.import_module(module)
         report[module] = "ok"
     except ModuleNotFoundError as exc:
-        sibling = (here / ((exc.name or "").split(".")[0] + ".py")).exists() or exc.name in sys.argv[2:]
-        report[module] = ("missing " + str(exc.name)) if sibling or (exc.name or "").startswith(("nth_", "codex_")) \
-            else ("skip " + str(exc.name))
+        top = (exc.name or "").split(".")[0]
+        report[module] = ("skip " if top in optional else "missing ") + str(exc.name)
     except Exception as exc:
         report[module] = "error " + type(exc).__name__ + ": " + str(exc)[:120]
 print(json.dumps(report))
@@ -206,7 +208,8 @@ print(json.dumps(report))
 
 def entry_points_import(label: str, tree: Path, home: Path) -> None:
     env = dict(os.environ, NTH_HOME=str(home), NTH_QUIET="1", PYTHONPATH=str(tree))
-    proc = subprocess.run([sys.executable, "-c", ENTRY_POINT_PROBE, str(tree), *DELIVERY_ENTRY_POINTS],
+    proc = subprocess.run([sys.executable, "-c", ENTRY_POINT_PROBE, ",".join(OPTIONAL_PACKAGES),
+                           *DELIVERY_ENTRY_POINTS],
                           capture_output=True, text=True, timeout=120, env=env, cwd=str(home))
     try:
         report = json.loads(proc.stdout.strip().splitlines()[-1])
@@ -214,16 +217,38 @@ def entry_points_import(label: str, tree: Path, home: Path) -> None:
         report = {}
     check(f"{label}: the delivery entry-point probe ran"
           + (f" — {(proc.stderr or '').strip()[-160:]}" if not report else ""), bool(report))
+    skipped = []
     for module in DELIVERY_ENTRY_POINTS:
         outcome = report.get(module, "not reported")
-        if outcome.startswith("skip"):
-            print(f"SKIP: {label}: import {module} ({outcome[5:]} is not installed here)")
+        if outcome.startswith("skip "):
+            skipped.append(f"{module} (needs {outcome[5:]})")
             continue
         check(f"{label}: import {module} from the installed tree"
               + ("" if outcome == "ok" else f" — {outcome}"), outcome == "ok")
+    if skipped:
+        print(f"!!!! SKIPPED {len(skipped)} DELIVERY ENTRY POINT(S) for {label}: {', '.join(skipped)}. "
+              "They were NOT checked; run with PY set to the nth venv to cover them. !!!!")
 
 
 import json  # noqa: E402
+
+# The probe itself: only an allowlisted package may skip. A module needing any other
+# missing package must come back "missing", or a broken install would pass as skipped.
+_probe_dir = Path(tempfile.mkdtemp(prefix="nth_probe_"))
+try:
+    (_probe_dir / "probe_needs_unknown.py").write_text("import probe_absent_package_x\n")
+    (_probe_dir / "probe_needs_optional.py").write_text("import probe_optional_package_y\n")
+    _proc = subprocess.run([sys.executable, "-c", ENTRY_POINT_PROBE, "probe_optional_package_y",
+                            "probe_needs_unknown", "probe_needs_optional"],
+                           capture_output=True, text=True, timeout=60, cwd=str(_probe_dir),
+                           env=dict(os.environ, PYTHONPATH=str(_probe_dir)))
+    _report = json.loads(_proc.stdout.strip().splitlines()[-1]) if _proc.stdout.strip() else {}
+    check("probe: a package outside the allowlist is a failure, never a skip",
+          _report.get("probe_needs_unknown", "").startswith("missing "))
+    check("probe: an allowlisted package is a skip",
+          _report.get("probe_needs_optional", "").startswith("skip "))
+finally:
+    shutil.rmtree(_probe_dir, ignore_errors=True)
 
 for label, installed in (("hub-service", hub_service), ("hub/spoke", hub_spoke)):
     staging = Path(tempfile.mkdtemp(prefix="nth_entry_"))

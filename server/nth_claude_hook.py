@@ -38,8 +38,16 @@ import tempfile
 import threading
 import time
 
-from nth_listener import FILTERS, PUSH_BURST, PUSH_REFILL_SECONDS, Listener, quartet_poll_factory
-from nth_notice import ENDED_ADVICE, from_event, name  # noqa: F401 - ENDED_ADVICE re-exported
+try:
+    from nth_listener import FILTERS, PUSH_BURST, PUSH_REFILL_SECONDS, Listener, quartet_poll_factory
+    from nth_notice import ENDED_ADVICE, from_event, name  # noqa: F401 - ENDED_ADVICE re-exported
+except Exception:  # noqa: BLE001
+    # Run as a hook, a partial install must not disturb the session: whatever this
+    # process writes to stderr reaches the model as a system reminder, a traceback
+    # included. Leave quietly. Imported as a module, fail as usual.
+    if __name__ != '__main__':
+        raise
+    sys.exit(0)
 
 # Any nth-* server: setup.py registers nth-trio and nth-qweb, and users add more
 # Quartet hubs under their own names (nth-team, ...). Server names never contain "__".

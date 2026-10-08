@@ -52,7 +52,14 @@ import sys
 import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import nth_claude_hook as core  # noqa: E402
+try:
+    import nth_claude_hook as core  # noqa: E402
+except Exception:  # noqa: BLE001
+    # Run as a hook, a partial install must not disturb the session: Codex may show
+    # a hook's output to the model or the user. Leave quietly; as a module, fail.
+    if __name__ != '__main__':
+        raise
+    sys.exit(0)
 
 # Codex reports an MCP tool as mcp__<server>__<tool>, with every character of the
 # server name outside [A-Za-z0-9_] replaced by "_": nth-qweb becomes nth_qweb.
