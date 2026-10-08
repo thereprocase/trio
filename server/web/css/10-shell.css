@@ -855,6 +855,49 @@ h1,h2,h3,h4{ margin:0; font-weight:600; }
 .toast .t-ic svg{ width:17px; height:17px; }
 @keyframes toastIn{ from{ opacity:0; transform:translateY(12px) scale(.96);} to{ opacity:1; transform:none; } }
 
+/* pull to refresh + update pill (48-app-refresh.js). The class sets display,
+   which would beat the UA's [hidden]{display:none}, so [hidden] is restated. */
+.pull-refresh{
+  position:fixed; z-index:var(--z-toast); top:env(safe-area-inset-top,0px); left:50%;
+  /* --pull is the damped finger distance; at 0 the pill sits just above the
+     viewport, so it slides down with the finger and back up on release. */
+  transform:translate(-50%, calc(var(--pull, 0px) - 100%));
+  display:inline-flex; align-items:center; gap:8px; padding:8px 15px 8px 12px;
+  background:var(--surface-2); color:var(--ink); border:1px solid var(--line); border-radius:999px;
+  box-shadow:var(--shadow-md); font-size:12.5px; font-weight:600; pointer-events:none; white-space:nowrap;
+}
+.pull-refresh[hidden]{ display:none; }
+.pull-refresh-icon{ width:16px; height:16px; color:var(--ink-3); transition:transform .15s var(--ease), color .15s var(--ease); }
+.pull-refresh.ready .pull-refresh-icon{ transform:rotate(180deg); color:var(--accent); }
+.pull-refresh.refreshing .pull-refresh-icon{ animation:pullSpin .9s linear infinite; }
+@keyframes pullSpin{ from{ transform:rotate(0deg); } to{ transform:rotate(360deg); } }
+.update-pill{
+  position:fixed; z-index:calc(var(--z-sidebar) - 10); top:calc(env(safe-area-inset-top,0px) + 78px); left:50%; transform:translateX(-50%);
+  display:inline-flex; align-items:center; gap:4px; padding:4px 4px 4px 14px;
+  background:var(--surface-2); color:var(--ink); border:1px solid var(--line); border-radius:999px;
+  box-shadow:var(--shadow-md); font-size:12.5px; font-weight:600; white-space:nowrap;
+  /* Opacity only: toastIn ends on transform:none, which would cancel the
+     centring translate above and push the pill off the right edge. */
+  animation:updatePillIn .3s var(--ease-soft) both;
+}
+@keyframes updatePillIn{ from{ opacity:0; } to{ opacity:1; } }
+.update-pill[hidden]{ display:none; }
+/* On phones the open nav drawer sits at z-index 2 (40-responsive.css), below
+   anything floating over the conversation. Its account menu already offers
+   "Update and reload", so the pill steps aside while the drawer is open. */
+.app.nav-open .update-pill{ display:none; }
+.update-pill-text{ margin-right:4px; }
+.update-pill-reload{ padding:5px 12px; border-radius:999px; background:var(--accent); color:var(--ink-inv); font-weight:700; }
+.update-pill-dismiss{ display:grid; place-items:center; width:28px; height:28px; border-radius:50%; color:var(--ink-3); }
+.update-pill-dismiss svg{ width:15px; height:15px; }
+.update-pill-dismiss:hover{ background:var(--bg-sink); color:var(--ink); }
+@media (min-width:881px){ .update-pill{ left:auto; right:24px; transform:none; } }
+@media (prefers-reduced-motion: reduce){
+  .pull-refresh-icon{ transition:none; }
+  .pull-refresh.refreshing .pull-refresh-icon{ animation:none; }
+  .update-pill{ animation:none; }
+}
+
 .hidden{ display:none !important; }
 
 /* ============================================================

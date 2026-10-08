@@ -10094,7 +10094,7 @@ WEB_CSS_FILES = (
 #   09-time                    message time formatting + copy-on-tap
 #   09-ui                      toasts, modals, confirmations
 #   10-markdown … 14-lightbox  rendering; read core, api and ui
-#   20-workspace … 46-data     features; read everything above
+#   20-workspace … 48-app-refresh  features; read everything above
 #   90-boot                    runs last; mounts the features
 #
 # THE FILENAME PREFIXES ARE THE ORDER, and that is worth keeping true. This
@@ -10117,7 +10117,7 @@ WEB_JS_FILES = (
     "js/14-lightbox.js", "js/20-workspace.js", "js/30-agents.js",
     "js/40-preferences.js", "js/41-gameboy-controls.js", "js/42-ipod-controls.js",
     "js/45-notifications.js", "js/46-data.js", "js/47-push.js",
-    "js/90-boot.js", "js/99-test-hook.js",
+    "js/48-app-refresh.js", "js/90-boot.js", "js/99-test-hook.js",
 )
 
 
@@ -10489,6 +10489,24 @@ for _old, _new in (('href="/apple-touch-icon.png"', f'href="{_icon_url("/apple-t
         raise RuntimeError(f"server/web/index.html lost its icon link: {_old}")
     INDEX_HTML = INDEX_HTML.replace(_old, _new, 1)
 PWA_SERVICE_WORKER = _read_web_bytes("sw.js")
+
+# ───────── Build identity ─────────
+# An installed app can stay open for days, so the page needs a way to notice
+# that the hub now serves something newer than what it is running. The build
+# id is a hash of everything a reload would change: the page, the manifest and
+# the service worker. It is computed once, here, after every substitution, so
+# two hubs with different app identities get different ids and an unchanged
+# checkout restarted gets the same one. The page carries it in
+# <meta name="nth-build">; /api/version answers with the same value.
+APP_BUILD = hashlib.sha256(
+    INDEX_HTML.encode("utf-8") + b"\0" + PWA_MANIFEST + b"\0" + PWA_SERVICE_WORKER
+).hexdigest()[:12]
+_BUILD_MARKER = '<meta name="nth-build" content="">'
+if _BUILD_MARKER not in INDEX_HTML:
+    raise RuntimeError(f"server/web/index.html lost its build marker: {_BUILD_MARKER}")
+INDEX_HTML = INDEX_HTML.replace(_BUILD_MARKER, f'<meta name="nth-build" content="{APP_BUILD}">', 1)
+APP_VERSION_JSON = json.dumps({"build": APP_BUILD, "version": NTH_VERSION}).encode("utf-8")
+
 # Static, identical for every viewer, and fetched by the browser without the
 # page's cookies (a manifest request is credentials-less by default), so these
 # are served before any identity check — the same reasoning as /avatars/.
@@ -10501,6 +10519,10 @@ PWA_ROUTES: Dict[str, Tuple[bytes, str, str, Tuple[Tuple[str, str], ...]]] = {
     # browser revalidate on every navigation so a deploy reaches phones.
     "/sw.js": (PWA_SERVICE_WORKER, "text/javascript; charset=utf-8", "no-cache",
                (("Service-Worker-Allowed", "/"),)),
+    # The open page polls this to learn whether a reload would bring a newer
+    # build (48-app-refresh.js). Constant bytes and nothing per-viewer, so it
+    # costs a dict lookup; no-store so a phone never answers from its cache.
+    "/api/version": (APP_VERSION_JSON, "application/json; charset=utf-8", "no-store", ()),
     # iOS probes these two root paths even when the page names its icon.
     "/apple-touch-icon.png": (PWA_ICONS["apple-touch-icon.png"], "image/png",
                               "public, max-age=86400", ()),
