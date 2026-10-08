@@ -32,6 +32,29 @@
     return BY_STATUS[status] || `That request failed (${status}).`;
   }
 
+  // A viewer the hub cannot name over Tailscale (another tailnet's user, a
+  // shared node) sits in the "pending" tier, and the server refuses its posts
+  // until it declares a guest name through /api/identify. Nothing else in the
+  // page asks for that name, so the first refused action asks for it here.
+  const NEEDS_NAME = /pick a name/i;
+  async function declareGuestName() {
+    const raw = window.prompt('Pick a name to post in this channel (up to 40 characters):') || '';
+    const name = raw.trim().slice(0, 40);
+    if (!name) return false;
+    const response = await fetch('/api/identify', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
+    });
+    if (!response.ok) return false;
+    const data = await response.json().catch(() => ({}));
+    if (data.operator && Trio.state) {
+      Trio.state.operator = data.operator;
+      if (Trio.store) Trio.store.set('session.operator', data.operator);
+    }
+    return true;
+  }
+
   async function request(method, path, body = null, channelScoped = true, options = {}) {
     const u = url(path, channelScoped);
     const init = { method, headers: {} };
@@ -46,6 +69,10 @@
     try { data = text ? JSON.parse(text) : { ok: false }; } catch { data = { ok: false, error: text.trim() || 'Server returned non-JSON' }; }
     if (!response.ok) {
       const detail = data?.error || text || 'request failed';
+      if (response.status === 403 && NEEDS_NAME.test(detail) && !options.nameDeclared
+          && await declareGuestName()) {
+        return request(method, path, body, channelScoped, { ...options, nameDeclared: true });
+      }
       // Two audiences. ~20 call sites toast `error.message` verbatim, so the
       // message has to read as a sentence to a person — "403 /api/send: not a
       // trusted operator" is a stack trace shown to a human, and an upload

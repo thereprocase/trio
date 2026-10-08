@@ -17,6 +17,7 @@ Two independent properties, both about who the web side is willing to trust.
 
 Usage: python tests/test-identity-owner.py
 """
+import os
 import sys
 import types
 from pathlib import Path
@@ -64,7 +65,46 @@ try:
     with_whois("someone-else@example.com")
     ident = reg.resolve_from_tailscale("tok-other", "100.64.0.2")
     check("a DIFFERENT tailnet account is refused the tailscale tier",
-          ident is None)
+          ident is not None and ident.source != web.IDENTITY_SOURCE_TAILSCALE)
+    check("a DIFFERENT tailnet account becomes a guest named by Tailscale",
+          ident is not None and ident.source == web.IDENTITY_SOURCE_GUEST
+          and ident.tailnet_verified and ident.name == "someone-else"
+          and ident.login == "someone-else@example.com")
+    check("a tailnet-verified guest gets no operator-only powers",
+          ident is not None and ident.source not in web.CULL_ALLOWED_SOURCES
+          and ident.source not in web.LOCAL_PATH_ALLOWED_SOURCES)
+    check("a tailnet-verified guest keeps the -guest trust tag",
+          ident is not None and ident.display_name.endswith("-guest"))
+    other_device = reg.resolve_from_tailscale("tok-other-2", "100.64.0.9")
+    check("the same tailnet account on another cookie is the same member",
+          other_device is not None and other_device.member_id == ident.member_id)
+    # An owner-listed account joins as a named member, without operator powers.
+    os.environ["NTH_TAILNET_MEMBERS"] = "Member@Example.com=Sam, bad-entry, x@example.com="
+    try:
+        reg = web.OperatorRegistry()
+        with_whois("member@example.com")
+        mem = reg.resolve_from_tailscale("tok-member", "100.64.0.7")
+        check("a listed tailnet account resolves as a named member",
+              mem is not None and mem.source == web.IDENTITY_SOURCE_MEMBER
+              and mem.display_name == "Sam" and mem.login == "member@example.com")
+        check("a member gets no operator-only powers",
+              mem.source not in web.CULL_ALLOWED_SOURCES
+              and mem.source not in web.LOCAL_PATH_ALLOWED_SOURCES)
+        check("a member is not the owner's tailscale tier",
+              mem.source != web.IDENTITY_SOURCE_TAILSCALE)
+        check("malformed NTH_TAILNET_MEMBERS entries are ignored",
+              web.tailnet_members() == {"member@example.com": "Sam"})
+        with_whois("unlisted@example.com")
+        other = reg.resolve_from_tailscale("tok-unlisted", "100.64.0.8")
+        check("an unlisted account stays a tailnet-verified guest",
+              other.source == web.IDENTITY_SOURCE_GUEST and other.tailnet_verified)
+    finally:
+        os.environ.pop("NTH_TAILNET_MEMBERS", None)
+    with_whois("someone-else@example.com")
+    reg = web.OperatorRegistry()
+    renamed = reg.register_guest("tok-other", "operator")
+    check("register_guest itself still works for self-declared names",
+          renamed.source == web.IDENTITY_SOURCE_GUEST and not renamed.tailnet_verified)
 
     # A second machine of the owner's carries the same login, so multi-device
     # use must be unaffected -- this is the regression the check could plausibly
@@ -114,7 +154,7 @@ try:
         with_whois("intruder@example.com")
         ident = reg.resolve_from_tailscale("tok-perm-mismatch", "100.64.0.5")
         check("permissive does NOT excuse a known-owner mismatch",
-              ident is None)
+              ident is not None and ident.source == web.IDENTITY_SOURCE_GUEST)
     finally:
         os.environ.pop("NTH_TAILNET_PERMISSIVE", None)
 
