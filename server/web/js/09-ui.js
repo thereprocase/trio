@@ -26,6 +26,10 @@
     if (!host.hasAttribute('popover')) host.setAttribute('popover', 'manual');
     const node = document.createElement('div'); node.className = 'toast'; node.textContent = message; host.append(node);
     const dismiss = () => { node.remove(); if (!host.childElementCount) { try { host.hidePopover?.(); } catch {} } };
+    // Tap to dismiss. Toasts sit at the bottom of the screen, which on a phone
+    // is the composer: a long message would otherwise cover Send and the mic
+    // for its whole timeout.
+    node.addEventListener('click', event => { if (event.target === node) dismiss(); });
     if (action && action.label && typeof action.onClick === 'function') {
       const btn = document.createElement('button'); btn.type = 'button'; btn.className = 'toast-action'; btn.textContent = action.label;
       btn.addEventListener('click', () => { action.onClick(); dismiss(); });

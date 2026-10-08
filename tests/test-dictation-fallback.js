@@ -171,12 +171,12 @@ win.SpeechRecognition = savedSpeech;
 
 // ── 3. the transcript accumulator ──
 // Reported live: saying "Today is a beautiful sunny day" produced "today today
-// is today is a today is a beautiful…". Each result event carries only the
-// results from resultIndex onward, so the running final text must accumulate
-// across events — but the BOX has to be rewritten from a fixed baseline, never
-// appended to. The original read the box back and appended the running
-// transcript to it, so every event re-added the whole sentence so far. Interim
-// results fire on nearly every word, so output grew quadratically with speech.
+// is today is a today is a beautiful…". The BOX has to be rewritten from a
+// fixed baseline, never appended to. The original read the box back and
+// appended the running transcript to it, so every event re-added the whole
+// sentence so far. Interim results fire on nearly every word, so output grew
+// quadratically with speech. The text itself is rebuilt from the whole
+// results list on every event (see 3b for why resultIndex is not trusted).
 const acc = Trio.composer.makeSpeechAccumulator;
 check('makeSpeechAccumulator is exported', typeof acc === 'function');
 
@@ -227,13 +227,103 @@ absorb = acc('');
 out = absorb([res('hello', true)], 0);
 check('an empty baseline yields no leading whitespace', out === 'hello');
 
-// resultIndex is what makes events incremental — a handler that ignores it
-// and rescans from 0 re-adds every already-final result.
+// The same list delivered twice must not add its finals twice. The old
+// accumulator relied on resultIndex to avoid that; the text is now rebuilt
+// from the whole list, so a repeated event is simply the same text again.
 absorb = acc('');
-const results = [res('one', true), res('two', true)];
+const results = [res('one', true), res(' two', true)];
 absorb(results.slice(0, 1), 0);
+absorb(results, 1);
 out = absorb(results, 1);
-check('resultIndex is honoured, not rescanned from zero', out === 'onetwo');
+check('a repeated event does not duplicate finals', out === 'one two');
+
+// ── 3b. Android Chrome result sequences ──
+// Android does not follow the desktop model: finals arrive duplicated or
+// cumulative, and resultIndex does not advance the way it does on desktop.
+// The old accumulator turned these into "hello hello world". Each sequence
+// below is a list of (results, resultIndex) events as Android delivers them.
+function play(baseline, events) {
+  const a = acc(baseline);
+  let text = '';
+  for (const [list, index] of events) text = a(list.map(([t, f]) => res(t, f)), index);
+  return text;
+}
+check('android: cumulative finals in a growing list, resultIndex stuck at 0',
+      play('', [
+        [[['hello', false]], 0],
+        [[['hello', true]], 0],
+        [[['hello', true], ['hello world', false]], 0],
+        [[['hello', true], ['hello world', true]], 0],
+      ]) === 'hello world');
+check('android: a final delivered twice appears once',
+      play('', [
+        [[['hello world', true]], 0],
+        [[['hello world', true], ['hello world', true]], 0],
+      ]) === 'hello world');
+check('android: one slot whose final keeps growing',
+      play('', [
+        [[['hello', true]], 0],
+        [[['hello world', true]], 0],
+        [[['hello world how are you', true]], 0],
+      ]) === 'hello world how are you');
+check('android: separate finals with resultIndex never advancing',
+      play('', [
+        [[['hello', true]], 0],
+        [[['hello', true], ['world', true]], 0],
+      ]) === 'hello world');
+check('android: duplicated finals differing only in case collapse',
+      play('', [
+        [[['hello', true]], 0],
+        [[['hello', true], ['Hello there', true]], 0],
+      ]) === 'Hello there');
+check('android: an interim that restates the finals replaces them on screen',
+      play('', [
+        [[['send the', true], ['send the report', false]], 0],
+      ]) === 'send the report');
+// A browser that starts a fresh list mid-session must not lose what was
+// already final: finals are immutable, so a final that turns into unrelated
+// text means the list was replaced and the old words are carried forward.
+check('a replaced results list keeps the earlier finals',
+      play('', [
+        [[['first part', true]], 0],
+        [[['second part', false]], 0],
+        [[['second part', true]], 0],
+      ]) === 'first part second part');
+check('a final revised shorter is not duplicated',
+      play('', [
+        [[['hello world', true]], 0],
+        [[['hello', true]], 0],
+      ]) === 'hello');
+
+// ── 3c. desktop sequences still produce the right text ──
+check('desktop: two finals with Chrome\'s leading space',
+      play('', [
+        [[['First sentence.', true]], 0],
+        [[['First sentence.', true], [' Second sentence.', true]], 1],
+      ]) === 'First sentence. Second sentence.');
+check('desktop: interim after a final, then the final',
+      play('', [
+        [[['one', true], [' two thr', false]], 1],
+        [[['one', true], [' two three', true]], 1],
+      ]) === 'one two three');
+check('desktop: a growing interim never repeats', play('', [
+  [[['today', false]], 0], [[['today is', false]], 0], [[['today is a sunny day', true]], 0],
+]) === 'today is a sunny day');
+
+// ── 3d. the typed-text baseline ──
+check('baseline kept once ahead of an android cumulative sequence',
+      play('existing note', [
+        [[['hello', true]], 0],
+        [[['hello', true], ['hello world', true]], 0],
+      ]) === 'existing note hello world');
+check('baseline is never collapsed into the dictation, even when it matches',
+      play('hello', [[[['hello world', true]], 0]]) === 'hello hello world');
+check('a baseline ending in a newline gets no extra space',
+      play('line one\n', [[[['line two', true]], 0]]) === 'line one\nline two');
+check('nothing heard leaves the baseline exactly as typed',
+      play('typed ', [[[['', false]], 0]]) === 'typed ');
+check('Japanese pieces are joined without a space',
+      play('', [[[['今日は', true], ['晴れです', true]], 1]]) === '今日は晴れです');
 
 // ── 4. why the mic button is dead ──
 // The button used to be `disabled` with title "Dictation is unavailable in
@@ -292,9 +382,108 @@ check('an unrecognised error is passed through unchanged',
 check('empty input does not become "undefined"',
       human(undefined) === '' && human(null) === '');
 
-console.log('');
-if (failures.length) {
-  console.log(failures.length + ' FAILED: ' + failures.join(', '));
-  process.exit(1);
-}
-console.log(passed + ' dictation fallback checks passed');
+// ── 6. which engine a tap starts ──
+// On a hub without Whisper (every Linux hub: mlx_whisper is Apple-silicon
+// only) the old default recorded the whole utterance, uploaded it after Stop,
+// failed, and lost it. The choice now follows /api/stt/health.
+const choose = C.chooseDictationEngine;
+check('chooseDictationEngine is exported', typeof choose === 'function');
+const caps = { canRecord: true, canRecognise: true };
+check('auto + hub has local Whisper -> local',
+      choose({ mode: 'auto', hubLocal: true, ...caps }).engine === 'local');
+check('auto + hub without local Whisper -> browser, with no message',
+      (r => r.engine === 'web' && !r.message)(choose({ mode: 'auto', hubLocal: false, ...caps })));
+check('auto + health not known yet -> browser (cannot lose a recording)',
+      choose({ mode: 'auto', hubLocal: null, ...caps }).engine === 'web');
+check('auto + hub without local + no browser engine -> nothing, with a reason',
+      (r => r.engine === 'none' && /isn't installed/.test(r.message))(
+        choose({ mode: 'auto', hubLocal: false, canRecord: true, canRecognise: false })));
+const explicitDead = choose({ mode: 'local', hubLocal: false,
+  detail: 'speech engine (mlx_whisper) not installed', ...caps });
+check('explicit local + hub without it -> does not record', explicitDead.engine === 'none');
+check('...says so in one short sentence',
+      /^Local Whisper isn't installed on this hub\.$/.test(explicitDead.message));
+check('...and offers the browser engine as a choice, not a switch', explicitDead.offerBrowser === true);
+check('explicit local + other health failure names the reason',
+      /ffmpeg/.test(choose({ mode: 'local', hubLocal: false, detail: 'ffmpeg not found', ...caps }).message));
+check('explicit local + hub has it -> local',
+      choose({ mode: 'local', hubLocal: true, ...caps }).engine === 'local');
+check('explicit web -> browser even when the hub has local',
+      choose({ mode: 'web', hubLocal: true, ...caps }).engine === 'web');
+check('explicit web without a browser engine -> a reason, not a crash',
+      (r => r.engine === 'none' && /Preferences/.test(r.message))(
+        choose({ mode: 'web', hubLocal: true, canRecord: true, canRecognise: false })));
+
+// The same decision through the live tap, with a fake engine and hub. The
+// browser engine must START inside the tap (no await first), or Safari
+// refuses it as outside a user gesture; the local engine must never open the
+// mic when the hub already said it cannot transcribe.
+(async () => {
+  const toasts = [];
+  const savedToast = Trio.ui.toast;
+  Trio.ui.toast = (message, ms, action) => toasts.push({ message, action });
+  const started = [];
+  function FakeSpeech() { this.start = () => started.push(this); this.stop = () => { this.stopped = true; }; }
+  let micOpens = 0;
+  win.isSecureContext = true;
+  win.SpeechRecognition = FakeSpeech;
+  win.MediaRecorder = function () {};
+  win.navigator.mediaDevices = { getUserMedia: () => { micOpens++; return new Promise(() => {}); } };
+  const savedFetch = win.fetch;
+  let health = { engine: 'mlx_whisper', available: false, detail: 'speech engine (mlx_whisper) not installed' };
+  win.fetch = () => Promise.resolve({ ok: true, json: () => Promise.resolve(health) });
+  try {
+    await C.refreshSttHealth();
+    Trio.preferences.save({ sttMode: 'auto' });
+    const tap = C.toggleDictation();
+    check('auto on a hub without Whisper starts the browser engine inside the tap',
+          started.length === 1);
+    await tap;
+    check('...without opening a recording', micOpens === 0);
+    check('...and without a toast', toasts.length === 0);
+    C.stopDictation();
+
+    Trio.preferences.save({ sttMode: 'local' });
+    started.length = 0;
+    await C.toggleDictation();
+    check('explicit local on a hub without Whisper records nothing', micOpens === 0 && started.length === 0);
+    check('...and says so before recording',
+          toasts.length === 1 && /isn't installed on this hub/.test(toasts[0].message));
+    check('...with a button for the browser engine', toasts[0].action?.label === 'Use browser dictation');
+    toasts[0].action.onClick();
+    check('the button starts the browser engine', started.length === 1);
+    C.stopDictation();
+
+    health = { engine: 'mlx_whisper', available: true, detail: 'model cached' };
+    await C.refreshSttHealth();
+    Trio.preferences.save({ sttMode: 'auto' });
+    started.length = 0;
+    C.toggleDictation();
+    await new Promise(r => setTimeout(r, 0));
+    check('auto on a hub with Whisper records locally', micOpens === 1 && started.length === 0);
+    check('the health answer feeds the diagnostics line', Trio.state.sttHealth === 'ready');
+  } finally {
+    Trio.ui.toast = savedToast;
+    win.fetch = savedFetch;
+  }
+
+  // ── 7. the stored preference ──
+  // sttMode used to default to 'local' and save() writes every key, so a
+  // stored 'local' is almost always the old default. It moves to Auto; a
+  // stored 'web' and a 'local' chosen since this change both stay.
+  const P = Trio.preferences;
+  function stored(raw) { win.localStorage.setItem('trio.preferences.v1', JSON.stringify(raw)); return P.apply().sttMode; }
+  check('a fresh profile defaults to auto', (win.localStorage.removeItem('trio.preferences.v1'), P.apply().sttMode) === 'auto');
+  check('a legacy stored local migrates to auto', stored({ sttMode: 'local' }) === 'auto');
+  check('a legacy stored web stays web', stored({ sttMode: 'web' }) === 'web');
+  P.save({ sttMode: 'local' });
+  check('local chosen after the change survives a reload', P.apply().sttMode === 'local');
+  check('an unknown stored value falls back to auto', stored({ sttMode: 'cloud', sttModeVersion: 2 }) === 'auto');
+
+  console.log('');
+  if (failures.length) {
+    console.log(failures.length + ' FAILED: ' + failures.join(', '));
+    process.exit(1);
+  }
+  console.log(passed + ' dictation fallback checks passed');
+})().catch(error => { console.log('FAIL: async section threw: ' + error.stack); process.exit(1); });
