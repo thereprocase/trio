@@ -215,8 +215,8 @@ def next_steps(result, platform=None):
             'ONE-TIME STEP: Codex runs new or changed hooks only after you trust them. Start `codex`;',
             'at "Hooks need review" choose "Trust all and continue" (or review them in /hooks).',
             'Until then a plainly launched Codex is not woken. Re-run this step after any reinstall',
-            'that changes the hook commands. Only the shared Codex daemon is woken, and a session pauses',
-            'after TRIO_CODEX_UNATTENDED_WAKES wakes (default 10) with nobody typing, until you type in it.',
+            'that changes the hook commands. Only the shared Codex daemon is woken; a session is woken',
+            'for every message that passes its filter, also after its window closes, until it ends.',
             'Remove the hooks with `trio hooks-uninstall`.',
         ]
         if result.get('codex_toml_hooks'):

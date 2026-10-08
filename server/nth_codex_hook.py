@@ -11,15 +11,13 @@ message that passes the filter the waiter runs
     codex queue --thread <session id> --message <wake text>
 
 which starts a turn in an idle thread, or queues one behind a running turn.
-`setup.py` registers the hook in Codex's hooks.json for five events:
+`setup.py` registers the hook in Codex's hooks.json for four events:
 
     tool    PostToolUse on the Trio/Quartet connect, listen and ack tools of any
             nth-* server: note which membership this session holds, then arm
     stop    Stop, after every turn: arm again if this session holds memberships
     start   SessionStart (startup, resume): a resumed session takes its
             memberships back and arms
-    prompt  UserPromptSubmit: a person typed, so the unattended-wake budget
-            starts again (a queued wake also arrives as a prompt; it does not count)
     end     SessionEnd: this session is over, its waiter leaves
 
 The hook arms only inside the shared Codex app-server daemon, the server
@@ -27,11 +25,9 @@ The hook arms only inside the shared Codex app-server daemon, the server
 app, an IDE's app-server) a queued wake could run the thread in a second server,
 so it stands down and says why in the session's status file.
 
-A closed window does not end a session while wakes keep it busy: the daemon
-unloads a thread only after it has been idle for about a minute, and every wake
-is activity. The waiter therefore stops after TRIO_CODEX_UNATTENDED_WAKES wakes
-(default 10; 0 means no limit) with nobody typing, and stays paused until a
-person types in the session or resumes it.
+Wakes are bounded by the membership's filter and the rate limit, nothing else:
+a session is woken for every message that passes its filter, including after its
+window closes (the daemon keeps a busy thread loaded), until the session ends.
 
 Arming spawns `nth_codex_hook.py wait` in a new session with stdin, stdout and
 stderr on the null device: Codex waits for the hook's pipes to close, and kills
@@ -69,8 +65,10 @@ HOOK_SCRIPT = 'nth_codex_hook.py'
 # one is anchored. "startup|resume" is matched exactly (only letters and "|").
 TOOL_MATCHER = r'^mcp__nth[-_][A-Za-z0-9_-]*__(trio|quartet)_(connect|listen|ack)$'
 HOOK_EVENTS = (('PostToolUse', 'tool', TOOL_MATCHER), ('Stop', 'stop', None),
-               ('SessionStart', 'start', 'startup|resume'), ('UserPromptSubmit', 'prompt', None),
-               ('SessionEnd', 'end', None))
+               ('SessionStart', 'start', 'startup|resume'), ('SessionEnd', 'end', None))
+# Events an earlier release registered and this one does not. A re-install removes
+# Trio's group from them in place; `prompt` stays a harmless no-op meanwhile.
+RETIRED_EVENTS = ('UserPromptSubmit',)
 # The hook only records and spawns, so it returns in well under a second. A sync
 # hook holds up the turn while it runs: keep the ceiling short.
 HOOK_TIMEOUT_SECONDS = 30
@@ -92,11 +90,6 @@ QUEUE_ATTEMPTS = 3
 QUEUE_RETRY_SECONDS = 2.0
 # How often a waiter checks whether Trio's own event service has taken the thread.
 RELAY_CHECK_SECONDS = 30.0
-# Wakes allowed with nobody typing in the session, before delivery pauses.
-DEFAULT_UNATTENDED_WAKES = 10
-# Every queued notice starts with this, and a prompt made only of such lines is a
-# wake, not a person: see is_wake_notice.
-NOTICE_PREFIX = 'Trio delivery'
 # Processes that may stand between the daemon and this hook: Codex runs a hook as
 # `$SHELL -lc <command>` (cmd.exe /C on Windows), and the shell may or may not exec.
 SHELLS = frozenset(('sh', 'bash', 'zsh', 'dash', 'ash', 'ksh', 'mksh', 'fish', 'tcsh', 'csh',
@@ -163,6 +156,14 @@ def install_hooks(data, python, script, runtime):
         else:
             groups.append(group)
         hooks[event] = groups
+    for event in RETIRED_EVENTS:
+        # Only Trio's own group goes; the user's hooks for that event stay in order.
+        if isinstance(hooks.get(event), list):
+            kept = [group for group in hooks[event] if not is_trio_group(group)]
+            if kept:
+                hooks[event] = kept
+            else:
+                del hooks[event]
     return data
 
 
@@ -397,25 +398,6 @@ def queue_wake(session_id, text):
     return 'failed'
 
 
-def unattended_budget():
-    """Wakes allowed with nobody typing: TRIO_CODEX_UNATTENDED_WAKES, default 10; 0 or
-    less means no limit (None)."""
-    try:
-        value = int(os.environ.get('TRIO_CODEX_UNATTENDED_WAKES', DEFAULT_UNATTENDED_WAKES))
-    except ValueError:
-        value = DEFAULT_UNATTENDED_WAKES
-    return value if value > 0 else None
-
-
-def is_wake_notice(prompt):
-    """Whether a submitted prompt is a queued Trio notice rather than a person typing.
-    Codex runs UserPromptSubmit for queued messages too."""
-    if not isinstance(prompt, str):
-        return False
-    lines = [line.strip() for line in prompt.splitlines() if line.strip()]
-    return bool(lines) and all(line.startswith(NOTICE_PREFIX) for line in lines)
-
-
 class QueueSink:
     """How a waiter reaches a Codex thread: `codex queue`. See core.StderrSink."""
     client = 'codex'
@@ -427,7 +409,6 @@ class QueueSink:
         self.lifetime = LIFETIME_SECONDS
         self.settle = SETTLE_SECONDS
         self.patience = LOCK_PATIENCE_SECONDS
-        self.budget = unattended_budget()
         self.status = {'supervisor_pid': supervisor}
         self.outcome = {}
         self._checked = None
@@ -476,27 +457,15 @@ def spawn_waiter(session_id, supervisor):
 
 
 def arm(session_id, supervisor, problem=''):
-    """Start a waiter when this session holds memberships, has not ended and is not
-    paused. From a host a wake must not be queued from, record why instead."""
+    """Start a waiter when this session holds memberships and has not ended. From a
+    host a wake must not be queued from, record why instead."""
     state = core.load_session(session_id)
-    if not state or state['ended'] or not state['memberships'] or state.get('paused'):
+    if not state or state['ended'] or not state['memberships']:
         return None
     if problem:
         core.write_status(session_id, 'codex', 0, {}, supervisor_pid=supervisor, problem=problem)
         return None
     return spawn_waiter(session_id, supervisor)
-
-
-def _attended(session_id):
-    """A person is here: the unattended-wake budget starts again. True when it was paused."""
-    if not core.session_path(session_id).exists():
-        return False                                 # a session that never joined: no lock file either
-    with core.session_update(session_id) as state:
-        if state is None:
-            return False
-        paused = bool(state.get('paused'))
-        state.update(unattended_wakes=0, paused=False, last_prompt=time.time())
-        return paused
 
 
 def main(argv=None):
@@ -517,6 +486,8 @@ def main(argv=None):
             return 0
         core.wait(args.session, QueueSink(args.session, args.supervisor))
         return 0
+    if args.event == 'prompt':
+        return 0                                     # retired: see RETIRED_EVENTS
     try:
         payload = json.load(sys.stdin)
     except ValueError:
@@ -532,16 +503,6 @@ def main(argv=None):
     host, problem = codex_host()
     if host and host == trio_server_pid():
         return 0                                     # `trio codex`: the event service delivers
-    if args.event == 'prompt':
-        if is_wake_notice(payload.get('prompt')):
-            return 0
-        # A subagent's task arrives as a prompt under the root session id, written by the
-        # parent model; only the root thread's prompts come from a person.
-        if payload.get('agent_id') or payload.get('agent_type'):
-            return 0
-        if _attended(session_id):
-            arm(session_id, host, problem)           # paused until now; otherwise Stop arms
-        return 0
     if args.event == 'tool':
         core.register(payload, tools=HOOK_TOOLS, client='codex')
     if args.event == 'start':
@@ -550,8 +511,6 @@ def main(argv=None):
         with core.session_update(session_id) as state:
             if state is not None and state['memberships']:
                 state['ended'] = False
-        if payload.get('source') == 'resume':
-            _attended(session_id)
     arm(session_id, host, problem)
     return 0
 

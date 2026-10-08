@@ -497,76 +497,42 @@ class CodexHookTests(unittest.TestCase):
         time.sleep(.5)
         self.assertEqual(core.read_status(SESSION)['pid'], 0)
 
-    # ---- the unattended-wake budget -----------------------------------------------------------
+    # ---- no cap: the filter decides ----------------------------------------------------------
 
     def wake_once(self, hubs, mid):
-        # A full rate-limit bucket each time: the budget is what is under test here.
+        # A full rate-limit bucket each time: the rate limit only spaces wakes out.
         with core.session_update(SESSION) as state:
             state['bucket'] = None
         hubs.last['http://hub-a.example/sse'] = [message(mid, mentioned=True)]
         return self.run_waiter(hubs)
 
-    def test_the_budget_stops_wakes_until_someone_types(self):
+    def test_every_message_that_passes_the_filter_wakes_with_no_cap(self):
         import nth_event_access as access
         self.install()
         self.join()
         hubs = Hubs()
-        with patch.dict(os.environ, {'TRIO_CODEX_UNATTENDED_WAKES': '2'}):
-            self.assertEqual([self.wake_once(hubs, mid) for mid in (2, 3, 4)], [2, 2, 0])
-            self.assertEqual(len(self.calls()), 2)
-            state = core.load_session(SESSION)
-            self.assertEqual((state['unattended_wakes'], state['paused']), (2, True))
-            self.assertTrue(core.read_status(SESSION)['paused'])
-            with patch.dict(os.environ, {'TRIO_NATIVE_CLIENT': 'codex'}):
-                status = access.delivery_status('room', 'member', TOKEN, session=SESSION)
-            self.assertEqual((status['state'], status['ready'], status['waiter']), ('paused', False, 'paused'))
-            self.assertIn('has to type once', status['hint'])
-            # A Stop while paused arms nothing; a queued notice is not a person typing.
-            self.assertEqual(self.run_main('stop', {'session_id': SESSION})[1], [])
-            notice = self.calls()[-1][4]
-            self.assertEqual(self.run_main('prompt', {'session_id': SESSION, 'prompt': notice})[1], [])
-            self.assertTrue(core.load_session(SESSION)['paused'])
-            # A person types: the budget starts again and the waiter is armed at once.
-            spawned = self.run_main('prompt', {'session_id': SESSION, 'prompt': 'carry on'})[1]
-            self.assertEqual([args[0] for args in spawned], [SESSION])
-            state = core.load_session(SESSION)
-            self.assertEqual((state['unattended_wakes'], state['paused']), (0, False))
-            self.assertEqual(self.wake_once(hubs, 5), 2)
-            self.assertEqual(len(self.calls()), 3)
+        self.assertEqual([self.wake_once(hubs, mid) for mid in range(2, 27)], [2] * 25)
+        self.assertEqual(len(self.calls()), 25)
+        state = core.load_session(SESSION)
+        self.assertNotIn('paused', state)
+        self.assertNotIn('unattended_wakes', state)
+        # A Stop after all that still arms the next waiter.
+        self.assertEqual([args[0] for args in self.run_main('stop', {'session_id': SESSION})[1]], [SESSION])
+        with patch.dict(os.environ, {'TRIO_NATIVE_CLIENT': 'codex'}):
+            status = access.delivery_status('room', 'member', TOKEN, session=SESSION)
+        self.assertNotEqual(status['state'], 'paused')
 
-    def test_a_subagent_prompt_is_not_a_person_typing(self):
+    def test_the_retired_prompt_event_does_nothing(self):
+        # An install from an earlier release still runs `... prompt` until it is reinstalled.
         self.join()
-        with core.session_update(SESSION) as state:
-            state.update(unattended_wakes=10, paused=True)
-        for marker in ({'agent_id': 'agent-1'}, {'agent_type': 'worker'}):
-            payload = {'session_id': SESSION, 'prompt': 'investigate the failing build', **marker}
-            self.assertEqual(self.run_main('prompt', payload)[1], [])
-            state = core.load_session(SESSION)
-            self.assertEqual((state['unattended_wakes'], state['paused']), (10, True))
+        before = core.load_session(SESSION)
+        self.assertEqual(self.run_main('prompt', {'session_id': SESSION, 'prompt': 'hello'}), (0, []))
+        self.assertEqual(core.load_session(SESSION), before)
 
-    def test_a_resume_restarts_the_budget(self):
+    def test_a_resume_rearms(self):
         self.join()
-        with core.session_update(SESSION) as state:
-            state.update(unattended_wakes=10, paused=True)
         spawned = self.run_main('start', {'session_id': SESSION, 'source': 'resume'})[1]
         self.assertEqual([args[0] for args in spawned], [SESSION])
-        self.assertFalse(core.load_session(SESSION)['paused'])
-
-    def test_a_zero_budget_means_no_limit(self):
-        self.join()
-        hubs = Hubs()
-        with patch.dict(os.environ, {'TRIO_CODEX_UNATTENDED_WAKES': '0'}):
-            self.assertEqual([self.wake_once(hubs, mid) for mid in range(2, 15)], [2] * 13)
-        self.assertFalse(core.load_session(SESSION)['paused'])
-        self.assertEqual(hook.unattended_budget(), 10)               # the default, outside that patch
-        with patch.dict(os.environ, {'TRIO_CODEX_UNATTENDED_WAKES': 'many'}):
-            self.assertEqual(hook.unattended_budget(), 10)
-
-    def test_only_trio_notices_are_taken_for_wakes(self):
-        self.assertTrue(hook.is_wake_notice('Trio delivery: 1 new quartet message (id 2) ...'))
-        self.assertTrue(hook.is_wake_notice('Trio delivery: a\n\nTrio delivery has stopped for b'))
-        for prompt in ('hello', 'Trio delivery: x\nand then do this', '', None):
-            self.assertFalse(hook.is_wake_notice(prompt), prompt)
 
     # ---- queue outcomes ----------------------------------------------------------------------
 
@@ -759,6 +725,21 @@ class RegistrationTests(unittest.TestCase):
         # A group the user shares with our handler is theirs: left alone.
         mixed = {'hooks': {'Stop': [{'hooks': [self.FOREIGN, self.install({})['hooks']['Stop'][0]['hooks'][0]]}]}}
         self.assertEqual(hook.uninstall_hooks(mixed), 0)
+
+    def test_a_reinstall_removes_the_old_prompt_group_in_place(self):
+        old = {'type': 'command', 'command': '/venv/bin/python /nth/server/nth_codex_hook.py --home /nth prompt',
+               'timeout': 30}
+        mine, later = {'hooks': [self.FOREIGN]}, {'hooks': [dict(self.FOREIGN, command='later.sh')]}
+        data = self.install({'hooks': {'UserPromptSubmit': [mine, {'hooks': [old]}, later]}})
+        self.assertEqual(data['hooks']['UserPromptSubmit'], [mine, later])
+        self.assertTrue(all(event != 'UserPromptSubmit' for event, _, _ in hook.HOOK_EVENTS))
+        # Trio's group alone: the event goes with it.
+        data = self.install({'hooks': {'UserPromptSubmit': [{'hooks': [old]}]}})
+        self.assertNotIn('UserPromptSubmit', data['hooks'])
+        # And uninstall still finds it in a file nobody reinstalled.
+        stale = {'hooks': {'UserPromptSubmit': [mine, {'hooks': [old]}]}}
+        self.assertEqual(hook.uninstall_hooks(stale), 1)
+        self.assertEqual(stale, {'hooks': {'UserPromptSubmit': [mine]}})
 
     def test_a_quoted_path_with_spaces_is_still_recognised(self):
         data = hook.install_hooks({}, '/opt/my venv/python', '/my nth/server/nth_codex_hook.py', '/my nth')

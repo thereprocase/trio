@@ -85,8 +85,7 @@ def native_connect_response(response, *, source='local', url='', channel=None):
             'and a message that passes your filter starts a new turn in this thread with a short '
             'Trio delivery notice (queued behind a running turn). ' + unverified + 'If '
             + prefix + '_delivery_status never reports ready, Codex has probably not run the hooks: '
-            'new hooks run only after the user trusts them (/hooks in Codex). After several wakes with '
-            'nobody typing, delivery pauses until the user types once in this session. Do not launch a Claude '
+            'new hooks run only after the user trusts them (/hooks in Codex). Do not launch a Claude '
             'Monitor or an idle polling loop. A notice carries no message text: read with '
             + prefix + '_poll and acknowledge with ' + prefix + '_ack after processing. In a new '
             'session, call ' + prefix + '_listen with enabled omitted so the hook picks the '
@@ -249,11 +248,6 @@ CODEX_NO_WAITER = (
     'the user to open /hooks in Codex, or to restart Codex and choose "Trust all and continue"), '
     'or this turn was started by a Trio wake, and the waiter returns when it ends. Check again '
     'in your next turn.')
-CODEX_PAUSED = (
-    'Delivery is paused: {count} wakes arrived with nobody typing in this session, so Trio stopped '
-    'waking it (a closed window, or agents answering each other). The user has to type once in this '
-    'session, or resume it, to restart delivery. Until then tell your peers you only see messages '
-    'when you poll.')
 
 
 def _codex_hooks_status(channel, member_id, session_token, session=None):
@@ -262,7 +256,7 @@ def _codex_hooks_status(channel, member_id, session_token, session=None):
     session reports this membership listening. It does not prove that a wake reaches
     the thread; the first wake does. `session` is the calling session when the host says
     it; otherwise the session that most recently joined with these credentials."""
-    from nth_claude_hook import (holders, identities_dir, identity_key_for, load_session,
+    from nth_claude_hook import (holders, identities_dir, identity_key_for,
                                  membership_config, read_json, read_status, status_live, waiter_for)
     key = identity_key_for(channel, member_id, session_token)
     if key is None:
@@ -284,14 +278,10 @@ def _codex_hooks_status(channel, member_id, session_token, session=None):
         state, hint = 'stopped', _recovery_hint(prefix, 'stopped')
     else:
         state, hint = 'hooks', CODEX_NO_WAITER + POLL_ONLY
-        held = load_session(target) if target else None
         status = read_status(target) if target else None
         status = status if isinstance(status, dict) and status.get('client') == 'codex' else None
         mine = waiter_for(key, 'codex', [target]) if target else None
-        if held and held.get('paused'):
-            state, extra['waiter'] = 'paused', 'paused'
-            hint = CODEX_PAUSED.format(count=int(held.get('unattended_wakes') or 0))
-        elif status and status.get('problem'):
+        if status and status.get('problem'):
             state = 'unavailable'
             hint = ('Trio\'s hooks cannot wake this session: ' + str(status['problem']) + '. Tell the '
                     'user.' + POLL_ONLY)

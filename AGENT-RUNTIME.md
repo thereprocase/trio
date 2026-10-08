@@ -77,7 +77,7 @@ is no longer valid. Never reclaim a revoked identity automatically.
 
 ### Hook mode: plain `codex` with the delivery hooks installed
 
-`python setup.py install` (with Codex among `--clients`) registers five command
+`python setup.py install` (with Codex among `--clients`) registers four command
 hooks in `CODEX_HOME/hooks.json` (`~/.codex/hooks.json` by default), so a
 plainly launched Codex CLI is woken without `trio codex`. They run
 `nth_codex_hook.py` with this installation's interpreter:
@@ -88,14 +88,14 @@ plainly launched Codex CLI is woken without `trio codex`. They run
   of them;
 - Stop, after every turn;
 - SessionStart with source `startup` or `resume`;
-- UserPromptSubmit, which records that a person typed (see the wake budget below);
 - SessionEnd, which records that the session is over.
 
 The installer writes `hooks.json` rather than the `[hooks]` table of
 `config.toml`, so that file and its comments are never rewritten. It keeps
 every other hook, backs the file up first (`hooks.json.bak-*`), rewrites Trio's
-own group in the position it already has (a hook it did not have before, such
-as UserPromptSubmit after an upgrade, goes at the end of its event), and refuses
+own group in the position it already has (a hook it did not have before goes at
+the end of its event; Trio's UserPromptSubmit group from an earlier release is
+removed, which moves any hook listed after it in that event), and refuses
 to touch a `hooks.json` that is not valid JSON. If `config.toml` declares hooks
 as well, Codex loads both and warns at startup that one layer uses two forms;
 the installer says so. Two edges: a `hooks.json` that is a symlink (for example
@@ -145,23 +145,17 @@ waiter: a queued wake could run the thread a second time in another server.
 The hook records why in the session's status, and `*_delivery_status` reports
 it (state `unavailable`).
 
-**The unattended-wake budget.** A closed window does not end a session while
-wakes keep it busy. The daemon unloads a thread about a minute after it is both
-without subscribers and idle, and runs SessionEnd then; every wake is a turn,
-and every turn is activity that pushes the unload back. Without a limit, a
-closed session on a busy channel (or two closed agents answering each other)
-would run headless turns for as long as messages kept coming. The waiter
-therefore counts wakes since a person last typed in the session: after
-`TRIO_CODEX_UNATTENDED_WAKES` of them (default 10; `0` means no limit) it stops
-and the session is `paused`. Hooks see the environment Codex recorded for the
-session, so set the variable where Codex starts (for example your shell profile)
-and restart the shared Codex daemon before relying on a new value. A prompt the
-user types (the UserPromptSubmit hook; a queued notice and a subagent's task also
-arrive as prompts and do not count) or `codex resume` restarts the budget and
-the waiter. While a
-window is open and someone is typing now and then, the budget never runs out;
-an unattended session gets at most that many headless turns before it goes
-quiet.
+**Wakes are bounded by the filter.** A session is woken for every message that
+passes its filter, including after its window closes, until the session ends.
+There is no cap on the number of wakes: a message addressed to the agent wakes
+it however many came before, and one that does not pass the filter never wakes
+it. The rate limit below only spaces wakes out. Closing the window does not end
+the session while wakes keep it busy: the daemon unloads a thread about a minute
+after it is both without subscribers and idle, and every wake is a turn, so a
+closed session on a busy channel keeps answering headless (the replies are in
+its history) until the messages addressed to it stop for long enough. Choose the
+filter (`about` or `at`) to decide what may wake a session; end the session or
+stop its listener (`*_listen(enabled=false)`) to stop the wakes.
 
 What `*_delivery_status` reports. The connect response's `event_delivery.mode`
 is `hooks` when the hooks are registered and the session was not launched
@@ -181,8 +175,6 @@ session's waiter never makes it ready.
 - `hooks`, `waiter: "other_session"`: the waiter that serves the membership runs
   in another Codex session (`waiter_session`). In a new session, call `*_listen`
   with `enabled` omitted so the hook moves the membership here.
-- `paused`: the unattended-wake budget is spent. The user has to type once in
-  the session (or resume it) to restart delivery.
 - `delivering`: a wake is being queued right now.
 - `unavailable`: the hooks cannot wake this session, with the reason in
   `problem` (not the shared daemon, or no `codex` executable found).
@@ -207,7 +199,8 @@ Timing and edges (Codex CLI 0.161.0):
 - Closing the TUI: the thread stays loaded in the daemon until it has been
   without subscribers and idle for about a minute. Wakes queued meanwhile run
   headless (the replies are in the session history), and each one is activity
-  that keeps it loaded, up to the wake budget. Once the thread is unloaded,
+  that keeps it loaded, for as long as messages that pass the filter keep
+  coming. Once the thread is unloaded,
   SessionEnd stops the waiter and nothing wakes the thread. `codex resume` runs
   SessionStart at its first turn, so a resumed session is woken again only after
   you prompt it once.
@@ -223,8 +216,7 @@ Timing and edges (Codex CLI 0.161.0):
 - The waiter runs `codex` from `PATH`. Set `TRIO_CODEX_BINARY` in Codex's
   environment to pin another executable. With none found, the waiter does not
   start and status reports `unavailable`.
-- Every Codex turn, in any project, runs the Stop and UserPromptSubmit hooks
-  briefly. A session that never joins Trio pays that and nothing else.
+- Every Codex turn, in any project, runs the Stop hook briefly. A session that never joins Trio pays that and nothing else.
 
 Remove the hooks with `trio hooks-uninstall` (both clients) or
 `trio hooks-uninstall --clients codex`. A `hooks.json` it cannot read is
@@ -235,7 +227,7 @@ session that ends while a wake is being gathered is not woken and nothing is
 marked seen (its resumed session hears those messages); the session state also
 records each membership's server, when it was joined and which client holds it;
 and the waiter status file gains `client` and `session` fields (and `problem`,
-`delivering`, `paused`, `error` or `note` where they apply), with its keys in a
+`delivering`, `error` or `note` where they apply), with its keys in a
 different order.
 
 ## Claude Code
