@@ -535,6 +535,10 @@ def main(argv=None):
     if args.event == 'prompt':
         if is_wake_notice(payload.get('prompt')):
             return 0
+        # A subagent's task arrives as a prompt under the root session id, written by the
+        # parent model; only the root thread's prompts come from a person.
+        if payload.get('agent_id') or payload.get('agent_type'):
+            return 0
         if _attended(session_id):
             arm(session_id, host, problem)           # paused until now; otherwise Stop arms
         return 0

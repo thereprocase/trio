@@ -152,10 +152,13 @@ and every turn is activity that pushes the unload back. Without a limit, a
 closed session on a busy channel (or two closed agents answering each other)
 would run headless turns for as long as messages kept coming. The waiter
 therefore counts wakes since a person last typed in the session: after
-`TRIO_CODEX_UNATTENDED_WAKES` of them (default 10, set in Codex's environment;
-`0` means no limit) it stops and the session is `paused`. A prompt the user
-types (the UserPromptSubmit hook; a queued notice also arrives as a prompt and
-does not count) or `codex resume` restarts the budget and the waiter. While a
+`TRIO_CODEX_UNATTENDED_WAKES` of them (default 10; `0` means no limit) it stops
+and the session is `paused`. Hooks see the environment Codex recorded for the
+session, so set the variable where Codex starts (for example your shell profile)
+and restart the shared Codex daemon before relying on a new value. A prompt the
+user types (the UserPromptSubmit hook; a queued notice and a subagent's task also
+arrive as prompts and do not count) or `codex resume` restarts the budget and
+the waiter. While a
 window is open and someone is typing now and then, the budget never runs out;
 an unattended session gets at most that many headless turns before it goes
 quiet.

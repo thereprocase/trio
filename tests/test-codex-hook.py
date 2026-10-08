@@ -534,6 +534,16 @@ class CodexHookTests(unittest.TestCase):
             self.assertEqual(self.wake_once(hubs, 5), 2)
             self.assertEqual(len(self.calls()), 3)
 
+    def test_a_subagent_prompt_is_not_a_person_typing(self):
+        self.join()
+        with core.session_update(SESSION) as state:
+            state.update(unattended_wakes=10, paused=True)
+        for marker in ({'agent_id': 'agent-1'}, {'agent_type': 'worker'}):
+            payload = {'session_id': SESSION, 'prompt': 'investigate the failing build', **marker}
+            self.assertEqual(self.run_main('prompt', payload)[1], [])
+            state = core.load_session(SESSION)
+            self.assertEqual((state['unattended_wakes'], state['paused']), (10, True))
+
     def test_a_resume_restarts_the_budget(self):
         self.join()
         with core.session_update(SESSION) as state:
