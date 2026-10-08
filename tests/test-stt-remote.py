@@ -21,6 +21,9 @@ Usage: python tests/test-stt-remote.py
 import io
 import json
 import os
+import shutil
+import socket
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -46,6 +49,7 @@ def check(name, cond):
 TOKEN = "test-token-6f1d0c2a9b"
 MODEL = "fake-parakeet-int8"
 PRIVATE_PATH = "/srv/speech/tmp/upload-81723.webm"
+DEEP_JSON = b"[" * 200000           # json.loads raises RecursionError on this
 
 
 # ── A fake speech service ────────────────────────────────────────────────────
@@ -100,6 +104,8 @@ def make_handler(svc):
                 self._send(200, {"ok": True, "model": MODEL, "quantization": "int8", "warm": False})
             elif mode == "500":
                 self._send(500, {"ok": False, "error": "boom"})
+            elif mode == "deep":
+                self._send(200, raw=DEEP_JSON)
             else:
                 self._send(200, {"ok": True, "model": MODEL, "quantization": "int8", "warm": True})
 
@@ -130,6 +136,11 @@ def make_handler(svc):
                 self._send(503, {"ok": False, "error": "overloaded"})
             elif mode == "garbage":
                 self._send(200, raw=b"<html>not json</html>")
+            elif mode == "deep":
+                self._send(200, raw=DEEP_JSON)
+            elif mode == "huge-number":
+                # Valid JSON whose number does not fit in a float.
+                self._send(200, raw=b'{"ok": true, "text": "hi", "seconds": 1' + b"0" * 400 + b"}")
             elif mode == "echo-token":
                 # A careless service that puts request headers in its errors.
                 self._send(422, {"ok": False,
@@ -150,6 +161,79 @@ def start(svc):
     return server, f"http://127.0.0.1:{server.server_address[1]}"
 
 
+class DripServer:
+    """Answers every request one byte per DRIP_INTERVAL_S, either inside the
+    status line and headers ("headers") or inside a declared body ("body").
+
+    Each byte arrives well inside any socket timeout, so only an overall
+    deadline can stop the client waiting. The drip stops after DRIP_LIMIT_S
+    so a client without one fails its elapsed-time check instead of hanging
+    the suite.
+    """
+
+    DRIP_INTERVAL_S = 0.2
+    DRIP_LIMIT_S = 6.0
+
+    def __init__(self, where):
+        self.where = where
+        self.sock = socket.socket()
+        self.sock.bind(("127.0.0.1", 0))
+        self.sock.listen(8)
+        self.base = f"http://127.0.0.1:{self.sock.getsockname()[1]}"
+        threading.Thread(target=self._accept, daemon=True).start()
+
+    def _accept(self):
+        while True:
+            try:
+                conn, _ = self.sock.accept()
+            except OSError:
+                return
+            threading.Thread(target=self._serve, args=(conn,), daemon=True).start()
+
+    @staticmethod
+    def _read_request(conn):
+        data = b""
+        while b"\r\n\r\n" not in data:
+            chunk = conn.recv(65536)
+            if not chunk:
+                return
+            data += chunk
+        head, _, body = data.partition(b"\r\n\r\n")
+        length = 0
+        for line in head.split(b"\r\n"):
+            if line.lower().startswith(b"content-length:"):
+                length = int(line.split(b":", 1)[1])
+        while len(body) < length:
+            chunk = conn.recv(65536)
+            if not chunk:
+                return
+            body += chunk
+
+    def _serve(self, conn):
+        try:
+            self._read_request(conn)
+            if self.where == "headers":
+                prefix, drip = b"", b"HTTP/1.1 200 OK\r\nX-Slow: " + b"a" * 4096
+            else:
+                prefix = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n" \
+                         b"Content-Length: 4096\r\n\r\n"
+                drip = b" " * 4096
+            conn.sendall(prefix)
+            stop = time.monotonic() + self.DRIP_LIMIT_S
+            for i in range(len(drip)):
+                if time.monotonic() > stop:
+                    break
+                conn.sendall(drip[i:i + 1])
+                time.sleep(self.DRIP_INTERVAL_S)
+        except OSError:
+            pass
+        finally:
+            conn.close()
+
+    def close(self):
+        self.sock.close()
+
+
 svc = FakeService()
 service, BASE = start(svc)
 other = FakeService()            # the host a redirect points at
@@ -157,7 +241,7 @@ other_server, OTHER_BASE = start(other)
 svc.redirect_to = OTHER_BASE
 
 # A port with nothing listening: bind, read the number, close.
-_probe_sock = __import__("socket").socket()
+_probe_sock = socket.socket()
 _probe_sock.bind(("127.0.0.1", 0))
 DEAD_BASE = f"http://127.0.0.1:{_probe_sock.getsockname()[1]}"
 _probe_sock.close()
@@ -228,17 +312,19 @@ try:
     reset()
     wr = remote(tf=token_file(mode=0o644, name="world-readable"))
     check("world-readable token file: refused",
-          "other users" in (wr.config_error or ""))
+          "outside its group" in (wr.config_error or ""))
     check("world-readable token file: health unavailable", wr.health()["available"] is False)
     try:
         wr.transcribe(b"abcd", "audio/webm")
         check("world-readable token file: transcribe refuses", False)
     except RuntimeError as e:
-        check("world-readable token file: transcribe refuses", "other users" in str(e))
+        check("world-readable token file: transcribe refuses", "outside its group" in str(e))
     check("world-readable token file: the service is never contacted",
           svc.hits["health"] == 0 and svc.hits["transcribe"] == 0)
     check("world-readable token file: token not kept", wr._token == "")
 
+    check("group-readable token file: accepted (only users outside the group are refused)",
+          remote(tf=token_file(mode=0o640, name="group-readable")).config_error is None)
     check("token file unset: refused", "not set" in (remote(tf="").config_error or ""))
     check("empty token file: refused",
           "single-line" in (remote(tf=token_file("", name="empty")).config_error or ""))
@@ -541,6 +627,161 @@ try:
     check("mlx path: temp file removed afterwards", not os.path.exists(seen.get("path", "/")))
     check("mlx path: the service is never contacted", svc.hits["transcribe"] == 0)
 
+    # ── 3b. A service that drips its reply ───────────────────────────────────
+    # One byte every 0.2 s never trips a 1 s socket timeout; only an overall
+    # deadline ends the wait. Without one, a slot (transcribe) or the probe
+    # lock (health) is held for as long as the service cares to drip.
+    for where in ("headers", "body"):
+        drip = DripServer(where)
+        try:
+            t0 = time.monotonic()
+            s = drive(remote(url=drip.base, timeout=1))
+            elapsed = time.monotonic() - t0
+            check(f"drip in {where}: transcribe ends at its deadline ({elapsed:.1f}s)",
+                  elapsed < 2.5)
+            check(f"drip in {where}: transcribe reports the existing 'timed out'",
+                  "timed out" in (s.get("body") or {}).get("error", ""))
+            saved_timeout = web.STT_REMOTE_HEALTH_TIMEOUT
+            web.STT_REMOTE_HEALTH_TIMEOUT = 1
+            try:
+                t0 = time.monotonic()
+                h = remote(url=drip.base).health()
+                elapsed = time.monotonic() - t0
+            finally:
+                web.STT_REMOTE_HEALTH_TIMEOUT = saved_timeout
+            check(f"drip in {where}: health ends at its deadline ({elapsed:.1f}s)",
+                  elapsed < 2.5)
+            check(f"drip in {where}: health unavailable, 'did not answer in time'",
+                  h["available"] is False and "in time" in h["detail"])
+        finally:
+            drip.close()
+
+    check("health timeout fits inside the client's 3 s health wait",
+          web.STT_REMOTE_HEALTH_TIMEOUT <= 2)
+
+    # ── 3c. Malformed answers never escape as exceptions ─────────────────────
+    reset(health="deep")
+    try:
+        h = remote().health()
+        check("deep JSON: health answers unavailable", h["available"] is False)
+        check("deep JSON: read as an unreadable reply, not an unplanned failure",
+              "unreadable" in h["detail"])
+    except RecursionError:
+        check("deep JSON: health answers unavailable", False)
+
+    reset(transcribe="deep")
+    try:
+        s = drive(remote())
+        err = (s.get("body") or {}).get("error", "")
+        check("deep JSON: transcribe answers 200 ok:false",
+              s.get("status") == 200 and s["body"].get("ok") is False)
+        check("deep JSON: no interpreter text reaches the client",
+              "recursion" not in err.lower() and "stack" not in err.lower())
+        check("deep JSON: transcribe says the reply was unreadable", "unreadable" in err)
+    except RecursionError:
+        check("deep JSON: transcribe answers 200 ok:false", False)
+
+    reset(transcribe="huge-number")
+    try:
+        s = drive(remote())
+        check("huge number: transcript kept, seconds dropped",
+              s["body"].get("ok") is True and s["body"].get("seconds") is None)
+    except OverflowError:
+        check("huge number: transcript kept, seconds dropped", False)
+    check("_stt_number: overflowing int is None", web._stt_number(10 ** 400) is None)
+
+    broken = remote()
+
+    def _explode(*a, **k):
+        raise KeyError("something nobody planned for")
+
+    broken._request = _explode
+    try:
+        h = broken.health()
+        check("unexpected probe failure: health still answers unavailable",
+              h["available"] is False and CONTRACT_KEYS <= set(h))
+    except KeyError:
+        check("unexpected probe failure: health still answers unavailable", False)
+    try:
+        broken.transcribe(b"abcd", "audio/webm")
+        check("unexpected transcribe failure: RuntimeError for the client", False)
+    except RuntimeError:
+        check("unexpected transcribe failure: RuntimeError for the client", True)
+    except KeyError:
+        check("unexpected transcribe failure: RuntimeError for the client", False)
+
+    # ── 3d. The token is removed before text is clipped ──────────────────────
+    straddle = "x" * 295 + TOKEN + " tail"
+    scrubbed = remote()._scrub(straddle)
+    check("scrub: a token straddling the clip boundary leaves no prefix",
+          TOKEN[:5] not in scrubbed)
+    check("scrub: still clipped", len(scrubbed) <= 300)
+
+    # ── 3e. Token file read failures stay configuration errors ───────────────
+    real_fstat = web.os.fstat
+
+    def _fstat_fails(fd):
+        raise OSError("simulated fstat failure")
+
+    web.os.fstat = _fstat_fails
+    try:
+        b = remote()
+        check("fstat failure: held as config_error, not raised", bool(b.config_error))
+    except OSError:
+        check("fstat failure: held as config_error, not raised", False)
+    finally:
+        web.os.fstat = real_fstat
+
+    # ── 3f. URL forms http.client would trip over later ──────────────────────
+    for bad, why in (("http://stt.example/a;b", "';'"), ("http://stt.example/a b", "space"),
+                     ("http://stt.example/a\tb", "tab"), ("http://stt.example/\u00e9", "non-ASCII")):
+        try:
+            web._stt_remote_target(bad)
+            check(f"url: rejects {why} up front", False)
+        except ValueError as e:
+            check(f"url: rejects {why} up front", "NTH_STT_URL" in str(e))
+
+    # ── 3g. HTTPS: the hand-built TLS connection verifies and works ──────────
+    if not shutil.which("openssl"):
+        print("SKIP: https path (openssl CLI not available)")
+    else:
+        key, cert = Path(tmpdir) / "tls.key", Path(tmpdir) / "tls.crt"
+        made = subprocess.run(
+            ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
+             "-keyout", str(key), "-out", str(cert), "-subj", "/CN=127.0.0.1",
+             "-addext", "subjectAltName=IP:127.0.0.1"],
+            capture_output=True, timeout=60)
+        if made.returncode != 0:
+            print("SKIP: https path (openssl could not make a test certificate)")
+        else:
+            tls_svc = FakeService()
+            tls_server = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(tls_svc))
+            tls_server.daemon_threads = True
+            server_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            server_ctx.load_cert_chain(str(cert), str(key))
+            tls_server.socket = server_ctx.wrap_socket(tls_server.socket, server_side=True)
+            threading.Thread(target=tls_server.serve_forever, daemon=True).start()
+            tls_base = f"https://127.0.0.1:{tls_server.server_address[1]}"
+            saved_cafile = os.environ.get("SSL_CERT_FILE")
+            try:
+                h = remote(url=tls_base).health()
+                check("https: an untrusted certificate is refused",
+                      h["available"] is False and "certificate" in h["detail"])
+                os.environ["SSL_CERT_FILE"] = str(cert)   # trust the test certificate
+                h = remote(url=tls_base).health()
+                check("https: health over verified TLS", h["available"] is True
+                      and h["model"] == MODEL)
+                s = drive(remote(url=tls_base), data=b"tls-audio")
+                check("https: transcribe over verified TLS",
+                      s["body"].get("text") == "hello from the service"
+                      and tls_svc.last.get("body") == b"tls-audio")
+            finally:
+                if saved_cafile is None:
+                    os.environ.pop("SSL_CERT_FILE", None)
+                else:
+                    os.environ["SSL_CERT_FILE"] = saved_cafile
+                tls_server.shutdown()
+
 finally:
     sys.stderr = _real_stderr
 
@@ -585,7 +826,7 @@ rc, out, err = import_with({"NTH_STT_URL": BASE, "NTH_STT_TOKEN_FILE": ww})
 check("world-readable token file at startup: dashboard still imports", rc == 0 and out)
 check("world-readable token file at startup: reported unavailable",
       out and out["health"]["available"] is False and out["health"]["engine"] == "remote")
-check("world-readable token file at startup: a warning is logged", "other users" in err)
+check("world-readable token file at startup: a warning is logged", "outside its group" in err)
 check("world-readable token file at startup: token not logged", TOKEN not in err)
 
 rc, out, err = import_with({"NTH_STT_URL": "stt.example:10400",
@@ -597,7 +838,7 @@ check("typo'd URL: reported unavailable",
 
 service.shutdown()
 other_server.shutdown()
-__import__("shutil").rmtree(tmpdir, ignore_errors=True)
+shutil.rmtree(tmpdir, ignore_errors=True)
 
 print()
 print(f"{'FAILED' if failures else 'OK'} — {len(failures)} failure(s)")
