@@ -38,6 +38,7 @@ import getpass
 import gzip
 import hashlib
 import html
+import http.client
 import http.cookies
 import io
 import ipaddress
@@ -387,6 +388,19 @@ def _env_int(name: str, default: int, minimum: int) -> int:
 
 
 STT_MAX_CONCURRENT = _env_int("NTH_STT_MAX_CONCURRENT", 2, 1)  # in-flight transcribes
+
+# Remote speech service (optional). The mlx sidecar runs only on Apple silicon,
+# so a hub on any other machine can send dictation to a speech service on the
+# LAN instead: GET /health and POST /transcribe, both behind a bearer token.
+# Setting NTH_STT_URL selects it and the sidecar is never started. A bad URL or
+# token file is reported through /api/stt/health as unavailable rather than
+# raised, for the same reason as _env_int above. See README → Dictation backend.
+STT_REMOTE_URL = os.environ.get("NTH_STT_URL", "").strip()
+STT_REMOTE_TOKEN_FILE = os.environ.get("NTH_STT_TOKEN_FILE", "").strip()
+STT_REMOTE_TIMEOUT = _env_int("NTH_STT_TIMEOUT", 60, 1)  # per-clip ceiling, seconds
+STT_REMOTE_HEALTH_TIMEOUT = 3      # phones poll health; a dead host must not hold them
+STT_REMOTE_DOWN_TTL_S = 10         # re-probe a failing service sooner than a healthy one
+STT_REMOTE_MAX_RESPONSE = 1024 * 1024   # a transcript is text; anything bigger is wrong
 STALE_SECONDS = 300          # fresh heartbeat threshold
 DEAD_SECONDS = 900           # no heartbeat this long → dead
 SLEEPING_KEYWORDS = ("idle", "standing by", "tier 3", "agent-monitor")
@@ -3129,6 +3143,325 @@ STT = SttWorker(STT_MODEL, STT_LANGUAGE)
 STT_SLOTS = threading.BoundedSemaphore(STT_MAX_CONCURRENT)
 
 
+# ───────── Remote speech-to-text service ─────────
+_STT_TOKEN_RE = re.compile(r"[\x21-\x7e]+")
+_STT_MEDIA_TYPE_RE = re.compile(r"[A-Za-z0-9!#$&^_.+-]+/[A-Za-z0-9!#$&^_.+-]+(\s*;[\x20-\x7e]*)?")
+STT_TOKEN_FILE_MAX = 4096
+
+
+def _stt_remote_target(url: str) -> Tuple[str, str, int, str]:
+    """Split NTH_STT_URL into (scheme, host, port, base path).
+
+    Raises ValueError with a reason for the operator. Credentials in the URL
+    are refused because environment values end up in unit files and process
+    listings; the token has its own file with its own permissions.
+    """
+    try:
+        parts = urlparse(url)
+        port = parts.port
+    except ValueError:
+        raise ValueError("NTH_STT_URL is not a valid URL") from None
+    if parts.scheme not in ("http", "https"):
+        raise ValueError("NTH_STT_URL must start with http:// or https://")
+    if not parts.hostname:
+        raise ValueError("NTH_STT_URL has no host")
+    if parts.username is not None or parts.password is not None:
+        raise ValueError("NTH_STT_URL must not carry credentials; use NTH_STT_TOKEN_FILE")
+    if parts.query or parts.fragment:
+        raise ValueError("NTH_STT_URL must not have a query or fragment")
+    if port is None:
+        port = 443 if parts.scheme == "https" else 80
+    return parts.scheme, parts.hostname, port, parts.path.rstrip("/")
+
+
+def _read_stt_token(path: str) -> str:
+    """Read the speech service's bearer token from `path`.
+
+    Raises ValueError with a reason that names neither the token nor the
+    path, because the reason is shown in the browser via /api/stt/health.
+    The file is opened once and checked through its descriptor, so the
+    permissions checked are those of the file actually read.
+    """
+    if not path:
+        raise ValueError("NTH_STT_TOKEN_FILE is not set")
+    try:
+        # O_NONBLOCK: a FIFO in place of the file must not hang startup; the
+        # regular-file check below then rejects it.
+        fd = os.open(os.path.expanduser(path), os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
+    except OSError:
+        raise ValueError("the speech service token file is missing or unreadable") from None
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise ValueError("the speech service token file is not a regular file")
+        # Windows reports synthetic mode bits, so the check means nothing there.
+        if os.name != "nt" and st.st_mode & stat.S_IRWXO:
+            raise ValueError("the speech service token file is open to other users; chmod 600 it")
+        try:
+            raw = os.read(fd, STT_TOKEN_FILE_MAX + 1)
+        except OSError:
+            raise ValueError("the speech service token file is missing or unreadable") from None
+    finally:
+        os.close(fd)
+    try:
+        token = raw.decode("ascii").strip()
+    except UnicodeDecodeError:
+        token = ""
+    # One printable line only: the value goes into an HTTP header verbatim.
+    if len(raw) > STT_TOKEN_FILE_MAX or not _STT_TOKEN_RE.fullmatch(token):
+        raise ValueError("the speech service token file does not hold a single-line token")
+    return token
+
+
+def _stt_forward_type(content_type: str) -> str:
+    """The upload's Content-Type if it is a plain media type, else a generic one.
+    The service decodes with ffmpeg, which sniffs the bytes, so the type is a
+    hint; a malformed header is replaced rather than forwarded."""
+    ct = (content_type or "").strip()
+    if len(ct) <= 200 and _STT_MEDIA_TYPE_RE.fullmatch(ct):
+        return ct
+    return "application/octet-stream"
+
+
+def _stt_clip(value: Any, limit: int) -> str:
+    """Printable text from the service, clipped. It reaches logs and the page."""
+    if not isinstance(value, str):
+        return ""
+    return "".join(ch for ch in value if ch.isprintable())[:limit]
+
+
+def _stt_number(value: Any) -> Optional[float]:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value) if math.isfinite(value) else None
+
+
+def _read_capped(resp: http.client.HTTPResponse, limit: int, deadline: float) -> Optional[bytes]:
+    """Read a response body under a size cap and an overall deadline.
+
+    The socket timeout bounds each read, not their sum, so a service sending a
+    byte at a time could otherwise hold a transcription slot indefinitely.
+    Returns None when the body exceeds `limit`.
+    """
+    chunks: List[bytes] = []
+    total = 0
+    while True:
+        if time.monotonic() > deadline:
+            raise TimeoutError("speech service response exceeded its deadline")
+        chunk = resp.read(65536)
+        if not chunk:
+            return b"".join(chunks)
+        total += len(chunk)
+        if total > limit:
+            return None
+        chunks.append(chunk)
+
+
+class RemoteStt:
+    """Dictation backed by a speech service over HTTP, used in place of the
+    mlx sidecar when NTH_STT_URL is set.
+
+    The token is read once, at construction, and kept only in memory: it is
+    never logged, never placed in a response, and scrubbed from any text the
+    service sends back before that text is logged. Redirects are never
+    followed, so the token is sent only to the configured host. A
+    configuration problem does not raise; it is held as `config_error` and
+    reported as an unavailable engine, so the dashboard still starts.
+    """
+
+    ENGINE = "remote"
+
+    def __init__(self, url: str, token_file: str, timeout: float):
+        self.url = url
+        self.timeout = timeout
+        self.model = ""                  # as last reported by the service
+        self.config_error: Optional[str] = None
+        self._token = ""
+        self._scheme, self._host, self._port, self._base = "http", "", 80, ""
+        # (expires_at monotonic, health dict); None until the first probe.
+        self._probe: Optional[Tuple[float, Dict[str, Any]]] = None
+        self._probe_lock = threading.Lock()
+        try:
+            self._scheme, self._host, self._port, self._base = _stt_remote_target(url)
+            self._token = _read_stt_token(token_file)
+        except ValueError as e:
+            self.config_error = str(e)
+
+    @classmethod
+    def from_env(cls) -> Optional["RemoteStt"]:
+        """The configured service, or None when NTH_STT_URL is unset."""
+        if not STT_REMOTE_URL:
+            return None
+        backend = cls(STT_REMOTE_URL, STT_REMOTE_TOKEN_FILE, STT_REMOTE_TIMEOUT)
+        if backend.config_error:
+            sys.stderr.write(f"[stt] NTH_STT_URL is set but dictation is unavailable: "
+                             f"{backend.config_error}\n")
+        return backend
+
+    # ── transport ──
+    def _request(self, method: str, route: str, body: Optional[bytes],
+                 content_type: str, timeout: float) -> Tuple[int, Optional[Dict[str, Any]]]:
+        """One request. Returns (status, JSON object or None if the body is not
+        one). Raises TimeoutError, ssl.SSLError, OSError or HTTPException on
+        transport failure. A 3xx comes back as a status: http.client follows
+        nothing on its own."""
+        deadline = time.monotonic() + timeout
+        if self._scheme == "https":
+            conn: http.client.HTTPConnection = http.client.HTTPSConnection(
+                self._host, self._port, timeout=timeout,
+                context=ssl.create_default_context())
+        else:
+            conn = http.client.HTTPConnection(self._host, self._port, timeout=timeout)
+        headers = {"Authorization": "Bearer " + self._token, "Accept": "application/json"}
+        if body is not None:
+            headers["Content-Type"] = content_type
+            headers["Content-Length"] = str(len(body))
+        try:
+            conn.request(method, (self._base + route), body=body, headers=headers)
+            resp = conn.getresponse()
+            raw = _read_capped(resp, STT_REMOTE_MAX_RESPONSE, deadline)
+            status = resp.status
+        finally:
+            conn.close()
+        if raw is None:
+            return status, None
+        try:
+            data = json.loads(raw.decode("utf-8"))
+        except ValueError:
+            return status, None
+        return status, (data if isinstance(data, dict) else None)
+
+    def _scrub(self, text: str) -> str:
+        """Service text for the log: clipped, printable, and without the token
+        even if the service echoes request headers into its errors."""
+        text = _stt_clip(text, 300)
+        return text.replace(self._token, "[token]") if self._token else text
+
+    def _forget_probe(self) -> None:
+        """A failed transcription is fresher news than a cached 'available'."""
+        self._probe = None
+
+    # ── health ──
+    def _health(self, available: bool, warm: bool, detail: str) -> Dict[str, Any]:
+        # `remote` lets the client say where the audio goes; the mlx
+        # sidecar's response leaves it out.
+        out: Dict[str, Any] = {"engine": self.ENGINE, "model": self.model,
+                               "available": available, "warm": warm, "detail": detail,
+                               "remote": True}
+        if available:
+            # Nothing downloads on this machine, so the composer's "downloading
+            # the model (first run)" label must never show for this engine.
+            out["cached"] = True
+        return out
+
+    def _probe_health(self) -> Dict[str, Any]:
+        try:
+            status, data = self._request("GET", "/health", None, "", STT_REMOTE_HEALTH_TIMEOUT)
+        except TimeoutError:
+            return self._health(False, False, "the speech service did not answer in time")
+        except ssl.SSLError:
+            return self._health(False, False, "the speech service's TLS certificate was not accepted")
+        except (OSError, http.client.HTTPException):
+            return self._health(False, False, "the speech service is unreachable")
+        if status in (401, 403):
+            return self._health(False, False, "the speech service rejected this hub's token")
+        if 300 <= status < 400:
+            return self._health(False, False, "the speech service answered with a redirect; "
+                                              "set NTH_STT_URL to its final address")
+        if status != 200:
+            return self._health(False, False, f"the speech service health check failed (HTTP {status})")
+        if data is None:
+            return self._health(False, False, "the speech service sent an unreadable health response")
+        if data.get("ok") is not True:
+            return self._health(False, False, "the speech service reports it is not ready")
+        self.model = _stt_clip(data.get("model"), 120)
+        warm = data.get("warm") is True
+        return self._health(True, warm, "speech service ready — model is warm" if warm
+                            else "speech service ready — first use warms the model")
+
+    def health(self) -> Dict[str, Any]:
+        """Availability for the settings status line. Cached, because phones
+        poll this: a healthy answer for STT_PROBE_TTL_S, a failure for
+        STT_REMOTE_DOWN_TTL_S so a restarted service is noticed quickly."""
+        if self.config_error:
+            return self._health(False, False, self.config_error)
+        probe = self._probe
+        if probe is not None and time.monotonic() < probe[0]:
+            return dict(probe[1])
+        with self._probe_lock:
+            probe = self._probe                      # re-check inside the lock
+            if probe is not None and time.monotonic() < probe[0]:
+                return dict(probe[1])
+            result = self._probe_health()
+            ttl = STT_PROBE_TTL_S if result["available"] else STT_REMOTE_DOWN_TTL_S
+            self._probe = (time.monotonic() + ttl, result)
+            return dict(result)
+
+    # ── transcription ──
+    def transcribe(self, audio: bytes, content_type: str) -> Dict[str, Any]:
+        """Blocking; returns the same fields SttWorker.transcribe does.
+
+        Raises SttEngineError when the service could not transcribe this clip
+        (its text is logged, never relayed), and RuntimeError with a short,
+        client-safe reason for everything else. Transport errors are all turned
+        into RuntimeError, so the handler's OSError branch, which reports a
+        local buffering failure, never misdescribes a network one.
+        """
+        if self.config_error:
+            raise RuntimeError(self.config_error)
+        try:
+            status, data = self._request("POST", "/transcribe", audio,
+                                         _stt_forward_type(content_type), self.timeout)
+        except TimeoutError:
+            self._forget_probe()
+            raise RuntimeError("transcription timed out") from None
+        except ssl.SSLError:
+            self._forget_probe()
+            raise RuntimeError("the speech service's TLS certificate was not accepted") from None
+        except (OSError, http.client.HTTPException):
+            self._forget_probe()
+            raise RuntimeError("the speech service is unreachable") from None
+        if status == 200 and data is not None and data.get("ok") is True:
+            text = data.get("text")
+            if not isinstance(text, str):
+                raise RuntimeError("the speech service sent an unreadable response")
+            no_speech = data.get("no_speech")
+            return {"ok": True, "text": text,
+                    "seconds": _stt_number(data.get("seconds")),
+                    # The service reports no silence gate of its own. An empty
+                    # transcript is shown as "nothing was picked up", the
+                    # neutral one of the client's two empty-result messages.
+                    "no_speech": no_speech if isinstance(no_speech, bool) else not text.strip(),
+                    "rms": _stt_number(data.get("rms")),
+                    "model": _stt_clip(data.get("model"), 120) or self.model}
+        reason = self._scrub(str((data or {}).get("error") or ""))
+        if status in (401, 403):
+            self._forget_probe()
+            raise RuntimeError("the speech service rejected this hub's token")
+        if status == 413:
+            raise RuntimeError("the clip is too large for the speech service")
+        if status in (422, 500) or (status == 200 and data is not None):
+            raise SttEngineError(f"speech service HTTP {status}: {reason or 'no reason given'}")
+        if status in (429, 503):
+            raise RuntimeError("the speech service is busy — try again in a moment")
+        if 300 <= status < 400:
+            raise RuntimeError("the speech service answered with a redirect; "
+                               "set NTH_STT_URL to its final address")
+        if status == 200:
+            raise RuntimeError("the speech service sent an unreadable response")
+        self._forget_probe()
+        raise RuntimeError(f"the speech service failed (HTTP {status})")
+
+
+STT_REMOTE: Optional[RemoteStt] = RemoteStt.from_env()
+
+
+def stt_health() -> Dict[str, Any]:
+    """Health of the dictation backend this hub uses: the speech service when
+    NTH_STT_URL is set, otherwise the mlx sidecar."""
+    return STT_REMOTE.health() if STT_REMOTE is not None else STT.health()
+
+
 # ───────── HTTP handler ─────────
 CHANNEL_CODE_RE = re.compile(r"^[a-z0-9][a-z0-9\-]{0,31}$")
 
@@ -4195,7 +4528,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
             # is unavailable and the ONLY useful thing to tell the operator is
             # the address that would work — which the browser cannot know and
             # the server can. Absent when there is nothing honest to name.
-            self._json({**STT.health(), "secure_url": SECURE_URL_HINT})
+            self._json({**stt_health(), "secure_url": SECURE_URL_HINT})
         elif path.startswith("/api/attachment/"):
             self._serve_attachment(path)
         elif path.startswith(nmedia.PAGE_PATH_PREFIX):
@@ -9337,9 +9670,10 @@ class NthWebHandler(BaseHTTPRequestHandler):
         sweep_attachments(self.db_path)
 
     def _handle_transcribe(self) -> None:
-        """Accept a raw audio body (webm/ogg/wav/…), transcribe locally with the
-        warm mlx_whisper worker, and return {ok, text, seconds}. Engine failures
-        return ok:false (HTTP 200) so the client can show its fallback banner.
+        """Accept a raw audio body (webm/ogg/wav/…), transcribe it with the
+        configured speech service (NTH_STT_URL) or else the warm mlx_whisper
+        worker, and return {ok, text, seconds}. Engine failures return ok:false
+        (HTTP 200) so the client can show its fallback banner.
 
         Deliberately channel-agnostic: audio is transcribed and handed straight
         back to the caller's composer, never stored or attributed to a channel,
@@ -9392,12 +9726,18 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 self._json({"ok": False, "error": "incomplete upload"}, status=400)
                 return
 
-            ext = _stt_ext_for(self.headers.get("Content-Type", ""))
             try:
-                fd, tmp = tempfile.mkstemp(prefix="nth_stt_", suffix=ext)
-                with os.fdopen(fd, "wb") as fh:
-                    fh.write(data)
-                result = STT.transcribe(tmp)
+                if STT_REMOTE is not None:
+                    # The bytes go to the service as they arrived; no temp file.
+                    result = STT_REMOTE.transcribe(data, self.headers.get("Content-Type", ""))
+                    engine, model = STT_REMOTE.ENGINE, result.get("model", "")
+                else:
+                    ext = _stt_ext_for(self.headers.get("Content-Type", ""))
+                    fd, tmp = tempfile.mkstemp(prefix="nth_stt_", suffix=ext)
+                    with os.fdopen(fd, "wb") as fh:
+                        fh.write(data)
+                    result = STT.transcribe(tmp)
+                    engine, model = "mlx_whisper", STT_MODEL
                 self._json({"ok": True, "text": result.get("text", ""),
                             "seconds": result.get("seconds"),
                             "no_speech": bool(result.get("no_speech")),
@@ -9405,12 +9745,13 @@ class NthWebHandler(BaseHTTPRequestHandler):
                             # from "you were too quiet to clear the gate" — the
                             # difference between try-again and move-closer.
                             "rms": result.get("rms"),
-                            "engine": "mlx_whisper", "model": STT_MODEL})
+                            "engine": engine, "model": model})
             except SttEngineError as e:
                 # Engine text is verbatim ffmpeg/mlx output — kilobytes of it,
                 # carrying absolute local paths (this request's temp file among
                 # them). Log it here; hand the client a bounded, path-free
                 # reason, which is all its fallback banner renders anyway.
+                # A speech service's own error text is handled the same way.
                 sys.stderr.write(f"[stt] engine error: {e}\n")
                 self._json({"ok": False, "error": "the audio could not be transcribed"})
             except RuntimeError as e:
