@@ -49,32 +49,42 @@ for it and tell the user; never reconnect or reclaim on your own.
 
 ## Optional poll cursor and delivery presence
 
-`trio_poll` accepts `after_id` (an integer at least 0) and
-`delivery_state` (`waiting`, `in_turn`, or `unreachable`). Both are optional;
+`trio_poll` accepts `after_id` (an integer with `0 <= after_id < 2**53`)
+and `delivery_state` (`waiting`, `in_turn`, or `unreachable`). Both are optional;
 omitting them preserves the existing reply and acknowledgement behavior.
-Unknown delivery states and invalid cursors return a clear error.
+Invalid values receive a tool or SDK validation refusal. MCP clients and SDKs
+may coerce argument types; the hub's cursor schema is strict and refuses boolean,
+string and fractional wire values. The allowed presence values appear in the schema.
 
 With `after_id`, returned message ids are greater than
 `max(read watermark, after_id)`, including final unread messages on channel end.
-A token uses its session watermark; a legacy caller uses the member watermark.
-The cursor itself acknowledges nothing: a listener can skip a previously seen
-backlog and keep long-polling while the owning session still reads and explicitly
-acks that backlog. Use `trio_ack` to advance the read watermark.
+On channel end, `unread_count` still counts **all visible unacknowledged messages**,
+even those below the cursor. A token uses its session watermark; a legacy caller
+uses the member watermark. Supplying a cursor disables legacy auto-ack, including
+when the cursor is zero or the poll is empty. It never acknowledges skipped or
+returned messages. Use `trio_ack` to advance the read watermark.
 
-`delivery_state` records the member's reported presence and its report time.
-The web roster shows `listening (hooks)` for `waiting`, `working` for `in_turn`,
-and `unreachable` for a fresh `unreachable` report. After more than two minutes
-without a renewed report it shows `silent since HH:MM` (UTC), regardless of
-other heartbeat traffic. Clients that omit it retain the legacy roster behavior.
-This is reported presence, not proof that a wake was received; keep the separate
-delivery-status readiness check and explicit acknowledgements.
+`delivery_state` requires a valid session token for the member; a member id alone
+cannot publish presence. The hub records one report timestamp per poll request,
+and connect/reclaim clears the previous report. The web roster supplements the
+agent's own status text with `listening (hooks)`, `working`, or `unreachable`.
+Blocked, errored, archived, sleeping and compacting states outrank this hint;
+the status chip retains its normal state label.
+
+After more than two minutes, a report with no newer heartbeat shows `silent since`
+and its report time. The browser uses its shared clock formatter and Local/UTC
+preference. A newer heartbeat supersedes the expired hint and restores normal
+member status without refreshing the report timestamp. Clients that omit presence
+retain legacy roster behavior. Presence does not prove readiness or receipt;
+keep the separate delivery-status check and explicit acknowledgements.
 
 The Quartet listener discovers `after_id` in the hub's `tools/list` schema once
-per SSE connection before sending its current high water. Older hubs receive no
-cursor and retain the backlog backoff fallback. The listener does not send
+per successful SSE connection discovery, with at most ten pages per attempt.
+Discovery errors or an incomplete schema use a legacy poll without a cursor and
+retry discovery on the next poll. Reconnects recheck support, including downgrades.
+Older hubs retain the backlog backoff fallback. Listeners do not send
 `delivery_state` yet. A cleaned-up channel returns `channel_gone` before token
-or membership checks; a removed member in an existing channel keeps the existing
-culled/refused outcomes.
+or membership checks; removal in an existing channel keeps the existing outcomes.
 
 ## Monitor Events
 

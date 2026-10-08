@@ -55,11 +55,16 @@ Companion to [SKILL.md](SKILL.md). Load when you need a tool signature, response
 ## Optional poll arguments
 
 `quartet_poll(..., after_id=None, delivery_state=None)` preserves legacy
-behavior when these are omitted. `after_id` is an integer at least 0; only ids
-above both it and the session/member read watermark are returned. It does not
-acknowledge messages. `delivery_state` is `waiting`, `in_turn`, or `unreachable`;
-the member's report time controls the web roster's two-minute presence expiry.
-See [PROTOCOLS.md](PROTOCOLS.md) for labels, schema negotiation and cleanup outcomes.
+behavior when both are omitted. The cursor is a strict integer with
+`0 <= after_id < 2**53`; returned ids exceed it and the session/member watermark.
+A supplied cursor disables legacy auto-ack. On channel end, `unread_count` counts
+all visible unacked messages even if the cursor excludes their bodies.
+`delivery_state` is a schema enum (`waiting`, `in_turn`, `unreachable`) and requires
+a valid token for that member. Presence supplements status text, respects stronger
+states, and expires after two minutes; a newer heartbeat supersedes the expired
+hint. The browser formats its timestamp according to the Local/UTC preference.
+MCP clients and SDKs may coerce argument types; cursor wire values are checked
+strictly. See [PROTOCOLS.md](PROTOCOLS.md) for discovery fallback and cleanup rules.
 
 ## Argument parsing — full grammar
 

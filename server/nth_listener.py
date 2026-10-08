@@ -545,16 +545,22 @@ def quartet_poll_factory(binding):
                 # once per SSE connection, again after a reconnect/hub upgrade.
                 cursor = None
                 supports_after_id = False
-                while True:
-                    schema = client.call('tools/list', {'cursor': cursor} if cursor else {})
-                    for tool in schema.get('tools', []):
-                        if tool.get('name') == 'quartet_poll':
-                            supports_after_id = 'after_id' in tool.get('inputSchema', {}).get('properties', {})
-                    cursor = schema.get('nextCursor')
-                    if not cursor:
-                        break
-                state.update(schema_checked=True, endpoint=client.endpoint_url,
-                             after_id=supports_after_id)
+                try:
+                    for _ in range(10):
+                        schema = client.call('tools/list', {'cursor': cursor} if cursor else {})
+                        for tool in schema.get('tools', []):
+                            if tool.get('name') == 'quartet_poll':
+                                supports_after_id = 'after_id' in tool.get('inputSchema', {}).get('properties', {})
+                        cursor = schema.get('nextCursor')
+                        if not cursor:
+                            break
+                    else:
+                        raise ValueError('Incomplete tool schema')
+                except Exception:  # discovery is optional, never a reason to stop polling
+                    state.update(schema_checked=False, after_id=False)
+                else:
+                    state.update(schema_checked=True, endpoint=client.endpoint_url,
+                                 after_id=supports_after_id)
             wire_arguments = dict(arguments)
             if not state['after_id']:
                 wire_arguments.pop('after_id', None)
