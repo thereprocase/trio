@@ -36,6 +36,7 @@ from __future__ import annotations
 import argparse
 import getpass
 import gzip
+import hashlib
 import html
 import http.cookies
 import io
@@ -9938,10 +9939,21 @@ def _app_icon(name: str, icon_dir: Optional[Path]) -> bytes:
         return builtin
 
 
+def _icon_url(path: str) -> str:
+    """The icon's path with a version taken from its bytes. Browsers and
+    Android's installer cache icons for a day or more, so a changed icon set
+    has to arrive under new URLs to be picked up at the next install."""
+    name = path.rsplit("/", 1)[-1]
+    data = PWA_ICONS.get(name)
+    return path if data is None else f"{path}?v={hashlib.sha256(data).hexdigest()[:12]}"
+
+
 def _app_manifest() -> bytes:
     manifest = json.loads(_read_web_bytes("manifest.webmanifest"))
     manifest.update(name=APP_NAME, short_name=APP_SHORT_NAME, theme_color=APP_THEME,
                     background_color=APP_BACKGROUND)
+    for icon in manifest.get("icons", []):
+        icon["src"] = _icon_url(icon["src"])
     return json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8")
 
 
@@ -9953,6 +9965,12 @@ if _APP_ICON_DIR is not None:
     sys.stderr.write(f"[nth_web] NTH_APP_ICON_DIR: custom {', '.join(_custom) or 'none'}; "
                      f"built-in {', '.join(n for n in PWA_ICON_NAMES if n not in _custom) or 'none'}\n")
 PWA_MANIFEST = _app_manifest()
+# The page head names two icons directly; they get the same versioned URLs.
+for _old, _new in (('href="/apple-touch-icon.png"', f'href="{_icon_url("/apple-touch-icon.png")}"'),
+                   ('href="/icons/icon-192.png"', f'href="{_icon_url("/icons/icon-192.png")}"')):
+    if _old not in INDEX_HTML:
+        raise RuntimeError(f"server/web/index.html lost its icon link: {_old}")
+    INDEX_HTML = INDEX_HTML.replace(_old, _new, 1)
 PWA_SERVICE_WORKER = _read_web_bytes("sw.js")
 # Static, identical for every viewer, and fetched by the browser without the
 # page's cookies (a manifest request is credentials-less by default), so these
