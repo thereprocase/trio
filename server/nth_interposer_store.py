@@ -74,6 +74,9 @@ class Store:
         self.lock = threading.RLock()
         self.import_skips = []
         self.import_cache = {}
+        # Runtime uses this same mapping; eviction must retain metadata until
+        # buffered evidence is successfully released (including failed writes).
+        self.pending_buffers = {}
         self.db = sqlite3.connect(self.path, timeout=15, check_same_thread=False)
         self.path.chmod(0o600)
         self.db.row_factory = sqlite3.Row
@@ -226,7 +229,9 @@ class Store:
     def _session_room(self):
         if self.db.execute('SELECT COUNT(*) FROM sessions').fetchone()[0] < MAX_SESSIONS:
             return
-        victim = self.db.execute("SELECT session FROM sessions WHERE state='ended' OR registered IS NULL ORDER BY registered,session LIMIT 1").fetchone()
+        victim = next((row for row in self.db.execute(
+            "SELECT session FROM sessions WHERE state='ended' OR registered IS NULL ORDER BY registered,session")
+            if row[0] not in self.pending_buffers), None)
         if victim is None:
             raise WireError('session limit reached', 'session_limit')
         self.db.execute('DELETE FROM holdings WHERE session=?', (victim[0],))

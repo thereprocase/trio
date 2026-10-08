@@ -79,7 +79,7 @@ class Runtime:
     def __init__(self, store, log, factory=None):
         self.store,self.log = store,log
         self.factory = factory or self.poll_factory
-        self.pollers,self.buffers = {},{}
+        self.pollers,self.buffers = {},store.pending_buffers
         self.last_drain = self.last_death = 0.0
 
     def poll_factory(self, identity):
@@ -164,12 +164,19 @@ class Runtime:
                     else:
                         target['members'][key] = item
                     item['owner_session'] = owner
+                    holding = self.store.db.execute('SELECT server FROM holdings WHERE session=? AND key=? AND attached=1',(owner,key)).fetchone()
+                    server = canonical_server(holding[0]) if holding else 'nth-trio'
+                    moved = target['members'][key]
+                    moved['server'] = server
+                    for span in moved['ranges']:
+                        span['server'] = server
                     del buffer['members'][key]
             if not buffer['members']:
                 self.buffers.pop(session,None)
 
     def release(self, session, force=False, flush=False):
         with self.store.lock:
+            self.transfer_buffers()
             buffer = self.buffers.get(session)
             if not buffer:
                 return

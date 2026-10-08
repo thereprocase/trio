@@ -110,25 +110,27 @@ def dispatch(store, request, runtime=None, *, activated=False, log=None):
     if op in ('list', 'status'):
         return store.snapshot(request.get('key') if op == 'status' else None,
                               request.get('session') if op == 'status' else None)
-    if op == 'session.register':
-        result = store.register(request)
-    elif op == 'membership.attach':
-        result = store.attach(request)
-    elif op == 'membership.configure':
-        result = store.configure(request)
-    elif op == 'ack.seen':
-        result = store.ack(request)
-    elif op == 'turn':
-        result = store.turn(request)
-        if runtime and request['phase'] == 'ended':
-            runtime.release(request['session'], force=True)
-    elif op == 'session.end':
-        result = store.end(request['session'])
-    else:
-        raise WireError('not implemented in this version')
-    if runtime:
-        runtime.reconcile()
-    return result
+    # Ownership mutation, transfer and release are one serialized operation.
+    with store.lock:
+        if op == 'session.register':
+            result = store.register(request)
+        elif op == 'membership.attach':
+            result = store.attach(request)
+        elif op == 'membership.configure':
+            result = store.configure(request)
+        elif op == 'ack.seen':
+            result = store.ack(request)
+        elif op == 'turn':
+            result = store.turn(request)
+            if runtime and request['phase'] == 'ended':
+                runtime.release(request['session'], force=True)
+        elif op == 'session.end':
+            result = store.end(request['session'])
+        else:
+            raise WireError('not implemented in this version')
+        if runtime:
+            runtime.reconcile()
+        return result
 
 
 def deadline_frame(sock, seconds=10):

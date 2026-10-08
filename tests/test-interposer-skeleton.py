@@ -40,7 +40,8 @@ EXPECTED_OPS = frozenset(('hello', 'hub.announce', 'session.register', 'membersh
 @unittest.skipUnless(hasattr(socket, 'AF_UNIX') and os.name == 'posix', 'Unix service skeleton')
 class InterposerCase(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory(prefix='ip2-')
+        # Unix sockets and offline systemd dependencies have short path limits.
+        self.tmp = tempfile.TemporaryDirectory(prefix='ip2-', dir='/tmp')
         self.root = Path(self.tmp.name)
         self.runtime = self.root / 'rt'
         self.runtime.mkdir(mode=0o700)

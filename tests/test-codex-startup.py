@@ -122,7 +122,8 @@ class StartupTests(unittest.TestCase):
             import websockets.sync.server  # noqa: F401
         except ImportError:
             self.skipTest('requires the installed websockets dependency')
-        with tempfile.TemporaryDirectory(prefix='trio-startup-') as directory:
+        # The fake app-server binds a Unix socket below this directory.
+        with tempfile.TemporaryDirectory(prefix='trio-startup-', dir='/tmp' if os.name == 'posix' else None) as directory:
             root = Path(directory)
             (root / 'fake_server.py').write_text(FAKE_SERVER, encoding='utf-8')
             (root / 'caller.py').write_text(CALLER, encoding='utf-8')
