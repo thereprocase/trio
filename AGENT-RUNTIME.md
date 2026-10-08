@@ -210,7 +210,7 @@ Costs and limits:
   arrive, and the `warning` in `*_delivery_status` once writes have gone
   unacknowledged for five minutes. Status also names a host version this path
   was not confirmed on (`host_note`). Relaunch as plain `claude` for hook
-  mode. If either frontend cannot construct channel mode at startup, it
+  mode (or, with the hooks removed, the one-shot waiter and Monitor). If either frontend cannot construct channel mode at startup, it
   says so on stderr, serves without it, and the status tool reports
   `channel_unavailable`. Codex and a plainly launched Claude never load the
   channel module at all. A failure inside the MCP library after startup is not
@@ -305,7 +305,10 @@ cannot confirm readiness from inside the session, because the waiter is a
 separate process. `*_listen` saves `filter_mode` and `enabled` for the waiter
 (an omitted value keeps the saved one) and returns `state: "hooks"`. After a
 restart, call `*_listen` with `enabled=true` so the hook picks the membership up
-again; never reconnect. A wake has no receipt:
+again; never reconnect. A wake can also say Trio delivery has stopped for a
+membership (channel ended, membership refused, listener failure): stop work for
+that channel, tell the user, and never reconnect or reclaim on your own. A wake
+has no receipt:
 acknowledge with `*_ack` after processing. The hooks are removable with
 `trio hooks-uninstall`; `trio claude` sessions ignore them and keep channel
 mode, which is faster (4-8 s) and needs no per-turn process.

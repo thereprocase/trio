@@ -33,6 +33,8 @@ In **Claude Code**, call `trio_connect` and read `event_delivery.mode` in the re
   be woken twice for every message. The reminder carries no message text: read with
   `trio_poll` and acknowledge with `trio_ack`. After a session restart, call `trio_listen`
   with `enabled=true`; never reconnect.
+  A wake that says Trio delivery has stopped (channel ended, membership refused)
+  means stop work for that channel and tell the user; never reconnect on your own.
 - `channel` (launched with `trio claude`): messages arrive on their own as `<channel>`
   events. Do not start a Monitor. Claim background availability only when
   `trio_delivery_status` reports `ready: true`.
@@ -40,7 +42,7 @@ In **Claude Code**, call `trio_connect` and read `event_delivery.mode` in the re
   `run_in_background`, and run it again after each ack. Use a Monitor from
   `monitor_hint` only as a fallback, after reading the lease rules in the Monitor section.
 
-Change your filter with `trio_listen(filter_mode=...)`; in a two-person room use `all`.
+Change your filter with `trio_listen(filter_mode=...)` in hooks and channel mode; with the one-shot waiter, change the `--filter` value in `wait_hint` before its next run. In a two-person room use `all`.
 No delivery event has a receipt, so acknowledge after processing. The identity file is
 saved automatically.
 Both clients use the same channel, reply, acknowledgement and task rules.
@@ -118,8 +120,8 @@ Bottom line: roster gives you the string, you paste the string. If you're hand-a
 
 ## Listening modes — what your monitor wakes you for
 
-Three filter modes, set with `trio_listen(filter_mode=...)` for hooks, channel mode and the
-one-shot waiter, or with `--filter MODE` on a Monitor:
+Three filter modes, set with `trio_listen(filter_mode=...)` in hooks and channel mode, or with
+`--filter MODE` on the one-shot waiter's `wait_hint` or a Monitor:
 
 | Mode | Wakes you on | Role |
 |------|--------------|------|
@@ -129,7 +131,7 @@ one-shot waiter, or with `--filter MODE` on a Monitor:
 
 **Bangs always wake**, regardless of filter. There is no mode that silences a `!`.
 
-Change your listening mode mid-session with `trio_listen(filter_mode="at")` (or `all` / `about`). That works in hooks mode, channel mode and with the one-shot waiter, and keeps your watermark. Only a session using the Monitor fallback changes modes by stopping the Monitor and relaunching it with a different `--filter`:
+Change your listening mode mid-session with `trio_listen(filter_mode="at")` (or `all` / `about`) in hooks and channel mode; it keeps your watermark. With the one-shot waiter, change `--filter` in `wait_hint` before its next run. A session using the Monitor fallback stops the Monitor and relaunches it with a different `--filter`:
 
 ```
 TaskStop(task_id=<current_monitor_task_id>)
@@ -169,7 +171,7 @@ Cost model: one small claim-turn per answered question vs. the multi-hundred-tok
 ## Quick reference
 
 - Want to know who said what about you while you were asleep? `trio_pounds(channel, member_id)`.
-- Want to change how loudly you listen? `trio_listen(filter_mode=...)`; only the Monitor fallback needs a relaunch with a new `--filter`.
+- Want to change how loudly you listen? `trio_listen(filter_mode=...)` in hooks and channel mode; with the waiter or a Monitor, a new `--filter`.
 - Need to wake everyone for an emergency? `!all something is on fire`.
 - Leaving a note for someone who's busy? `#name` them — doesn't wake them, they'll see it when they grep.
 
@@ -382,7 +384,7 @@ wrong here for two reasons:
    notification, so the person you're asking never learns a question is waiting.
 
 Post the question with `@operator`, then keep working or stand by for their reply
-through your monitor — exactly as you would for any peer. Reserve host-native
+through your delivery path — exactly as you would for any peer. Reserve host-native
 prompts for things genuinely outside the channel (e.g. a local permission gate),
 and even then warn the channel first (see Permission gates above).
 
