@@ -23,14 +23,17 @@ The socket uses `XDG_RUNTIME_DIR/trio/interposer.sock` when that runtime directo
 is absolute, owned by the user and not writable by group or others. Otherwise
 it uses `/run/user/<uid>/trio/interposer.sock` if that directory is owned by the
 user with mode 0700, then falls back to `NTH_HOME/run/interposer.sock`. Socket
-paths must be under 104 bytes. The installer pins the selected path in its units. Its
-directory is 0700, the socket is 0600, and Linux additionally checks peer uid.
+paths must be under 104 bytes. The installer pins the selected path in its units. The
+`ListenStream` path is unquoted, with `%t` used for the manager's runtime directory;
+the service receives `NTH_INTERPOSER_SOCKET` to use exactly that same socket.
+socket's directory is 0700, the socket is 0600, and Linux additionally checks peer uid.
 The service holds `run/lease.lock`, serializes SQLite writes to
 `events/interposer.sqlite` (schema 2, WAL, FULL synchronization), and exits after 30 minutes
 without a live registered session. Windows named pipes are deferred.
 
 IPC allows at most 32 concurrent connections and gives each complete frame a
-10-second read deadline. Timeout logs are rate limited; `interposer.log` rotates
+10-second read deadline, including idle time before the next frame's first byte.
+Persistent clients reconnect after that idle interval. Timeout logs are rate limited; `interposer.log` rotates
 at 1 MiB with one `.1` backup. Protocol 1 uses JSON lines, at most 64 KiB including the newline, with an
 integer request id echoed in every reply. `hello` must come first and reports the
 software version and supported protocol range. `hub.announce` stores an
@@ -51,9 +54,16 @@ sessions are `idle_unreachable` until registration can verify their host in a
 later PR. A corrupt legacy file is skipped without changing it; valid files still
 import. `legacy_import_skips` in status/list and doctor report its basename and a
 fixed reason. Logs omit file contents and tokens. Fallback shutdown removes only
-the inode it bound. Restart verifies the pid's process command before signalling.
+the inode it bound. Waiter `session-<id>.status.json` telemetry is ignored during
+import. Doctor uses the bounded `status(skips=true)` summary rather than listing
+all imported sessions. Restart verifies the pid's process command before signalling:
+Linux uses `/proc`, and other Unix systems use `/bin/ps`.
 Lease losers exit with code 75, which systemd will not restart. Manager failures
 warn and appear in the install result while the native installation completes.
+An unavailable user manager skips unit setup quietly. EOF/socket errors while
+stopping a fallback allow socket setup to continue. Tests set
+`NTH_INTERPOSER_TEST_RUNTIME` to an existing private temporary root; clients and
+spawned services refuse socket paths outside it, even if a runtime directory disappears.
 
 ## Codex
 

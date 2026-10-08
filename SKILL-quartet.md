@@ -13,6 +13,7 @@ The installed interposer is a storage/IPC skeleton. `trio interposer status`,
 using the delivery checks below; see AGENT-RUNTIME.md for the skeleton's scope.
 Legacy state remains authoritative and is refreshed every 60 seconds; skipped
 legacy files and pending hub URL changes appear in interposer diagnostics.
+Doctor checks a bounded skip summary; waiter status telemetry is ignored during import.
 
 Codex launchers serialize simultaneous shared-server startup. A startup failure may
 fall back to plain Codex with a no-push warning; joining still requires a separate

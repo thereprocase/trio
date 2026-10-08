@@ -65,6 +65,9 @@ inspect or control it. This skeleton stores pending hub announcements and refres
 legacy hook watermarks and settings at startup and every 60 seconds. Malformed
 legacy files are skipped and reported; polling and delivery still use the existing
 runtime. See [AGENT-RUNTIME.md](AGENT-RUNTIME.md#spoke-interposer-skeleton).
+Doctor uses a compact skip summary even when imported session listings are large;
+waiter status files are ignored by the importer. Unit setup skips quietly when
+Linux has no user manager, and fallback restart also verifies processes on macOS.
 
 `trio status` shows subscriptions; `trio start` starts the local service. `*_listen(filter_mode="all"|"about"|"at")` changes a Codex listener and `*_listen(enabled=false)` stops it. For an already exposed owning server, `trio attach --endpoint LOCAL_ENDPOINT` enables observation; an ordinary stdio Codex server picks up delivery on its next launch through Trio. See [native runtime instructions](AGENT-RUNTIME.md) and [delivery protocol and recovery](CODEX-EVENT-RELAY.md).
 

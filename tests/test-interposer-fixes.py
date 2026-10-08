@@ -283,7 +283,9 @@ class FixTests(cases.InterposerCase):
                 canonical.chmod(mode)
                 self.assertEqual(wire.socket_path(),wire.home() / 'run' / 'interposer.sock')
             metadata = Mock(st_mode=stat.S_IFDIR | 0o700,st_uid=os.getuid()+1)
-            with patch.object(Path,'lstat',return_value=metadata):
+            root_info = self.root.lstat()
+            with patch.object(Path,'lstat',autospec=True,
+                              side_effect=lambda path:root_info if path==self.root else metadata):
                 self.assertEqual(wire.socket_path(),wire.home() / 'run' / 'interposer.sock')
         os.environ['NTH_HOME'] = str(self.root / ('x'*100))
         with self.assertRaisesRegex(wire.WireError,'under 104 bytes'):

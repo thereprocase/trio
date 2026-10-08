@@ -9,6 +9,8 @@ The spoke interposer currently implements storage and IPC only. Use
 delivery-status and acknowledgement protocol below. See AGENT-RUNTIME.md.
 Interposer framing errors close the connection; operation refusals keep it open.
 Malformed legacy files are skipped and reported rather than blocking startup.
+The frame deadline includes idle time between frames; reconnect after ten seconds
+of inactivity. Doctor reads only the bounded skip summary.
 
 Codex launchers serialize simultaneous shared-server startup. A startup failure may
 fall back to plain Codex with a no-push warning; joining still requires a separate
