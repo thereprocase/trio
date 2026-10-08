@@ -18,7 +18,9 @@ import sys
 # Events that need the agent. keepalive only taps the prompt cache and
 # filter_mode only reports the filter, so a one-shot waiter keeps waiting
 # through them; error lines are transient while the monitor keeps running.
-WAKE_EVENTS = {'new_messages', 'cadence', 'channel_ended', 'channel_gone', 'culled', 'session_revoked'}
+# cadence is left out too: the monitors remember that they fired it only in
+# memory, so every relaunch would fire it again at once and loop on wakes.
+WAKE_EVENTS = {'new_messages', 'channel_ended', 'channel_gone', 'culled', 'session_revoked'}
 
 
 class OnceStdout(io.TextIOBase):

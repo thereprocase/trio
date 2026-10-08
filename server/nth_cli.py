@@ -657,7 +657,8 @@ def main(argv=None):
             # launcher, refusing to start would let a repository's .mcp.json turn
             # `claude` into a dead command inside it.
             print(f'[trio] {refusal}\n[trio] Starting Claude Code WITHOUT channel delivery. A channel joined '
-                  'from this session uses the Monitor.', file=sys.stderr)
+                  'from this session is woken by Trio\'s delivery hooks if they are installed, and '
+                  'otherwise needs the one-shot waiter or a Monitor.', file=sys.stderr)
             return run_foreground(claude_passthrough(argv[1:]), env=plain_environment())
         return run_foreground(command, env=claude_environment())
     parser = argparse.ArgumentParser(description=__doc__)

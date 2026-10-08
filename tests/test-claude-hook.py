@@ -252,16 +252,50 @@ class HookTests(unittest.TestCase):
         config = hook.membership_config(KEY)
         self.assertEqual((config['ended'], config['enabled']), ('channel ended', False))
 
-    def test_a_hooks_dir_open_to_others_is_refused(self):
+    def test_our_hooks_dir_left_open_is_closed_and_a_symlink_is_refused(self):
         if os.name == 'nt':
             self.skipTest('POSIX permissions')
         path = hook.hooks_dir()
         os.chmod(path, 0o755)
+        self.assertEqual(hook.hooks_dir().stat().st_mode & 0o777, 0o700)
+        moved = path.with_name('hooks-real')
+        path.rename(moved)
+        path.symlink_to(moved)
         try:
             with self.assertRaises(PermissionError):
                 hook.hooks_dir()
         finally:
-            os.chmod(path, 0o700)
+            path.unlink()
+            moved.rename(path)
+
+    def test_listen_reports_and_clears_only_a_retryable_ended_mark(self):
+        self.identity()
+        for reason, cleared in (('listener failure', True), ('channel ended', False),
+                                ('membership refused', False)):
+            with hook.membership_update(KEY) as config:
+                config['ended'] = reason
+            result = self.listen(enabled=True)
+            self.assertEqual(result['ended'], '' if cleared else reason, reason)
+            self.assertEqual(hook.membership_config(KEY)['ended'], '' if cleared else reason)
+            if not cleared:
+                self.assertIn('cannot restart it', result['hint'])
+
+    def test_hooks_are_not_claimed_inside_a_trio_claude_launch(self):
+        import nth_event_access
+        self.identity()
+        # The hooks stand down under the launcher whether or not its hub came up. With the
+        # hub (1) the session is in channel mode; without it (unavailable) it needs a Monitor.
+        for flag, monitor in (('1', False), ('unavailable', True)):
+            with self.hook_mode(), patch.dict(os.environ, {'TRIO_CLAUDE_CHANNEL': flag}):
+                self.assertFalse(nth_event_access._hooks_deliver(), flag)
+                self.assertEqual(nth_event_access.uses_monitor(), monitor, flag)
+
+    def test_old_membership_locks_are_pruned(self):
+        lock = hook.hooks_dir() / ('membership-' + KEY + '.lock')
+        lock.write_text('')
+        os.utime(lock, (time.time() - 40 * 86400,) * 2)
+        hook.prune()
+        self.assertFalse(lock.exists())
 
     def test_listen_in_hook_mode_needs_a_saved_identity(self):
         self.assertIn('error', self.listen(filter_mode='all'))
@@ -335,7 +369,8 @@ class HookTests(unittest.TestCase):
              patch.object(hook, 'wait', return_value=0) as waited:
             self.assertEqual(hook.main(['start']), 0)
         self.assertFalse(hook.load_session(SESSION)['ended'])
-        waited.assert_called_once_with(SESSION)
+        # Claude's first response may wait for SessionStart hooks: the Stop hook waits instead.
+        waited.assert_not_called()
 
     def test_a_fresh_start_or_clear_does_not_revive_an_ended_session(self):
         self.identity()
@@ -414,6 +449,15 @@ class RegistrationTests(unittest.TestCase):
         self.assertEqual(group['matcher'], 'resume')
         self.assertEqual(group['hooks'][0]['args'][-1], 'start')
         self.assertTrue(group['hooks'][0]['asyncRewake'])
+
+    def test_waking_hooks_carry_a_timeout_past_claudes_default(self):
+        settings = self.install({})
+        for event, action, _ in hook.HOOK_EVENTS:
+            entry = settings['hooks'][event][0]['hooks'][0]
+            if action == 'end':
+                self.assertNotIn('timeout', entry)
+            else:
+                self.assertGreater(entry['timeout'], 600, event)
 
     def test_the_tool_matcher_covers_any_nth_server(self):
         import re

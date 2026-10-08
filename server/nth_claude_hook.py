@@ -4,7 +4,7 @@
 Claude Code runs a command hook with `asyncRewake: true` in the background and,
 when it exits with code 2, wakes the model and shows it the hook's stderr as a
 system reminder. This script is that hook. `setup.py` registers it in Claude's
-user settings for three events:
+user settings for four events:
 
     tool   PostToolUse on the Trio/Quartet connect, listen and ack tools of any
            nth-* server: note which membership this session holds, then wait
@@ -74,6 +74,10 @@ HOOK_TAG = 'nth-trio-delivery'
 HOOK_EVENTS = (('PostToolUse', 'tool', r'mcp__nth-[A-Za-z0-9-]+__(trio|quartet)_(connect|listen|ack)'),
                ('Stop', 'stop', None), ('SessionStart', 'start', 'resume'), ('SessionEnd', 'end', None))
 HOOK_SCRIPT = 'nth_claude_hook.py'
+# Claude Code enforces a hook's `timeout` (600 s by default) even on asyncRewake hooks,
+# and cancels the hook at expiry. Unset, an idle session would be deaf ten minutes
+# after its last turn. A day matches the waiter's own unsupervised lifetime.
+HOOK_TIMEOUT_SECONDS = 24 * 3600
 
 
 def is_trio_group(group):
@@ -135,6 +139,7 @@ def install_hooks(settings, python, script, runtime):
                  'args': [str(script), '--home', str(runtime), action]}
         if action != 'end':                          # SessionEnd only records; it never wakes
             entry['asyncRewake'] = True
+            entry['timeout'] = HOOK_TIMEOUT_SECONDS
         group = {HOOK_TAG: True, 'hooks': [entry]}
         if matcher:
             group['matcher'] = matcher
@@ -166,12 +171,14 @@ def hooks_dir():
     path.mkdir(mode=0o700, exist_ok=True)
     if os.name != 'nt':
         # Its files decide what this session listens to: refuse a directory someone else
-        # could have planted (a symlink, another owner, or open to the group/world).
-        info = os.lstat(path)
+        # could have planted (a symlink or another owner). Our own directory left open to
+        # the group or world, e.g. by a default ACL, is closed rather than refused.
         import stat
-        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode) \
-                or info.st_uid != os.getuid() or info.st_mode & 0o077:
-            raise PermissionError(f'{path} must be a directory owned by this user with mode 0700')
+        info = os.lstat(path)
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+            raise PermissionError(f'{path} must be a directory owned by this user, not a symlink')
+        if info.st_mode & 0o077:
+            os.chmod(path, 0o700)
     return path
 
 
@@ -432,9 +439,15 @@ def membership_update(key):
         write_json(path, config)
 
 
+# Why a waiter stopped serving a membership. Only a listener failure is worth retrying
+# on request; an ended channel or a refused membership needs a person (or a reconnect).
+RETRYABLE_ENDED = ('listener failure',)
+
+
 def configure_membership(key, filter_mode=None, enabled=None):
     """Save a listen call's filter and on/off switch where the waiter reads them; an
-    omitted value keeps what is saved. Returns the resulting membership_config."""
+    omitted value keeps what is saved. enabled=true also clears a retryable ended mark.
+    Returns the resulting membership_config, whose `ended` says if the waiter still skips it."""
     if filter_mode is not None and filter_mode not in FILTERS:
         raise ValueError(f'filter_mode must be one of {sorted(FILTERS)}')
     with membership_update(key) as config:
@@ -442,6 +455,8 @@ def configure_membership(key, filter_mode=None, enabled=None):
             config['filter'] = filter_mode
         if enabled is not None:
             config['enabled'] = bool(enabled)
+        if enabled and config.get('ended') in RETRYABLE_ENDED:
+            config.pop('ended')
     return membership_config(key)
 
 
@@ -663,7 +678,7 @@ SAY = sys.stderr
 def prune(now=None):
     """Forget sessions and memberships nobody has touched for weeks."""
     now = now or time.time()
-    for pattern, days in (('session-*', 14), ('membership-*.json', 30)):
+    for pattern, days in (('session-*', 14), ('membership-*.json', 30), ('membership-*.lock', 30)):
         for path in hooks_dir().glob(pattern):
             try:
                 if now - path.stat().st_mtime > days * 86400:
@@ -703,12 +718,14 @@ def main(argv=None):
         register(payload)
     if args.event == 'start':
         # Only a resume continues a session that held memberships; a fresh start,
-        # /clear and compaction need nothing here (compaction never ended it).
-        if payload.get('source') != 'resume':
-            return 0
-        with session_update(session_id) as state:
-            if state is not None and state['memberships']:
-                state['ended'] = False
+        # /clear and compaction need nothing here (compaction never ended it). It
+        # does not wait here: Claude's first response may wait for SessionStart
+        # hooks, so the Stop hook after that turn starts the waiter.
+        if payload.get('source') == 'resume':
+            with session_update(session_id) as state:
+                if state is not None and state['memberships']:
+                    state['ended'] = False
+        return 0
     if not session_path(session_id).exists():
         return 0                                     # a session that never joined: nothing to do
     return wait(session_id)
