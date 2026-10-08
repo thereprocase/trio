@@ -59,7 +59,7 @@
     const meta = document.createElement('div'); meta.className = 'page-card-meta';
     const expired = pageExpired(page, now);
     meta.textContent = expired ? 'Page expired'
-      : 'Page · expires ' + date(page.expires_at) + ', ' + time(page.expires_at);
+      : 'Page · expires ' + Trio.time.dateTime(page.expires_at);
     card.append(title, meta);
     const path = pagePath(page);
     if (expired || !path) { card.classList.add('expired'); return card; }
