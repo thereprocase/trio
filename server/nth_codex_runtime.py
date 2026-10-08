@@ -29,6 +29,9 @@ from nth_constants import AGENT_INBOX_CHANNEL
 
 
 STDERR_TAIL_LINES = 200
+# Attachment files the hub stores as web images ({id}{ext}, ext from the sniffed type).
+# Only these go to Codex as localImage; anything else is named as a local file.
+CODEX_IMAGE_SUFFIXES = {'.png', '.jpg', '.jpeg', '.gif', '.webp'}
 DEFAULT_TIMEOUT = 10.0
 
 # One capability list drives both App Server enablement and readiness. Managed
@@ -742,12 +745,18 @@ class CodexRuntimeManager:
             with self._lock:
                 self._starting.pop(agent_id, None)
             return False
+        # Only web images go in as localImage; any other attachment (PDF, ZIP, text,
+        # HEIC) is named as a local file in the text, as the Claude supervisor does.
+        attachments = context.get("attachments", [])
+        images = [p for p in attachments if Path(p).suffix.lower() in CODEX_IMAGE_SUFFIXES]
+        files = [p for p in attachments if p not in images]
+        text = f"[#{context['channel']}] {context['text']}"
+        if files:
+            text += "\n\nAttached local files:\n" + "\n".join(files)
         params: Dict[str, Any] = {
             "threadId": thread_id,
-            "input": ([{"type": "text", "text":
-                       f"[#{context['channel']}] {context['text']}"}] +
-                      [{"type": "localImage", "path": path}
-                       for path in context.get("attachments", [])]),
+            "input": ([{"type": "text", "text": text}] +
+                      [{"type": "localImage", "path": path} for path in images]),
         }
         if prior_turn:
             params['input'] = []

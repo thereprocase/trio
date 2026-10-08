@@ -141,6 +141,24 @@ try:
                   and "UTF-8''" in disposition)
             check(f"types: {name} carries a sandbox CSP",
                   "sandbox" in headers.get("Content-Security-Policy", ""))
+    # The saved name always ends in an extension the sniffed type allows, so a text
+    # file cannot be saved as something that runs on a double-click.
+    for sent, kept in (("run.bat", "run.bat.txt"), ("Invoice.hta", "Invoice.hta.txt"),
+                       ("page.html", "page.html.txt"), ("log.CSV", "log.CSV")):
+        st, body = upload(port, b"plain text\n", sent)
+        check(f"names: text sent as {sent} is stored as {kept}",
+              st == 200 and body.get("filename") == kept)
+    st, body = upload(port, b"PK\x03\x04" + b"\x00" * 64, "tool.jar")
+    check("names: a ZIP sent as tool.jar is stored as tool.jar.zip",
+          st == 200 and body.get("filename") == "tool.jar.zip")
+    st, body = upload(port, b"%PDF-1.4\n", "")
+    check("names: an unnamed PDF is file.pdf", st == 200 and body.get("filename") == "file.pdf")
+    check("sniff: a short file ending in a broken UTF-8 byte is not text",
+          web.sniff_attachment_mime(b"abc\xff") is None)
+    check("sniff: a long text file cut mid-character in the sample is text",
+          web.sniff_attachment_mime(b"a" * 65535 + "é".encode() + b"tail") == "text/plain")
+    check("env: a malformed NTH_UPLOAD_MAX_BYTES falls back to the default",
+          web._env_bytes("NTH_TEST_NOT_SET_XYZ", 7) == 7)
     st, body = upload(port, b"\x7fELF\x02\x01\x01\x00" + b"\x00" * 64, "tool.bin")
     check("types: an unrecognised binary is refused (400)", st == 400)
     st, body = upload(port, PNG, "inline.png")
