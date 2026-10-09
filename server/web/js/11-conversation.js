@@ -645,18 +645,19 @@
       const role = document.createElement('span'); role.className = 'message-role role-' + vm.role; role.textContent = vm.role;
       head.append(role);
     }
-    head.append(stamp);
     if (vm.confidence) { const confidence = document.createElement('span'); confidence.className = 'confidence confidence-' + vm.confidence; confidence.textContent = vm.confidence; head.append(confidence); }
     if (vm.isPrivate) { const badge = document.createElement('span'); badge.className = 'private-badge'; badge.textContent = 'private'; head.append(badge); }
     if (vm.isTask) { const task = document.createElement('span'); task.className = 'task-chip'; task.textContent = 'task #' + vm.taskId; head.append(task); }
     if (vm.isQuestion) card.classList.add('question');
-    content.append(head);
     if (vm.replyTo) {
-      const reply = document.createElement('a'); reply.className = 'reply-context'; reply.href = '#m' + vm.replyTo; reply.textContent = 'replying to #' + vm.replyTo;
-      reply.addEventListener('click', (e) => { e.preventDefault(); const target = document.querySelector(`[data-message-id="${vm.replyTo}"]`); if (target) { target.scrollIntoView({ behavior: 'smooth', block: 'center' }); target.focus(); } });
-      content.append(reply);
+      const reply = document.createElement('a'); reply.className = 'reply-context'; reply.href = '#m' + vm.replyTo; reply.textContent = '↪ #' + vm.replyTo;
+      reply.setAttribute('aria-label', 'Replying to message #' + vm.replyTo);
+      reply.addEventListener('click', (e) => { e.preventDefault(); const target = document.querySelector(`[data-message-id="${vm.replyTo}"]`); if (target) { target.scrollIntoView({ behavior: 'smooth', block: 'center' }); target.setAttribute('tabindex', '-1'); target.focus({ preventScroll: true }); } });
+      head.append(reply);
     }
-    const target = renderTargets(vm); if (target) content.append(target);
+    const target = renderTargets(vm); if (target) head.append(target);
+    head.append(stamp);
+    content.append(head);
     // A trio_ask stores the question BOTH as prose (content) and as a structured
     // picker (choices). Rendering both stacks a redundant echo bubble above the
     // picker — so when the ask-card will render, suppress the bubble and let the

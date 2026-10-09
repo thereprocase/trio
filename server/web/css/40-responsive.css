@@ -184,3 +184,20 @@
   .att-card .att-detail .r .v{ min-width:0; max-width:100%; overflow-wrap:anywhere; }
   .att-card .reason pre{ max-width:100%; overflow:auto; }
 }
+
+/* One phone app-bar row, including the 44px controls and member pile. The
+   rescue checker retains its 8px border within the same 64px height budget. */
+@media (max-width:640px){
+  .conversation-header{ min-height:56px; padding:4px 8px; gap:4px; }
+  .conversation-header .tt{ display:flex; align-items:center; gap:4px; }
+  .conversation-header h1{ flex:1; min-width:0; font-size:16px; }
+  .conversation-header .topic{ flex:0 1 auto; max-width:72px; margin:0; font-size:10px; }
+  .conversation-header .topic[data-static="true"]{ display:none; }
+  .conversation-header .topbar-actions{ gap:0; flex-shrink:0; }
+  .conversation-header .icon-btn{ width:44px; height:44px; flex-shrink:0; }
+  .conversation-header .face-pile{ padding:8px 3px; flex-shrink:0; }
+  .conversation-header .face-pile .av,
+  .conversation-header .face-pile .more{ width:28px; height:28px; margin-left:-10px; font-size:11px; }
+  .conversation-header .face-pile .av:first-child{ margin-left:0; }
+  .message.msg .message-head{ gap:1px; }
+}
