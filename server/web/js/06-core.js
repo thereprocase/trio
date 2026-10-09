@@ -100,6 +100,15 @@
     h.textContent = label;
     h.title = label;
   };
+  // Only the static channel tagline disappears on phones. Loading, errors,
+  // archive and DM context remain visible when the title track is compact.
+  root.setChannelSubtitle = function setChannelSubtitle(text) {
+    const meta = document.getElementById('h-meta');
+    if (!meta) return;
+    meta.textContent = text || '';
+    meta.setAttribute?.('data-static', String(text === 'Live agent workspace'));
+    meta.title = text || '';
+  };
   root.boot = async function boot(mountFeatures) {
     // A failed/slow /api/meta must NOT abort boot — otherwise mountFeatures()
     // below never runs and the whole shell (theme, router, views) is skipped,
@@ -120,7 +129,7 @@
     // paints a final claim beside fallback initials while those slower slices
     // are still in flight. Workspace refresh promotes this to Live only after
     // both metadata slices have settled.
-    document.getElementById('h-meta').textContent = root.state.channel ? 'Loading workspace…' : 'No channel selected';
+    root.setChannelSubtitle(root.state.channel ? 'Loading workspace…' : 'No channel selected');
     mountFeatures?.();
     // The router applies the initial route from inside mountFeatures(), and a
     // channel route loads the conversation — which opens the event stream. So
