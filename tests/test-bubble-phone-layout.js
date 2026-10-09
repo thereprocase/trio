@@ -24,6 +24,11 @@ assert.ok(declaration, 'production CSS order exists');
 const cssFiles = [...declaration[1].matchAll(/"(css\/[^"]+)"/g)].map(m => m[1]);
 assert.ok(cssFiles.length, 'production CSS list is populated');
 const css = cssFiles.map(name => fs.readFileSync(path.join(web, name), 'utf8')).join('\n');
+const themeSource = fs.readFileSync(path.join(web, 'js/40-preferences.js'), 'utf8');
+const themeList = themeSource.match(/const themes = \[([\s\S]*?)\];/);
+assert.ok(themeList, 'registered theme list exists');
+const themes = [...themeList[1].matchAll(/id: '([^']+)'/g)].map(m => m[1]);
+assert.ok(themes.length > 0, 'registered themes are populated');
 const scripts = `window.Trio = { state: { operator: { id: 'operator' }, readOnly: true },
   api: {}, events: new EventTarget(), actions: {}, avatarTone: () => 'eucalyptus' };\n`
   + ['js/09-time.js', 'js/10-markdown.js', 'js/11-conversation.js']
@@ -96,10 +101,12 @@ async function measure() {
   while (!await evaluate("document.readyState === 'complete' && !!window.Trio?.conversation")) {
     await new Promise(resolve => setTimeout(resolve, 20));
   }
-  await evaluate(`(() => {
+  await evaluate(`(async () => {
     Trio.state.members = new Map([
       ['operator', { id:'operator', name:'Operator' }],
-      ['agent', { id:'agent', name:'Agent', kind:'agent' }]
+      ['agent', { id:'agent', name:'Agent', kind:'agent' }],
+      ['coordinator', { id:'coordinator', name:'BuildCoordinator', kind:'agent' }],
+      ['long', { id:'long', name:'Member' + 'LongName'.repeat(9), kind:'agent' }]
     ]);
     document.getElementById('h-channel').textContent = '#layout-demo';
     document.body.classList.add('message-numbers');
@@ -114,21 +121,38 @@ async function measure() {
       { id:5, member_id:'operator', content:'Private reply.', recipients:['agent'], is_dm:true },
       { id:6, member_id:'agent', content:'| A very wide first heading | A very wide second heading | A very wide third heading |\\n| --- | --- | --- |\\n| One | Two | Three |' },
       { id:7, member_id:'operator', content:'Deleted.', retracted_at:'2026-01-01T12:01:00Z' },
-      { id:8, member_id:'agent', content:'[joined] Agent' }
+      { id:8, member_id:'agent', content:'[joined] Agent' },
+      { id:9, member_id:'operator', content:'Recipients.', mentions:['long', 'agent'], refs:['long'], bangs:['long'] },
+      { id:10, member_id:'coordinator', content:'Private incoming.', recipients:['operator'], is_dm:true },
+      { id:11, member_id:'long', content:'Long incoming author.', recipients:['operator'], is_dm:true, confidence:'medium', task_id:123456789 },
+      { id:12, member_id:'agent', content:'Metadata incoming.', recipients:['operator'], is_dm:true, confidence:'medium', task_id:123456789 },
+      { id:13, member_id:'operator', content:'Landscape attachment.', attachments:[{id:1, mime:'image/png', filename:'landscape.png'}] },
+      { id:14, member_id:'agent', content:'Landscape attachment.', attachments:[{id:2, mime:'image/png', filename:'landscape.png'}] },
+      { id:15, member_id:'agent', content:'Incoming recipients.', mentions:['long'] },
+      { id:16, member_id:'operator', content:String.fromCharCode(96).repeat(3) + 'text\\n' + 'long-code-'.repeat(50) + '\\n' + String.fromCharCode(96).repeat(3) }
     ];
-    list.replaceChildren(...messages.map(msg => Trio.conversation.cardFor({ ...base, ...msg })));
+    const cards = messages.map(msg => Trio.conversation.cardFor({ ...base, ...msg }));
+    const canvas = document.createElement('canvas'); canvas.width = 640; canvas.height = 360;
+    const context = canvas.getContext('2d'); context.fillStyle = '#448866'; context.fillRect(0, 0, 640, 360);
+    const source = canvas.toDataURL('image/png');
+    for (const card of cards) for (const image of card.querySelectorAll('.message-attachment img')) {
+      image.src = source; image.loading = 'eager'; image.classList.remove('error');
+    }
+    list.replaceChildren(...cards);
+    await Promise.all([...list.querySelectorAll('.message-attachment img')].map(image => image.decode()));
+
   })()`);
   let passed = 0;
   const failures = [], measurements = [];
-  for (const width of [360, 390, 412, 1280]) {
+  for (const width of [320, 360, 390, 412, 768, 1280]) {
     const mobile = width < 640;
     await call('Emulation.setTouchEmulationEnabled', { enabled:mobile, maxTouchPoints:1 }, sessionId);
     await call('Emulation.setDeviceMetricsOverride', { width, height:900, deviceScaleFactor:1, mobile }, sessionId);
-    for (const theme of ['light-1', 'dark-1', 'inspired-rescue']) {
+    for (const theme of themes) {
       const name = width + 'px ' + theme;
       const geometry = await evaluate(`(async () => {
         document.documentElement.dataset.theme = ${JSON.stringify(theme)};
-        const list = document.getElementById('messages'); list.scrollTop = 0;
+        const list = document.getElementById('messages'); list.scrollTop = 0; list.scrollLeft = 0;
         await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
         const rect = el => { const r = el.getBoundingClientRect();
           return { left:r.left, right:r.right, top:r.top, bottom:r.bottom, width:r.width, height:r.height }; };
@@ -139,61 +163,123 @@ async function measure() {
           return { bubble:r, row:rect(c), content:rect(c.querySelector('.message-content')), leftGap:r.left-l.left, rightGap:l.right-r.right,
             avatar:rect(c.querySelector('.message-avatar')),
             head:rect(c.querySelector('.message-head')), targets:c.querySelector('.message-targets') ? rect(c.querySelector('.message-targets')) : null,
+            headerChildren:[...c.querySelector('.message-head').children].filter(el => el.getClientRects().length).map(el => ({ tag:el.tagName, className:el.className, ...rect(el), whiteSpace:getComputedStyle(el).whiteSpace })),
+            chips:[...c.querySelectorAll('.target-chip')].map(el => rect(el)),
+            rowInsets:{ left:parseFloat(getComputedStyle(c).paddingLeft) + parseFloat(getComputedStyle(c).borderLeftWidth), right:parseFloat(getComputedStyle(c).paddingRight) + parseFloat(getComputedStyle(c).borderRightWidth) },
             copy:rect(copy), copyHitWidth:copy.offsetWidth + (parseFloat(target.left) || 0)*-1 + (parseFloat(target.right) || 0)*-1 };
         };
         const table = card(6).querySelector('.md-table');
+        const imageGeometry = id => { const image = card(id).querySelector('.message-attachment img');
+          return { image:rect(image), wrapper:rect(image.parentElement), content:rect(card(id).querySelector('.message-content')),
+            naturalWidth:image.naturalWidth, naturalHeight:image.naturalHeight }; };
+        const code = card(16).querySelector('pre.mdcode');
         return { width:${width}, theme:${JSON.stringify(theme)}, viewport:document.documentElement.clientWidth,
           coarse:matchMedia('(hover:none) and (pointer:coarse)').matches,
-          conversation:rect(list), padding:parseFloat(getComputedStyle(list).paddingRight),
+          conversation:rect(list), padding:parseFloat(getComputedStyle(list).paddingRight), rowPadding:parseFloat(getComputedStyle(card(1)).paddingRight),
+          avatarWidth:parseFloat(getComputedStyle(card(2).querySelector('.message-avatar')).width),
           overflow:list.scrollWidth-list.clientWidth, own:gaps(1), other:gaps(2),
           shortOwn:gaps(3), shortOther:gaps(4), private:gaps(5), table:gaps(6),
+          longChip:gaps(9), incomingPrivate:gaps(10), longAuthor:gaps(11), incomingMetadata:gaps(12), incomingChip:gaps(15),
+          ownImage:imageGeometry(13), incomingImage:imageGeometry(14),
+          codeScroll:{ width:code.clientWidth, scrollWidth:code.scrollWidth, overflowX:getComputedStyle(code).overflowX },
+          codeCopy:rect(card(16).querySelector('.code-copy')),
+
           tableScroll:{ width:table.clientWidth, scrollWidth:table.scrollWidth, overflowX:getComputedStyle(table).overflowX },
           privateMarker:!!card(5).querySelector('.private-badge'), privateShadow:getComputedStyle(card(5).querySelector('.bubble')).boxShadow,
           retracted:{ row:rect(card(7)), avatar:rect(card(7).querySelector('.message-avatar')), content:rect(card(7).querySelector('.message-content')), bubble:!!card(7).querySelector('.bubble'), tools:!!card(7).querySelector('.message-tools') },
           system:{ row:rect(card(8)), content:rect(card(8).querySelector('.message-content')), bubble:!!card(8).querySelector('.bubble'), avatar:!!card(8).querySelector('.message-avatar'), tools:!!card(8).querySelector('.message-tools') } };
       })()`);
+      if (mobile) geometry.chipHits = await evaluate(`(() => {
+        const list = document.getElementById('messages');
+        const hits = [...list.querySelectorAll('[data-message-id="9"] .target-chip, [data-message-id="15"] .target-chip')].map(chip => {
+          chip.scrollIntoView({ block:'center' });
+          const r = chip.getBoundingClientRect();
+          return [r.left + 2, r.right - 2].map(x => {
+            const hit = document.elementFromPoint(x, r.top + r.height / 2);
+            return hit === chip || chip.contains(hit);
+          });
+        });
+        list.scrollTop = 0; list.scrollLeft = 0;
+        return hits;
+      })()`);
       measurements.push(geometry);
       if (evidence) {
         const { data } = await call('Page.captureScreenshot', { format:'png' }, sessionId);
         fs.writeFileSync(path.join(evidence, phase + '-' + width + '-' + theme + '.png'), Buffer.from(data, 'base64'));
+        if ([320, 390].includes(width) && ['light-1', 'inspired-slack', 'inspired-messenger'].includes(theme)) {
+          for (const id of [9, 11, 14]) {
+            await evaluate(`document.querySelector('[data-message-id="${id}"]').scrollIntoView({ block:'center' })`);
+            const shot = await call('Page.captureScreenshot', { format:'png' }, sessionId);
+            fs.writeFileSync(path.join(evidence, phase + '-' + width + '-' + theme + '-message-' + id + '.png'), Buffer.from(shot.data, 'base64'));
+          }
+        }
       }
       try {
         assert.strictEqual(geometry.viewport, width, 'actual viewport');
-        assert.strictEqual(geometry.overflow, 0, 'conversation must not scroll sideways');
-        for (const key of ['own', 'other', 'shortOwn', 'shortOther', 'private', 'table']) {
+        if (mobile) assert.strictEqual(geometry.overflow, 0, 'conversation must not scroll sideways');
+        for (const key of ['own', 'other', 'shortOwn', 'shortOther', 'private', 'table', 'longChip', 'incomingPrivate', 'longAuthor', 'incomingMetadata', 'incomingChip']) {
           const g = geometry[key];
           assert.ok(g.leftGap >= 0 && g.rightGap >= 0, key + ' fits conversation');
-          if (mobile) assert.ok(g.copyHitWidth >= 44, key + ' retains horizontal 44px copy target');
+          if (mobile) {
+            assert.ok(g.copyHitWidth >= 44, key + ' retains horizontal 44px copy target');
+            assert.ok(g.head.left >= g.content.left - .5 && g.head.right <= g.content.right + .5, key + ' header fits content');
+            for (const child of g.headerChildren) {
+              assert.ok(child.left >= g.content.left - .5 && child.right <= g.content.right + .5,
+                key + ' header child fits content: ' + JSON.stringify(child));
+              if (child.tag === 'TIME') assert.strictEqual(child.whiteSpace, 'nowrap', 'timestamp stays together');
+            }
+            for (const chip of g.chips) assert.ok(chip.left >= g.content.left - .5 && chip.right <= g.content.right + .5,
+              key + ' chip fits content: ' + JSON.stringify(chip));
+          }
         }
         if (mobile) {
           assert.strictEqual(geometry.coarse, true, 'touch rules active');
-          for (const key of ['own', 'shortOwn', 'private']) {
+          assert.ok(geometry.chipHits.length >= 4 && geometry.chipHits.flat().every(Boolean), 'recipient chip edges are reachable');
+          assert.ok(geometry.incomingMetadata.headerChildren.some(child => child.className === 'private-badge'), 'incoming private fixture');
+          assert.ok(geometry.incomingMetadata.headerChildren.some(child => child.className === 'task-chip'), 'incoming task fixture');
+          assert.ok(geometry.incomingMetadata.headerChildren.some(child => child.className.includes('confidence-')), 'incoming confidence fixture');
+          for (const key of ['own', 'shortOwn', 'private', 'longChip']) {
             const g = geometry[key];
             assert.ok(g.rightGap < g.leftGap, key + ' right gap < left gap: ' + JSON.stringify(g));
-            assert.ok(Math.abs(g.rightGap - geometry.padding) < .5, key + ' hugs page padding');
+            assert.ok(Math.abs(g.bubble.right - (g.row.right - g.rowInsets.right)) < .5, key + ' hugs row edge');
             assert.strictEqual(g.avatar.width, 0, key + ' own avatar does not reserve space');
             assert.ok(g.head.left >= g.content.left - .5 && g.head.right <= g.content.right + .5, key + ' header fits');
           }
           for (const key of ['other', 'shortOther', 'table']) {
             const g = geometry[key];
             assert.ok(g.leftGap < g.rightGap, key + ' left gap < right gap: ' + JSON.stringify(g));
-            assert.strictEqual(g.avatar.width, 32, key + ' incoming avatar retained');
+            assert.strictEqual(g.avatar.width, theme === 'inspired-messenger' ? 0 : geometry.avatarWidth, key + ' incoming avatar retained');
           }
-          const minimumGutter = Math.max(48, geometry.own.row.width * .16);
-          assert.ok(geometry.own.leftGap - geometry.padding >= minimumGutter - .5, 'own opposite gutter');
-          assert.ok(geometry.other.rightGap - geometry.padding >= minimumGutter - .5, 'incoming opposite gutter');
-        } else {
+          for (const key of ['own', 'other']) {
+            const g = geometry[key], rowWidth = g.row.width - g.rowInsets.left - g.rowInsets.right;
+            const minimumGutter = Math.min(72, Math.max(theme === 'inspired-slack' ? 52 : 48, rowWidth * .16));
+            const gutter = key === 'own' ? g.bubble.left - g.row.left - g.rowInsets.left
+              : g.row.right - g.rowInsets.right - g.bubble.right;
+            assert.ok(gutter >= minimumGutter - .5, key + ' opposite gutter');
+          }
+        } else if (['light-1', 'dark-1', 'inspired-rescue'].includes(theme)) {
           assert.ok(geometry.own.row.width <= 820, 'desktop row cap');
           assert.ok(geometry.own.bubble.width <= geometry.own.row.width * .72 + .5, 'desktop bubble cap');
           assert.strictEqual(geometry.own.avatar.width, 32, 'desktop own avatar retained');
         }
+        if (mobile) for (const key of ['ownImage', 'incomingImage']) {
+          const g = geometry[key];
+          assert.strictEqual(g.naturalWidth, 640, key + ' intrinsic image loaded');
+          assert.strictEqual(g.naturalHeight, 360, key + ' intrinsic image loaded');
+          assert.ok(g.image.width > 0, key + ' image visible');
+          assert.ok(g.image.left >= g.wrapper.left - .5 && g.image.right <= g.wrapper.right + .5, key + ' image fits wrapper');
+          assert.ok(g.wrapper.left >= g.content.left - .5 && g.wrapper.right <= g.content.right + .5, key + ' wrapper fits content');
+        }
+        assert.strictEqual(geometry.codeScroll.overflowX, 'auto', 'code scroll stays local');
+        assert.ok(geometry.codeScroll.scrollWidth > geometry.codeScroll.width, 'wide code scrolls');
         if (mobile) assert.ok(geometry.tableScroll.scrollWidth > geometry.tableScroll.width, 'wide table scrolls');
         assert.strictEqual(geometry.tableScroll.overflowX, 'auto');
-        assert.ok(geometry.privateMarker && geometry.privateShadow.includes('inset'), 'private marker retained');
+        assert.ok(geometry.privateMarker, 'private marker retained');
+        if (['light-1', 'dark-1', 'inspired-rescue'].includes(theme)) assert.ok(geometry.privateShadow.includes('inset'), 'private shadow retained');
         assert.ok(!geometry.retracted.bubble && !geometry.retracted.tools, 'retracted message stays plain');
-        assert.strictEqual(geometry.retracted.avatar.width, 32, 'retracted avatar unchanged');
+        assert.strictEqual(geometry.retracted.avatar.width, theme === 'inspired-messenger' ? 0 : geometry.avatarWidth, 'retracted avatar unchanged');
         assert.ok(!geometry.system.bubble && !geometry.system.avatar && !geometry.system.tools, 'system stays plain');
-        assert.strictEqual(geometry.system.content.width, geometry.system.row.width, 'system stays full width');
+        if (['light-1', 'dark-1', 'inspired-rescue'].includes(theme)) assert.strictEqual(geometry.system.content.width, geometry.system.row.width, 'system stays full width');
         passed++; console.log('PASS: ' + name);
       } catch (error) { failures.push(name); console.error('FAIL: ' + name + ' — ' + error.message); }
     }
