@@ -43,53 +43,155 @@ def copy_file(source, destination):
     shutil.copy2(source, destination)
 
 
+def _toml_tokens(text):
+    """Yield source spans, treating strings/comments as opaque TOML tokens."""
+    i = 0
+    while i < len(text):
+        start, char = i, text[i]
+        if char in ' \t\r':
+            i += 1
+            continue
+        if char == '#':
+            end = text.find('\n', i)
+            i = len(text) if end < 0 else end
+            continue
+        if char in ('"', "'"):
+            quote = char * (3 if text.startswith(char * 3, i) else 1)
+            i += len(quote)
+            while i < len(text):
+                if char == '"' and text[i] == '\\':
+                    i += 2
+                elif text.startswith(quote, i):
+                    i += len(quote)
+                    if len(quote) == 3:
+                        while i < len(text) and text[i] == char:
+                            i += 1
+                    break
+                else:
+                    i += 1
+        elif char in '\n{}[]=,.':
+            i += 1
+        else:
+            while i < len(text) and text[i] not in ' \t\r\n{}[]=,.#\'"':
+                i += 1
+        yield text[start:i], start, i
+
+
+def _toml_groups(tokens, separator):
+    """Split only outside arrays/tables and opaque string tokens."""
+    group, depth = [], 0
+    for token in tokens:
+        word = token[0]
+        if word == separator and depth == 0:
+            if group:
+                yield group
+            group = []
+            continue
+        group.append(token)
+        if word in ('[', '{'):
+            depth += 1
+        elif word in (']', '}'):
+            depth -= 1
+    if group:
+        yield group
+
+
+def _toml_assignment(text, tokens):
+    equal = next((i for i, token in enumerate(tokens) if token[0] == '='), None)
+    if equal is None:
+        return None, []
+    # Let TOML decode quoted/escaped keys, rather than interpreting string text.
+    key = tomllib.loads(text[tokens[0][1]:tokens[equal][1]] + '=0')
+    return key, tokens[equal + 1:]
+
+
 def name_codex_hubs(path):
-    """Patch retained proxy env tables without rewriting unrelated TOML/comments."""
+    """Change only server names; skip unsupported layouts without rewriting them."""
     if not path.exists():
         return
-    text = path.read_text(encoding='utf-8')
-    servers = tomllib.loads(text).get('mcp_servers', {})
+    original = path.read_text(encoding='utf-8')
+    before = tomllib.loads(original)
+    servers = before.get('mcp_servers', {})
     names = {name for name, entry in servers.items()
              if name.startswith('nth-') and isinstance(entry, dict)
              and any('nth_quartet_proxy' in str(arg) for arg in entry.get('args', []))}
-    # Decode headers through TOML itself so quoted server names work as well.
-    headers = list(re.finditer(r'^\s*\[(?!\[)([^\n]+)\][ \t]*(?:#[^\n]*)?$', text, re.M))
-    replacements = []
-    for index, header in enumerate(headers):
-        try:
-            tree = tomllib.loads(header.group(0) + '\n__nth_header__=true\n').get('mcp_servers', {})
-        except tomllib.TOMLDecodeError:
+    sections, current = [], None
+    for tokens in _toml_groups(_toml_tokens(original), '\n'):
+        if tokens[0][0] == '[':
+            tree = tomllib.loads(original[tokens[0][1]:tokens[-1][2]] +
+                                '\n__nth_header__=true\n').get('mcp_servers', {})
+            current = None
+            for name in names & tree.keys():
+                table = tree[name]
+                if '__nth_header__' in table:
+                    current = (name, False, tokens[-1][2], [])
+                elif isinstance(table.get('env'), dict) and '__nth_header__' in table['env']:
+                    current = (name, True, tokens[-1][2], [])
+            if current:
+                sections.append(current)
+        elif current:
+            current[3].append(tokens)
+    edits, changed = [], set()
+    for name in sorted(names):
+        if 'env' in servers[name] and not isinstance(servers[name]['env'], dict):
+            print('Note: retained Codex hub ' + name +
+                  ': skipped NTH_SERVER_NAME edit; unsupported TOML layout.', file=sys.stderr)
             continue
-        for name in names & tree.keys():
-            table = tree[name]
-            is_env = isinstance(table.get('env'), dict)
-            if not is_env and '__nth_header__' not in table:
-                continue
-            start = header.end()
-            end = headers[index + 1].start() if index + 1 < len(headers) else len(text)
-            body = text[start:end]
-            value = json.dumps(name)
-            if is_env:
-                assignment = re.search(r'^([ \t]*NTH_SERVER_NAME[ \t]*=[ \t]*)(?:"[^"\n]*"|\'[^\'\n]*\')', body, re.M)
-                if assignment:
-                    body = body[:assignment.start()] + assignment.group(1) + value + body[assignment.end():]
-                else:
-                    body = '\nNTH_SERVER_NAME = ' + value + body
-            elif isinstance(servers[name].get('env'), dict):
-                # Nested env tables are handled by their own header above.
-                inline = re.search(r'^([ \t]*env[ \t]*=[ \t]*\{)(.*?)\}', body, re.M | re.S)
-                if not inline:
-                    continue
-                contents = re.sub(r'(?:NTH_SERVER_NAME|"NTH_SERVER_NAME"|\'NTH_SERVER_NAME\')[ \t]*=[ \t]*(?:"[^"\n]*"|\'[^\'\n]*\')[ \t]*,?', '', inline.group(2)).strip().strip(',')
-                body = body[:inline.start()] + inline.group(1) + 'NTH_SERVER_NAME = ' + value + (', ' + contents if contents else '') + '}' + body[inline.end():]
+        if servers[name].get('env', {}).get('NTH_SERVER_NAME') == name:
+            continue
+        candidates = [s for s in sections if s[0] == name]
+        nested = next((s for s in candidates if s[1]), None)
+        parent = next((s for s in candidates if not s[1]), None)
+        value = json.dumps(name)
+        proposed = []
+        if nested:
+            for tokens in nested[3]:
+                key, rhs = _toml_assignment(original, tokens)
+                if key == {'NTH_SERVER_NAME': 0}:
+                    proposed = [(rhs[0][1], rhs[-1][2], value)]
+                    break
             else:
-                body += '\n[mcp_servers.' + json.dumps(name) + '.env]\nNTH_SERVER_NAME = ' + value + '\n'
-            replacements.append((start, end, body))
-    for start, end, body in reversed(replacements):
-        text = text[:start] + body + text[end:]
-    # Validate the edit before touching the original; retain a backup on changes.
-    tomllib.loads(text)
-    if text != path.read_text(encoding='utf-8'):
+                if 'NTH_SERVER_NAME' not in servers[name]['env']:
+                    proposed = [(nested[2], nested[2], '\nNTH_SERVER_NAME = ' + value)]
+        elif parent:
+            for tokens in parent[3]:
+                key, rhs = _toml_assignment(original, tokens)
+                if key == {'env': 0} and rhs[0][0] == '{' and rhs[-1][0] == '}':
+                    for field in _toml_groups(rhs[1:-1], ','):
+                        env_key, env_rhs = _toml_assignment(original, field)
+                        if env_key == {'NTH_SERVER_NAME': 0}:
+                            proposed = [(env_rhs[0][1], env_rhs[-1][2], value)]
+                            break
+                    else:
+                        if 'NTH_SERVER_NAME' not in servers[name]['env']:
+                            proposed = [(rhs[0][2], rhs[0][2], 'NTH_SERVER_NAME = ' +
+                                         value + (', ' if len(rhs) > 2 else ''))]
+                    break
+            else:
+                if 'env' not in servers[name]:
+                    proposed = [(parent[2], parent[2], '\nenv = {NTH_SERVER_NAME = ' + value + '}')]
+        if proposed:
+            edits.extend(proposed)
+            changed.add(name)
+        else:
+            print('Note: retained Codex hub ' + name +
+                  ': skipped NTH_SERVER_NAME edit; unsupported TOML layout.', file=sys.stderr)
+    text = original
+    for start, end, value in sorted(edits, reverse=True):
+        text = text[:start] + value + text[end:]
+    # Syntax alone cannot catch corruption of unrelated environment values.
+    import copy
+    expected = copy.deepcopy(before)
+    for name in changed:
+        expected['mcp_servers'][name].setdefault('env', {})['NTH_SERVER_NAME'] = name
+    try:
+        preserved = tomllib.loads(text) == expected
+    except tomllib.TOMLDecodeError:
+        preserved = False
+    if not preserved:
+        print('Note: skipped retained Codex hub edits; TOML preservation check failed.', file=sys.stderr)
+        return
+    if text != original:
         backup(path)
         temporary = path.with_name(path.name + '.tmp-' + STAMP)
         temporary.write_text(text, encoding='utf-8')

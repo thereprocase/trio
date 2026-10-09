@@ -84,20 +84,22 @@ class FixTests(unittest.TestCase):
 
     def test_registered_host_and_in_turn_survive_import_and_register(self):
         self.attach()
-        service.dispatch(self.store,dict(registration(),host_pid=os.getpid()))
-        stamp=claude.process_stamp(os.getpid())
-        self.assertEqual(self.store.session(SESSION)['state'],'idle')
-        self.assertEqual(self.store.live_sessions(),1)
-        self.op('turn',session=SESSION,phase='started')
-        service.dispatch(self.store,registration())
-        self.assertEqual(self.store.session(SESSION)['state'],'in_turn')
-        service.dispatch(self.store,dict(registration(),host_pid=os.getpid()))
-        path=wire.private_dir(wire.home()/'events/hooks')/('session-'+SESSION+'.json')
-        path.write_text(json.dumps(dict(ended=True,client='claude',memberships={})))
-        self.store.import_hooks()
-        row=self.store.session(SESSION)
-        self.assertEqual((row['state'],row['host_pid'],row['host_stamp']),('in_turn',os.getpid(),stamp))
-        self.assertEqual(self.store.live_sessions(),1)
+        with self.store.lock:
+            self.assertTrue(self.store.lock._is_owned())
+            service.dispatch(self.store,dict(registration(),host_pid=os.getpid()))
+            stamp=claude.process_stamp(os.getpid())
+            self.assertEqual(self.store.session(SESSION)['state'],'idle')
+            self.assertEqual(self.store.live_sessions(),1)
+            self.op('turn',session=SESSION,phase='started')
+            service.dispatch(self.store,registration())
+            self.assertEqual(self.store.session(SESSION)['state'],'in_turn')
+            service.dispatch(self.store,dict(registration(),host_pid=os.getpid()))
+            path=wire.private_dir(wire.home()/'events/hooks')/('session-'+SESSION+'.json')
+            path.write_text(json.dumps(dict(ended=True,client='claude',memberships={})))
+            self.store.import_hooks()
+            row=self.store.session(SESSION)
+            self.assertEqual((row['state'],row['host_pid'],row['host_stamp']),('in_turn',os.getpid(),stamp))
+            self.assertEqual(self.store.live_sessions(),1)
 
     def test_imported_holdings_cannot_become_owner(self):
         self.attach()
@@ -496,6 +498,8 @@ class FixTests(unittest.TestCase):
             client.close()
 
     def test_retained_codex_hub_env_table_variants(self):
+        previous_umask=os.umask(0o022)
+        self.addCleanup(os.umask,previous_umask)
         spec=importlib.util.spec_from_file_location('env_setup',ROOT/'setup.py')
         setup=importlib.util.module_from_spec(spec);spec.loader.exec_module(setup)
         path=self.root/'config.toml'
@@ -503,8 +507,10 @@ class FixTests(unittest.TestCase):
                     '[mcp_servers."nth-second".env]\nKEEP="yes"\nNTH_SERVER_NAME="old"'):
             with self.subTest(env=env):
                 path.write_text('# comment\n[mcp_servers."nth-second"]\ncommand="python"\nargs=["nth_quartet_proxy.py","--url","'+URL+'"]\n'+env+'\n[mcp_servers.unrelated]\ncommand="keep"\n')
+                path.chmod(0o600)
                 before=tomllib.loads(path.read_text())['mcp_servers']['unrelated']
                 setup.name_codex_hubs(path)
+                self.assertEqual(path.stat().st_mode & 0o777,0o600)
                 data=tomllib.loads(path.read_text())
                 self.assertEqual(data['mcp_servers']['nth-second']['env']['NTH_SERVER_NAME'],'nth-second')
                 if env:self.assertEqual(data['mcp_servers']['nth-second']['env']['KEEP'],'yes')
@@ -512,6 +518,7 @@ class FixTests(unittest.TestCase):
                 self.assertIn('# comment',path.read_text())
                 original=path.read_bytes();setup.name_codex_hubs(path)
                 self.assertEqual(path.read_bytes(),original)
+                self.assertEqual(path.stat().st_mode & 0o777,0o600)
 
     def test_installed_claude_startup_and_resume_matchers_register(self):
         spec=importlib.util.spec_from_file_location('hook_setup',ROOT/'setup.py')
@@ -616,10 +623,14 @@ class FixTests(unittest.TestCase):
         self.attach()
         self.op('membership.configure',key=KEY,enabled=False)
         for reason,expected in (('listener failure',''),('channel ended','channel ended')):
-            with self.store.db:
-                self.store.db.execute('UPDATE memberships SET shadow_ended=? WHERE key=?',(reason,KEY))
-            self.op('membership.configure',key=KEY,enabled=True)
-            self.assertEqual(self.runtime.member(KEY)['shadow_ended'],expected)
+            # Re-enabling starts a live listener: fixture SQL and assertions
+            # must serialize with its callbacks just like production dispatch.
+            with self.store.lock:
+                self.assertTrue(self.store.lock._is_owned())
+                with self.store.db:
+                    self.store.db.execute('UPDATE memberships SET shadow_ended=? WHERE key=?',(reason,KEY))
+                self.op('membership.configure',key=KEY,enabled=True)
+                self.assertEqual(self.runtime.member(KEY)['shadow_ended'],expected)
 
     def test_kill_switch_stops_service_pollers(self):
         self.attach()

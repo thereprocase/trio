@@ -250,7 +250,14 @@ class Store:
         except (OverflowError, OSError):
             stamp = None
         with self.lock, self.db:
-            if not self.db.execute('SELECT 1 FROM sessions WHERE session=?',(request['session'],)).fetchone():
+            previous = self.db.execute('SELECT registered FROM sessions WHERE session=?',
+                                       (request['session'],)).fetchone()
+            registered = time.time()
+            if previous and previous['registered'] is not None:
+                # A strictly increasing registration stamp also identifies the
+                # generation when a PID is unchanged or the wall clock stalls.
+                registered = max(registered, math.nextafter(previous['registered'], math.inf))
+            if not previous:
                 self._session_room()
             self.db.execute('''INSERT INTO sessions(session,client,sink,host_pid,host_stamp,state,
                 host_ok,problem,registered,wakes_hour) VALUES (?,?,?,?,?,'idle',?,?,?,0)
@@ -260,8 +267,22 @@ class Store:
                 WHEN sessions.state='ended' AND ?=0 AND ? IS NULL THEN 'ended' ELSE 'idle' END,
                 host_ok=excluded.host_ok,problem=excluded.problem,registered=excluded.registered''',
                 (request['session'], request['client'], request['sink'], pid, stamp,
-                 int(request['host_ok']), request['problem'], time.time(), int(request.get('resume',False)), stamp))
-            return {'session': request['session'], 'state': self.session(request['session'])['state']}
+                 int(request['host_ok']), request['problem'], registered, int(request.get('resume',False)), stamp))
+            state = self.session(request['session'])['state']
+            if state in ('idle','in_turn','waiting'):
+                # Resume alone must restart retained memberships. Recover only
+                # unowned seats; registration cannot steal from another owner.
+                for row in self.db.execute('''SELECT m.key FROM memberships m
+                    JOIN holdings h ON h.key=m.key WHERE h.session=? AND h.attached=1
+                    AND m.owner_session IS NULL''', (request['session'],)).fetchall():
+                    owner = self.db.execute('''SELECT h.session FROM holdings h JOIN sessions s
+                        ON h.session=s.session WHERE h.key=? AND h.attached=1
+                        AND s.registered IS NOT NULL AND s.state IN ('idle','in_turn','waiting')
+                        ORDER BY h.joined DESC,h.session DESC LIMIT 1''', (row['key'],)).fetchone()
+                    if owner:
+                        self.db.execute('UPDATE memberships SET owner_session=? WHERE key=?',
+                                        (owner[0],row['key']))
+            return {'session': request['session'], 'state': state}
 
     def attach(self, request):
         key, session = request['key'], request['session']

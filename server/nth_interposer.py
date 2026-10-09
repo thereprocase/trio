@@ -98,6 +98,15 @@ class PrivateRotatingHandler(RotatingFileHandler):
 
 
 def dispatch(store, request, runtime=None, *, activated=False, log=None):
+    # Admission and dispatch share close's lock. Accepted handlers that have
+    # not started dispatch must be refused before touching the closing store.
+    with store.lock:
+        if runtime and runtime.closing:
+            raise WireError('interposer is closing', 'service_closing')
+        return _dispatch(store, request, runtime, activated=activated, log=log)
+
+
+def _dispatch(store, request, runtime=None, *, activated=False, log=None):
     op = validate_request(request)
     if op == 'hello':
         return {'version': NTH_VERSION, 'protocol_min': PROTOCOL_VERSION,
@@ -258,6 +267,9 @@ class Server(socketserver.ThreadingUnixStreamServer):
                 self.log.warning('frame read timed out')
 
     def verify_request(self, request, client_address):
+        with self.store.lock:
+            if self.runtime and self.runtime.closing:
+                return False
         allowed = peer_allowed(request)
         if not allowed:
             self.log.warning('peer refused: foreign uid or unavailable credentials')
