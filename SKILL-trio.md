@@ -602,3 +602,20 @@ identity-file state and trusted URL/config. Stop, reattach, resume and config ch
 discard stale jobs. Pre-Listener failures back off from 0.5 to 30 seconds, resetting
 for a changed startup signature. Close cancels pending jobs without awaiting DNS;
 a late completion cannot touch a closed Store or restart observation.
+
+Inbox dispatch uses one ordered daemon worker. Startup and tick only schedule it;
+queued files remain until applied or quarantined, and closing leaves unapplied files
+for the next instance. Active inbox work prevents premature idle exit. A shared DNS
+context guard refuses validation on the service thread or while any store lock is
+owned. Announcement handlers, inbox/startup workers and connection readers resolve
+through the bounded background resolver; approval snapshots and rechecks its row
+without holding the lock during validation.
+
+Selected observations and terminal metadata are journaled in the same transaction
+as their cursor/end state. Failed transactions restore the in-memory buffer too.
+Handoff updates the new owner's durable snapshot before removing the old one.
+Restart restores live buffered ranges, counters and integer settle timestamps before
+starting pollers, preserving in-turn holding; a reboot clamps a future settle time.
+Release commits a ready recovery record before append and removes it only after
+successful evidence/accounting. Abrupt termination therefore cannot discard IDs
+covered by a committed shadow cursor. Recovery stores no peer text, tokens or URLs.

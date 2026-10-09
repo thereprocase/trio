@@ -35,6 +35,7 @@ class FixTests(unittest.TestCase):
     op=cases.ShadowTests.op
     attach=cases.ShadowTests.attach
     wait_start=cases.ShadowTests.wait_start
+    drain_wait=cases.ShadowTests.drain_wait
     eventually=cases.ShadowTests.eventually
     start_socket=cases.ShadowTests.start_socket
 
@@ -49,7 +50,7 @@ class FixTests(unittest.TestCase):
                      tool_response=json.dumps(dict(identity_key=KEY,channel='room',member_id='member')))
         claude.register(payload,tools=codex.HOOK_TOOLS,client='codex',shadow_host=(os.getpid(),''))
         self.hub.replies=[dict(event='new_messages',messages=[message(7,mentioned=True)])]
-        self.runtime.drain()
+        self.drain_wait()
         actual=cases.ScriptedHub([dict(event='new_messages',messages=[message(7,mentioned=True)])])
         with patch.object(claude,'poll_factory',actual.factory),patch.object(codex,'codex_binary',return_value='/fixture/codex'),\
              patch.object(codex,'queue_wake',return_value='queued'),patch.object(codex,'relay_owns',return_value=False),\
@@ -310,7 +311,9 @@ class FixTests(unittest.TestCase):
     def test_close_flushes_in_turn_buffer(self):
         self.attach()
         self.op('turn',session=SESSION,phase='started')
-        self.runtime.accumulate(self.runtime.member(KEY),[message(23,banged=True)])
+        with self.store.lock:
+            self.assertTrue(self.store.lock._is_owned())
+            self.runtime.accumulate(self.runtime.member(KEY),[message(23,banged=True)])
         self.runtime.close()
         self.assertEqual(shadow.records('would')[0]['ranges'][0]['last'],23)
         self.assertEqual(self.runtime.buffers,{})
@@ -781,7 +784,7 @@ class FixTests(unittest.TestCase):
         (inbox/'large.json').write_bytes(b'x'*(wire.MAX_FRAME+1))
         tmp=inbox/'old.tmp';tmp.write_text('partial');os.utime(tmp,(0,0))
         wire.tell('session.register',**{k:v for k,v in registration().items() if k not in ('v','id','op')})
-        before=time.monotonic();self.runtime.drain()
+        before=time.monotonic();self.drain_wait()
         self.assertLess(time.monotonic()-before,.5)
         self.assertEqual({p.name for p in (inbox/'bad').glob('*.json')},{'fifo.json','link.json','large.json'})
         self.assertFalse(tmp.exists())
@@ -795,7 +798,7 @@ class FixTests(unittest.TestCase):
         fd=os.open(path,os.O_RDWR|os.O_NONBLOCK)
         try:
             os.write(fd,wire.encode_frame(registration('session-fifo')))
-            self.runtime.drain()
+            self.drain_wait()
             self.assertTrue((path.parent/'bad'/path.name).exists())
             self.assertNotIn('session-fifo',[r['session'] for r in self.store.snapshot()['sessions']])
         finally:os.close(fd)
@@ -844,7 +847,7 @@ else:
         (inbox/'000-bad.json').write_text('bad')
         wire.tell('session.register',**{k:v for k,v in registration().items() if k not in ('v','id','op')})
         with patch('nth_interposer_runtime.os.replace',side_effect=FileNotFoundError):
-            self.runtime.drain()
+            self.drain_wait()
         self.assertEqual(self.store.session(SESSION)['state'],'idle')
 
     def test_tick_five_second_drain_cadence(self):
@@ -863,6 +866,8 @@ else:
         (inbox/'later.json').write_bytes(wire.encode_frame(registration()))
         with patch('nth_interposer_runtime.time.monotonic',return_value=105):
             self.runtime.last_drain=100;self.runtime.last_death=100;self.runtime.tick()
+        if self.runtime.inbox_thread:
+            self.runtime.inbox_thread.join(2)
         self.assertEqual(self.store.session(SESSION)['state'],'idle')
         self.assertFalse((inbox/'later.json').exists())
 
@@ -899,7 +904,7 @@ else:
     def test_tell_no_spawn_both_paths_and_no_reply_replay(self):
         with patch.object(wire,'_spawn') as spawn,patch.object(wire.subprocess,'Popen') as popen:
             wire.tell('session.register',**{k:v for k,v in registration().items() if k not in ('v','id','op')})
-            self.runtime.drain();self.start_socket()
+            self.drain_wait();self.start_socket()
             self.assertTrue(wire.tell('turn',session=SESSION,phase='started'))
             self.assertFalse(wire.tell('turn',session='unknown-holder',phase='ended'))
             self.assertFalse(list((wire.home()/'events/inbox').glob('*.json')))

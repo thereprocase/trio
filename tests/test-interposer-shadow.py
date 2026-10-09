@@ -95,6 +95,8 @@ class ShadowTests(unittest.TestCase):
             self.thread.join(2)
             self.server.server_close()
         self.runtime.close()
+        if self.runtime.inbox_thread:
+            self.runtime.inbox_thread.join(2)
         for worker in list(self.runtime.startup_threads):
             worker.join(2)
         self.store.close()
@@ -131,6 +133,12 @@ class ShadowTests(unittest.TestCase):
                 return key not in runtime.startups and (key in runtime.pollers or key in runtime.start_retry
                                                         or not runtime.eligible(row))
         self.eventually(settled)
+
+    def drain_wait(self):
+        self.runtime.drain()
+        if self.runtime.inbox_thread:
+            self.runtime.inbox_thread.join(2)
+        self.assertFalse(self.runtime.inbox_busy(), 'ordered inbox worker did not finish')
 
     def eventually(self, predicate):
         deadline = time.monotonic() + 2
@@ -235,7 +243,7 @@ class ShadowTests(unittest.TestCase):
     def test_tell_socket_and_absent_inbox(self):
         self.assertFalse(wire.tell('session.register', **{k:v for k,v in registration().items() if k not in ('v','id','op')}))
         self.assertEqual(len(list((wire.home() / 'events/inbox').glob('*.json'))), 1)
-        self.runtime.drain()
+        self.drain_wait()
         self.assertEqual(self.store.session(SESSION)['state'], 'idle')
         self.start_socket()
         self.assertTrue(wire.tell('turn', session=SESSION, phase='started'))
@@ -271,7 +279,7 @@ class ShadowTests(unittest.TestCase):
         inbox = wire.home() / 'events/inbox'
         for i in range(101):
             (inbox / f'bad-{i:03d}.json').write_text('not-json')
-        self.runtime.drain()
+        self.drain_wait()
         self.assertEqual(self.store.session(SESSION)['state'], 'idle')
         self.assertEqual(len(list((inbox/'bad').glob('*.json'))), 100)
         self.assertFalse(list(inbox.glob('*.json')))
@@ -694,7 +702,7 @@ class ShadowTests(unittest.TestCase):
         claude.register(dict(session_id=SESSION,tool_name='mcp__nth-trio__trio_connect',
             tool_response=json.dumps(dict(identity_key=KEY,channel='room',member_id='member'))))
         self.hub.replies=[dict(event='new_messages',messages=batch)]
-        self.runtime.drain()
+        self.drain_wait()
         actual=ScriptedHub([dict(event='new_messages',messages=batch)])
         with patch.object(claude,'poll_factory',actual.factory),patch.object(claude,'SAY',io.StringIO()),\
              patch.multiple(claude,TICK_SECONDS=.01,SETTLE_SECONDS=.01,UNSUPERVISED_LIFETIME_SECONDS=.2):

@@ -862,7 +862,8 @@ class FixTests(cases.InterposerCase):
         fake_store.live_sessions.side_effect = [1,1,0,0]
         fake_server.handle_request.side_effect = lambda:now.__setitem__(0,now[0]+10)
         with patch.object(service,'Store',return_value=fake_store),patch.object(service,'Server',return_value=fake_server), \
-             patch.object(service.time,'monotonic',side_effect=lambda:now[0]),patch('nth_interposer_runtime.Runtime'):
+             patch.object(service.time,'monotonic',side_effect=lambda:now[0]),patch('nth_interposer_runtime.Runtime') as runtime:
+            runtime.return_value.inbox_busy.return_value = False
             service.serve(idle_seconds=20)
         self.assertEqual(fake_server.handle_request.call_count,4)
 

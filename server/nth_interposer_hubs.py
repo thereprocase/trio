@@ -1,5 +1,6 @@
 """Hub trust is operator-owned. DNS checks also guard reconnects against rebinding."""
 import ipaddress
+from contextlib import contextmanager
 import json
 from pathlib import Path
 import shlex
@@ -14,10 +15,53 @@ from nth_interposer_wire import WireError, validate_hub, canonical_server
 DNS_TIMEOUT = .3
 DNS_WORKERS = 4
 _dns_slots = threading.BoundedSemaphore(DNS_WORKERS)
+_dns_context = threading.local()
+
+
+class StoreLock:
+    """An RLock that also marks its owner's context as unsuitable for DNS."""
+    def __init__(self):
+        self._lock = threading.RLock()
+
+    def acquire(self, blocking=True, timeout=-1):
+        acquired = self._lock.acquire(blocking, timeout)
+        if acquired:
+            _dns_context.locks = getattr(_dns_context,'locks',0)+1
+        return acquired
+
+    def release(self):
+        self._lock.release()
+        _dns_context.locks -= 1
+
+    def _is_owned(self):
+        return self._lock._is_owned()
+
+    def __enter__(self):
+        self.acquire()
+        return self
+
+    def __exit__(self, *args):
+        self.release()
+
+
+@contextmanager
+def service_thread():
+    previous = getattr(_dns_context,'service',False)
+    _dns_context.service = True
+    try:
+        yield
+    finally:
+        _dns_context.service = previous
+
+
+def require_dns_context():
+    if getattr(_dns_context,'service',False) or getattr(_dns_context,'locks',0):
+        raise WireError('DNS validation requires an unlocked background context', 'hub_not_allowed')
 
 
 def resolve(host, port):
     """Bound latency and outstanding OS lookups, including ones that never return."""
+    require_dns_context()
     slots = _dns_slots
     if not slots.acquire(blocking=False):
         raise WireError('hub resolver capacity unavailable', 'hub_not_allowed')
@@ -81,6 +125,7 @@ def check_host(url, *, allow_restricted=False):
     The only exception is an exact URL from the user's trusted local MCP config.
     Resolve on each new connection so approval cannot bypass a subsequent rebind.
     """
+    require_dns_context()
     if restricted_host(url) and not allow_restricted:
         raise WireError('loopback, link-local and metadata hub hosts are forbidden', 'hub_not_allowed')
     parts = urlsplit(url)

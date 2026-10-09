@@ -13,6 +13,7 @@ import threading
 import time
 
 from nth_interposer_wire import home, private_dir, IDENTITY_KEY, SESSION_ID, validate_hub, WireError
+from nth_interposer_hubs import StoreLock
 
 SCHEMA_VERSION = 3
 MAX_HUBS = 32
@@ -71,7 +72,7 @@ class Store:
         private_dir(self.path.parent)
         if self.path.is_symlink():
             raise PermissionError('interposer database must not be a symlink')
-        self.lock = threading.RLock()
+        self.lock = StoreLock()
         self.import_skips = []
         self.import_cache = {}
         # Runtime uses this same mapping; eviction must retain metadata until
@@ -201,14 +202,20 @@ class Store:
         from nth_interposer_wire import canonical_server
         server = canonical_server(server)
         validate_hub(server, url, allow_restricted=True)
-        with self.lock, self.db:
+        with self.lock:
             row = self.db.execute('SELECT * FROM hubs WHERE server=?', (server,)).fetchone()
             if row is None:
                 raise WireError('hub is unknown', 'unknown_hub')
             pending = row['pending_url'] or row['config_pending_url'] or row['url']
             if url != pending:
                 raise WireError('approval URL does not match the pending URL', 'hub_not_allowed')
-            check_host(url, allow_restricted=row['trust']=='setup' and row['config_url']==url and restricted_host(url))
+            snapshot = tuple(row)
+            allow = row['trust']=='setup' and row['config_url']==url and restricted_host(url)
+        check_host(url, allow_restricted=allow)
+        with self.lock,self.db:
+            current = self.db.execute('SELECT * FROM hubs WHERE server=?', (server,)).fetchone()
+            if current is None or tuple(current)!=snapshot:
+                raise WireError('hub configuration changed during approval', 'hub_not_allowed')
             self.db.execute("UPDATE hubs SET url=?,pending_url='',config_pending_url='',trust='setup',state='announced',approved=1 WHERE server=?", (url,server))
         return {'server': server, 'url': url, 'approved': True}
 
