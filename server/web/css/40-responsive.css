@@ -212,6 +212,9 @@
     position:relative; align-items:center; gap:0 3px; font-size:11px; line-height:22px;
     letter-spacing:normal; margin:0 0 1px;
   }
+  /* Touch adjustment can otherwise prefer the focusable bubble immediately
+     below a control's bottom edge, even when elementFromPoint hits the button. */
+  :root[data-theme] .message.msg .message-head:has(.reply-context,.targets-toggle){ margin-bottom:9px; }
   :root[data-theme] .message.msg.me .message-head{ justify-content:flex-start; }
   :root[data-theme] .message.msg .message-head .reply-context{ order:-1; }
   :root[data-theme] .message.msg .targets-toggle{ order:1; margin-left:auto; }
@@ -222,11 +225,11 @@
   :root[data-theme] .message.msg .message-head .reply-context,
   :root[data-theme] .message.msg .targets-toggle{
     position:relative; display:inline-flex; align-items:center; justify-content:center;
-    min-width:44px; height:22px; min-height:0; line-height:22px; font-size:11px;
+    min-width:44px; height:44px; min-height:44px; line-height:22px; font-size:11px;
   }
   :root[data-theme] .message.msg .message-head .reply-context::after,
   :root[data-theme] .message.msg .targets-toggle::after{
-    content:""; position:absolute; z-index:1; inset:-13px 0 -9px; border-radius:4px;
+    content:""; position:absolute; z-index:1; inset:0; border-radius:0;
   }
   :root[data-theme] .message.msg .message-head .target-label,
   :root[data-theme] .message.msg.me .message-head strong,
@@ -240,21 +243,39 @@
   :root[data-theme] .message.msg.me .message-head:not(:has(.reply-context,.target-chip,.confidence,.private-badge,.task-chip)),
   :root[data-theme] .message.msg.message-grouped .message-head:not(:has(.reply-context,.target-chip,.confidence,.private-badge,.task-chip)){ margin:0; }
   :root[data-theme] .message.msg .message-targets:not(.targets-expanded) .extra-target{ display:none; }
-  :root[data-theme] .message.msg .bubble{ position:relative; padding:6px 10px; min-height:41px; }
+  :root[data-theme] .message.msg .bubble{ position:relative; padding:6px 10px; min-height:48px; }
   :root[data-theme] .message.msg .bubble-time-space{
     display:inline-flex; visibility:hidden; margin-left:8px; font-size:10px;
     line-height:18px; vertical-align:bottom; white-space:nowrap; font-variant-numeric:tabular-nums;
   }
   :root[data-theme] .message.msg .bubble-time{
-    display:inline-flex; position:absolute; right:10px; bottom:6px;
-    align-items:center; justify-content:center; min-width:44px; height:18px; min-height:0;
+    display:inline-flex; position:absolute; right:10px; bottom:0;
+    align-items:center; justify-content:center; min-width:44px; height:44px; min-height:44px;
     font-size:10px; line-height:18px; color:color-mix(in srgb,currentColor 65%,transparent); margin:0;
   }
-  /* Forty-one-pixel bubbles plus the three-pixel run gap separate adjacent clocks'
-     44px hit boxes. The prose spacer keeps those boxes away from body links. */
-  :root[data-theme] .message.msg .bubble-time::after{
-    content:""; position:absolute; z-index:1; inset:-13px 0; border-radius:4px;
+  /* Keep the whole clock inside the bubble. Interactive prose gets an
+     exclusive bottom row; plain acknowledgements keep their compact shape. */
+  :root[data-theme] .message.msg .bubble-time::after{ content:none; }
+  :root[data-theme] .message.msg .bubble:has(a,button,input,textarea,select,[tabindex]:not(.bubble-time)){ padding-bottom:44px; }
+  :root[data-theme] .message.msg .bubble:has(a,button,input,textarea,select,[tabindex]:not(.bubble-time)) .bubble-time-space{ display:none; }
+  :root[data-theme] .message.msg .message-identity{
+    display:flex; flex-wrap:nowrap; align-items:center; gap:3px;
+    flex:1 1 80px; min-width:0; max-width:100%;
   }
+  :root[data-theme] .message.msg .message-identity strong{
+    flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+  }
+  :root[data-theme] .message.msg.me .message-identity,
+  :root[data-theme] .message.msg.message-grouped .message-identity{ display:contents; }
+  :root[data-theme] .message.msg .message-head .message-targets{
+    display:flex; flex-wrap:nowrap; align-items:center; gap:3px;
+    min-width:0; max-width:100%; margin:0;
+  }
+  :root[data-theme] .message.msg .message-targets:not(.targets-expanded) .target-chip{
+    flex:0 1 auto; max-width:80px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+  }
+  :root[data-theme] .message.msg .message-targets.targets-expanded{ flex-wrap:wrap; }
+  :root[data-theme] .message.msg .message-targets.targets-expanded .target-chip{ max-width:100%; white-space:normal; }
   :root[data-theme] .message.msg .message-tools{ display:none; }
   :root[data-theme] .message.msg .message-actions-menu{ flex-wrap:wrap; }
   :root[data-theme] .message.msg .message-actions-menu button{ min-width:44px; min-height:44px; }

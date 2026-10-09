@@ -17,6 +17,13 @@
   state.jumpUnread = state.jumpUnread || 0;
   state.activeMessageActions = state.activeMessageActions || null;
 
+  const phoneLayout = window.matchMedia('(max-width:640px)');
+  const responsiveCards = new WeakMap();
+  phoneLayout.addEventListener('change', () => {
+    closeMessageActions();
+    for (const card of dom()?.querySelectorAll('.message.msg') || []) responsiveCards.get(card)?.();
+  });
+
   function member(id) { return state.members.get(id) || {}; }
   function nameFor(id, fallback) { return member(id).name || fallback || id || 'unknown'; }
   // Shared with 20-workspace.js via Trio.avatarTone (00-core.js) — a bare
@@ -533,7 +540,7 @@
       const group = document.createElement('span'); group.className = 'target-group';
       const prefix = document.createElement('span'); prefix.className = 'target-label'; prefix.textContent = label + ' ';
       group.append(prefix);
-      ids.forEach(id => { const chip = document.createElement('span'); chip.className = 'target-chip'; chip.textContent = sigil + nameFor(id, id); group.append(chip); });
+      ids.forEach(id => { const chip = document.createElement('span'); chip.className = 'target-chip'; chip.textContent = sigil + nameFor(id, id); chip.title = chip.textContent; chip.setAttribute('aria-label', chip.textContent); group.append(chip); });
       bar.append(group);
     }
     const chips = [...bar.querySelectorAll('.target-chip')];
@@ -641,10 +648,9 @@
       showMessageActions(card, content, msg, body);
     });
     card.addEventListener('keydown', event => {
-      if (event.key === 'F10' && event.shiftKey && !interactiveMessageTarget(event.target)) {
+      if (phoneLayout.matches && event.key === 'F10' && event.shiftKey && !interactiveMessageTarget(event.target)) {
         event.preventDefault(); showMessageActions(card, content, msg, body);
-        const selector = window.matchMedia('(max-width:640px)').matches ? '.menu-copy' : 'button:not(.menu-copy)';
-        content.querySelector('.message-actions-menu')?.querySelector(selector)?.focus();
+        content.querySelector('.message-actions-menu')?.querySelector('.menu-copy')?.focus();
       }
     });
   }
@@ -677,12 +683,14 @@
     const avatar = messageAvatar(vm);
     const content = document.createElement('div'); content.className = 'message-content msg-body';
     const head = document.createElement('header'); head.className = 'message-head';
-    if (!vm.isOwn) head.append(messageAvatar(vm, true));
+    const identity = document.createElement('span'); identity.className = 'message-identity';
+    if (!vm.isOwn) identity.append(messageAvatar(vm, true));
     const author = document.createElement('strong'); author.textContent = vm.author;
+    author.title = vm.author; author.setAttribute('aria-label', vm.author);
     const numberPrefix = () => { const part = document.createElement('span'); part.className = 'message-id'; part.textContent = '#' + vm.id + ' · '; return part; };
     const idPart = numberPrefix();
     const stamp = Trio.time.element(vm.createdAt, { prefix: idPart });
-    head.append(author);
+    identity.append(author); head.append(identity);
     if (vm.role) {
       const role = document.createElement('span'); role.className = 'message-role role-' + vm.role; role.textContent = vm.role;
       head.append(role);
@@ -691,8 +699,9 @@
     if (vm.isPrivate) { const badge = document.createElement('span'); badge.className = 'private-badge'; badge.textContent = 'private'; head.append(badge); }
     if (vm.isTask) { const task = document.createElement('span'); task.className = 'task-chip'; task.textContent = 'task #' + vm.taskId; head.append(task); }
     if (vm.isQuestion) card.classList.add('question');
+    let reply = null;
     if (vm.replyTo) {
-      const reply = document.createElement('a'); reply.className = 'reply-context'; reply.href = '#m' + vm.replyTo; reply.textContent = '↪ #' + vm.replyTo;
+      reply = document.createElement('a'); reply.className = 'reply-context'; reply.href = '#m' + vm.replyTo; reply.textContent = '↪ #' + vm.replyTo;
       reply.setAttribute('aria-label', 'Replying to message #' + vm.replyTo);
       reply.addEventListener('click', (e) => { e.preventDefault(); const target = document.querySelector(`[data-message-id="${vm.replyTo}"]`); if (target) { target.scrollIntoView({ behavior: 'smooth', block: 'center' }); target.setAttribute('tabindex', '-1'); target.focus({ preventScroll: true }); } });
       head.append(reply);
@@ -708,24 +717,24 @@
     const ask = (!vm.isRetracted) ? askCard(msg) : null;
     // `body` stays function-scoped: bindMessageActions (below) needs it, and a
     // question message simply leaves it null (its own messages are never asks).
-    let body = null;
+    let body = null, phoneStamp = null, space = null, spaceParent = null;
     // A page posted without a caption is the card alone.
     const pageOnly = vm.page && !vm.isRetracted && !vm.content.trim();
     if (!ask && !pageOnly) {
       body = document.createElement('div'); body.className = 'message-body bubble'; paintBody(card, body, vm);
       if (!vm.isRetracted) {
         card.classList.add('has-bubble-time');
-        const phoneStamp = Trio.time.element(vm.createdAt, { prefix:numberPrefix() });
+        phoneStamp = Trio.time.element(vm.createdAt, { prefix:numberPrefix() });
         phoneStamp.classList.add('bubble-time');
-        const space = document.createElement('span'); space.className = 'bubble-time-space'; space.setAttribute('aria-hidden', 'true');
+        space = document.createElement('span'); space.className = 'bubble-time-space'; space.setAttribute('aria-hidden', 'true');
         // Reserve the clock's width on the final prose line, including the
         // optional number. The real clock sits in that space at bottom-right.
         space.append(numberPrefix(), document.createTextNode(Trio.time.label(vm.createdAt)));
         const last = body.lastElementChild;
-        if (last?.tagName === 'P') last.append(space);
-        else body.append(space);
+        spaceParent = last?.tagName === 'P' ? last : body;
+        spaceParent.append(space);
         body.append(phoneStamp);
-        body.tabIndex = 0; body.setAttribute('aria-keyshortcuts', 'Shift+F10');
+        // Focusability follows the phone media query, including existing cards.
       }
       content.append(body);
     }
@@ -788,6 +797,29 @@
       }
     }
     if (!msg.retracted_at && !vm.isSystem) bindMessageActions(card, content, msg, body);
+    const updateLayout = () => {
+      if (phoneLayout.matches) {
+        if (reply) { reply.textContent = '↪ #' + vm.replyTo; head.append(reply); }
+        if (target) head.append(target);
+        head.append(stamp);
+      } else {
+        // Preserve main's header and separate metadata rows on desktop.
+        const role = head.querySelector('.message-role');
+        head.insertBefore(stamp, (role || identity).nextSibling);
+        if (reply) { reply.textContent = 'replying to #' + vm.replyTo; content.insertBefore(reply, head.nextSibling); }
+        if (target) content.insertBefore(target, reply ? reply.nextSibling : head.nextSibling);
+      }
+      if (body && !vm.isRetracted) {
+        if (phoneLayout.matches) {
+          spaceParent.append(space); body.append(phoneStamp);
+          body.tabIndex = 0; body.setAttribute('aria-keyshortcuts', 'Shift+F10');
+        } else {
+          space.remove(); phoneStamp.remove();
+          body.removeAttribute('tabindex'); body.removeAttribute('aria-keyshortcuts');
+        }
+      }
+    };
+    responsiveCards.set(card, updateLayout); updateLayout();
     card.append(avatar, content);
     return card;
   }
