@@ -149,11 +149,10 @@
     && !state.sliceErrors?.meta && !state.sliceErrors?.agents;
   function renderChannelMetadataState() {
     if (!state.channel || state.dmKey) return;
-    const meta = document.getElementById('h-meta');
-    if (meta) meta.textContent = state.readOnly
+    Trio.setChannelSubtitle(state.readOnly
       ? channelSubtitle(true)
       : !channelMetadataSettled() ? 'Loading workspace…'
-      : channelMetadataReady() ? channelSubtitle(false) : 'Workspace metadata unavailable';
+      : channelMetadataReady() ? channelSubtitle(false) : 'Workspace metadata unavailable');
   }
   // Set synchronously by a route that owns feed selection. Channel routes know
   // their feed immediately; DM/audit routes claim it before their asynchronous
@@ -210,7 +209,7 @@
     state.channel = channel;
     renderRail();
     Trio.setChannelTitle(title);
-    document.getElementById('h-meta').textContent = subtitle;
+    Trio.setChannelSubtitle(subtitle);
     if (!isDm) renderChannelMetadataState();
     renderFacePile();
     const detailsBtn = $('details-btn');
@@ -348,8 +347,8 @@
     state.messageDomById = new Map();
     state.answers = new Map();
     Trio.setChannelTitle('DM ' + key);
-    document.getElementById('h-meta').textContent = audit ? 'Agent-to-agent audit'
-      : archived ? 'Archived private conversation' : 'Private conversation';
+    Trio.setChannelSubtitle(audit ? 'Agent-to-agent audit'
+      : archived ? 'Archived private conversation' : 'Private conversation');
     const banner = document.getElementById('private-banner');
     if (banner) {
       banner.classList.remove('hidden');
@@ -657,8 +656,7 @@
   }
   function updateTopbar(title, subtitle) {
     Trio.setChannelTitle(title);
-    const m = $('h-meta');
-    if (m) m.textContent = subtitle || '';
+    Trio.setChannelSubtitle(subtitle);
   }
   function showConversationPage() {
     const shell = document.querySelector('.conversation-shell');
