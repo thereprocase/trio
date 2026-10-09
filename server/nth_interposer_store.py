@@ -77,6 +77,7 @@ class Store:
         # Runtime uses this same mapping; eviction must retain metadata until
         # buffered evidence is successfully released (including failed writes).
         self.pending_buffers = {}
+        self.pending_evidence_keys = {}
         self.db = sqlite3.connect(self.path, timeout=15, check_same_thread=False)
         self.path.chmod(0o600)
         self.db.row_factory = sqlite3.Row
@@ -134,15 +135,29 @@ class Store:
             else:
                 raise WireError('hub table is full (maximum 32)', 'hub_limit')
 
-    def announce(self, server, url, log=None):
+    def announce(self, server, url, log=None, closing=None):
         from nth_interposer_hubs import check_host, restricted_host
         from nth_interposer_wire import canonical_server
         server = canonical_server(server)
         validate_hub(server, url, allow_restricted=True)
+        def trusted_config():
+            return [tuple(row) for row in self.db.execute(
+                "SELECT server,url,trust,config_url FROM hubs WHERE url=? AND trust='setup' AND config_url=? ORDER BY server",
+                (url,url))]
         with self.lock:
-            trusted = self.db.execute("SELECT 1 FROM hubs WHERE url=? AND trust='setup' AND config_url=?", (url,url)).fetchone()
+            if closing and closing():
+                raise WireError('interposer is closing', 'service_closing')
+            trusted = trusted_config()
         check_host(url, allow_restricted=bool(trusted) and restricted_host(url))
-        with self.lock, self.db:
+        with self.lock:
+            if closing and closing():
+                raise WireError('interposer is closing', 'service_closing')
+            if trusted_config() != trusted:
+                raise WireError('hub configuration changed during validation', 'hub_not_allowed')
+            return self._announce_checked(server, url, log)
+
+    def _announce_checked(self, server, url, log):
+        with self.db:
             existing = self.db.execute('SELECT * FROM hubs WHERE server=?', (server,)).fetchone()
             now = time.time()
             if existing is None:
@@ -231,7 +246,9 @@ class Store:
             return
         victim = next((row for row in self.db.execute(
             "SELECT session FROM sessions WHERE state='ended' OR registered IS NULL ORDER BY registered,session")
-            if row[0] not in self.pending_buffers), None)
+            if row[0] not in self.pending_buffers and not self.db.execute(
+                'SELECT 1 FROM meta WHERE substr(key,1,length(?))=?',
+                ('shadow_pending:'+row[0]+':','shadow_pending:'+row[0]+':')).fetchone()), None)
         if victim is None:
             raise WireError('session limit reached', 'session_limit')
         self.db.execute('DELETE FROM holdings WHERE session=?', (victim[0],))

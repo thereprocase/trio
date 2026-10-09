@@ -1,14 +1,19 @@
 """Shadow-only listeners; observation and its high water share one locked update."""
 import os
+import json
 import stat
 import time
+import uuid
 
 from nth_claude_hook import poll_factory, process_stamp
 from nth_interposer_wire import home, private_dir, read_frame, WireError, MAX_FRAME, canonical_server
 from nth_interposer_store import _json_file
 from nth_listener import Listener, classify_poll, select_messages, OK
 from nth_notice import message_notice, ended_notice, shown_reason, MAX_INTEGER
-from nth_interposer_shadow import append, ranges_for
+from nth_interposer_shadow import append, ranges_for, project_record
+
+PENDING_PREFIX = 'shadow_pending:'
+FINAL_FLUSH_ATTEMPTS = 3
 
 
 def shadow_row(row):
@@ -84,6 +89,40 @@ class Runtime:
         self.pollers,self.buffers = {},store.pending_buffers
         self.last_drain = self.last_death = 0.0
         self.closing = False
+        self.pending_keys = store.pending_evidence_keys
+        self.recover()
+
+    def recover(self):
+        """Replay only projected evidence, without requiring a live owner or hub."""
+        with self.store.lock:
+            for row in self.store.db.execute(
+                    'SELECT key,value FROM meta WHERE key LIKE ?', (PENDING_PREFIX+'%',)).fetchall():
+                if row['key'] in self.pending_keys.values():
+                    continue  # This process still owns the corresponding live buffer.
+                try:
+                    record = json.loads(row['value'])
+                    fields = ('session','client','sink','ranges','ended','lines')
+                    if set(record) != set(fields) or not row['key'].startswith(PENDING_PREFIX+record['session']+':'):
+                        raise ValueError
+                    clean = project_record('would', **record)
+                    if not clean:
+                        continue
+                    if append('would', **record):
+                        with self.store.db:
+                            self.count_record(clean)
+                            self.store.db.execute('DELETE FROM meta WHERE key=?', (row['key'],))
+                except (ValueError,TypeError,KeyError):
+                    self.log.warning('shadow recovery refused: invalid record')
+
+    def count_record(self, record):
+        counts = {}
+        for span in record['ranges']:
+            counts[span['key']] = counts.get(span['key'],0) + span['count']
+        for ended in record['ended']:
+            counts.setdefault(ended['key'],0)
+        for key,count in counts.items():
+            self.store.db.execute('UPDATE memberships SET shadow_notices=shadow_notices+1,shadow_ids=shadow_ids+? WHERE key=?',
+                                  (count,key))
 
     def poll_factory(self, identity):
         if identity['source']=='local':
@@ -182,11 +221,11 @@ class Runtime:
             self.transfer_buffers()
             buffer = self.buffers.get(session)
             if not buffer:
-                return
+                return True
             state = self.store.session(session)
             settle = .3 if state['client']=='claude' else 2.5
             if (state['state']=='in_turn' and not flush) or (not force and time.monotonic()-buffer['at']<settle):
-                return
+                return False
             ranges,ended,lines = [],[],[]
             for key,item in sorted(buffer['members'].items()):
                 prefix = 'trio' if item['source']=='local' else 'quartet'
@@ -198,12 +237,27 @@ class Runtime:
                 if item['reason']:
                     lines.append(ended_notice(prefix,item['channel'],item['member_id'],item['reason'],server))
                     ended.append({'key':key,'reason':item['reason']})
+            record = project_record('would',session,state['client'],state['sink'],ranges,ended,len(lines))
+            if not record:
+                return False
+            if self.closing:
+                # Commit the integer-only recovery copy before risking a final
+                # append. The shadow cursor is already durable.
+                pending = {k:record[k] for k in ('session','client','sink','ranges','ended','lines')}
+                with self.store.db:
+                    pending_key = self.pending_keys.setdefault(session, PENDING_PREFIX+session+':'+uuid.uuid4().hex)
+                    self.store.db.execute('INSERT OR REPLACE INTO meta(key,value) VALUES (?,?)',
+                                          (pending_key,json.dumps(pending,allow_nan=False)))
             if append('would',session,state['client'],state['sink'],ranges,ended,len(lines)):
                 with self.store.db:
-                    for key,item in buffer['members'].items():
-                        self.store.db.execute('UPDATE memberships SET shadow_notices=shadow_notices+1,shadow_ids=shadow_ids+? WHERE key=?',(item['count'],key))
+                    self.count_record(record)
+                    if session in self.pending_keys:
+                        self.store.db.execute('DELETE FROM meta WHERE key=?',(self.pending_keys[session],))
                 self.buffers.pop(session,None)
+                self.pending_keys.pop(session,None)
+                return True
             # On a logging failure retain the buffer for another attempt/close.
+            return False
 
     def poll_state(self, key, state, error='', last_ok=None):
         row = self.store.db.execute('SELECT poll_state,poll_error,last_ok FROM memberships WHERE key=?',(key,)).fetchone()
@@ -216,6 +270,7 @@ class Runtime:
         with self.store.lock:
             if self.closing:
                 return
+            self.recover()
             self.transfer_buffers()
             wanted = {r['key']:r for raw in self.store.snapshot()['memberships']
                       if self.eligible(r:=shadow_row(raw))}
@@ -327,5 +382,13 @@ class Runtime:
             listener.thread.join(timeout=1)
         with self.store.lock:
             self.transfer_buffers()
-            for session in list(self.buffers):
-                self.release(session,force=True,flush=True)
+            for attempt in range(FINAL_FLUSH_ATTEMPTS):
+                self.recover()
+                for session in list(self.buffers):
+                    self.release(session,force=True,flush=True)
+                if not self.buffers:
+                    break
+                if attempt+1 < FINAL_FLUSH_ATTEMPTS:
+                    time.sleep(.05)
+            return not self.buffers and not self.store.db.execute(
+                'SELECT 1 FROM meta WHERE key LIKE ?', (PENDING_PREFIX+'%',)).fetchone()
