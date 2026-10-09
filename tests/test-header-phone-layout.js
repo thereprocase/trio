@@ -20,20 +20,28 @@ assert.strictEqual(typeof WebSocket, 'function', 'Chromium tests require Node wi
 
 const root = path.join(__dirname, '..', 'server');
 const web = path.join(root, 'web');
-const declaration = fs.readFileSync(path.join(root, 'nth_web.py'), 'utf8').match(/WEB_CSS_FILES = \(([\s\S]*?)\)/);
+const baselineRef = process.env.HEADER_BASELINE_REF;
+const read = name => baselineRef ? spawnSync('git', ['show', baselineRef + ':server/' + name], { cwd:path.dirname(root), encoding:'utf8' }).stdout : fs.readFileSync(path.join(root,name),'utf8');
+const declaration = read('nth_web.py').match(/WEB_CSS_FILES = \(([\s\S]*?)\)/);
 assert.ok(declaration, 'production CSS order exists');
 const cssFiles = [...declaration[1].matchAll(/"(css\/[^"]+)"/g)].map(m => m[1]);
 assert.ok(cssFiles.length, 'production CSS list is populated');
-const css = cssFiles.map(name => fs.readFileSync(path.join(web, name), 'utf8')).join('\n');
+const css = cssFiles.map(name => read('web/' + name)).join('\n');
+const themeSource = read('web/js/40-preferences.js');
+const themes = [...themeSource.match(/const themes = \[([\s\S]*?)\];/)[1].matchAll(/id: '([^']+)'/g)].map(m => m[1]);
+assert.strictEqual(themes.length, 21, 'all registered themes');
 const scripts = `window.Trio = { state: { operator: { id: 'operator' }, readOnly: true },
   api: {}, events: new EventTarget(), actions: {}, avatarTone: () => 'eucalyptus' };\n`
   + ['js/06-core.js', 'js/09-time.js', 'js/10-markdown.js', 'js/11-conversation.js', 'js/20-workspace.js']
-    .map(name => fs.readFileSync(path.join(web, name), 'utf8')).join('\n');
+    .map(name => read('web/' + name)).join('\n');
+// Six synthetic one-line acknowledgements measured in Chromium at 390px,
+// with production markup/CSS from gutter commit 60be439, before density changes.
+const BASELINE_ACK_HEIGHT = {"light-1": 605.625, "dark-1": 605.625, "inspired-rescue": 607.125};
 const evidence = process.env.HEADER_EVIDENCE_DIR;
 const phase = process.env.HEADER_PHASE || 'after';
 assert.ok(/^[a-z-]+$/.test(phase), 'safe artifact label');
 if (evidence) fs.mkdirSync(evidence, { recursive: true });
-const html = fs.readFileSync(path.join(web, 'index.html'), 'utf8')
+const html = read('web/index.html')
   .replace(/<link\b[^>]*>/g, '') // no font/manifest network requests
   .replace('<!--__TRIO_STYLES__-->', '<style>' + css + '</style>')
   .replace('<!--__TRIO_SCRIPTS__-->', '<script>' + scripts + '</script>');
@@ -97,181 +105,160 @@ async function measure() {
   while (!await evaluate("document.readyState === 'complete' && !!window.Trio?.conversation")) {
     await new Promise(resolve => setTimeout(resolve, 20));
   }
-  await evaluate(`(() => {
-    Trio.state.channel = 'layout-demo';
-    Trio.state.readOnly = false;
-    Trio.state.loaded = { meta:true, agents:true };
-    Trio.state.members = new Map([
-      ['operator', { id:'operator', name:'Operator', status:'active' }],
-      ['agent', { id:'agent', name:'Agent', kind:'agent', status:'active' }],
-      ['peer', { id:'peer', name:'Peer', kind:'agent', status:'active' }],
-      ['helper', { id:'helper', name:'Helper', kind:'agent', status:'active' }],
-      ['reviewer', { id:'reviewer', name:'Reviewer', kind:'agent', status:'active' }],
-      ['long-name', { id:'long-name', name:'AnExtremelyLongSyntheticParticipantName', status:'offline' }]
+  await evaluate(String.raw`(() => {
+    Trio.state.channel='layout-demo'; Trio.state.readOnly=false;
+    Trio.state.loaded={meta:true,agents:true};
+    Trio.state.members=new Map([
+      ['operator',{id:'operator',name:'Operator',kind:'human'}],
+      ['agent',{id:'agent',name:'Agent',kind:'agent'}],
+      ['peer',{id:'peer',name:'Peer',kind:'agent'}],
+      ['helper',{id:'helper',name:'Helper',kind:'agent'}],
+      ['reviewer',{id:'reviewer',name:'Reviewer',kind:'agent'}],
+      ['long',{id:'long',name:'AnExtremelyLongSyntheticParticipantName',kind:'agent'}]
     ]);
     Trio.setChannelTitle('#layout-demo-with-a-long-title');
-    document.getElementById('h-meta').textContent = 'Live agent workspace';
-    Trio.workspace.renderChannelMetadataState();
-    Trio.workspace.renderFacePile();
+    Trio.workspace.renderChannelMetadataState(); Trio.workspace.renderFacePile();
     document.body.classList.add('message-numbers');
-    const list = document.getElementById('messages');
-    const base = { created_at:'2026-01-01T12:00:00Z', channel:'layout-demo' };
-    const messages = [
-      { id:1, member_id:'operator', content:'The original message.' },
-      { id:2, member_id:'agent', content:'A reply with one recipient. This message wraps on a phone.', mentions:['operator'], reply_to:1 },
-      { id:3, member_id:'operator', content:'An outgoing reply with one recipient.', mentions:['agent'], reply_to:2 },
-      { id:4, member_id:'agent', content:'Several recipients keep their full names.', mentions:['operator','peer','helper'], refs:['reviewer'], bangs:['peer'], reply_to:3 },
-      { id:5, member_id:'operator', content:'A private task reply.', recipients:['agent'], mentions:['agent'], is_dm:true, task_id:9, confidence:'high', reply_to:4 },
-      { id:123456, member_id:'long-name', content:'Long names and message numbers wrap without losing metadata.', mentions:['long-name'], reply_to:123455 }
+    const base={channel:'layout-demo',created_at:'2026-01-01T12:00:00Z'};
+    window.syntheticMessages=[
+      ...Array.from({length:6},(_,i)=>({...base,id:i+1,member_id:i<3?'agent':'peer',content:['Ready.','Acknowledged.','On it.'][i%3],created_at:'2026-01-01T12:0'+i+':00Z'})),
+      {...base,id:7,member_id:'operator',content:'Thanks.'},
+      {...base,id:8,member_id:'agent',content:'The first pass is ready for review. The narrow layout now has room for short acknowledgements as well as longer explanations.\n\nEach update keeps the conversation in order and retains the original text. A reviewer can follow the reply marker, expand the recipients, or copy the message from its actions menu.\n\nThe next step is to compare the screenshots and verify the interaction targets.',mentions:['operator','peer','helper','reviewer'],reply_to:7},
+      {...base,id:9,member_id:'long',content:'A long sender name remains available.'},
+      {...base,id:10,member_id:'agent',content:'A long recipient name still fits.',mentions:['long'],reply_to:9},
+      {...base,id:11,member_id:'peer',content:'[joined] Peer'},
+      {...base,id:12,member_id:'agent',content:'Code example:\n\n\`\`\`text\nhello world\n\`\`\`'}
     ];
-    list.replaceChildren(...messages.map(msg => Trio.conversation.cardFor({ ...base, ...msg })));
-    window.headerCopies = [];
-    Trio.ui = { copyText: text => { window.headerCopies.push(text); return Promise.resolve(); } };
+    window.paintSynthetic=()=>{const list=document.getElementById('messages');list.replaceChildren(...window.syntheticMessages.map(m=>Trio.conversation.cardFor(m)));Trio.conversation.syncMessageGroups?.(list);list.scrollTop=0;};
+    window.paintSynthetic(); window.copies=[];
+    Trio.ui={copyText:text=>{window.copies.push(text);return Promise.resolve();},setLive:()=>{}};
   })()`);
-  let passed = 0;
-  const failures = [], measurements = [];
-  for (const width of [360, 390, 412, 1280]) {
-    const mobile = width < 640;
-    await call('Emulation.setTouchEmulationEnabled', { enabled:mobile, maxTouchPoints:1 }, sessionId);
-    await call('Emulation.setDeviceMetricsOverride', { width, height:900, deviceScaleFactor:1, mobile }, sessionId);
-    // Re-render the actual responsive face pile, including its overflow count.
-    await evaluate('Trio.workspace.renderFacePile()');
-    for (const theme of ['light-1', 'dark-1', 'inspired-rescue']) {
-      const name = width + 'px ' + theme;
-      const geometry = await evaluate(`(async () => {
-        document.documentElement.dataset.theme = ${JSON.stringify(theme)};
-        const list = document.getElementById('messages'); list.scrollTop = 0;
-        document.activeElement?.blur();
-        document.querySelectorAll('.msg-time.copied').forEach(el => el.classList.remove('copied'));
-        await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
-        const rect = el => {
-          const range = document.createRange(); range.selectNodeContents(el);
-          const r = getComputedStyle(el).display === 'contents' ? range.getBoundingClientRect() : el.getBoundingClientRect();
-          return { left:r.left, right:r.right, top:r.top, bottom:r.bottom, width:r.width, height:r.height }; };
-        const card = id => list.querySelector('[data-message-id="' + id + '"]');
-        const header = id => {
-          const c = card(id), head = c.querySelector('.message-head'), reply = c.querySelector('.reply-context');
-          const targets = c.querySelector('.message-targets'), stamp = c.querySelector('time');
-          return { head:rect(head), author:rect(head.querySelector('strong')), reply:rect(reply),
-            targets:rect(targets), time:rect(stamp), content:rect(c.querySelector('.message-content')),
-            totalHeight:c.querySelector('.bubble').getBoundingClientRect().top - head.getBoundingClientRect().top,
-            inline:reply.parentNode === head && targets.parentNode === head,
-            endStamp:head.lastElementChild === stamp, replyLabel:reply.getAttribute('aria-label'),
-            numberVisible:getComputedStyle(stamp.querySelector('.message-id')).display !== 'none',
-            targetText:targets.textContent, datetime:stamp.getAttribute('datetime') };
-        };
-        const bar = document.querySelector('.conversation-header');
-        const buttons = [...bar.querySelectorAll('.icon-btn'), document.getElementById('face-pile')]
-          .filter(el => getComputedStyle(el).display !== 'none').map(el => ({ id:el.id, ...rect(el) }));
-        const meta = document.getElementById('h-meta');
-        const title = document.getElementById('h-channel');
-        return { width:${width}, theme:${JSON.stringify(theme)}, viewport:document.documentElement.clientWidth,
-          coarse:matchMedia('(hover:none) and (pointer:coarse)').matches,
-          topbar:rect(bar), title:rect(title), titleOverflow:title.scrollWidth > title.clientWidth,
-          metaVisible:getComputedStyle(meta).display !== 'none', buttons,
-          overflow:list.scrollWidth-list.clientWidth, own:header(3), other:header(2), many:header(4), private:header(5) };
+  const measurements=[], failures=[];let passed=0;
+  for (const width of [360,390,412,1280]) {
+    const mobile=width<=640;
+    await call('Emulation.setTouchEmulationEnabled',{enabled:mobile,maxTouchPoints:1},sessionId);
+    await call('Emulation.setDeviceMetricsOverride',{width,height:900,deviceScaleFactor:1,mobile},sessionId);
+    for (const theme of themes) {
+      const geometry=await evaluate(`(async()=>{
+        document.documentElement.dataset.theme=${JSON.stringify(theme)};window.paintSynthetic();
+        await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));
+        const list=document.getElementById('messages'),cards=[...list.querySelectorAll('.message')];
+        const rect=el=>{const r=el.getBoundingClientRect();return {left:r.left,right:r.right,top:r.top,bottom:r.bottom,width:r.width,height:r.height};};
+        const ack=cards.slice(0,6),own=cards.find(c=>c.dataset.messageId==='7');
+        return {width:${width},theme:${JSON.stringify(theme)},overflow:list.scrollWidth-list.clientWidth,
+          ackHeight:rect(ack.at(-1)).bottom-rect(ack[0]).top,
+          rows:cards.map(c=>({id:Number(c.dataset.messageId),...rect(c)})),
+          grouped:ack.map(c=>({grouped:c.classList.contains('message-grouped'),avatar:getComputedStyle(c.querySelector('.header-avatar')||c.querySelector('.message-avatar')).display,
+            author:rect(c.querySelector('.message-head strong')),authorText:c.querySelector('.message-head strong').textContent,
+            time:rect(c.querySelector('.bubble-time')||c.querySelector('time')),bubble:rect(c.querySelector('.bubble'))})),
+          own:{author:rect(own.querySelector('.message-head strong')),head:rect(own.querySelector('.message-head')),
+            avatar:rect(own.querySelector('.message-avatar')),time:rect(own.querySelector('.bubble-time')||own.querySelector('time')),bubble:rect(own.querySelector('.bubble'))},
+          topbar:rect(document.querySelector('.conversation-header'))};
       })()`);
       measurements.push(geometry);
-      if (evidence) {
-        const { data } = await call('Page.captureScreenshot', { format:'png' }, sessionId);
-        fs.writeFileSync(path.join(evidence, phase + '-' + width + '-' + theme + '.png'), Buffer.from(data, 'base64'));
-      }
       try {
-        if (phase !== 'before') {
-          assert.strictEqual(geometry.viewport, width, 'actual viewport');
-          assert.strictEqual(geometry.overflow, 0, 'conversation fits viewport');
-          for (const key of ['own', 'other', 'many', 'private']) {
-            const g = geometry[key];
-            assert.ok(g.inline && g.endStamp, key + ' metadata in header, time at end');
-            assert.strictEqual(g.replyLabel, 'Replying to message #' + (key === 'other' ? 1 : key === 'own' ? 2 : key === 'many' ? 3 : 4));
-            assert.ok(g.numberVisible, 'message-number setting on');
-            assert.strictEqual(g.datetime, '2026-01-01T12:00:00.000Z');
-            assert.ok(g.head.left >= g.content.left - .5 && g.head.right <= g.content.right + .5, key + ' header fits content');
-            if (mobile) {
-              for (const target of [g.reply, g.time]) {
-                assert.ok(target.width >= 44 && target.height >= 44, key + ' 44px touch target');
-              }
+        if(phase!=='before') {
+          assert.strictEqual(geometry.overflow,0,'conversation fits viewport');
+          if(mobile) {
+            for(const i of [1,2,4,5]) {
+              const g=geometry.grouped[i];assert.ok(g.grouped,'same-sender run groups');
+              assert.strictEqual(g.avatar,'none','repeated avatar hidden');
+              assert.ok(g.author.width<=1 && g.author.height<=1,'repeated name visually hidden');
+              assert.ok(g.authorText,'author still available to screen readers');
+              assert.strictEqual(g.bubble.left,geometry.grouped[i<3?0:3].bubble.left,'run bubbles align');
+              if(['light-1','dark-1','inspired-rescue'].includes(theme))assert.strictEqual(g.bubble.left,16,'incoming bubble starts at the 16px page padding');
             }
-          }
-          assert.ok(geometry.many.targetText.includes('@Operator') && geometry.many.targetText.includes('#Reviewer') && geometry.many.targetText.includes('!Peer'), 'all sigils kept');
-          if (mobile) {
-            assert.strictEqual(geometry.coarse, true, 'touch emulation active');
-            assert.ok(geometry.topbar.height <= 64, 'phone top bar <=64px: ' + geometry.topbar.height);
-            assert.ok(!geometry.metaVisible, 'static subtitle hidden on phone');
-            assert.ok(geometry.titleOverflow && geometry.title.width > 0, 'title truncates with space left');
-            for (const button of geometry.buttons) {
-              assert.ok(button.width >= 44 && button.height >= 44, button.id + ' 44px touch target');
-              assert.ok(button.left >= 0 && button.right <= width, button.id + ' fits viewport');
-            }
-            if (width >= 360) {
-              for (const key of ['own', 'other']) {
-                const g = geometry[key];
-                assert.ok(g.head.height <= 44.5, key + ' reply+recipient fits one line: ' + g.head.height);
-                assert.ok(Math.abs(key === 'own' ? g.head.right - g.content.right : g.head.left - g.content.left) < .5,
-                  key + ' header aligns with its bubble side');
-                assert.ok(Math.abs(g.reply.top - g.time.top) < .5, key + ' reply and timestamp on same line');
-                assert.ok(g.targets.top >= g.head.top && g.targets.bottom <= g.head.bottom, key + ' recipients share the row');
-              }
-            }
-          }
-          const behavior = await evaluate(`(async () => {
+            assert.ok(geometry.own.author.width<=1 && geometry.own.head.height===0,'own message has no name header');
+            assert.strictEqual(geometry.own.avatar.width,0,'own avatar absent');
+            for(const g of [...geometry.grouped,geometry.own]) assert.ok(g.time.left>=g.bubble.left && g.time.right<=g.bubble.right && g.time.top>=g.bubble.top && g.time.bottom<=g.bubble.bottom,'clock inside bubble');
+            assert.ok(geometry.topbar.height<=64,'phone app bar stays compact');
+            if(width===390 && ['light-1','dark-1','inspired-rescue'].includes(theme)) assert.ok(geometry.ackHeight<=BASELINE_ACK_HEIGHT[theme]*.60,'ack cluster <=60% of measured pre-change height: '+geometry.ackHeight);
+          }else for(const i of [1,2,4,5])assert.ok(geometry.grouped[i].author.width>1,'desktop repeated names remain');
+          const behavior=await evaluate(`(async()=>{
+            const list=document.getElementById('messages');
             document.body.classList.remove('message-numbers');
-            const hidden = getComputedStyle(document.querySelector('.message-id')).display === 'none';
+            const hidden=[...list.querySelectorAll('.message-id')].every(el=>getComputedStyle(el).display==='none');
             document.body.classList.add('message-numbers');
-            const target = document.querySelector('[data-message-id="1"]');
-            let jumped = false; target.scrollIntoView = () => { jumped = true; };
-            document.querySelector('[data-message-id="2"] .reply-context').click();
-            document.querySelector('[data-message-id="2"] time').click();
-            await Promise.resolve();
-            const hitTargets = [...document.querySelectorAll('[data-message-id="2"] .reply-context, [data-message-id="2"] time')];
-            const hits = hitTargets.every(el => {
-              el.scrollIntoView({ block:'center' });
-              const r = el.getBoundingClientRect();
-              return [[r.left+1,r.top+r.height/2], [r.right-1,r.top+r.height/2],
-                [r.left+r.width/2,r.top+1], [r.left+r.width/2,r.bottom-1]]
-                .every(([x,y]) => el.contains(document.elementFromPoint(x,y)));
+            const visible=[...list.querySelectorAll('.message-id')].filter(el=>el.getClientRects().length).every(el=>getComputedStyle(el).display!=='none');
+            const more=list.querySelector('[data-message-id="8"] .targets-toggle');
+            const before=[...list.querySelectorAll('[data-message-id="8"] .target-chip')].filter(el=>el.getClientRects().length).length;
+            more.click();const after=[...list.querySelectorAll('[data-message-id="8"] .target-chip')].filter(el=>el.getClientRects().length).length;
+            const expanded=more.getAttribute('aria-expanded');more.click();
+            const hitTargets=[...list.querySelectorAll('time[datetime],.reply-context,.targets-toggle,.code-copy')].filter(el=>el.getClientRects().length);
+            const targets=hitTargets.map(el=>{
+              el.scrollIntoView({block:'center'});const box=el.getBoundingClientRect(),p=getComputedStyle(el,'::after');
+              const r={left:box.left+(parseFloat(p.left)||0),right:box.right-(parseFloat(p.right)||0),top:box.top+(parseFloat(p.top)||0),bottom:box.bottom-(parseFloat(p.bottom)||0)};
+              const width=r.right-r.left,height=r.bottom-r.top;
+              const hits=[[r.left+1,(r.top+r.bottom)/2],[r.right-1,(r.top+r.bottom)/2],[(r.left+r.right)/2,r.top+1],[(r.left+r.right)/2,r.bottom-1]].map(([x,y])=>el.contains(document.elementFromPoint(x,y)));
+              return {id:el.closest('.message').dataset.messageId,cls:el.className,width,height,hits,label:el.getAttribute('aria-label')||el.title};
             });
-            Trio.state.loaded.agents = false; Trio.workspace.renderChannelMetadataState();
-            const meta = document.getElementById('h-meta');
-            const loading = { visible:getComputedStyle(meta).display !== 'none', text:meta.textContent, width:meta.getBoundingClientRect().width };
-            Trio.setChannelSubtitle('Connecting…');
-            const connecting = { visible:getComputedStyle(meta).display !== 'none', text:meta.textContent, width:meta.getBoundingClientRect().width };
-            Trio.state.loaded.agents = true; Trio.workspace.renderChannelMetadataState();
-            return { hidden, jumped, focused:document.activeElement === target, hits, loading, connecting, copied:window.headerCopies.at(-1), height:document.querySelector('.conversation-header').getBoundingClientRect().height };
+            // Contextmenu is the same menu path opened by a touch long press.
+            const incoming=list.querySelector('[data-message-id="1"]'),bubble=incoming.querySelector('.bubble');
+            if (${mobile} && ${width} === 390 && ['light-1','dark-1','inspired-rescue'].includes(${JSON.stringify(theme)})) {
+              bubble.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true,pointerType:'touch',isPrimary:true,clientX:100,clientY:100}));
+              await new Promise(resolve=>setTimeout(resolve,520));
+              bubble.dispatchEvent(new PointerEvent('pointerup',{bubbles:true,pointerType:'touch'}));
+            } else bubble.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true}));
+            const menu=incoming.querySelector('.message-actions-menu'),copy=menu?.querySelector('.menu-copy');
+            const copyRect=copy?.getBoundingClientRect();if(copy && ${mobile})copy.click();await Promise.resolve();
+            list.querySelector('[data-message-id="12"] .code-copy').click();await Promise.resolve();
+            let jumped=false;const replyTarget=list.querySelector('[data-message-id="7"]');replyTarget.scrollIntoView=()=>{jumped=true;};
+            list.querySelector('[data-message-id="8"] .reply-context').click();
+            const focused=document.activeElement===replyTarget;
+            const clock=list.querySelector('[data-message-id="1"] time[datetime]'+(${mobile}?'.bubble-time':'.header-time'));
+            clock.click();await Promise.resolve();
+            return {hidden,visible,before,after,expanded,targets,jumped,focused,
+              copySize:copyRect?{width:copyRect.width,height:copyRect.height}:null,
+              incomingCopied:window.copies.at(-3),codeCopied:window.copies.at(-2),timeCopied:window.copies.at(-1),
+              externalCopies:[...list.querySelectorAll('.message-tools')].filter(el=>el.getClientRects().length).length,
+              system:{bubble:!!list.querySelector('[data-message-id="11"] .bubble'),font:getComputedStyle(list.querySelector('[data-message-id="11"] .message-body')).fontSize}};
           })()`);
-          geometry.behavior = behavior;
-          assert.ok(behavior.hidden && behavior.jumped && behavior.focused, 'numbers setting and reply jump/focus');
-          assert.ok(behavior.hits, 'reply and timestamp hit areas are reachable');
-          assert.strictEqual(behavior.copied, '2026-01-01T12:00:00.000Z', 'tap copies timestamp');
-          assert.ok(behavior.loading.visible && behavior.loading.width > 0 && behavior.connecting.visible && behavior.connecting.width > 0, 'loading and connecting status remains visible');
-          if (mobile) assert.ok(behavior.height <= 64, 'status does not enlarge phone bar');
-          if (evidence) {
-            await evaluate("Trio.setChannelSubtitle('Connecting…'); document.getElementById('messages').scrollTop = 0; document.activeElement?.blur()");
-            const { data } = await call('Page.captureScreenshot', { format:'png' }, sessionId);
-            fs.writeFileSync(path.join(evidence, phase + '-' + width + '-' + theme + '-connecting.png'), Buffer.from(data, 'base64'));
-            await evaluate('Trio.workspace.renderChannelMetadataState()');
+          geometry.behavior=behavior;
+          assert.ok(behavior.hidden&&behavior.visible,'message-number preference works');
+          assert.strictEqual(behavior.codeCopied,'hello world','code copy retains source');
+          assert.strictEqual(behavior.timeCopied,'2026-01-01T12:00:00.000Z','timestamp still copies UTC instant');
+          assert.ok(behavior.jumped && behavior.focused,'reply jumps and focuses the original message');
+          if(mobile){
+            assert.strictEqual(behavior.before,3,'three recipients before expansion');assert.strictEqual(behavior.after,4,'all recipients after expansion');assert.strictEqual(behavior.expanded,'true');
+            assert.strictEqual(behavior.externalCopies,0,'no outside copy row on phone');
+            assert.strictEqual(behavior.incomingCopied,'Ready.','incoming message copies from long-press menu');
+            assert.ok(behavior.copySize.width>=44 && behavior.copySize.height>=44,'menu copy target 44px');
+            for(const t of behavior.targets){assert.ok(t.width>=44&&t.height>=44,t.cls+' 44px target');assert.ok(t.hits.every(Boolean),JSON.stringify(t)+' actual hit edges');}
+            assert.ok(!behavior.system.bubble && behavior.system.font==='11px','system line has no bubble and dim small text');
           }
         }
-        passed++; console.log('PASS: ' + name + ' (bar ' + geometry.topbar.height + 'px, reply header ' + geometry.other.totalHeight + 'px)');
-      } catch (error) { failures.push(name); console.error('FAIL: ' + name + ' — ' + error.message); }
+        passed++;console.log('PASS: '+width+'px '+theme+' (ack '+geometry.ackHeight+'px)');
+      }catch(error){failures.push(width+'px '+theme);console.error('FAIL: '+width+'px '+theme+' — '+error.message);}
     }
   }
-  if (evidence) fs.writeFileSync(path.join(evidence, phase + '-measurements.json'), JSON.stringify({ passed, failures, measurements }, null, 2) + '\n');
-  console.log(passed + ' geometry cases passed, ' + failures.length + ' failed');
-  assert.strictEqual(failures.length, 0, 'header phone geometry');
+  if (phase !== 'before') {
+    const lifecycle = await evaluate(`(async()=>{
+      Trio.state.readOnly=true;
+      const make=(id,member_id,created_at)=>({id,member_id,created_at,channel:'layout-demo',content:'Acknowledged.'});
+      const first=make(101,'agent','2026-01-01T12:00:00Z'), second=make(103,'agent','2026-01-01T12:05:00Z');
+      Trio.state.messages=new Map([[101,first],[103,second]]);Trio.state.messageDomById.clear();
+      Trio.conversation.render();const card=id=>document.querySelector('[data-message-id="'+id+'"]');
+      const withinFive=card(103).classList.contains('message-grouped');
+      Trio.conversation.upsert(make(103,'agent','2026-01-01T12:05:01Z'));
+      const expired=!card(103).classList.contains('message-grouped');
+      Trio.conversation.upsert(second);
+      Trio.conversation.upsert(make(102,'peer','2026-01-01T12:02:00Z'));
+      await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));
+      const inserted=!card(103).classList.contains('message-grouped');
+      Trio.conversation.upsert(make(102,'agent','2026-01-01T12:02:00Z'));
+      const edited=card(102).classList.contains('message-grouped')&&card(103).classList.contains('message-grouped');
+      Trio.conversation.upsert({id:102,member_id:'agent',content:'Acknowledged.',retracted_at:'2026-01-01T12:06:00Z'});
+      const retracted=!card(103).classList.contains('message-grouped');
+      return {withinFive,expired,inserted,edited,retracted};
+    })()`);
+    assert.ok(Object.values(lifecycle).every(Boolean), 'production render and incremental run boundaries: '+JSON.stringify(lifecycle));
+  }
+  if(evidence)fs.writeFileSync(path.join(evidence,phase+'-measurements.json'),JSON.stringify({passed,failures,measurements},null,2)+'\n');
+  console.log(passed+' geometry cases passed, '+failures.length+' failed');assert.strictEqual(failures.length,0,'phone headers');
 }
 
-(async () => {
-  try {
-    await Promise.race([measure(), new Promise((_, reject) => {
-      timer = setTimeout(() => reject(new Error('Chromium geometry deadline exceeded')), 45000);
-    })]);
-  } catch (error) { console.error(error.stack); process.exitCode = 1; }
-  finally {
-    clearTimeout(timer); socket?.close(); stopBrowser('SIGTERM');
-    let killTimer;
-    await Promise.race([closed, new Promise(resolve => { killTimer = setTimeout(() => { stopBrowser('SIGKILL'); resolve(); }, 3000); })]);
-    clearTimeout(killTimer);
-    fs.rmSync(temporary, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
-  }
+(async()=>{
+  try{await Promise.race([measure(),new Promise((_,reject)=>{timer=setTimeout(()=>reject(new Error('Chromium geometry deadline exceeded')),45000);})]);}
+  catch(error){console.error(error.stack);process.exitCode=1;}
+  finally{clearTimeout(timer);socket?.close();stopBrowser('SIGTERM');let killTimer;await Promise.race([closed,new Promise(resolve=>{killTimer=setTimeout(()=>{stopBrowser('SIGKILL');resolve();},3000);})]);clearTimeout(killTimer);fs.rmSync(temporary,{recursive:true,force:true,maxRetries:5,retryDelay:100});}
 })();

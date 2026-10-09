@@ -161,10 +161,10 @@ async function measure() {
           const c = card(id), b = c.querySelector('.bubble'), r = rect(b), l = rect(list);
           const copy = c.querySelector('.msg-copy'), target = getComputedStyle(copy, '::after');
           return { bubble:r, row:rect(c), content:rect(c.querySelector('.message-content')), leftGap:r.left-l.left, rightGap:l.right-r.right,
-            avatar:rect(c.querySelector('.message-avatar')),
+            avatar:rect((${mobile} && c.querySelector('.header-avatar')) || c.querySelector('.message-avatar')),
             head:rect(c.querySelector('.message-head')), targets:c.querySelector('.message-targets') ? rect(c.querySelector('.message-targets')) : null,
-            headerChildren:[...c.querySelector('.message-head').children].filter(el => el.getClientRects().length).map(el => ({ tag:el.tagName, className:el.className, ...rect(el), whiteSpace:getComputedStyle(el).whiteSpace })),
-            chips:[...c.querySelectorAll('.target-chip')].map(el => rect(el)),
+            headerChildren:[...c.querySelector('.message-head').children].filter(el => el.getClientRects().length && getComputedStyle(el).clipPath !== 'inset(50%)').map(el => ({ tag:el.tagName, className:el.className, ...rect(el), whiteSpace:getComputedStyle(el).whiteSpace })),
+            chips:[...c.querySelectorAll('.target-chip')].filter(el => el.getClientRects().length).map(el => rect(el)),
             rowInsets:{ left:parseFloat(getComputedStyle(c).paddingLeft) + parseFloat(getComputedStyle(c).borderLeftWidth), right:parseFloat(getComputedStyle(c).paddingRight) + parseFloat(getComputedStyle(c).borderRightWidth) },
             copy:rect(copy), copyHitWidth:copy.offsetWidth + (parseFloat(target.left) || 0)*-1 + (parseFloat(target.right) || 0)*-1 };
         };
@@ -176,7 +176,8 @@ async function measure() {
         return { width:${width}, theme:${JSON.stringify(theme)}, viewport:document.documentElement.clientWidth,
           coarse:matchMedia('(hover:none) and (pointer:coarse)').matches,
           conversation:rect(list), padding:parseFloat(getComputedStyle(list).paddingRight), rowPadding:parseFloat(getComputedStyle(card(1)).paddingRight),
-          avatarWidth:parseFloat(getComputedStyle(card(2).querySelector('.message-avatar')).width),
+          avatarWidth:parseFloat(getComputedStyle((${mobile} && card(2).querySelector('.header-avatar')) || card(2).querySelector('.message-avatar')).width),
+          retractedAvatarWidth:parseFloat(getComputedStyle(card(7).querySelector('.message-avatar')).width),
           overflow:list.scrollWidth-list.clientWidth, own:gaps(1), other:gaps(2),
           shortOwn:gaps(3), shortOther:gaps(4), private:gaps(5), table:gaps(6),
           longChip:gaps(9), incomingPrivate:gaps(10), longAuthor:gaps(11), incomingMetadata:gaps(12), incomingChip:gaps(15),
@@ -191,7 +192,7 @@ async function measure() {
       })()`);
       if (mobile) geometry.chipHits = await evaluate(`(() => {
         const list = document.getElementById('messages');
-        const hits = [...list.querySelectorAll('[data-message-id="9"] .target-chip, [data-message-id="15"] .target-chip')].map(chip => {
+        const hits = [...list.querySelectorAll('[data-message-id="9"] .target-chip, [data-message-id="15"] .target-chip')].filter(chip => chip.getClientRects().length).map(chip => {
           chip.scrollIntoView({ block:'center' });
           const r = chip.getBoundingClientRect();
           return [r.left + 2, r.right - 2].map(x => {
@@ -221,7 +222,8 @@ async function measure() {
           const g = geometry[key];
           assert.ok(g.leftGap >= 0 && g.rightGap >= 0, key + ' fits conversation');
           if (mobile) {
-            assert.ok(g.copyHitWidth >= 44, key + ' retains horizontal 44px copy target');
+            assert.strictEqual(g.copy.width, 0, key + ' outside copy affordance hidden on phone');
+            assert.strictEqual(g.copy.height, 0, key + ' copy spends no row');
             assert.ok(g.head.left >= g.content.left - .5 && g.head.right <= g.content.right + .5, key + ' header fits content');
             for (const child of g.headerChildren) {
               assert.ok(child.left >= g.content.left - .5 && child.right <= g.content.right + .5,
@@ -248,7 +250,8 @@ async function measure() {
           for (const key of ['other', 'shortOther', 'table']) {
             const g = geometry[key];
             assert.ok(g.leftGap < g.rightGap, key + ' left gap < right gap: ' + JSON.stringify(g));
-            assert.strictEqual(g.avatar.width, theme === 'inspired-messenger' ? 0 : geometry.avatarWidth, key + ' incoming avatar retained');
+            assert.ok(Math.abs(g.bubble.left-g.row.left-g.rowInsets.left)<.5, key + ' incoming bubble starts at page gutter');
+            assert.strictEqual(g.avatar.width, 22, key + ' incoming avatar stays in the header');
           }
           for (const key of ['own', 'other']) {
             const g = geometry[key], rowWidth = g.row.width - g.rowInsets.left - g.rowInsets.right;
@@ -277,7 +280,7 @@ async function measure() {
         assert.ok(geometry.privateMarker, 'private marker retained');
         if (['light-1', 'dark-1', 'inspired-rescue'].includes(theme)) assert.ok(geometry.privateShadow.includes('inset'), 'private shadow retained');
         assert.ok(!geometry.retracted.bubble && !geometry.retracted.tools, 'retracted message stays plain');
-        assert.strictEqual(geometry.retracted.avatar.width, theme === 'inspired-messenger' ? 0 : geometry.avatarWidth, 'retracted avatar unchanged');
+        assert.strictEqual(geometry.retracted.avatar.width, theme === 'inspired-messenger' ? 0 : geometry.retractedAvatarWidth, 'retracted avatar unchanged');
         assert.ok(!geometry.system.bubble && !geometry.system.avatar && !geometry.system.tools, 'system stays plain');
         if (['light-1', 'dark-1', 'inspired-rescue'].includes(theme)) assert.strictEqual(geometry.system.content.width, geometry.system.row.width, 'system stays full width');
         passed++; console.log('PASS: ' + name);

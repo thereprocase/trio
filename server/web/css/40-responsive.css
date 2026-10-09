@@ -201,3 +201,83 @@
   .conversation-header .face-pile .av:first-child{ margin-left:0; }
   .message.msg .message-head{ gap:1px; }
 }
+
+/* Phone conversation rhythm: identity once per five-minute run; clocks use
+   reserved space at the end of prose rather than a separate metadata row. */
+@media (max-width:640px){
+  :root[data-theme] .messages{ gap:3px; }
+  :root[data-theme] .message.msg:not(.system-message):not(.retracted){ padding-block:0; }
+  :root[data-theme] .message.msg.message-run-start{ margin-top:7px; }
+  :root[data-theme] .message.msg .message-head{
+    position:relative; align-items:center; gap:0 3px; font-size:11px; line-height:22px;
+    letter-spacing:normal; margin:0 0 1px;
+  }
+  :root[data-theme] .message.msg.me .message-head{ justify-content:flex-start; }
+  :root[data-theme] .message.msg .message-head .reply-context{ order:-1; }
+  :root[data-theme] .message.msg .targets-toggle{ order:1; margin-left:auto; }
+  :root[data-theme] .message.msg .message-head strong{ font-size:13px; font-weight:600; line-height:22px; }
+  :root[data-theme] .message.msg .message-head .target-chip{
+    font-size:11px; line-height:18px; padding:1px 6px; margin:0;
+  }
+  :root[data-theme] .message.msg .message-head .reply-context,
+  :root[data-theme] .message.msg .targets-toggle{
+    position:relative; display:inline-flex; align-items:center; justify-content:center;
+    min-width:44px; height:22px; min-height:0; line-height:22px; font-size:11px;
+  }
+  :root[data-theme] .message.msg .message-head .reply-context::after,
+  :root[data-theme] .message.msg .targets-toggle::after{
+    content:""; position:absolute; z-index:1; inset:-13px 0 -9px; border-radius:4px;
+  }
+  :root[data-theme] .message.msg .message-head .target-label,
+  :root[data-theme] .message.msg.me .message-head strong,
+  :root[data-theme] .message.msg.message-grouped .message-head strong,
+  :root[data-theme] .message.msg.message-grouped .message-role{
+    position:absolute; width:1px; height:1px; padding:0; margin:-1px;
+    overflow:hidden; clip-path:inset(50%); white-space:nowrap;
+  }
+  :root[data-theme] .message.msg.message-grouped .message-avatar{ visibility:hidden; }
+  :root[data-theme] .message.msg.has-bubble-time .message-head .header-time{ display:none; }
+  :root[data-theme] .message.msg.me .message-head:not(:has(.reply-context,.target-chip,.confidence,.private-badge,.task-chip)),
+  :root[data-theme] .message.msg.message-grouped .message-head:not(:has(.reply-context,.target-chip,.confidence,.private-badge,.task-chip)){ margin:0; }
+  :root[data-theme] .message.msg .message-targets:not(.targets-expanded) .extra-target{ display:none; }
+  :root[data-theme] .message.msg .bubble{ position:relative; padding:6px 10px; min-height:41px; }
+  :root[data-theme] .message.msg .bubble-time-space{
+    display:inline-flex; visibility:hidden; margin-left:8px; font-size:10px;
+    line-height:18px; vertical-align:bottom; white-space:nowrap; font-variant-numeric:tabular-nums;
+  }
+  :root[data-theme] .message.msg .bubble-time{
+    display:inline-flex; position:absolute; right:10px; bottom:6px;
+    align-items:center; justify-content:center; min-width:44px; height:18px; min-height:0;
+    font-size:10px; line-height:18px; color:color-mix(in srgb,currentColor 65%,transparent); margin:0;
+  }
+  /* Forty-one-pixel bubbles plus the three-pixel run gap separate adjacent clocks'
+     44px hit boxes. The prose spacer keeps those boxes away from body links. */
+  :root[data-theme] .message.msg .bubble-time::after{
+    content:""; position:absolute; z-index:1; inset:-13px 0; border-radius:4px;
+  }
+  :root[data-theme] .message.msg .message-tools{ display:none; }
+  :root[data-theme] .message.msg .message-actions-menu{ flex-wrap:wrap; }
+  :root[data-theme] .message.msg .message-actions-menu button{ min-width:44px; min-height:44px; }
+  :root[data-theme] .message.msg .message-actions-menu .menu-copy{ display:inline-grid; }
+  :root[data-theme] .message.msg .code-copy{ width:44px; height:44px; top:0; right:0; opacity:1; }
+  :root[data-theme] .message.msg .code-block pre.mdcode{ padding-right:56px; }
+  :root[data-theme] .message.msg.system-message{ padding:0; }
+  :root[data-theme] .message.msg.system-message .message-content{ width:100%; max-width:none; }
+  :root[data-theme] .message.msg.system-message .message-body.system{
+    width:100%; text-align:center; font-size:11px; line-height:16px; color:var(--ink-3);
+  }
+}
+
+/* Incoming avatars belong to the identity line, not to a column beside the
+   entire answer. Keep the opposite gutter while giving prose that column back. */
+@media (max-width:640px){
+  :root[data-theme] .message.msg:not(.me):not(.system-message):not(.retracted) > .message-avatar{ display:none; }
+  :root[data-theme] .message.msg:not(.me):not(.system-message):not(.retracted) .message-content{
+    max-width:calc(100% - var(--bubble-gutter));
+  }
+  :root[data-theme] .message.msg:not(.me):not(.retracted) .message-head .header-avatar{
+    display:flex; width:22px; height:22px; flex-shrink:0; margin:0; order:-2; font-size:11px;
+  }
+  :root[data-theme] .message.msg:not(.me) .message-head strong{ order:-1; }
+  :root[data-theme] .message.msg.message-grouped:not(.me):not(.retracted) .message-head .header-avatar{ display:none; }
+}
