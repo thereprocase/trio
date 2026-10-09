@@ -1116,7 +1116,7 @@
 :root[data-theme="inspired-messenger"] .message.msg.me .message-body a { color:#fff; }
 :root[data-theme="inspired-messenger"] .message.msg.me .inline-mention { background:rgba(255,255,255,.2); color:#fff; }
 :root[data-theme="inspired-messenger"] .message.msg .message-attachment { border:0; border-radius:16px; overflow:hidden; }
-:root[data-theme="inspired-messenger"] .message.msg .message-attachment img { max-width:280px; max-height:300px; }
+:root[data-theme="inspired-messenger"] .message.msg .message-attachment img { max-width:min(100%,280px); max-height:300px; }
 :root[data-theme="inspired-messenger"] .icon-btn,
 :root[data-theme="inspired-messenger"] .add-btn,
 :root[data-theme="inspired-messenger"] .btn,
