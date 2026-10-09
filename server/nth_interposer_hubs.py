@@ -4,11 +4,41 @@ import json
 from pathlib import Path
 import shlex
 import socket
+import threading
 import tomllib
 import unicodedata
 from urllib.parse import urlsplit
 
 from nth_interposer_wire import WireError, validate_hub, canonical_server
+
+DNS_TIMEOUT = .3
+DNS_WORKERS = 4
+_dns_slots = threading.BoundedSemaphore(DNS_WORKERS)
+
+
+def resolve(host, port):
+    """Bound latency and outstanding OS lookups, including ones that never return."""
+    slots = _dns_slots
+    if not slots.acquire(blocking=False):
+        raise WireError('hub resolver capacity unavailable', 'hub_not_allowed')
+    done, result = threading.Event(), []
+    def lookup():
+        try:
+            result.append(socket.getaddrinfo(host, port, type=socket.SOCK_STREAM))
+        except Exception:
+            result.append(None)
+        finally:
+            slots.release()
+            done.set()
+    worker = threading.Thread(target=lookup, name='interposer-dns', daemon=True)
+    try:
+        worker.start()
+    except BaseException:
+        slots.release()
+        raise
+    if not done.wait(DNS_TIMEOUT) or not result or not result[0]:
+        raise WireError('hub hostname cannot be safely resolved', 'hub_not_allowed')
+    return result[0]
 
 
 def normalized_host(host):
@@ -56,8 +86,7 @@ def check_host(url, *, allow_restricted=False):
     parts = urlsplit(url)
     host = normalized_host(parts.hostname)
     try:
-        answers = socket.getaddrinfo(host, parts.port or (443 if parts.scheme == 'https' else 80),
-                                     type=socket.SOCK_STREAM)
+        answers = resolve(host, parts.port or (443 if parts.scheme == 'https' else 80))
         if not answers:
             raise OSError
         if not allow_restricted and any(restricted_address(a[4][0]) for a in answers):
@@ -106,7 +135,7 @@ def connection_guard(url, *, allow_restricted=False):
         if normalized_host(host)!=normalized_host(urlsplit(url).hostname):
             raise WireError('hub connection origin changed', 'hub_not_allowed')
         check_host(url,allow_restricted=allow_restricted)
-        answers = socket.getaddrinfo(normalized_host(host),port,type=socket.SOCK_STREAM)
+        answers = resolve(normalized_host(host),port)
         if not allow_restricted and any(restricted_address(a[4][0]) for a in answers):
             raise WireError('hub DNS answer is restricted', 'hub_not_allowed')
         last = None

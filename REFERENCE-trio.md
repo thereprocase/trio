@@ -362,3 +362,19 @@ from eligible registered attached holdings without taking another live owner's
 seat. Host-death observations apply only to the checked registration generation,
 even if a resume reuses its PID and the wall clock has not advanced. Handoff keeps
 the original settle deadline when buffers move to a new owner.
+
+Shutdown retries each failed evidence flush up to three times and checks the result.
+Before a final append, it commits only projected IDs, counts, validated identifiers
+and fixed labels to the private SQLite recovery journal. Startup and reconciliation
+retry retained records, including ended owners; pending recovery protects session
+metadata from eviction. Separate journal entries preserve older failures when more
+observations arrive. A crash between append and journal deletion may repeat evidence,
+but cannot discard its IDs. No peer text, credentials or hub URLs enter the journal.
+
+Announcement DNS runs outside the store/admission lock, with a 0.3-second deadline
+and at most four outstanding daemon workers. Timed-out lookups retain their worker
+slot until the OS call returns; excess lookups fail promptly. Shutdown and trusted
+config are checked again before applying an announcement. Connection DNS checks
+remain bounded and pin validated answers. Service logs open nonblocking, reject
+symlinks and nonregular descriptors, and preserve private modes. A failed log open
+reports a fixed error class on stderr without trying to reopen the failing sink.

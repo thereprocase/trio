@@ -31,10 +31,8 @@ def ranges_for(key, server, messages):
     return result
 
 
-def append(side, session, client, sink, ranges, ended, lines):
+def project_record(side, session, client, sink, ranges, ended, lines):
     """Project each record anew: no tokens, message text or sender fields escape."""
-    if os.environ.get('TRIO_INTERPOSER_SHADOW') == '0':
-        return False
     try:
         if side not in ('actual', 'would') or not SESSION_ID.fullmatch(session):
             return False
@@ -56,8 +54,19 @@ def append(side, session, client, sink, ranges, ended, lines):
             if not IDENTITY_KEY.fullmatch(row['key']):
                 return False
             clean_ended.append({'key': row['key'], 'reason': shown_reason(row['reason'])})
-        record = dict(t=time.time(), side=side, session=session, client=client, sink=sink,
-                      ranges=clean_ranges, ended=clean_ended, lines=int(lines))
+        return dict(t=time.time(), side=side, session=session, client=client, sink=sink,
+                    ranges=clean_ranges, ended=clean_ended, lines=int(lines))
+    except Exception:
+        return False
+
+
+def append(side, session, client, sink, ranges, ended, lines):
+    if os.environ.get('TRIO_INTERPOSER_SHADOW') == '0':
+        return False
+    try:
+        record = project_record(side, session, client, sink, ranges, ended, lines)
+        if not record:
+            return False
         directory = private_dir(home() / 'events' / 'shadow')
         path = directory / (side + '.jsonl')
         data = (json.dumps(record, separators=(',', ':'), allow_nan=False) + '\n').encode()

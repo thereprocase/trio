@@ -92,12 +92,24 @@ def service_log():
 
 class PrivateRotatingHandler(RotatingFileHandler):
     def _open(self):
-        descriptor = os.open(self.baseFilename, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
-        os.fchmod(descriptor, 0o600)
-        return os.fdopen(descriptor, 'a', encoding='utf-8')
+        descriptor = os.open(self.baseFilename, os.O_WRONLY | os.O_CREAT | os.O_APPEND |
+                             os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+        try:
+            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                raise OSError('service log must be a regular file')
+            os.fchmod(descriptor, 0o600)
+            return os.fdopen(descriptor, 'a', encoding='utf-8')
+        except BaseException:
+            os.close(descriptor)
+            raise
 
 
 def dispatch(store, request, runtime=None, *, activated=False, log=None):
+    op = validate_request(request)
+    if op == 'hub.announce':
+        # DNS has a deadline and worker cap, and must not hold the writer lock.
+        return store.announce(request['server'], request['url'], log=log,
+                              closing=(lambda: runtime.closing) if runtime else None)
     # Admission and dispatch share close's lock. Accepted handlers that have
     # not started dispatch must be refused before touching the closing store.
     with store.lock:
@@ -112,8 +124,6 @@ def _dispatch(store, request, runtime=None, *, activated=False, log=None):
         return {'version': NTH_VERSION, 'protocol_min': PROTOCOL_VERSION,
                 'protocol_max': PROTOCOL_VERSION, 'schema_version': SCHEMA_VERSION, 'pid': os.getpid(),
                 'activation': 'systemd' if activated else 'fallback'}
-    if op == 'hub.announce':
-        return store.announce(request['server'], request['url'], log=log)
     if op == 'status' and request.get('skips'):
         return store.skip_status()
     if op in ('list', 'status'):
@@ -345,16 +355,18 @@ def serve(*, idle_seconds=1800, stop=None):
                         log.info('service idle exit')
                         break
             finally:
-                if runtime is not None:
-                    runtime.close()
-                if server is not None:
-                    server.server_close()
-                    if inherited is None:
-                        unlink_bound_socket(path, server.bound_identity)
-                elif inherited is not None:
-                    inherited.close()
-                store.close()
-                log.info('service stopped')
+                try:
+                    if runtime is not None and not runtime.close():
+                        log.warning('shadow evidence pending durable recovery')
+                finally:
+                    if server is not None:
+                        server.server_close()
+                        if inherited is None:
+                            unlink_bound_socket(path, server.bound_identity)
+                    elif inherited is not None:
+                        inherited.close()
+                    store.close()
+                    log.info('service stopped')
 
 
 def unlink_bound_socket(path, identity):
@@ -383,8 +395,7 @@ def main(argv=None):
         return LEASE_EXIT_STATUS
     except Exception as exc:
         # Fixed error classes only: a damaged legacy file may contain a token.
-        with service_log() as log:
-            log.error('service startup failed: %s', type(exc).__name__)
+        # The failing sink may itself be a FIFO; never try to reopen it here.
         print('interposer failed: ' + type(exc).__name__ + '; see trio interposer logs', file=sys.stderr)
         return 1
     return 0

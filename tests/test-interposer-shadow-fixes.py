@@ -267,7 +267,9 @@ class FixTests(unittest.TestCase):
     def test_dispatch_serializes_ownership_change_with_reconcile(self):
         self.attach()
         service.dispatch(self.store,registration(SESSION2))
-        self.runtime.accumulate(self.runtime.member(KEY),[message(39,mentioned=True)])
+        with self.store.lock:
+            self.assertTrue(self.store.lock._is_owned())
+            self.runtime.accumulate(self.runtime.member(KEY),[message(39,mentioned=True)])
         changed,attempted,finished=threading.Event(),threading.Event(),threading.Event()
         original=self.store.attach
         errors=[]
@@ -294,8 +296,10 @@ class FixTests(unittest.TestCase):
 
     def test_ended_last_owner_preserves_buffer(self):
         self.attach()
-        self.runtime.accumulate(self.runtime.member(KEY),[message(19,mentioned=True)])
-        self.op('session.end',session=SESSION)
+        with self.store.lock:
+            self.assertTrue(self.store.lock._is_owned())
+            self.runtime.accumulate(self.runtime.member(KEY),[message(19,mentioned=True)])
+            self.op('session.end',session=SESSION)
         self.assertEqual(shadow.records('would')[0]['ranges'][0]['last'],19)
 
     def test_close_flushes_in_turn_buffer(self):
@@ -398,13 +402,15 @@ class FixTests(unittest.TestCase):
             with patch('nth_interposer_store.time.time',return_value=index*10):
                 service.dispatch(self.store,registration(session))
                 self.op('membership.attach',session=session,key=KEY,server='nth-qweb',via='connect')
-        with self.store.db:
-            self.store.db.execute("INSERT INTO sessions(session,state,registered) VALUES ('ended-holder','ended',90)")
-            self.store.db.execute("INSERT INTO holdings(session,key,server,joined,attached) VALUES ('ended-holder',?,'nth-qweb',90,1)",(KEY,))
-            self.store.db.execute("INSERT INTO sessions(session,state) VALUES ('imported-holder','idle_unreachable')")
-            self.store.db.execute("INSERT INTO holdings(session,key,server,joined) VALUES ('imported-holder',?,'nth-qweb',100)",(KEY,))
-        self.op('session.end',session=sessions[-1])
-        self.assertEqual(self.runtime.member(KEY)['owner_session'],SESSION2)
+        with self.store.lock:
+            self.assertTrue(self.store.lock._is_owned())
+            with self.store.db:
+                self.store.db.execute("INSERT INTO sessions(session,state,registered) VALUES ('ended-holder','ended',90)")
+                self.store.db.execute("INSERT INTO holdings(session,key,server,joined,attached) VALUES ('ended-holder',?,'nth-qweb',90,1)",(KEY,))
+                self.store.db.execute("INSERT INTO sessions(session,state) VALUES ('imported-holder','idle_unreachable')")
+                self.store.db.execute("INSERT INTO holdings(session,key,server,joined) VALUES ('imported-holder',?,'nth-qweb',100)",(KEY,))
+            self.op('session.end',session=sessions[-1])
+            self.assertEqual(self.runtime.member(KEY)['owner_session'],SESSION2)
 
     def test_pending_cap_ttl_and_setup_room(self):
         for index in range(8):
