@@ -41,6 +41,8 @@ class ShadowListener(Listener):
 
     def _fresh(self, messages):
         with self.runtime.store.lock:
+            if self.runtime.closing:
+                return []
             row = self.runtime.member(self.row['key'])
             if not self.runtime.eligible(row):
                 return []
@@ -81,6 +83,7 @@ class Runtime:
         self.factory = factory or self.poll_factory
         self.pollers,self.buffers = {},store.pending_buffers
         self.last_drain = self.last_death = 0.0
+        self.closing = False
 
     def poll_factory(self, identity):
         if identity['source']=='local':
@@ -101,7 +104,7 @@ class Runtime:
             "SELECT 1 FROM hubs WHERE url=? AND trust='setup'",(row['url'],)).fetchone())
 
     def eligible(self, row):
-        if os.environ.get('TRIO_INTERPOSER_SHADOW')=='0' or not row:
+        if self.closing or os.environ.get('TRIO_INTERPOSER_SHADOW')=='0' or not row:
             return False
         if not row['owner_session'] or not row['enabled'] or row['ended'] or not self.allowed(row):
             return False
@@ -211,6 +214,8 @@ class Runtime:
 
     def reconcile(self):
         with self.store.lock:
+            if self.closing:
+                return
             self.transfer_buffers()
             wanted = {r['key']:r for raw in self.store.snapshot()['memberships']
                       if self.eligible(r:=shadow_row(raw))}
@@ -302,11 +307,18 @@ class Runtime:
                 except (OverflowError,OSError):
                     stamp = None
                 if stamp is None or stamp!=session['host_stamp']:
-                    self.store.end(session['session'])
+                    with self.store.lock:
+                        current = self.store.session(session['session'])
+                        # Registration may replace even the same PID/stamp while
+                        # the slow OS check runs outside the writer lock.
+                        if not self.closing and all(current[k]==session[k] for k in
+                                ('host_pid','host_stamp','registered')):
+                            self.store.end(session['session'])
         self.reconcile()
 
     def close(self):
         with self.store.lock:
+            self.closing = True
             listeners = list(self.pollers.values())
             self.pollers.clear()
             for listener in listeners:

@@ -561,3 +561,14 @@ share one lock, and sessions with pending evidence cannot be evicted at the cap.
 Failed evidence writes retain IDs for retry; service exit flushes pending buffers.
 The installer observes Claude SessionStart for both startup and resume, and sets
 `NTH_SERVER_NAME` on retained Codex Quartet hubs while preserving other settings.
+The TOML editor respects quoted keys, escaped and multiline strings, and inline
+boundaries. It verifies all unrelated parsed values, preserves file permissions
+and backups, and reports unsupported layouts without rewriting them.
+
+Service shutdown closes request admission under the store lock before stopping
+listeners and flushing buffers; late requests receive `service_closing`, and no
+shadow cursor can advance after the flush. Resume restores unowned memberships
+from eligible registered attached holdings without taking another live owner's
+seat. Host-death observations apply only to the checked registration generation,
+even if a resume reuses its PID and the wall clock has not advanced. Handoff keeps
+the original settle deadline when buffers move to a new owner.
