@@ -380,3 +380,17 @@ config are checked again before applying an announcement. Connection DNS checks
 remain bounded and pin validated answers. Service logs open nonblocking, reject
 symlinks and nonregular descriptors, and preserve private modes. A failed log open
 reports a fixed error class on stderr without trying to reopen the failing sink.
+
+Attachment requires a registered session in a live state; imported sessions cannot
+take a seat until registration succeeds, even after an idle turn observation.
+Refused socket or inbox attachments preserve the current owner and poller.
+
+Poller startup validation runs in daemon jobs outside the writer lock and service
+loop, with at most four outstanding jobs and four attempts per reconciliation.
+Identity reads and factory construction run in those jobs; DNS retains its bounded
+resolver and connection-time pinning. Before construction and start, the service
+rechecks closing, eligibility, membership fields, owner registration/holding,
+identity-file state and trusted URL/config. Stop, reattach, resume and config changes
+discard stale jobs. Pre-Listener failures back off from 0.5 to 30 seconds, resetting
+for a changed startup signature. Close cancels pending jobs without awaiting DNS;
+a late completion cannot touch a closed Store or restart observation.

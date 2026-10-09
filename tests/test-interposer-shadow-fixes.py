@@ -34,6 +34,7 @@ class FixTests(unittest.TestCase):
     identity=cases.ShadowTests.identity
     op=cases.ShadowTests.op
     attach=cases.ShadowTests.attach
+    wait_start=cases.ShadowTests.wait_start
     eventually=cases.ShadowTests.eventually
     start_socket=cases.ShadowTests.start_socket
 
@@ -115,11 +116,13 @@ class FixTests(unittest.TestCase):
 
     def test_unregistered_attached_holder_cannot_become_owner(self):
         self.attach()
-        with self.store.db:
-            self.store.db.execute("INSERT INTO sessions(session,state) VALUES ('unregistered-holder','idle')")
-            self.store.db.execute("INSERT INTO holdings(session,key,server,joined,attached) VALUES ('unregistered-holder',?,'nth-qweb',9999999999,1)",(KEY,))
-        self.op('session.end',session=SESSION)
-        self.assertIsNone(self.runtime.member(KEY)['owner_session'])
+        with self.store.lock:
+            self.assertTrue(self.store.lock._is_owned())
+            with self.store.db:
+                self.store.db.execute("INSERT INTO sessions(session,state) VALUES ('unregistered-holder','idle')")
+                self.store.db.execute("INSERT INTO holdings(session,key,server,joined,attached) VALUES ('unregistered-holder',?,'nth-qweb',9999999999,1)",(KEY,))
+            self.op('session.end',session=SESSION)
+            self.assertIsNone(self.runtime.member(KEY)['owner_session'])
 
     def test_import_unchanged_files_is_cheap_and_skips_stay_reported(self):
         path=wire.private_dir(wire.home()/'events/hooks')/('membership-'+KEY+'.json')
@@ -253,11 +256,13 @@ class FixTests(unittest.TestCase):
 
     def test_release_after_ownership_mutation_uses_current_owner_and_sink(self):
         self.attach()
-        self.runtime.accumulate(self.runtime.member(KEY),[message(37,mentioned=True)])
-        service.dispatch(self.store,registration(SESSION2,'codex'))
-        # Direct mutation deliberately reproduces the interval before reconcile.
-        self.store.attach(request('membership.attach',session=SESSION2,key=KEY,server='nth-second',via='connect'))
-        self.op('turn',session=SESSION,phase='ended')
+        with self.store.lock:
+            self.assertTrue(self.store.lock._is_owned())
+            self.runtime.accumulate(self.runtime.member(KEY),[message(37,mentioned=True)])
+            service.dispatch(self.store,registration(SESSION2,'codex'))
+            # Direct mutation deliberately reproduces the interval before reconcile.
+            self.store.attach(request('membership.attach',session=SESSION2,key=KEY,server='nth-second',via='connect'))
+            self.op('turn',session=SESSION,phase='ended')
         self.assertEqual(shadow.records('would'),[])
         self.runtime.release(SESSION2,force=True)
         row=shadow.records('would')[0]
@@ -389,10 +394,13 @@ class FixTests(unittest.TestCase):
         old=self.runtime.pollers[KEY]
         self.identity(KEY2)
         self.op('membership.attach',session=SESSION,key=KEY2,server='nth-qweb',via='connect')
-        self.assertTrue(old._stop.is_set())
-        self.assertNotIn(KEY,self.runtime.pollers)
-        self.assertIn(KEY2,self.runtime.pollers)
-        self.assertEqual(self.runtime.member(KEY)['shadow_ended'],'membership replaced')
+        self.wait_start(KEY2)
+        with self.store.lock:
+            self.assertTrue(self.store.lock._is_owned())
+            self.assertTrue(old._stop.is_set())
+            self.assertNotIn(KEY,self.runtime.pollers)
+            self.assertIn(KEY2,self.runtime.pollers)
+            self.assertEqual(self.runtime.member(KEY)['shadow_ended'],'membership replaced')
 
     def test_three_holders_choose_newest_registered_live(self):
         sessions=(SESSION,SESSION2,'session-charlie')
@@ -670,6 +678,7 @@ class FixTests(unittest.TestCase):
         self.identity()
         with patch.object(hubs.socket,'getaddrinfo',return_value=private):
             self.op('membership.attach',session=SESSION,key=KEY,server='nth-qweb',via='connect')
+            self.wait_start(KEY)
         self.assertEqual(self.runtime.pollers,{})
         self.assertEqual(self.hub.calls,[])
         self.assertEqual(self.runtime.member(KEY)['poll_state'],'reconnecting')
@@ -742,6 +751,7 @@ class FixTests(unittest.TestCase):
         with patch.object(hubs.socket,'getaddrinfo',return_value=answer):
             with self.assertRaises(wire.WireError):self.store.announce('nth-qweb',URL)
             self.op('membership.attach',session=SESSION,key=KEY,server='nth-qweb',via='connect')
+            self.wait_start(KEY)
         self.assertEqual(self.runtime.pollers,{})
 
     def test_sse_endpoint_requires_exact_origin(self):
@@ -1068,6 +1078,7 @@ else:
                 upgraded.approve('nth-qweb',URL)
                 self.assertEqual(upgraded.attach(request('membership.attach',session=SESSION,key=KEY,server='nth-qweb',via='connect'))['owner'],SESSION)
                 probe.reconcile()
+                self.wait_start(KEY,probe)
                 self.assertIn(KEY,probe.pollers)
             finally:
                 probe.close();upgraded.close()
