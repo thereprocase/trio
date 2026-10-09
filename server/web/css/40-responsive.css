@@ -97,6 +97,32 @@
   :root{ --gutter:16px; }
 }
 
+/* Leave breathing room opposite each authored bubble. The incoming avatar
+   still occupies 32px + the 12px row gap; outgoing bubbles use the page edge.
+   Desktop keeps its 820px row / 72% content caps. Plain timeline rows keep
+   their existing layout. Percentages resolve against the conversation row. */
+@media (max-width:640px){
+  .message.msg:not(.system-message):not(.retracted){
+    --bubble-gutter:clamp(48px,16%,72px);
+  }
+  .message.msg:not(.system-message):not(.retracted) .message-content{
+    max-width:calc(100% - 44px - var(--bubble-gutter));
+  }
+  .message.msg.me:not(.retracted) .message-avatar{ display:none; }
+  .message.msg.me:not(.retracted) .message-content{
+    max-width:calc(100% - var(--bubble-gutter));
+  }
+  .message.msg.me:not(.retracted) .message-head{
+    flex-wrap:wrap; justify-content:flex-end; text-align:right;
+  }
+  .message.msg.me:not(.retracted) .message-head strong{
+    min-width:0; overflow-wrap:anywhere;
+  }
+  .message.msg.me:not(.retracted) .message-head time{ margin-left:0; }
+  .message.msg.me:not(.retracted) .message-targets,
+  .message.msg.me:not(.retracted) .target-group{ justify-content:flex-end; }
+}
+
 /* Populated Messages/Attention inbox cards have three header peers: avatar,
    identity copy, and a nowrap unread/waiting badge. In a flex row the identity
    copy kept its min-content width, so a long agent/thread name plus the badge
