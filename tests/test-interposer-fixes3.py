@@ -25,6 +25,7 @@ class Fixes3Tests(unittest.TestCase):
     identity = cases.FixTests.identity
     op = cases.FixTests.op
     attach = cases.FixTests.attach
+    wait_start = cases.FixTests.wait_start
     eventually = cases.FixTests.eventually
 
     def member(self, key):
@@ -173,6 +174,7 @@ class Fixes3Tests(unittest.TestCase):
                     os.sys.stderr.close()
                 self.hub.replies = [dict(event='new_messages', messages=[message(87, mentioned=True)])]
                 self.runtime.drain()
+                self.wait_start(key)
                 with self.store.lock:
                     self.assertEqual(self.session(session)['state'], 'idle')
                     self.assertEqual(self.member(key)['owner_session'], session)

@@ -95,6 +95,8 @@ class ShadowTests(unittest.TestCase):
             self.thread.join(2)
             self.server.server_close()
         self.runtime.close()
+        for worker in list(self.runtime.startup_threads):
+            worker.join(2)
         self.store.close()
         self.fast.stop()
         self.dns.stop()
@@ -115,7 +117,20 @@ class ShadowTests(unittest.TestCase):
         self.identity(key, url, source)
         if source != 'local':
             self.store.setup_hub(server, url)
-        return self.op('membership.attach', session=session, key=key, server=server, via='connect')
+        result = self.op('membership.attach', session=session, key=key, server=server, via='connect')
+        self.wait_start(key)
+        return result
+
+    def wait_start(self, key, runtime=None):
+        runtime = runtime or self.runtime
+        def settled():
+            if runtime is not self.runtime:
+                runtime.reconcile()
+            with runtime.store.lock:
+                row = runtime.member(key)
+                return key not in runtime.startups and (key in runtime.pollers or key in runtime.start_retry
+                                                        or not runtime.eligible(row))
+        self.eventually(settled)
 
     def eventually(self, predicate):
         deadline = time.monotonic() + 2
@@ -565,6 +580,7 @@ class ShadowTests(unittest.TestCase):
         self.identity(url='https://untrusted.example/sse')
         before=len(self.hub.calls)
         self.op('membership.configure',key=KEY,enabled=True)
+        self.wait_start(KEY)
         self.assertEqual(len(self.hub.calls),before)
         self.assertEqual(self.store.snapshot()['memberships'][0]['poll_state'],'reconnecting')
 

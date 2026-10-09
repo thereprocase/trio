@@ -304,8 +304,9 @@ class Store:
     def attach(self, request):
         key, session = request['key'], request['session']
         with self.lock, self.db:
-            if self.session(session)['state']=='ended':
-                raise WireError('session has ended', 'unknown_session')
+            owner = self.session(session)
+            if owner['registered'] is None or owner['state'] not in ('idle','in_turn','waiting'):
+                raise WireError('session is not registered and live', 'unknown_session')
             try:
                 identity = _json_file(self.path.parent / 'identities' / (key + '.json'))
                 source, url, channel, member = [identity[field] for field in

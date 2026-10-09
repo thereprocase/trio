@@ -1,10 +1,12 @@
 """Shutdown recovery, bounded DNS, private logging and resume eligibility."""
 import importlib.util
+from contextlib import closing
 import json
 import logging
 import os
 from pathlib import Path
 import socket
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -31,6 +33,7 @@ class Fixes4Tests(unittest.TestCase):
     identity = cases.FixTests.identity
     op = cases.FixTests.op
     attach = cases.FixTests.attach
+    wait_start = cases.FixTests.wait_start
     eventually = cases.FixTests.eventually
     start_socket = cases.FixTests.start_socket
     stop_pollers = round3.Fixes3Tests.stop_pollers
@@ -60,7 +63,16 @@ class Fixes4Tests(unittest.TestCase):
         listener = self.buffer()
         path = wire.private_dir(wire.home()/'events/shadow')/'would.lock'
         with wire.file_lock(path):
-            self.assertFalse(self.runtime.close())
+            real_append = runtime_module.append
+            def committed_before_append(*args, **kwargs):
+                with closing(sqlite3.connect(self.store.path)) as reader:
+                    saved = [json.loads(row[0]) for row in reader.execute(
+                        "SELECT value FROM meta WHERE key LIKE 'shadow_pending:%'")]
+                self.assertTrue(saved, 'pending evidence was not committed before append')
+                self.assertEqual(saved[0]['ranges'][0]['last'], 903)
+                return real_append(*args, **kwargs)
+            with patch.object(runtime_module, 'append', side_effect=committed_before_append):
+                self.assertFalse(self.runtime.close())
             self.assertTrue(self.runtime.buffers)
             self.assertEqual(shadow.records('would'), [])
             pending = self.pending()
@@ -84,6 +96,26 @@ class Fixes4Tests(unittest.TestCase):
         self.assertTrue(self.runtime.close())
         self.restart()
         self.assertEqual(len(shadow.records('would')), 1)
+        # Interrupt append before it can return, then discard the old process state.
+        self.buffer(941)
+        class Interrupted(BaseException):
+            pass
+        with patch.object(runtime_module, 'append', side_effect=Interrupted):
+            with self.assertRaises(Interrupted):
+                self.runtime.close()
+        self.restart()
+        self.assertEqual(self.member(KEY)['shadow_announced_through'], 941)
+        self.assertEqual({r['ranges'][0]['last'] for r in shadow.records('would')}, {903,941})
+        self.assertEqual(self.pending(), [])
+        listener = self.buffer(947)
+        with self.store.lock:
+            listener._fresh([message(949, mentioned=True)])
+        self.assertTrue(self.runtime.release(SESSION, force=True, flush=True))
+        self.assertEqual((self.member(KEY)['shadow_ids'],self.member(KEY)['shadow_notices']), (4,3))
+        with self.store.lock:
+            self.runtime.accumulate(self.runtime.member(KEY), [], 'channel ended')
+        self.assertTrue(self.runtime.release(SESSION, force=True, flush=True))
+        self.assertEqual((self.member(KEY)['shadow_ids'],self.member(KEY)['shadow_notices']), (4,4))
 
     def test_final_flush_retries_transient_failure_and_reports_success(self):
         self.buffer(907)
@@ -114,9 +146,22 @@ class Fixes4Tests(unittest.TestCase):
         with patch.dict(os.environ, TRIO_INTERPOSER_SHADOW='0'):
             self.restart()
             self.assertEqual(len(self.pending()), 1)
+            self.assertEqual(self.runtime.buffers, {})
+            import nth_interposer_store as storage
+            with patch.object(storage, 'MAX_SESSIONS', 2):
+                service.dispatch(self.store, registration(SESSION2), self.runtime)
+                with self.assertRaises(wire.WireError) as refused:
+                    service.dispatch(self.store, registration('session-extra'), self.runtime)
+                self.assertEqual(refused.exception.code, 'session_limit')
+                self.assertEqual(self.store.snapshot(session=SESSION)['sessions'][0]['state'], 'ended')
+                self.assertEqual(self.store.snapshot(session=SESSION)['holdings'][0]['attached'], 1)
         self.runtime.reconcile()
         self.assertEqual(self.pending(), [])
         self.assertEqual(shadow.records('would')[0]['ranges'][0]['last'], 911)
+        service.dispatch(self.store, dict(registration(), resume=True), self.runtime)
+        self.wait_start(KEY)
+        self.assertEqual(self.member(KEY)['owner_session'], SESSION)
+        self.assertIn(KEY, self.runtime.pollers)
 
     def test_older_pending_record_is_not_overwritten_by_another_failed_close(self):
         self.buffer(913)
@@ -124,6 +169,9 @@ class Fixes4Tests(unittest.TestCase):
             self.assertFalse(self.runtime.close())
             self.restart()
             self.assertEqual(len(self.pending()), 1)
+            self.assertEqual(self.runtime.buffers, {})
+            self.assertFalse(self.runtime.close(), 'old pending evidence must make close incomplete')
+            self.restart()
             with self.store.lock:
                 self.runtime.accumulate(self.runtime.member(KEY), [message(917, mentioned=True)])
             self.assertFalse(self.runtime.close())
@@ -235,6 +283,53 @@ class Fixes4Tests(unittest.TestCase):
                     time.sleep(.005)
         self.assertEqual(len(errors), 1)
         self.assertEqual(slots._value, 2)
+        # Use actual production bounds: neither deadline nor semaphore is replaced.
+        blocked, completed = threading.Event(), threading.Event()
+        counts, errors, mutex = [0,0], [], threading.Lock()
+        def production_slow(*args, **kwargs):
+            with mutex:
+                counts[0] += 1
+            blocked.wait(3)
+            return answers
+        def production_call():
+            try:
+                hubs.resolve('slow.example',443)
+            except wire.WireError as exc:
+                with mutex:
+                    errors.append(exc)
+            finally:
+                with mutex:
+                    counts[1] += 1
+                    if counts[1]==12:
+                        completed.set()
+        production_slots = hubs._dns_slots
+        available = production_slots._value
+        with patch.object(hubs.socket,'getaddrinfo',side_effect=production_slow):
+            callers = [threading.Thread(target=production_call) for _ in range(12)]
+            for caller in callers:
+                caller.start()
+            try:
+                self.assertTrue(completed.wait(.8), 'production DNS deadline exceeded')
+                self.assertEqual(counts[0],4, 'production resolver worker limit changed')
+                self.assertEqual(len(errors),12)
+            finally:
+                blocked.set()
+                for caller in callers:
+                    caller.join(2)
+                deadline = time.monotonic()+1
+                while production_slots._value!=available and time.monotonic()<deadline:
+                    time.sleep(.005)
+        self.assertEqual(production_slots._value,available)
+        # An exception from Thread.start must release the same acquired slot.
+        startup_slots = threading.BoundedSemaphore(1)
+        with patch.object(hubs,'_dns_slots',startup_slots):
+            with patch.object(hubs.threading.Thread,'start',side_effect=RuntimeError('synthetic-start-failure')):
+                with self.assertRaises(RuntimeError):
+                    hubs.resolve('slow.example',443)
+            self.assertTrue(startup_slots.acquire(blocking=False), 'failed thread startup leaked capacity')
+            startup_slots.release()
+            with patch.object(hubs.socket,'getaddrinfo',return_value=answers):
+                self.assertEqual(hubs.resolve('slow.example',443),answers)
 
     def test_announcement_rechecks_trusted_config_after_dns(self):
         self.store.setup_hub('nth-local','http://127.0.0.1/sse')
@@ -327,6 +422,37 @@ finally:
                     self.assertEqual(result.returncode,0,result.stderr)
                     path.unlink()
                     path.with_suffix('.log.1').unlink(missing_ok=True)
+        # A child exit must not hide leaked rejected descriptors.
+        handler = service.PrivateRotatingHandler(path,maxBytes=1,backupCount=1)
+        handler.stream.close()
+        handler.stream = None
+        path.unlink()
+        os.mkfifo(path)
+        reader = os.open(path,os.O_RDWR|os.O_NONBLOCK)
+        opened, real_open = [], os.open
+        def capture(*args, **kwargs):
+            fd = real_open(*args, **kwargs)
+            opened.append(fd)
+            return fd
+        try:
+            with patch.object(service.os,'open',side_effect=capture):
+                for _ in range(20):
+                    with self.assertRaises(OSError):
+                        handler._open()
+                    with self.assertRaises(OSError) as unusable:
+                        os.fstat(opened[-1])
+                    import errno
+                    self.assertEqual(unusable.exception.errno,errno.EBADF)
+            self.assertEqual(len(opened),20)
+        finally:
+            handler.close()
+            for fd in opened:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+            os.close(reader)
+            path.unlink()
 
     def test_log_initialization_failure_does_not_reopen_failed_sink(self):
         with patch.object(service,'serve',side_effect=OSError('synthetic-secret')), \
@@ -355,6 +481,7 @@ finally:
                 baseline = len(self.hub.calls)
                 self.hub.replies = [dict(event='new_messages',messages=[message(931 if ineligible=='ended' else 937,mentioned=True)])]
                 self.op('session.register',**{k:v for k,v in dict(registration(),resume=True).items() if k not in ('v','id','op')})
+                self.wait_start(KEY)
                 with self.store.lock:
                     self.assertEqual(self.runtime.member(KEY)['owner_session'],SESSION)
                     self.assertIn(KEY,self.runtime.pollers)

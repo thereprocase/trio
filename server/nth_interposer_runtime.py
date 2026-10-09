@@ -2,6 +2,7 @@
 import os
 import json
 import stat
+import threading
 import time
 import uuid
 
@@ -14,6 +15,10 @@ from nth_interposer_shadow import append, ranges_for, project_record
 
 PENDING_PREFIX = 'shadow_pending:'
 FINAL_FLUSH_ATTEMPTS = 3
+MAX_STARTUPS = 4
+START_RETRY_SECONDS = .5
+START_RETRY_MAX = 30
+START_FIELDS = ('source','url','channel','member_id','owner_session','filter','enabled','ended')
 
 
 def shadow_row(row):
@@ -90,6 +95,9 @@ class Runtime:
         self.last_drain = self.last_death = 0.0
         self.closing = False
         self.pending_keys = store.pending_evidence_keys
+        self.startups, self.start_retry = {}, {}
+        self.startup_threads = set()
+        self.startup_slots = threading.BoundedSemaphore(MAX_STARTUPS)
         self.recover()
 
     def recover(self):
@@ -129,8 +137,11 @@ class Runtime:
             return poll_factory(identity)
         from nth_listener import quartet_poll_factory
         from nth_interposer_hubs import connection_guard, restricted_host
-        row = self.store.db.execute("SELECT config_url FROM hubs WHERE url=? AND trust='setup'",(identity['url'],)).fetchone()
-        allow = bool(row and row['config_url']==identity['url'] and restricted_host(identity['url']))
+        with self.store.lock:
+            if self.closing:
+                raise WireError('interposer is closing', 'service_closing')
+            row = self.store.db.execute("SELECT config_url FROM hubs WHERE url=? AND trust='setup'",(identity['url'],)).fetchone()
+            allow = bool(row and row['config_url']==identity['url'] and restricted_host(identity['url']))
         return quartet_poll_factory({'url':identity['url'],
             'connection_guard':connection_guard(identity['url'],allow_restricted=allow)})
 
@@ -266,6 +277,122 @@ class Runtime:
             with self.store.db:
                 self.store.db.execute('UPDATE memberships SET poll_state=?,poll_error=?,last_ok=? WHERE key=?',(state,error,ok,key))
 
+    def start_signature(self, row):
+        """Called under the lock; includes owner registration and attached holding."""
+        state = self.store.session(row['owner_session'])
+        holding = self.store.db.execute('SELECT server,joined,attached FROM holdings WHERE session=? AND key=?',
+                                       (row['owner_session'],row['key'])).fetchone()
+        trust = tuple(tuple(r) for r in self.store.db.execute(
+            "SELECT server,url,trust,config_url,approved FROM hubs WHERE url=? AND trust='setup' ORDER BY server",
+            (row['url'],))) if row['source']!='local' else ()
+        return (tuple(row[k] for k in START_FIELDS),
+                tuple(state[k] for k in ('registered','host_pid','host_stamp','client','sink')),
+                tuple(holding), trust)
+
+    def start_failed(self, job, exc):
+        with self.store.lock:
+            if self.closing or job['cancelled'].is_set() or self.startups.get(job['row']['key']) is not job:
+                return
+            row = self.member(job['row']['key'])
+            if not self.eligible(row) or self.start_signature(row)!=job['signature']:
+                return
+            previous = self.start_retry.get(row['key'])
+            failures = (previous[2] if previous and previous[0]==job['signature'] else 0)+1
+            delay = min(START_RETRY_MAX, START_RETRY_SECONDS * 2**min(failures-1,16))
+            self.start_retry[row['key']] = (job['signature'],time.monotonic()+delay,failures)
+            self.poll_state(row['key'],'reconnecting',type(exc).__name__)
+
+    def start_current(self, job, path, stamp):
+        """Under store.lock, refuse stale work before construction and before start."""
+        key = job['row']['key']
+        if self.closing or job['cancelled'].is_set() or self.startups.get(key) is not job:
+            return None
+        current = self.member(key)
+        if (not self.eligible(current) or self.start_signature(current)!=job['signature']
+                or self.identity_stamp(path)!=stamp or key in self.pollers):
+            return None
+        return current
+
+    def start_member(self, job):
+        """DNS, identity reads and factory construction run outside the service loop/lock."""
+        row, listener, accepted = job['row'], None, False
+        try:
+            if job['cancelled'].is_set():
+                return
+            path = self.store.path.parent/'identities'/(row['key']+'.json')
+            stamp = self.identity_stamp(path)
+            identity = _json_file(path)
+            if self.identity_stamp(path)!=stamp:
+                raise ValueError('identity changed during read')
+            if any(identity.get(k)!=row[k] for k in ('url','source','channel','member_id')):
+                raise ValueError('identity changed')
+            if not isinstance(identity.get('session_token'),str) or not identity['session_token']:
+                raise ValueError('identity token absent')
+            if job['cancelled'].is_set():
+                return
+            if row['source']!='local':
+                from nth_interposer_hubs import check_host, restricted_host
+                allow = any(trusted[3]==row['url'] for trusted in job['signature'][3])
+                check_host(row['url'],allow_restricted=allow and restricted_host(row['url']))
+            if job['cancelled'].is_set():
+                return
+            with self.store.lock:
+                current = self.start_current(job,path,stamp)
+                if current is None:
+                    return
+            listener = ShadowListener(self,current,identity)
+            if self.identity_stamp(path)!=stamp or _json_file(path)!=identity or self.identity_stamp(path)!=stamp:
+                raise ValueError('identity changed during validation')
+            with self.store.lock:
+                # A late worker must not read a closed Store or resurrect a stop.
+                current = self.start_current(job,path,stamp)
+                if current is None:
+                    return
+                listener.row = current
+                listener.high_water = max(listener.high_water,current['shadow_announced_through'])
+                self.pollers[row['key']] = listener
+                self.poll_state(row['key'],'starting')
+                listener.start()
+                accepted = True
+                self.start_retry.pop(row['key'],None)
+        except Exception as exc:
+            with self.store.lock:
+                if listener and self.pollers.get(row['key']) is listener:
+                    self.pollers.pop(row['key'],None)
+            self.start_failed(job,exc)
+        finally:
+            if listener and not accepted:
+                listener.stop()
+            with self.store.lock:
+                if self.startups.get(row['key']) is job:
+                    self.startups.pop(row['key'],None)
+                self.startup_threads.discard(job['thread'])
+            job['slots'].release()
+
+    @staticmethod
+    def identity_stamp(path):
+        info = path.lstat()
+        return (info.st_dev,info.st_ino,info.st_size,info.st_mtime_ns,info.st_ctime_ns,info.st_mode)
+
+    def queue_start(self, row, signature):
+        if not self.startup_slots.acquire(blocking=False):
+            return False
+        job = dict(row=dict(row),signature=signature,cancelled=threading.Event(),slots=self.startup_slots)
+        self.startups[row['key']] = job
+        try:
+            self.poll_state(row['key'],'starting')
+            thread = threading.Thread(target=self.start_member,args=(job,),name='shadow-startup',daemon=True)
+            job['thread'] = thread
+            self.startup_threads.add(thread)
+            thread.start()
+        except Exception as exc:
+            self.start_failed(job,exc)
+            self.startups.pop(row['key'],None)
+            if 'thread' in job:
+                self.startup_threads.discard(job['thread'])
+            self.startup_slots.release()
+        return True
+
     def reconcile(self):
         with self.store.lock:
             if self.closing:
@@ -274,6 +401,14 @@ class Runtime:
             self.transfer_buffers()
             wanted = {r['key']:r for raw in self.store.snapshot()['memberships']
                       if self.eligible(r:=shadow_row(raw))}
+            for key,job in list(self.startups.items()):
+                row = wanted.get(key)
+                if not row or self.start_signature(row)!=job['signature']:
+                    job['cancelled'].set()
+                    self.startups.pop(key,None)
+            for key in list(self.start_retry):
+                if key not in wanted:
+                    self.start_retry.pop(key,None)
             for key,listener in list(self.pollers.items()):
                 row = wanted.get(key)
                 if not row or any(row[k]!=listener.row[k] for k in ('owner_session','filter','url')):
@@ -281,27 +416,21 @@ class Runtime:
                     self.pollers.pop(key)
                     if not self.member(key)['ended']:
                         self.poll_state(key,'stopped')
+            queued = 0
             for key,row in wanted.items():
                 if key in self.pollers:
                     listener = self.pollers[key]
                     self.poll_state(key,listener.state,listener.error,listener.last_ok)
                     continue
-                try:
-                    identity = _json_file(self.store.path.parent/'identities'/(key+'.json'))
-                    if any(identity.get(k)!=row[k] for k in ('url','source','channel','member_id')):
-                        raise ValueError('identity changed')
-                    if not isinstance(identity.get('session_token'),str) or not identity['session_token']:
-                        raise ValueError('identity token absent')
-                    if row['source']!='local':
-                        from nth_interposer_hubs import check_host, restricted_host
-                        trusted = self.store.db.execute("SELECT config_url FROM hubs WHERE url=? AND trust='setup'",(row['url'],)).fetchone()
-                        check_host(row['url'],allow_restricted=trusted['config_url']==row['url'] and restricted_host(row['url']))
-                    listener = ShadowListener(self,row,identity)
-                    self.pollers[key] = listener
-                    self.poll_state(key,'starting')
-                    listener.start()
-                except Exception as exc:
-                    self.poll_state(key,'reconnecting',type(exc).__name__)
+                if key in self.startups:
+                    continue
+                signature = self.start_signature(row)
+                retry = self.start_retry.get(key)
+                if retry and retry[0]==signature and time.monotonic()<retry[1]:
+                    continue
+                if queued>=MAX_STARTUPS or not self.queue_start(row,signature):
+                    break
+                queued += 1
             for session in list(self.buffers):
                 self.release(session,force=self.store.session(session)['state']=='ended')
 
@@ -374,6 +503,10 @@ class Runtime:
     def close(self):
         with self.store.lock:
             self.closing = True
+            for job in self.startups.values():
+                job['cancelled'].set()
+            self.startups.clear()
+            self.start_retry.clear()
             listeners = list(self.pollers.values())
             self.pollers.clear()
             for listener in listeners:
