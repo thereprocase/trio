@@ -2,6 +2,7 @@
 import os
 import json
 import stat
+import sqlite3
 import threading
 import time
 import uuid
@@ -51,7 +52,23 @@ class ShadowListener(Listener):
     def _push_delay(self):
         return 0.0
 
+    def retry_storage(self, operation, stopped=None):
+        """Retry rolled-back SQLite writes without holding the service lock asleep."""
+        delay = START_RETRY_SECONDS
+        while True:
+            try:
+                return operation()
+            except sqlite3.Error:
+                self.status,self.error = 'reconnecting','shadow storage unavailable'
+                if self._stop.wait(delay):
+                    break
+                delay = min(START_RETRY_MAX,delay*2)
+        return stopped
+
     def _fresh(self, messages):
+        return self.retry_storage(lambda:self.observe_fresh(messages),stopped=[])
+
+    def observe_fresh(self, messages):
         with self.runtime.store.lock:
             if self.runtime.closing:
                 return []
@@ -69,6 +86,7 @@ class ShadowListener(Listener):
                     self.runtime.store.db.execute('UPDATE memberships SET shadow_announced_through=? WHERE key=?',
                                                   (fresh[-1]['id'],row['key']))
                 self.high_water = fresh[-1]['id']
+            self.status,self.error = 'listening',''
             return fresh
 
     def _deliver(self, fresh, selected):
@@ -76,6 +94,9 @@ class ShadowListener(Listener):
 
     def _end(self, reason, advice):
         del advice
+        return self.retry_storage(lambda:self.commit_end(reason))
+
+    def commit_end(self, reason):
         with self.runtime.store.lock:
             if self.runtime.pollers.get(self.row['key']) is not self or self._stop.is_set():
                 return
@@ -83,10 +104,10 @@ class ShadowListener(Listener):
             if not self.runtime.eligible(row):
                 return
             reason = shown_reason(reason)
-            self.status,self.error = 'ended',reason
             with self.runtime.buffer_transaction():
                 self.runtime.accumulate(row,[],reason)
                 self.runtime.store.db.execute("UPDATE memberships SET shadow_ended=?,poll_state='ended' WHERE key=?",(reason,row['key']))
+            self.status,self.error = 'ended',reason
 
 
 class Runtime:
@@ -497,6 +518,12 @@ class Runtime:
                     self.pollers.pop(key)
                     if not self.member(key)['ended']:
                         self.poll_state(key,'stopped')
+                elif not listener.thread.is_alive() and not listener._stop.is_set() and not row['ended']:
+                    listener.stop()
+                    self.pollers.pop(key)
+                    self.start_retry[key] = (self.start_signature(row),
+                                             time.monotonic()+START_RETRY_SECONDS,1)
+                    self.poll_state(key,'reconnecting','shadow listener stopped before terminal commit')
             queued = 0
             for key,row in wanted.items():
                 if key in self.pollers:

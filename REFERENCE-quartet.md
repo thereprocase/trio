@@ -411,3 +411,16 @@ starting pollers, preserving in-turn holding; a reboot clamps a future settle ti
 Release commits a ready recovery record before append and removes it only after
 successful evidence/accounting. Abrupt termination therefore cannot discard IDs
 covered by a committed shadow cursor. Recovery stores no peer text, tokens or URLs.
+
+Large shadow releases split into JSONL records of at most 5 MiB, with one
+`notice_id` and numbered `part`/`parts` metadata. Rotation retains each release's
+chunks together; comparison counts them as one notice. The reader streams complete
+files and reports malformed, oversized, duplicate or incomplete records with fixed
+labels and line numbers. Evidence errors make shadow-diff noncomparable and return
+exit 1 in both text and JSON modes.
+
+Rolled-back shadow observation and terminal transactions retry outside the store
+lock, with interruptible backoff from 0.5 to 30 seconds. Listener status becomes
+ended only after terminal persistence commits. Reconciliation retires unexpectedly
+dead listeners with no committed terminal state and schedules a replacement after
+0.5 seconds; re-enable requires no filter, owner or service change.

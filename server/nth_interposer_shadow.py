@@ -1,5 +1,7 @@
 """Private, content-free shadow evidence and interval comparison. No delivery sink."""
 import json
+import uuid
+from bisect import bisect_right
 import math
 import stat
 import os
@@ -11,6 +13,7 @@ from nth_interposer_wire import home, private_dir, file_lock, IDENTITY_KEY, SESS
 from nth_notice import shown_reason
 
 ROTATE_BYTES = 5 * 1024 * 1024
+MAX_RECORD_BYTES = 5 * 1024 * 1024
 COMPARE_MARGIN = 3.0
 
 
@@ -60,6 +63,35 @@ def project_record(side, session, client, sink, ranges, ended, lines):
         return False
 
 
+def encode_record(record):
+    return (json.dumps(record, separators=(',', ':'), allow_nan=False) + '\n').encode()
+
+
+def record_chunks(record):
+    """Bound physical lines while preserving one logical release and timestamp."""
+    data = encode_record(record)
+    if len(data) <= MAX_RECORD_BYTES:
+        return [data]
+    base = dict(record, ranges=[], ended=[], notice_id=uuid.uuid4().hex,
+                part=0, parts=0)
+    # Reserve enough digits for both indexes before packing individual items.
+    overhead = len(encode_record(dict(base, part=2**53-1, parts=2**53-1)))
+    groups, group, size = [], dict(ranges=[], ended=[]), overhead
+    for field in ('ranges', 'ended'):
+        for item in record[field]:
+            cost = len(encode_record(item))  # newline reserves its separating comma
+            if overhead + cost > MAX_RECORD_BYTES:
+                raise ValueError('evidence item exceeds record limit')
+            if size + cost > MAX_RECORD_BYTES:
+                groups.append(group)
+                group, size = dict(ranges=[], ended=[]), overhead
+            group[field].append(item)
+            size += cost
+    groups.append(group)
+    return [encode_record(dict(base, **group, part=i, parts=len(groups)))
+            for i, group in enumerate(groups)]
+
+
 def append(side, session, client, sink, ranges, ended, lines):
     if os.environ.get('TRIO_INTERPOSER_SHADOW') == '0':
         return False
@@ -69,18 +101,19 @@ def append(side, session, client, sink, ranges, ended, lines):
             return False
         directory = private_dir(home() / 'events' / 'shadow')
         path = directory / (side + '.jsonl')
-        data = (json.dumps(record, separators=(',', ':'), allow_nan=False) + '\n').encode()
+        chunks = record_chunks(record)
         with file_lock(directory / (side + '.lock'), timeout=.02):
             if path.is_symlink():
                 return False
-            if path.exists() and path.stat().st_size + len(data) > ROTATE_BYTES:
+            if path.exists() and path.stat().st_size + sum(map(len,chunks)) > ROTATE_BYTES:
                 os.replace(path, path.with_suffix('.jsonl.1'))
             fd = os.open(path, os.O_CREAT | os.O_APPEND | os.O_WRONLY | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
             with os.fdopen(fd, 'ab') as stream:
                 if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
                     return False
                 os.fchmod(stream.fileno(), 0o600)
-                stream.write(data)
+                for data in chunks:
+                    stream.write(data)
         return True
     except Exception:
         return False  # Evidence is best effort and never changes real delivery.
@@ -95,6 +128,13 @@ def valid_record(row, side):
             return False
         if not isinstance(row['ranges'],list) or not isinstance(row['ended'],list):
             return False
+        chunk_fields = {'notice_id', 'part', 'parts'}
+        present = chunk_fields.intersection(row)
+        if present and (present != chunk_fields or not isinstance(row['notice_id'],str)
+                or len(row['notice_id']) != 32 or any(c not in '0123456789abcdef' for c in row['notice_id'])
+                or type(row['part']) is not int or type(row['parts']) is not int
+                or not 0 <= row['part'] < row['parts'] < 2**53 or row['parts'] < 2):
+            return False
         for item in row['ranges']:
             canonical_server(item['server'])
             if not IDENTITY_KEY.fullmatch(item['key']):
@@ -107,31 +147,68 @@ def valid_record(row, side):
             if not IDENTITY_KEY.fullmatch(item['key']) or not isinstance(item['reason'],str):
                 return False
         return True
-    except (KeyError,TypeError,ValueError):
+    except (KeyError,TypeError,ValueError,OverflowError):
         return False
+
+
+class EvidenceRecords(list):
+    def __init__(self):
+        super().__init__()
+        self.errors = []
 
 
 def records(side, since=None):
     directory = home()/'events'/'shadow'
     cutoff = time.time()-since if since is not None else float('-inf')
-    result = []
+    result, groups = EvidenceRecords(), {}
+    def error(path, line, reason):
+        # Never echo input bytes or filesystem/exception text into public output.
+        result.errors.append(dict(file=path.name, line=line, reason=reason))
     for path in (directory/(side+'.jsonl.1'),directory/(side+'.jsonl')):
         try:
             fd = os.open(path,os.O_RDONLY|os.O_NONBLOCK|os.O_NOFOLLOW)
             with os.fdopen(fd,'rb') as stream:
-                info = os.fstat(stream.fileno())
-                if not stat.S_ISREG(info.st_mode):
+                if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                    error(path,0,'not a regular evidence file')
                     continue
-                data = stream.read(5*1024*1024+1)
-            for line in data.splitlines():
-                try:
-                    row = json.loads(line)
-                    if valid_record(row,side) and row['t']>=cutoff:
+                number = 0
+                while True:
+                    line = stream.readline(MAX_RECORD_BYTES+1)
+                    if not line:
+                        break
+                    number += 1
+                    if len(line)>MAX_RECORD_BYTES:
+                        error(path,number,'evidence record exceeds byte limit')
+                        while not line.endswith(b'\n'):
+                            line = stream.readline(MAX_RECORD_BYTES+1)
+                            if not line:
+                                break
+                        continue
+                    try:
+                        row = json.loads(line)
+                        if not line.endswith(b'\n'):
+                            raise ValueError
+                        if not valid_record(row,side):
+                            raise ValueError
+                    except (ValueError,TypeError,UnicodeError,RecursionError):
+                        error(path,number,'invalid or incomplete evidence record')
+                        continue
+                    if 'notice_id' in row:
+                        identity = row['notice_id']
+                        signature = tuple(row[k] for k in ('session','client','sink','t','lines','parts'))
+                        group = groups.setdefault(identity,dict(signature=signature,seen=set(),path=path,line=number))
+                        if group['signature']!=signature or row['part'] in group['seen']:
+                            error(path,number,'inconsistent or duplicate evidence chunk')
+                        group['seen'].add(row['part'])
+                    if row['t']>=cutoff:
                         result.append(row)
-                except (ValueError,UnicodeError,RecursionError):
-                    continue
+        except FileNotFoundError:
+            pass
         except OSError:
-            continue
+            error(path,0,'evidence file could not be read')
+    for group in groups.values():
+        if len(group['seen'])!=group['signature'][-1]:
+            error(group['path'],group['line'],'incomplete logical notice')
     return result
 
 
@@ -148,9 +225,14 @@ def merge(intervals):
 def subtract(left, right):
     """Bound memory by ranges, even for a 50,000-message flood."""
     result = []
+    right = merge(right)
+    index = 0
     for first, last in merge(left):
         cursor = first
-        for start, end in merge(right):
+        while index < len(right) and right[index][1] < cursor:
+            index += 1
+        for position in range(index,len(right)):
+            start,end = right[position]
             if end < cursor:
                 continue
             if start > last:
@@ -165,7 +247,8 @@ def subtract(left, right):
 
 def compare(since=None):
     logs = {side:records(side) for side in ('actual','would')}
-    missing = {'missing_in_would':[],'missing_in_actual':[]}
+    missing = {'missing_in_would':[],'missing_in_actual':[],
+               'errors':[error for rows in logs.values() for error in rows.errors]}
     if not all(logs.values()):
         return {**missing,'sessions':{},'median_release_delay':None,'window':None,'comparable':False}
     # Match against all retained evidence. Only reporting is windowed: settling
@@ -176,6 +259,7 @@ def compare(since=None):
         lower = max(lower,time.time()-since)
     counts,ids,timed,owners = {},{'actual':{},'would':{}},{'actual':{},'would':{}},{}
     retained = {'actual':{},'would':{}}
+    notices = set()
     for side,rows in logs.items():
         for row in sorted(rows,key=lambda r:r['t']):
             for item in row['ranges']:
@@ -184,7 +268,10 @@ def compare(since=None):
             if not lower<=row['t']<=upper:
                 continue
             count = counts.setdefault(row['session'],{'actual_notices':0,'would_notices':0})
-            count[side+'_notices'] += 1
+            identity = (side,row.get('notice_id',id(row)))
+            if identity not in notices:
+                count[side+'_notices'] += 1
+                notices.add(identity)
             for item in row['ranges']:
                 key = item['key']
                 span = item['first'],item['last']
@@ -197,11 +284,16 @@ def compare(since=None):
         for side,other in (('actual','would'),('would','actual')):
             for first,last in subtract(ids[side].get(key,[]),retained[other].get(key,[])):
                 missing['missing_in_'+other].append(dict(session=owners[key],key=key,first=first,last=last))
+        counterparts = sorted(timed['would'].get(key,[]))
+        starts, ends = [], []
+        for start,end,_ in counterparts:
+            starts.append(start)
+            ends.append(max(end,ends[-1] if ends else end))
         for first,last,actual in timed['actual'].get(key,[]):
-            matched = [would for start,end,would in timed['would'].get(key,[])
+            matched = [would for start,end,would in counterparts[bisect_right(ends,first-1):bisect_right(starts,last)]
                        if max(first,start)<=min(last,end) and
                        (lower<=actual<=upper or lower<=would<=upper)]
             if matched:
                 delays.append(min(matched)-actual)
     return {**missing,'sessions':counts,'median_release_delay':statistics.median(delays) if delays else None,
-            'window':{'from':lower,'through':upper,'margin':COMPARE_MARGIN},'comparable':lower<=upper}
+            'window':{'from':lower,'through':upper,'margin':COMPARE_MARGIN},'comparable':lower<=upper and not missing['errors']}

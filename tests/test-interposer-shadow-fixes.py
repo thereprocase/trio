@@ -614,11 +614,12 @@ class FixTests(unittest.TestCase):
                 stream.write(json.dumps(row)+'\n')
         shadow.compare()
         with patch('sys.stdout',io.StringIO()) as out:
-            self.assertEqual(cli.main(['interposer','shadow-diff']),0)
+            self.assertEqual(cli.main(['interposer','shadow-diff']),1)
             self.assertIn('Shadow comparison:',out.getvalue())
+            self.assertIn('Evidence error:',out.getvalue())
         with patch('sys.stdout',io.StringIO()) as out:
-            self.assertEqual(cli.main(['interposer','shadow-diff','--json']),0)
-            json.loads(out.getvalue())
+            self.assertEqual(cli.main(['interposer','shadow-diff','--json']),1)
+            self.assertEqual(len(json.loads(out.getvalue())['errors']),4)
 
     def test_poll_state_no_repeated_writes_and_shadow_presence(self):
         self.attach()

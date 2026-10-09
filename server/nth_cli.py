@@ -762,9 +762,11 @@ def main(argv=None):
                 for direction in ('missing_in_would','missing_in_actual'):
                     for span in result[direction]:
                         print(f"{direction}: {span['key']} ids {span['first']} to {span['last']}")
+                for error in result['errors']:
+                    print(f"Evidence error: {error['file']} line {error['line']}: {error['reason']}")
                 print('Notice counts: '+json.dumps(result['sessions']))
                 print('Median release delay: '+str(result['median_release_delay']))
-            return int(bool(result['missing_in_would'] or result['missing_in_actual']))
+            return int(bool(result['missing_in_would'] or result['missing_in_actual'] or result['errors']))
         return interposer_control(args.action)
     elif args.command == 'status':
         print(json.dumps({'listeners': public_status(),
