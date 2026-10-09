@@ -531,9 +531,25 @@
     const bar = document.createElement('div'); bar.className = 'message-targets';
     for (const [sigil, ids, label] of targets) {
       const group = document.createElement('span'); group.className = 'target-group';
-      group.append(document.createTextNode(label + ' '));
+      const prefix = document.createElement('span'); prefix.className = 'target-label'; prefix.textContent = label + ' ';
+      group.append(prefix);
       ids.forEach(id => { const chip = document.createElement('span'); chip.className = 'target-chip'; chip.textContent = sigil + nameFor(id, id); group.append(chip); });
       bar.append(group);
+    }
+    const chips = [...bar.querySelectorAll('.target-chip')];
+    if (chips.length > 3) {
+      chips.slice(3).forEach(chip => chip.classList.add('extra-target'));
+      const more = document.createElement('button'); more.type = 'button'; more.className = 'targets-toggle';
+      bar.id = 'message-targets-' + msg.id;
+      more.setAttribute('aria-controls', bar.id);
+      const update = expanded => {
+        bar.classList.toggle('targets-expanded', expanded);
+        more.textContent = expanded ? 'Less' : '+' + (chips.length - 3);
+        more.setAttribute('aria-expanded', String(expanded));
+        more.setAttribute('aria-label', (expanded ? 'Hide ' : 'Show ') + (chips.length - 3) + ' more recipients');
+      };
+      update(false); more.addEventListener('click', () => update(!bar.classList.contains('targets-expanded')));
+      bar.append(more);
     }
     return bar;
   }
@@ -560,7 +576,7 @@
       try {
         const response = await fetch(apiUrl('/api/edit'), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message_id: msg.id, content }) });
         if (!response.ok) throw new Error('edit failed (' + response.status + ')');
-        body.textContent = content;
+        upsert({ ...msg, content });
       } catch (error) { Trio.ui.toast(error.message); }
     });
   }
@@ -575,7 +591,8 @@
     return !!target?.closest?.('a,button,input,textarea,select,fieldset,.msg-time');
   }
   function showMessageActions(card, content, msg, body) {
-    if (!isOwn(msg) || msg.retracted_at || state.readOnly) return;
+    const phone = window.matchMedia('(max-width:640px)').matches;
+    if (msg.retracted_at || (!phone && (!isOwn(msg) || state.readOnly))) return;
     const existing = content.querySelector('.message-actions-menu');
     if (existing && state.activeMessageActions === existing && !existing.classList.contains('hidden')) {
       closeMessageActions();
@@ -585,7 +602,13 @@
     let menu = existing;
     if (!menu) {
       menu = document.createElement('div'); menu.className = 'message-actions-menu hidden';
-      for (const [label, fn] of [['Edit', () => edit(msg, body)], ['Delete', () => retract(msg)]]) {
+      const copySource = () => state.messages.get(msg.id)?.content ?? msg.content ?? '';
+      if (copySource().trim()) {
+        const copy = makeCopyButton(copySource, { title:'Copy markdown', className:'menu-copy' });
+        copy.addEventListener('click', closeMessageActions); menu.append(copy);
+      }
+      const actions = isOwn(msg) && !state.readOnly ? [...(body ? [['Edit', () => edit(msg, body)]] : []), ['Delete', () => retract(msg)]] : [];
+      for (const [label, fn] of actions) {
         const button = document.createElement('button'); button.type = 'button'; button.textContent = label;
         button.addEventListener('click', () => { closeMessageActions(); fn(); });
         menu.append(button);
@@ -596,37 +619,37 @@
     state.activeMessageActions = menu;
   }
   function bindMessageActions(card, content, msg, body) {
-    let pressTimer = null;
+    let pressTimer = null, pressX = 0, pressY = 0;
     const clearPress = () => { if (pressTimer) { clearTimeout(pressTimer); pressTimer = null; } };
     const startPress = event => {
       if (event.isPrimary === false || (event.button != null && event.button !== 0) || interactiveMessageTarget(event.target)) return;
-      clearPress();
+      if (!isOwn(msg) && !window.matchMedia('(max-width:640px)').matches) return;
+      clearPress(); pressX = event.clientX; pressY = event.clientY;
       pressTimer = setTimeout(() => {
         pressTimer = null;
         showMessageActions(card, content, msg, body);
       }, 500);
     };
     card.addEventListener('pointerdown', startPress);
+    card.addEventListener('pointermove', event => { if (Math.hypot(event.clientX - pressX, event.clientY - pressY) >= 10) clearPress(); });
     card.addEventListener('pointerup', clearPress);
     card.addEventListener('pointercancel', clearPress);
     card.addEventListener('pointerleave', clearPress);
     card.addEventListener('contextmenu', event => {
-      if (interactiveMessageTarget(event.target)) return;
+      if (interactiveMessageTarget(event.target) || (!isOwn(msg) && !window.matchMedia('(max-width:640px)').matches)) return;
       event.preventDefault(); clearPress();
       showMessageActions(card, content, msg, body);
     });
+    card.addEventListener('keydown', event => {
+      if (event.key === 'F10' && event.shiftKey && !interactiveMessageTarget(event.target)) {
+        event.preventDefault(); showMessageActions(card, content, msg, body);
+        const selector = window.matchMedia('(max-width:640px)').matches ? '.menu-copy' : 'button:not(.menu-copy)';
+        content.querySelector('.message-actions-menu')?.querySelector(selector)?.focus();
+      }
+    });
   }
 
-  function cardFor(msg) {
-    const vm = viewModel(msg);
-    const card = document.createElement('article'); card.className = 'message msg' + (vm.isSystem ? ' system-message' : '') + (!vm.isSystem && vm.isOwn ? ' own me' : '') + (!vm.isSystem && vm.isPrivate ? ' private' : '');
-    card.dataset.messageId = vm.id;
-    if (vm.isSystem) {
-      const content = document.createElement('div'); content.className = 'message-content msg-body';
-      const body = document.createElement('div'); paintBody(card, body, vm); content.append(body);
-      card.append(content);
-      return card;
-    }
+  function messageAvatar(vm, inline = false) {
     const avatar = document.createElement('div');
     avatar.className = 'message-avatar av av-32 tone-' + avatarTone(vm.author);
     avatar.setAttribute('aria-hidden', 'true');
@@ -635,10 +658,29 @@
       image.className = 'avatar-svg-image'; image.src = vm.avatarUrl; image.alt = '';
       avatar.append(image);
     } else avatar.textContent = (vm.author || '?').split(/\s+/).map(part => part[0]).join('').slice(0, 2).toUpperCase();
+    if (inline) avatar.classList.add('header-avatar');
+    return avatar;
+  }
+
+  function cardFor(msg) {
+    const vm = viewModel(msg);
+    const card = document.createElement('article'); card.className = 'message msg' + (vm.isSystem ? ' system-message' : '') + (!vm.isSystem && vm.isOwn ? ' own me' : '') + (!vm.isSystem && vm.isPrivate ? ' private' : '');
+    card.dataset.messageId = vm.id;
+    card.dataset.sender = msg.member_id || '';
+    card.dataset.createdAt = vm.createdAt || '';
+    if (vm.isSystem) {
+      const content = document.createElement('div'); content.className = 'message-content msg-body';
+      const body = document.createElement('div'); paintBody(card, body, vm); content.append(body);
+      card.append(content);
+      return card;
+    }
+    const avatar = messageAvatar(vm);
     const content = document.createElement('div'); content.className = 'message-content msg-body';
     const head = document.createElement('header'); head.className = 'message-head';
+    if (!vm.isOwn) head.append(messageAvatar(vm, true));
     const author = document.createElement('strong'); author.textContent = vm.author;
-    const idPart = document.createElement('span'); idPart.className = 'message-id'; idPart.textContent = '#' + vm.id + ' · ';
+    const numberPrefix = () => { const part = document.createElement('span'); part.className = 'message-id'; part.textContent = '#' + vm.id + ' · '; return part; };
+    const idPart = numberPrefix();
     const stamp = Trio.time.element(vm.createdAt, { prefix: idPart });
     head.append(author);
     if (vm.role) {
@@ -656,7 +698,7 @@
       head.append(reply);
     }
     const target = renderTargets(vm); if (target) head.append(target);
-    head.append(stamp);
+    stamp.classList.add('header-time'); head.append(stamp);
     content.append(head);
     // A trio_ask stores the question BOTH as prose (content) and as a structured
     // picker (choices). Rendering both stacks a redundant echo bubble above the
@@ -669,7 +711,24 @@
     let body = null;
     // A page posted without a caption is the card alone.
     const pageOnly = vm.page && !vm.isRetracted && !vm.content.trim();
-    if (!ask && !pageOnly) { body = document.createElement('div'); body.className = 'message-body bubble'; paintBody(card, body, vm); content.append(body); }
+    if (!ask && !pageOnly) {
+      body = document.createElement('div'); body.className = 'message-body bubble'; paintBody(card, body, vm);
+      if (!vm.isRetracted) {
+        card.classList.add('has-bubble-time');
+        const phoneStamp = Trio.time.element(vm.createdAt, { prefix:numberPrefix() });
+        phoneStamp.classList.add('bubble-time');
+        const space = document.createElement('span'); space.className = 'bubble-time-space'; space.setAttribute('aria-hidden', 'true');
+        // Reserve the clock's width on the final prose line, including the
+        // optional number. The real clock sits in that space at bottom-right.
+        space.append(numberPrefix(), document.createTextNode(Trio.time.label(vm.createdAt)));
+        const last = body.lastElementChild;
+        if (last?.tagName === 'P') last.append(space);
+        else body.append(space);
+        body.append(phoneStamp);
+        body.tabIndex = 0; body.setAttribute('aria-keyshortcuts', 'Shift+F10');
+      }
+      content.append(body);
+    }
     if (vm.attachments.length) {
       const attachments = document.createElement('div'); attachments.className = 'message-attachments';
       // Every image in THIS message forms one gallery, so the lightbox's
@@ -728,9 +787,29 @@
         content.append(tools);
       }
     }
-    if (body && isOwn(msg) && !msg.retracted_at && !state.readOnly) bindMessageActions(card, content, msg, body);
+    if (!msg.retracted_at && !vm.isSystem) bindMessageActions(card, content, msg, body);
     card.append(avatar, content);
     return card;
+  }
+
+  // Recompute from the painted order: late history inserts, edits, pruning and
+  // day/unread separators can all change the neighbour of an existing card.
+  // CSS applies the grouping only on phones; author text remains available to SRs.
+  function syncMessageGroups(list) {
+    let previous = null;
+    for (const card of list.children) {
+      if (!card.matches('.message.msg:not(.system-message):not(.retracted)')) {
+        previous = null;
+        continue;
+      }
+      const elapsed = previous ? Date.parse(card.dataset.createdAt) - Date.parse(previous.dataset.createdAt) : NaN;
+      const sameSender = previous && card.dataset.sender && card.dataset.sender === previous.dataset.sender;
+      const grouped = sameSender && elapsed >= 0 && elapsed <= 300000
+        && card.classList.contains('private') === previous.classList.contains('private');
+      card.classList.toggle('message-grouped', !!grouped);
+      card.classList.toggle('message-run-start', !!previous && !grouped);
+      previous = card;
+    }
   }
 
   function ordered() { return [...state.messages.values()].sort((a, b) => Number(a.id) - Number(b.id)); }
@@ -805,6 +884,7 @@
     // label cannot push the newest message below the fold.
     pruneMessages();
     syncDaySeparators(list);
+    if (list) syncMessageGroups(list);
     if (wasNear) { list.scrollTop = list.scrollHeight; markRead(); }
   }
   function openInsertWindow(wasNear) {
@@ -858,6 +938,7 @@
       if (index === unreadRel) { const divider = document.createElement('div'); divider.className = 'unread-divider'; divider.textContent = 'New since your last visit'; list.append(divider); }
       const card = cardFor(msg); list.append(card); state.messageDomById.set(msg.id, card);
     });
+    syncMessageGroups(list);
     const saved = state.scrollPositions[convId()];
     if (stick) { list.scrollTop = list.scrollHeight; markRead(); }
     else if (saved != null) { list.scrollTop = saved; }
@@ -933,11 +1014,13 @@
       else { render(); }
       pruneMessages();
       syncDaySeparators(list);
+      if (list) syncMessageGroups(list);
       if (wasNear && list) { list.scrollTop = list.scrollHeight; markRead(); }
       if (list) openInsertWindow(wasNear);
       return;
     }
     const replacement = cardFor(state.messages.get(msg.id)); existing.replaceWith(replacement); state.messageDomById.set(msg.id, replacement);
+    if (list) syncMessageGroups(list);
     if (wasNear) list.scrollTop = list.scrollHeight;
   }
 
@@ -1021,5 +1104,5 @@
   }
   function mount() { init(); }
 
-  Trio.conversation = { init, mount, unmount, render, ingest, upsert, paintBody, cardFor, viewModel, answerPayload, isPrivate, seedWatermark, pageCard, pageCaption };
+  Trio.conversation = { init, mount, unmount, render, ingest, upsert, paintBody, cardFor, syncMessageGroups, viewModel, answerPayload, isPrivate, seedWatermark, pageCard, pageCaption };
 })();
