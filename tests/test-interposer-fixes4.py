@@ -34,6 +34,7 @@ class Fixes4Tests(unittest.TestCase):
     op = cases.FixTests.op
     attach = cases.FixTests.attach
     wait_start = cases.FixTests.wait_start
+    drain_wait = cases.FixTests.drain_wait
     eventually = cases.FixTests.eventually
     start_socket = cases.FixTests.start_socket
     stop_pollers = round3.Fixes3Tests.stop_pollers

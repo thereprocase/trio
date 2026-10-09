@@ -5,6 +5,8 @@ import stat
 import threading
 import time
 import uuid
+from contextlib import contextmanager
+from copy import deepcopy
 
 from nth_claude_hook import poll_factory, process_stamp
 from nth_interposer_wire import home, private_dir, read_frame, WireError, MAX_FRAME, canonical_server
@@ -62,8 +64,8 @@ class ShadowListener(Listener):
             if fresh:
                 # Never commit seen IDs before they have an owner buffer. A handoff
                 # after this lock moves that buffer, rather than discarding delivery.
-                self.runtime.accumulate(row,selected)
-                with self.runtime.store.db:
+                with self.runtime.buffer_transaction():
+                    self.runtime.accumulate(row,selected)
                     self.runtime.store.db.execute('UPDATE memberships SET shadow_announced_through=? WHERE key=?',
                                                   (fresh[-1]['id'],row['key']))
                 self.high_water = fresh[-1]['id']
@@ -82,8 +84,8 @@ class ShadowListener(Listener):
                 return
             reason = shown_reason(reason)
             self.status,self.error = 'ended',reason
-            self.runtime.accumulate(row,[],reason)
-            with self.runtime.store.db:
+            with self.runtime.buffer_transaction():
+                self.runtime.accumulate(row,[],reason)
                 self.runtime.store.db.execute("UPDATE memberships SET shadow_ended=?,poll_state='ended' WHERE key=?",(reason,row['key']))
 
 
@@ -98,6 +100,8 @@ class Runtime:
         self.startups, self.start_retry = {}, {}
         self.startup_threads = set()
         self.startup_slots = threading.BoundedSemaphore(MAX_STARTUPS)
+        self.inbox_path = home()/'events'/'inbox'
+        self.inbox_thread = None
         self.recover()
 
     def recover(self):
@@ -110,17 +114,87 @@ class Runtime:
                 try:
                     record = json.loads(row['value'])
                     fields = ('session','client','sink','ranges','ended','lines')
-                    if set(record) != set(fields) or not row['key'].startswith(PENDING_PREFIX+record['session']+':'):
+                    buffered = record.get('buffered',False)
+                    extra = {'buffered','buffered_at_ns'} if buffered else set()
+                    if (set(record)!=set(fields)|extra or not row['key'].startswith(PENDING_PREFIX+record['session']+':')
+                            or (buffered and (buffered is not True or type(record['buffered_at_ns']) is not int
+                                              or record['buffered_at_ns']<0))):
                         raise ValueError
-                    clean = project_record('would', **record)
+                    projected = {k:record[k] for k in fields}
+                    clean = project_record('would', **projected)
                     if not clean:
                         continue
-                    if append('would', **record):
+                    if buffered:
+                        self.restore_buffer(row['key'],clean,record['buffered_at_ns'])
+                    elif append('would', **projected):
                         with self.store.db:
                             self.count_record(clean)
                             self.store.db.execute('DELETE FROM meta WHERE key=?', (row['key'],))
                 except (ValueError,TypeError,KeyError):
                     self.log.warning('shadow recovery refused: invalid record')
+
+    def restore_buffer(self, journal_key, record, at_ns):
+        session = record['session']
+        self.store.session(session)  # Durable pending rows protect this metadata.
+        grouped = {}
+        for span in record['ranges']:
+            grouped.setdefault(span['key'],[]).append(dict(span))
+        ended = {item['key']:item['reason'] for item in record['ended']}
+        now = time.monotonic()
+        with self.buffer_transaction():
+            buffer = self.buffers.setdefault(session,dict(at=min(now,at_ns/1e9),members={}))
+            buffer['at'] = min(buffer['at'],now,at_ns/1e9)
+            for key in grouped.keys()|ended.keys():
+                member = self.member(key)
+                if member is None:
+                    raise ValueError('pending membership missing')
+                spans = grouped.get(key,[])
+                if key in buffer['members']:
+                    raise ValueError('duplicate buffered snapshot')
+                holding = self.store.db.execute('SELECT server FROM holdings WHERE session=? AND key=?',
+                                               (session,key)).fetchone()
+                buffer['members'][key] = dict(member,owner_session=session,
+                    server=spans[0]['server'] if spans else canonical_server(holding[0] if holding else 'nth-trio'),
+                    ranges=spans,first_id=min((r['first'] for r in spans),default=0),
+                    last_id=max((r['last'] for r in spans),default=0),count=sum(r['count'] for r in spans),
+                    addressed=any(r['addressed'] for r in spans),banged=False,reason=ended.get(key,''))
+            self.pending_keys[session] = journal_key
+
+    @contextmanager
+    def buffer_transaction(self):
+        """Memory rollback and projected journal/cursor writes commit together."""
+        with self.store.lock:
+            previous, keys = deepcopy(self.buffers),dict(self.pending_keys)
+            try:
+                with self.store.db:
+                    yield
+                    self.persist_buffers()
+            except BaseException:
+                self.buffers.clear()
+                self.buffers.update(previous)
+                self.pending_keys.clear()
+                self.pending_keys.update(keys)
+                raise
+
+    def persist_buffer(self, session, record, buffered):
+        pending = {k:record[k] for k in ('session','client','sink','ranges','ended','lines')}
+        if buffered:
+            pending.update(buffered=True,buffered_at_ns=max(0,int(self.buffers[session]['at']*1e9)))
+        key = self.pending_keys.setdefault(session,PENDING_PREFIX+session+':'+uuid.uuid4().hex)
+        self.store.db.execute('''INSERT INTO meta(key,value) VALUES (?,?)
+            ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE meta.value!=excluded.value''',
+            (key,json.dumps(pending,allow_nan=False)))
+
+    def persist_buffers(self):
+        for session in self.buffers:
+            record = self.buffer_record(session)
+            if not record:
+                raise ValueError('invalid buffered evidence')
+            self.persist_buffer(session,record,buffered=not self.closing)
+        # Write the new owner's snapshot before deleting an old owner's entry.
+        for session in list(self.pending_keys):
+            if session not in self.buffers:
+                self.store.db.execute('DELETE FROM meta WHERE key=?',(self.pending_keys.pop(session),))
 
     def count_record(self, record):
         counts = {}
@@ -198,6 +272,10 @@ class Runtime:
                 target.append(dict(span))
 
     def transfer_buffers(self):
+        with self.buffer_transaction():
+            self._transfer_buffers()
+
+    def _transfer_buffers(self):
         for session,buffer in list(self.buffers.items()):
             for key,item in list(buffer['members'].items()):
                 row = self.member(key)
@@ -227,6 +305,25 @@ class Runtime:
             if not buffer['members']:
                 self.buffers.pop(session,None)
 
+    def buffer_record(self, session, render=False):
+        buffer, state = self.buffers[session],self.store.session(session)
+        ranges,ended,lines = [],[],0
+        for key,item in sorted(buffer['members'].items()):
+            prefix = 'trio' if item['source']=='local' else 'quartet'
+            server = None if state['client']=='claude' else item['server']
+            if item['count'] and not item['reason']:
+                lines += 1
+                if render:
+                    message_notice(prefix,item['channel'],item['member_id'],item['first_id'],
+                                   item['last_id'],item['count'],item['addressed'],server)
+            ranges.extend(item['ranges'])
+            if item['reason']:
+                lines += 1
+                if render:
+                    ended_notice(prefix,item['channel'],item['member_id'],item['reason'],server)
+                ended.append({'key':key,'reason':item['reason']})
+        return project_record('would',session,state['client'],state['sink'],ranges,ended,lines)
+
     def release(self, session, force=False, flush=False):
         with self.store.lock:
             self.transfer_buffers()
@@ -237,29 +334,13 @@ class Runtime:
             settle = .3 if state['client']=='claude' else 2.5
             if (state['state']=='in_turn' and not flush) or (not force and time.monotonic()-buffer['at']<settle):
                 return False
-            ranges,ended,lines = [],[],[]
-            for key,item in sorted(buffer['members'].items()):
-                prefix = 'trio' if item['source']=='local' else 'quartet'
-                server = None if state['client']=='claude' else item['server']
-                if item['count'] and not item['reason']:
-                    lines.append(message_notice(prefix,item['channel'],item['member_id'],item['first_id'],
-                                               item['last_id'],item['count'],item['addressed'],server))
-                ranges.extend(item['ranges'])
-                if item['reason']:
-                    lines.append(ended_notice(prefix,item['channel'],item['member_id'],item['reason'],server))
-                    ended.append({'key':key,'reason':item['reason']})
-            record = project_record('would',session,state['client'],state['sink'],ranges,ended,len(lines))
+            record = self.buffer_record(session,render=True)
             if not record:
                 return False
-            if self.closing:
-                # Commit the integer-only recovery copy before risking a final
-                # append. The shadow cursor is already durable.
-                pending = {k:record[k] for k in ('session','client','sink','ranges','ended','lines')}
-                with self.store.db:
-                    pending_key = self.pending_keys.setdefault(session, PENDING_PREFIX+session+':'+uuid.uuid4().hex)
-                    self.store.db.execute('INSERT OR REPLACE INTO meta(key,value) VALUES (?,?)',
-                                          (pending_key,json.dumps(pending,allow_nan=False)))
-            if append('would',session,state['client'],state['sink'],ranges,ended,len(lines)):
+            with self.store.db:
+                self.persist_buffer(session,record,buffered=False)
+            projected = {k:record[k] for k in ('session','client','sink','ranges','ended','lines')}
+            if append('would', **projected):
                 with self.store.db:
                     self.count_record(record)
                     if session in self.pending_keys:
@@ -450,8 +531,29 @@ class Runtime:
         return result
 
     def drain(self):
+        """Kick one ordered worker; service startup/tick must never wait on DNS."""
+        if not self.inbox_path.is_dir():
+            return
+        with self.store.lock:
+            if self.closing or self.inbox_busy():
+                return
+            worker = threading.Thread(target=self._drain,name='shadow-inbox',daemon=True)
+            self.inbox_thread = worker
+            try:
+                worker.start()
+            except Exception as exc:
+                self.inbox_thread = None
+                self.log.info('inbox worker failed: %s',type(exc).__name__)
+
+    def inbox_busy(self):
+        return self.inbox_thread is not None and self.inbox_thread.is_alive()
+
+    def _drain(self):
         from nth_interposer import dispatch
-        inbox = private_dir(home()/'events'/'inbox')
+        with self.store.lock:
+            if self.closing:
+                return
+        inbox = private_dir(self.inbox_path)
         for path in inbox.glob('*.tmp'):
             try:
                 if time.time()-path.lstat().st_mtime>60:
@@ -459,22 +561,29 @@ class Runtime:
             except OSError:
                 pass
         for path in sorted(inbox.glob('*.json')):
+            with self.store.lock:
+                if self.closing:
+                    return  # Unapplied files belong to the next service instance.
             try:
                 request = self.inbox_request(path)
                 if request['op'] not in ('hub.announce','session.register','membership.attach','membership.configure','ack.seen','turn','session.end'):
                     raise WireError('invalid inbox operation')
                 dispatch(self.store,request,self,log=self.log)
             except Exception as exc:
-                bad = private_dir(inbox/'bad')
-                try:
-                    os.replace(path,bad/path.name)
-                except OSError:
-                    pass  # Another drainer/removal can win; continue with remaining work.
-                for old in sorted(bad.glob('*.json'))[:-100]:
-                    old.unlink(missing_ok=True)
-                self.log.info('inbox refused: %s',type(exc).__name__)
+                with self.store.lock:
+                    if self.closing:
+                        return
+                    bad = private_dir(inbox/'bad')
+                    try:
+                        os.replace(path,bad/path.name)
+                    except OSError:
+                        pass  # Another drainer/removal can win; continue with remaining work.
+                    for old in sorted(bad.glob('*.json'))[:-100]:
+                        old.unlink(missing_ok=True)
+                    self.log.info('inbox refused: %s',type(exc).__name__)
             else:
-                path.unlink(missing_ok=True)
+                with self.store.lock:
+                    path.unlink(missing_ok=True)
 
     def tick(self):
         now = time.monotonic()

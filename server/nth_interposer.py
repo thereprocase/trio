@@ -314,6 +314,12 @@ def remove_stale_socket(path):
 
 
 def serve(*, idle_seconds=1800, stop=None):
+    from nth_interposer_hubs import service_thread
+    with service_thread():
+        return _serve(idle_seconds=idle_seconds,stop=stop)
+
+
+def _serve(*, idle_seconds=1800, stop=None):
     if idle_seconds <= 0:
         raise ValueError('idle timeout must be positive')
     stop = stop if stop is not None else threading.Event()
@@ -349,7 +355,7 @@ def serve(*, idle_seconds=1800, stop=None):
                     if time.monotonic() >= next_import:
                         store.import_hooks(log=log)
                         next_import = time.monotonic() + HOOKS_IMPORT_INTERVAL
-                    if store.live_sessions():
+                    if store.live_sessions() or runtime.inbox_busy():
                         idle_since = time.monotonic()
                     elif time.monotonic() - idle_since >= idle_seconds:
                         log.info('service idle exit')

@@ -30,6 +30,7 @@ class Fixes5Tests(unittest.TestCase):
     op = cases.FixTests.op
     attach = cases.FixTests.attach
     wait_start = cases.FixTests.wait_start
+    drain_wait = cases.FixTests.drain_wait
     eventually = cases.FixTests.eventually
     start_socket = cases.FixTests.start_socket
     stop_pollers = round4.Fixes4Tests.stop_pollers
@@ -71,7 +72,7 @@ class Fixes5Tests(unittest.TestCase):
                 inbox = wire.private_dir(wire.home()/'events/inbox')
                 entry = inbox/('attach-'+str(index)+'.json')
                 entry.write_bytes(wire.encode_frame(frame))
-                self.runtime.drain()
+                self.drain_wait()
                 self.assertTrue((inbox/'bad'/entry.name).exists())
                 with self.store.lock:
                     self.assertEqual(self.runtime.member(KEY)['owner_session'],SESSION)
