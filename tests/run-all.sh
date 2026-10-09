@@ -45,28 +45,40 @@ is_soak() {
     return 1
 }
 
-pass=0; fail=0; skip=0; failed_names=""
+# Run the files concurrently. The suite is wait-bound, not CPU-bound: the
+# slowest files spend 15-25 s each in deliberate poll/timeout sleeps, and the
+# whole set adds up to about six minutes serially but under a minute at
+# JOBS=8. Every test already isolates its own HOME, runtime and temp state,
+# so they do not interfere. Output keeps a stable order: each worker writes
+# its result to a temp file and the report prints them after all finish, so
+# a failure is as easy to find as before.
+#     JOBS=1 bash tests/run-all.sh      # serial, if a test ever needs it
+JOBS="${JOBS:-8}"
+results="$(mktemp -d)"
+trap 'rm -rf "$results"' EXIT
 
+run_one() {  # run_one FILE INTERPRETER -> $results/FILE.status and .out
+    local f="$1" interp="$2" out rc
+    out="$(run_test "$interp" "$f" 2>&1)"; rc=$?
+    printf '%s\n' "$out" > "$results/$f.out"
+    if [ $rc -eq 0 ]; then echo pass
+    elif printf '%s' "$out" | grep -q "No module named 'mcp'"; then echo skip-mcp
+    elif [ $rc -eq 124 ]; then echo timeout
+    else echo fail
+    fi > "$results/$f.status"
+}
+
+pass=0; fail=0; skip=0; failed_names=""
+running=0
 for f in test-*.py; do
     [ -e "$f" ] || continue
     if is_soak "$f"; then
         printf '  \033[90mSOAK\033[0m  %s (long-running; run by hand)\n' "$f"
         skip=$((skip+1)); continue
     fi
-    out="$(run_test "$PY" "$f" 2>&1)"; rc=$?
-    if [ $rc -eq 0 ]; then
-        printf '  \033[32mPASS\033[0m  %s\n' "$f"; pass=$((pass+1))
-    elif printf '%s' "$out" | grep -q "No module named 'mcp'"; then
-        printf '  \033[90mSKIP\033[0m  %s (needs the mcp SDK — set PY to the nth venv)\n' "$f"
-        skip=$((skip+1))
-    elif [ $rc -eq 124 ]; then
-        printf '  \033[31mFAIL\033[0m  %s (timed out after %ss)\n' "$f" "$TIMEOUT"
-        fail=$((fail+1)); failed_names="$failed_names $f"
-    else
-        printf '  \033[31mFAIL\033[0m  %s\n' "$f"
-        printf '%s\n' "$out" | tail -20 | sed 's/^/        /'
-        fail=$((fail+1)); failed_names="$failed_names $f"
-    fi
+    run_one "$f" "$PY" &
+    running=$((running+1))
+    if [ "$running" -ge "$JOBS" ]; then wait -n; running=$((running-1)); fi
 done
 
 # The Node DOM tests. These exercise the browser client against a fake DOM and
@@ -76,14 +88,9 @@ done
 if command -v node >/dev/null 2>&1; then
     for f in test-*.js; do
         [ -e "$f" ] || continue
-        out="$(run_test node "$f" 2>&1)"; rc=$?
-        if [ $rc -eq 0 ]; then
-            printf '  \033[32mPASS\033[0m  %s\n' "$f"; pass=$((pass+1))
-        else
-            printf '  \033[31mFAIL\033[0m  %s\n' "$f"
-            printf '%s\n' "$out" | tail -20 | sed 's/^/        /'
-            fail=$((fail+1)); failed_names="$failed_names $f"
-        fi
+        run_one "$f" node &
+        running=$((running+1))
+        if [ "$running" -ge "$JOBS" ]; then wait -n; running=$((running-1)); fi
     done
 else
     for f in test-*.js; do
@@ -91,6 +98,17 @@ else
         printf '  \033[90mSKIP\033[0m  %s (needs node)\n' "$f"; skip=$((skip+1))
     done
 fi
+wait
+
+for f in test-*.py test-*.js; do
+    [ -e "$results/$f.status" ] || continue
+    case "$(cat "$results/$f.status")" in
+        pass) printf '  \033[32mPASS\033[0m  %s\n' "$f"; pass=$((pass+1));;
+        skip-mcp) printf '  \033[90mSKIP\033[0m  %s (needs the mcp SDK; set PY to the nth venv)\n' "$f"; skip=$((skip+1));;
+        timeout) printf '  \033[31mFAIL\033[0m  %s (timed out after %ss)\n' "$f" "$TIMEOUT"; fail=$((fail+1)); failed_names="$failed_names $f";;
+        *) printf '  \033[31mFAIL\033[0m  %s\n' "$f"; tail -20 "$results/$f.out" | sed 's/^/        /'; fail=$((fail+1)); failed_names="$failed_names $f";;
+    esac
+done
 
 echo ""
 echo "  $pass passed, $fail failed, $skip skipped"
