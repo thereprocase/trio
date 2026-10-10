@@ -1600,42 +1600,47 @@
     else if (route.name === 'archive') showView('archive');
     else if (route.name === 'data') showView('data');
   }
-  let refreshPending = false;
-  async function refresh() {
+  let refreshPending = null;
+  async function refresh({messageOnly = false} = {}) {
     // Hidden views need no snapshots; the stream-open hook catches up on return.
     if (document.hidden || document.visibilityState === 'hidden') return;
-    if (state.workspaceLoading) { refreshPending = true; return; }
+    if (state.workspaceLoading) {
+      refreshPending = {messageOnly: messageOnly && refreshPending?.messageOnly !== false};
+      return;
+    }
     state.workspaceLoading = true; state.workspaceError = '';
     renderRail();
     const query = state.channel ? '?channel=' + encodeURIComponent(state.channel) : '';
-    const requests = [
-      api.get('/api/channels').then(data => { state.channels = data.channels || []; Trio.store.set('workspace.channels', state.channels); Trio.conversation?.syncReadState?.(state.channels.find(c => c.code === state.channel)); renderRail(); markLoaded('channels'); }),
-      api.get('/api/dms').then(data => { state.dms = data; Trio.store.set('workspace.dms', state.dms); renderRail(); markLoaded('dms'); }),
-      api.get('/api/meta' + query).then(data => { state.meta = {...state.meta, ...data}; Trio.store.set('workspace.meta', state.meta); renderRail(); markLoaded('meta'); }),
-      api.get('/api/tasks' + query).then(data => { state.tasks = data.tasks || []; Trio.store.set('workspace.tasks', state.tasks); markLoaded('tasks'); }),
-      api.get('/api/approvals').then(data => { state.approvals = data.approvals || []; Trio.store.set('workspace.approvals', state.approvals); markLoaded('approvals'); }),
-      api.get('/api/questions').then(data => { state.questions = data.questions || []; Trio.store.set('workspace.questions', state.questions); markLoaded('questions'); }),
-      api.get('/api/mentions').then(data => { state.mentions = data.mentions || []; Trio.store.set('workspace.mentions', state.mentions); markLoaded('mentions'); }),
-      api.get('/api/usage').then(data => { state.usage = data; Trio.store.set('workspace.usage', state.usage); markLoaded('usage'); }),
-      // Keep state.agents (live/busy/state + context %) fresh on the same 15s +
-      // on-message cadence as everything else. The drawer, face-pile, and roster
+    const loaders = [
+      () => api.get('/api/channels').then(data => { state.channels = data.channels || []; Trio.store.set('workspace.channels', state.channels); Trio.conversation?.syncReadState?.(state.channels.find(c => c.code === state.channel)); renderRail(); markLoaded('channels'); }),
+      () => api.get('/api/dms').then(data => { state.dms = data; Trio.store.set('workspace.dms', state.dms); renderRail(); markLoaded('dms'); }),
+      () => api.get('/api/meta' + query).then(data => { state.meta = {...state.meta, ...data}; Trio.store.set('workspace.meta', state.meta); renderRail(); markLoaded('meta'); }),
+      () => api.get('/api/tasks' + query).then(data => { state.tasks = data.tasks || []; Trio.store.set('workspace.tasks', state.tasks); markLoaded('tasks'); }),
+      () => api.get('/api/approvals').then(data => { state.approvals = data.approvals || []; Trio.store.set('workspace.approvals', state.approvals); markLoaded('approvals'); }),
+      () => api.get('/api/questions').then(data => { state.questions = data.questions || []; Trio.store.set('workspace.questions', state.questions); markLoaded('questions'); }),
+      () => api.get('/api/mentions').then(data => { state.mentions = data.mentions || []; Trio.store.set('workspace.mentions', state.mentions); markLoaded('mentions'); }),
+      () => api.get('/api/usage').then(data => { state.usage = data; Trio.store.set('workspace.usage', state.usage); markLoaded('usage'); }),
+      // Keep state.agents (live/busy/state + context %) fresh on the 15s
+      // full-snapshot cadence, alongside the lightweight agent poll. The drawer, face-pile, and roster
       // card all read state.agents, which was otherwise only refetched on an
       // Agent-roster page visit — so their status/context went stale in between.
       // agents.refresh() honors the current archived filter and re-renders the
       // roster page if it's open. It's the slowest slice, so it marks ready last.
-      (Trio.agents?.refresh?.() || Promise.resolve()).then(() => markLoaded('agents')),
+      () => (Trio.agents?.refresh?.() || Promise.resolve()).then(() => markLoaded('agents')),
     ];
-    // Names in the SAME ORDER as `requests`, so a rejection can be attributed
-    // to the slice it came from. Promise.allSettled preserves order, and
-    // without this the only record of WHICH endpoint failed was a console
-    // warning — which is why the Home health row could not tell "no agents"
-    // from "could not ask about agents".
-    const SLICES = ['channels', 'dms', 'meta', 'tasks', 'approvals',
-                    'questions', 'mentions', 'usage', 'agents'];
+    const names = ['channels', 'dms', 'meta', 'tasks', 'approvals',
+                   'questions', 'mentions', 'usage', 'agents'];
+    // Messages already arrive over SSE. Refresh their navigation/inbox effects
+    // without fetching provider usage, agent state, metadata or task lists.
+    const changed = new Set(['channels', 'dms', 'approvals', 'questions', 'mentions']);
+    const indices = names.map((_, i) => i).filter(i => !messageOnly || changed.has(names[i]));
+    const SLICES = indices.map(i => names[i]);
+    const requests = indices.map(i => loaders[i]());
     const results = await Promise.allSettled(requests);
     const failures = results.filter(result => result.status === 'rejected');
     failures.forEach(result => console.warn('workspace refresh failed', result.reason));
-    state.sliceErrors = {};
+    state.sliceErrors = {...state.sliceErrors};
+    SLICES.forEach(k => { delete state.sliceErrors[k]; });
     results.forEach((result, i) => {
       if (result.status === 'rejected') state.sliceErrors[SLICES[i]] = result.reason;
     });
@@ -1661,8 +1666,8 @@
     // snapshot is still waiting on a slower endpoint. Never discard that
     // refresh request: coalesce any overlap into exactly one follow-up pass.
     if (refreshPending) {
-      refreshPending = false;
-      Promise.resolve().then(refresh);
+      const pending = refreshPending; refreshPending = null;
+      Promise.resolve().then(() => refresh(pending));
     }
   }
   let searchDialog = null, searchController = null, searchTimer = null, searchKeydown = null, detailsClick = null;
@@ -2192,7 +2197,7 @@
   function onMessageLiveRefresh() {
     // Keep the first deadline: resetting it on every message starves a busy room.
     if (document.hidden || document.visibilityState === 'hidden' || liveRefreshDebounce) return;
-    liveRefreshDebounce = setTimeout(() => { liveRefreshDebounce = null; refresh(); }, 600);
+    liveRefreshDebounce = setTimeout(() => { liveRefreshDebounce = null; refresh({messageOnly:true}); }, 600);
   }
   let drawerActivityDebounce = null;
   function onMessageForDrawer(event) {

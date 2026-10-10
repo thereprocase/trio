@@ -63,8 +63,31 @@
       init.body = JSON.stringify(body);
     }
     if (options.signal) init.signal = options.signal;
-    const response = await fetch(u, init);
-    const text = await response.text();
+    // Bound reads through body consumption too: suspended mobile connections
+    // can return headers then stop delivering bytes. Never retry writes here.
+    const controller = method === 'GET' ? new AbortController() : null;
+    let timer, timedOut = false;
+    const abort = () => controller?.abort();
+    if (controller) {
+      init.signal = controller.signal;
+      if (options.signal?.aborted) abort();
+      else options.signal?.addEventListener('abort', abort, {once:true});
+      timer = setTimeout(() => { timedOut = true; controller.abort(); }, 15000);
+    }
+    let response, text;
+    try {
+      response = await fetch(u, init);
+      text = await response.text();
+    } catch (error) {
+      if (timedOut) {
+        const timeout = new Error('The server took too long to respond. Try again.');
+        timeout.status = 408; timeout.path = path; throw timeout;
+      }
+      throw error;
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+      options.signal?.removeEventListener('abort', abort);
+    }
     let data;
     try { data = text ? JSON.parse(text) : { ok: false }; } catch { data = { ok: false, error: text.trim() || 'Server returned non-JSON' }; }
     if (!response.ok) {
