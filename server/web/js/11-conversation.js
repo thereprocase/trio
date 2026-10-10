@@ -1128,8 +1128,13 @@
       // fan-out — so re-check here. DM views are scoped by recipients above.
       return;
     }
-    const wasNear = nearBottom(dom()); const previous = state.messages.get(msg.id) || {};
-    state.messages.set(msg.id, Object.assign({}, previous, msg));
+    const previous = state.messages.get(msg.id);
+    // Both feeds can deliver the same row. Keep the existing bubble (and any
+    // selection/expanded controls) when every supplied field is unchanged.
+    if (previous && Object.keys(msg).every(key =>
+      JSON.stringify(previous[key]) === JSON.stringify(msg[key]))) return;
+    const wasNear = nearBottom(dom());
+    state.messages.set(msg.id, Object.assign({}, previous || {}, msg));
     const existing = state.messageDomById.get(msg.id);
     const list = dom();
     if (!existing) {

@@ -1,0 +1,10 @@
+'use strict';
+const assert=require('assert'),{load}=require('./dom-harness');
+const T=load().hooks.Trio,s=T.state;s.channel='sample';s.dmKey='';s.messages=new Map();s.messageDomById=new Map();
+const m={id:1,channel:'sample',member_id:'worker',content:'Hello',created_at:'2026-01-01T00:00:00Z',attachments:[]};
+T.conversation.upsert(m);const first=s.messageDomById.get(1);
+T.conversation.upsert({...m,attachments:[]});assert.strictEqual(s.messageDomById.get(1),first);
+T.conversation.upsert({id:1,channel:'sample',content:'Hello'});assert.strictEqual(s.messageDomById.get(1),first);
+T.conversation.upsert({...m,content:'Edited'});const edited=s.messageDomById.get(1);assert.notStrictEqual(edited,first);
+T.conversation.upsert({...m,content:'Edited',retracted_at:'2026-01-02'});assert.notStrictEqual(s.messageDomById.get(1),edited);
+console.log('PASS: duplicate and partial replays preserve nodes; edits and retractions update');

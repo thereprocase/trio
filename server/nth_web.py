@@ -4643,7 +4643,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
         elif path == "/api/questions":
             self._handle_questions()
         elif path == "/api/mentions":
-            self._handle_mentions()
+            self._handle_mentions(parsed)
         elif path == "/api/tasks":
             self._handle_tasks(parsed)
         elif path == "/api/storage":
@@ -8260,11 +8260,12 @@ class NthWebHandler(BaseHTTPRequestHandler):
         self._json({"ok": True, "count": len(questions),
                     "questions": questions})
 
-    def _handle_mentions(self) -> None:
+    def _handle_mentions(self, parsed=None) -> None:
         """@mentions of the operator, each with a read receipt."""
         ident = self._require_operator()
         if ident is None:
             return
+        summary = parsed is not None and parse_qs(parsed.query).get("summary") == ["1"]
         operator_id = ident.member_id
         db = None
         try:
@@ -8272,8 +8273,9 @@ class NthWebHandler(BaseHTTPRequestHandler):
             db.row_factory = sqlite3.Row
             db.execute("PRAGMA busy_timeout=3000")
             rows = db.execute(
-                "SELECT m.id, m.channel, m.member_id, m.member_name, "
-                "       m.content, m.created_at, m.mentions, "
+                "SELECT m.id, m.channel, m.member_id, m.member_name, " +
+                ("       NULL AS content, m.created_at, m.mentions, " if summary else
+                 "       m.content, m.created_at, m.mentions, ") +
                 "       (mr.member_id IS NOT NULL) AS is_read "
                 "FROM messages m "
                 "LEFT JOIN message_reads mr "
@@ -8287,15 +8289,19 @@ class NthWebHandler(BaseHTTPRequestHandler):
             mentions = []
             name_cache: Dict[str, str] = {}
             unread_count = 0
+            count = 0
             for r in rows:
                 # The LIKE above is a coarse prefilter only — it would also
                 # match an id that merely CONTAINS the operator's. The parsed
                 # array is the exact test, and it is the one that decides.
                 if operator_id not in parse_mentions_json(r["mentions"]):
                     continue
+                count += 1
                 is_read = bool(r["is_read"])
                 if not is_read:
                     unread_count += 1
+                if summary:
+                    continue
                 mentions.append({
                     "id": r["id"],
                     "channel": r["channel"],
@@ -8316,6 +8322,9 @@ class NthWebHandler(BaseHTTPRequestHandler):
                     db.close()
                 except sqlite3.Error:
                     pass
+        if summary:
+            self._json({"ok": True, "count": count, "unread_count": unread_count})
+            return
         self._json({"ok": True, "count": len(mentions),
                     "unread_count": unread_count, "mentions": mentions})
 

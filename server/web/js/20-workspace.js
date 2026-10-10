@@ -115,7 +115,7 @@
     blockedAgents(src = state) { return listOf(src.agents).filter(a => a.status === 'blocked' || a.status === 'error' || a.status === 'errored').length; },
     activeAgents(src = state) { return listOf(src.agents).filter(a => ['working','active','idle'].includes(a.status)).length; },
     unreadDms(src = state) { return (src.dms?.your_dms || []).reduce((s, d) => s + (Number(d.unread) || 0), 0); },
-    unreadMentions(src = state) { return listOf(src.mentions).filter(m => !m.read).length; },
+    unreadMentions(src = state) { return src.mentionsSummaryOnly ? (src.mentionsUnread || 0) : listOf(src.mentions).filter(m => !m.read).length; },
     pendingQuestions(src = state) { return visibleQuestions(src).length; },
     recentChannels(src = state) { return (src.channels || []).filter(c => !c.archived).slice(0, 5); },
     taskItems(src = state) {
@@ -1272,7 +1272,13 @@
     if (view === 'home') { renderHome(panel); }
     else if (view === 'tasks') { renderTasks(panel); }
     else if (view === 'attention') { renderAttention(panel); }
-    else if (view === 'messages') { renderMessages(panel); }
+    else if (view === 'messages') {
+      if (state.mentionsSummaryOnly || !state.loaded?.mentions) {
+        panel.textContent = 'Loading messages…';
+        refreshMentions(false).then(() => { if (state.view === 'messages') { renderMessages(panel); renderRail(); } })
+          .catch(error => { if (state.view === 'messages') panel.textContent = error.message; });
+      } else renderMessages(panel);
+    }
     else if (view === 'roster') { Trio.agents?.renderPage?.(panel); }
     else if (view === 'prefs') { Trio.preferences?.renderPage?.(panel); }
     else if (view === 'archive') { renderArchive(panel); }
@@ -1600,6 +1606,26 @@
     else if (route.name === 'archive') showView('archive');
     else if (route.name === 'data') showView('data');
   }
+  let mentionRequest = 0, mentionDetailPending = null;
+  function refreshMentions(summary = state.view !== 'messages') {
+    if (mentionDetailPending) return mentionDetailPending;
+    const version = ++mentionRequest;
+    const task = api.get('/api/mentions' + (summary ? '?summary=1' : '')).then(data => {
+      if (version !== mentionRequest) return;
+      state.mentionsSummaryOnly = summary;
+      state.mentionsUnread = data.unread_count || 0;
+      if (!summary) {
+        state.mentions = data.mentions || [];
+        Trio.store.set('workspace.mentions', state.mentions);
+      }
+      markLoaded('mentions');
+    });
+    if (!summary) {
+      mentionDetailPending = task.finally(() => { mentionDetailPending = null; });
+      return mentionDetailPending;
+    }
+    return task;
+  }
   let refreshPending = null;
   async function refresh({messageOnly = false} = {}) {
     // Hidden views need no snapshots; the stream-open hook catches up on return.
@@ -1618,7 +1644,7 @@
       () => api.get('/api/tasks' + query).then(data => { state.tasks = data.tasks || []; Trio.store.set('workspace.tasks', state.tasks); markLoaded('tasks'); }),
       () => api.get('/api/approvals').then(data => { state.approvals = data.approvals || []; Trio.store.set('workspace.approvals', state.approvals); markLoaded('approvals'); }),
       () => api.get('/api/questions').then(data => { state.questions = data.questions || []; Trio.store.set('workspace.questions', state.questions); markLoaded('questions'); }),
-      () => api.get('/api/mentions').then(data => { state.mentions = data.mentions || []; Trio.store.set('workspace.mentions', state.mentions); markLoaded('mentions'); }),
+      () => refreshMentions(),
       () => api.get('/api/usage').then(data => { state.usage = data; Trio.store.set('workspace.usage', state.usage); markLoaded('usage'); }),
       // Keep state.agents (live/busy/state + context %) fresh on the 15s
       // full-snapshot cadence, alongside the lightweight agent poll. The drawer, face-pile, and roster
