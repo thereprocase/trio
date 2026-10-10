@@ -285,6 +285,20 @@
   async function terminalControls(id) {
     const dialog = document.createElement('dialog'); dialog.className = 'terminal-controls'; dialog.setAttribute('aria-label', 'Terminal controls');
     const heading = document.createElement('h2'); heading.textContent = 'Terminal controls';
+    const header = document.createElement('div'); header.className = 'terminal-header';
+    const dismiss = document.createElement('button'); dismiss.type = 'button'; dismiss.className = 'terminal-close';
+    dismiss.textContent = '×'; dismiss.setAttribute('aria-label', 'Close terminal controls');
+    dismiss.addEventListener('click', () => dialog.close()); header.append(heading, dismiss);
+    const outside = event => {
+      const r = dialog.getBoundingClientRect();
+      return event.clientX < r.left || event.clientX > r.right || event.clientY < r.top || event.clientY > r.bottom;
+    };
+    let backdropPress = false;
+    dialog.addEventListener('pointerdown', event => { backdropPress = event.target === dialog && outside(event); });
+    dialog.addEventListener('click', event => {
+      if (backdropPress && event.target === dialog && outside(event)) dialog.close();
+      backdropPress = false;
+    });
     const status = document.createElement('p'); status.setAttribute('aria-live', 'polite');
     const screen = document.createElement('pre'); screen.className = 'terminal-screen'; screen.tabIndex = 0;
     const history = document.createElement('div');
@@ -334,7 +348,7 @@
     const refresh = document.createElement('button'); refresh.type = 'button'; refresh.textContent = 'Refresh snapshot'; refresh.addEventListener('click', refreshTerminal);
     const close = document.createElement('button'); close.type = 'button'; close.textContent = 'Close'; close.addEventListener('click', () => dialog.close());
     const note = document.createElement('p'); note.textContent = 'Review the screen before answering a prompt. “Sent” means keys reached tmux; check the screen for completion. Actions are never retried automatically.';
-    dialog.append(heading,status,quotas,screen,text,pauseLabel,enters,buttons,refresh,close,note,history);
+    dialog.append(header,status,quotas,screen,text,pauseLabel,enters,buttons,refresh,close,note,history);
     dialog.addEventListener('close', () => { ++refreshVersion; dialog.remove(); }); document.body.append(dialog); dialog.showModal(); await refreshTerminal();
   }
   function renderPage(panel) {
