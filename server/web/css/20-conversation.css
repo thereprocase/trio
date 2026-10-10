@@ -417,8 +417,8 @@ body.compact .day-separator, body.compact .unread-divider { margin:4px 0; }
 .message-identity{ display:contents; }
 
 /* Horizontal reply feedback uses the active theme. Native scrolling stays enabled. */
-.messages { overflow-x:hidden; overscroll-behavior-x:none; }
-.message { position:relative; }
+.messages { overflow-x:hidden; overscroll-behavior-x:none; isolation:isolate; }
+.message { position:relative; isolation:isolate; }
 .message-content { position:relative; z-index:1; }
 .swipe-reply-icon { position:absolute; width:24px; height:24px; display:grid; place-items:center; transform:translateY(-50%); opacity:0; color:var(--ink-3); pointer-events:none; }
 .message.swipe-reply-ready .swipe-reply-icon { color:var(--accent); }
