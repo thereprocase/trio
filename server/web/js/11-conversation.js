@@ -293,6 +293,8 @@
         // avatar gradient background.
         if (kind === 'mention') span.dataset.tone = Trio.avatarTone(nameFor(lookup, match[2])) || 'eucalyptus';
         span.dataset.memberId = lookup;
+        if (!String(lookup).startsWith('_op_') && (member(lookup).kind || 'agent') === 'agent')
+          Trio.agents?.bindMemberControl?.(span, lookup, nameFor(lookup, lookup));
         span.textContent = match[1] + nameFor(lookup, match[2]);
         frag.append(span);
         cursor = match.index + match[0].length;
@@ -665,6 +667,7 @@
       avatar.append(image);
     } else avatar.textContent = (vm.author || '?').split(/\s+/).map(part => part[0]).join('').slice(0, 2).toUpperCase();
     if (inline) avatar.classList.add('header-avatar');
+    if (vm.role === 'agent') Trio.agents?.bindMemberControl?.(avatar, vm.member_id, vm.author);
     return avatar;
   }
 
@@ -690,6 +693,7 @@
     if (!vm.isOwn) identity.append(messageAvatar(vm, true));
     const author = document.createElement('strong'); author.textContent = vm.author;
     author.title = vm.author; author.setAttribute('aria-label', vm.author);
+    if (vm.role === 'agent') Trio.agents?.bindMemberControl?.(author, vm.member_id, vm.author);
     const numberPrefix = () => { const part = document.createElement('span'); part.className = 'message-id'; part.textContent = '#' + vm.id + ' · '; return part; };
     const idPart = numberPrefix();
     const stamp = Trio.time.element(vm.createdAt, { prefix: idPart });

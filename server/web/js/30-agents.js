@@ -204,6 +204,37 @@
     }
     article.append(actions); return article;
   }
+  function isOwner() { return ['loopback','tailscale'].includes(state.operator?.source); }
+  async function openMember(id) {
+    if (!isOwner()) return;
+    const results = await Promise.allSettled([Trio.api.get('/api/agents'), Trio.api.get('/api/terminals')]);
+    const managed = results[0].status === 'fulfilled' ? (results[0].value.agents || []).find(a => a.id === id) : null;
+    if (managed) { showDetail(viewModel(managed)); return; }
+    const sessions = results[1].status === 'fulfilled' ? (results[1].value.sessions || []).filter(s => s.member_id === id) : [];
+    if (sessions.length === 1) { await terminalControls(sessions[0].id); return; }
+    if (sessions.length > 1) {
+      const dialog = document.createElement('dialog'); dialog.className = 'terminal-controls';
+      const title = document.createElement('h2'); title.textContent = 'Choose agent session'; dialog.append(title);
+      for (const session of sessions) {
+        const button = document.createElement('button'); button.type = 'button'; button.textContent = session.name + ' · ' + session.host + ' · ' + session.pane;
+        button.addEventListener('click', () => { dialog.close(); terminalControls(session.id); }); dialog.append(button);
+      }
+      const close = document.createElement('button'); close.type = 'button'; close.textContent = 'Close'; close.addEventListener('click', () => dialog.close()); dialog.append(close);
+      dialog.addEventListener('close', () => dialog.remove()); document.body.append(dialog); dialog.showModal(); return;
+    }
+    const person = state.members?.get(id);
+    Trio.ui.modal('Agent: ' + (person?.name || id), '<p>' + (results.every(r => r.status === 'rejected')
+      ? 'Agent controls could not be loaded. Try again.'
+      : 'This session is not paired for remote controls yet.') + '</p>', undefined, {submit:false,cancelLabel:'Close'});
+  }
+  function bindMemberControl(element, id, name) {
+    if (!isOwner()) return;
+    element.classList.add('agent-control-link'); element.setAttribute('role', 'button'); element.tabIndex = 0;
+    element.removeAttribute('aria-hidden'); element.setAttribute('aria-label', 'Manage agent ' + name);
+    const open = event => { event.preventDefault(); event.stopPropagation(); openMember(id); };
+    element.addEventListener('click', open);
+    element.addEventListener('keydown', event => { if (event.key === 'Enter' || event.key === ' ') open(event); });
+  }
   // Paired terminals remain external sessions: no supervisor takeover.
   function terminalSection(panel) {
     const section = document.createElement('section'); section.className = 'terminal-sessions';
@@ -1106,5 +1137,5 @@
     });
     modelField?.addEventListener('change', rebuildEffort);
   }
-  Trio.agents = { terminalControls, init, mount, unmount, render, renderPage, refresh, renderActivityEvent, loadDiscovery, normalizeModels, modelOptions, orderedProviders, providerLabel, initialEffortFor, FIRST_RUN, permissionOptions, viewModel, actionCaps, actionLabel, statusIcon, formatLastActive, action, create, effortsForModel, effortOptions, effortSlider, wireEffortSlider, lastEffort, rememberEffort, selection, toggleSelected, clearSelection, bulkAction, reportBulk, bulkAttributeJobs, showBulkAttributes, showBulkChannels, showBulkCompact };
+  Trio.agents = { openMember, bindMemberControl, terminalControls, init, mount, unmount, render, renderPage, refresh, renderActivityEvent, loadDiscovery, normalizeModels, modelOptions, orderedProviders, providerLabel, initialEffortFor, FIRST_RUN, permissionOptions, viewModel, actionCaps, actionLabel, statusIcon, formatLastActive, action, create, effortsForModel, effortOptions, effortSlider, wireEffortSlider, lastEffort, rememberEffort, selection, toggleSelected, clearSelection, bulkAction, reportBulk, bulkAttributeJobs, showBulkAttributes, showBulkChannels, showBulkCompact };
 })();

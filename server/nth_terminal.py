@@ -159,7 +159,7 @@ def exchange(path, host, payload, now=None):
         if not isinstance(generation,str) or len(generation)>128:
             raise ValueError('invalid session generation')
         clean.append({'binding':snap['binding'],'generation':generation,
-            'name':str(snap.get('name',snap['binding']))[:100], 'provider':str(snap.get('provider',''))[:20],
+            'name':str(snap.get('name',snap['binding']))[:100], 'member_id':str(snap.get('member_id',''))[:80], 'provider':str(snap.get('provider',''))[:20],
             'pane':str(snap.get('pane',''))[:20], 'available':snap.get('available') is True,
             'screen':screen,'screen_hash':hashlib.sha256(screen.encode()).hexdigest(),
             'problem':str(snap.get('problem',''))[:160]})
@@ -217,6 +217,7 @@ class Tmux:
 
     def snapshot(self,binding):
         result={k:binding[k] for k in ('binding','name','pane','provider')}
+        result['member_id']=binding.get('member_id','')
         try:
             generation=self.identity(binding)
             if generation != binding.get('generation'):
@@ -288,18 +289,19 @@ def main(argv=None):
     sub=parser.add_subparsers(dest='command',required=True)
     run=sub.add_parser('run');run.add_argument('--config',required=True)
     bind=sub.add_parser('bind');bind.add_argument('--config',required=True)
-    bind.add_argument('--binding',required=True);bind.add_argument('--name',required=True)
+    bind.add_argument('--member-id',required=True);bind.add_argument('--binding',required=True);bind.add_argument('--name',required=True)
     bind.add_argument('--pane',required=True);bind.add_argument('--provider',choices=['claude','codex'],required=True)
     pair=sub.add_parser('pair');pair.add_argument('--host',required=True);pair.add_argument('--url',required=True)
     pair.add_argument('--hub-file',required=True);pair.add_argument('--spoke-file',required=True)
-    pair.add_argument('--binding',required=True);pair.add_argument('--name',required=True);pair.add_argument('--pane',required=True)
+    pair.add_argument('--member-id',required=True);pair.add_argument('--binding',required=True);pair.add_argument('--name',required=True);pair.add_argument('--pane',required=True)
     pair.add_argument('--provider',choices=['claude','codex'],required=True);pair.add_argument('--socket')
     args=parser.parse_args(argv)
     if args.command=='run':return bridge(args.config)
+    if not ID.fullmatch(args.member_id):parser.error('invalid Quartet member ID')
     if args.command=='bind':
         cfg=private_json(args.config)
         if not ID.fullmatch(args.binding):parser.error('invalid binding')
-        binding={'binding':args.binding,'name':args.name,'pane':args.pane,'provider':args.provider}
+        binding={'binding':args.binding,'name':args.name,'pane':args.pane,'provider':args.provider,'member_id':args.member_id}
         binding['generation']=Tmux(cfg.get('socket')).identity(binding)
         cfg['bindings']=[b for b in cfg['bindings'] if b['binding']!=args.binding]+[binding]
         tmp=Path(args.config).with_name(Path(args.config).name+'.'+secrets.token_hex(4))
@@ -308,7 +310,7 @@ def main(argv=None):
         return
     if not ID.fullmatch(args.host) or not ID.fullmatch(args.binding) or not re.fullmatch(r'%[0-9]+',args.pane):
         parser.error('invalid host, binding or pane')
-    binding={'binding':args.binding,'name':args.name,'pane':args.pane,'provider':args.provider}
+    binding={'binding':args.binding,'name':args.name,'pane':args.pane,'provider':args.provider,'member_id':args.member_id}
     binding['generation']=Tmux(args.socket).identity(binding)
     token=secrets.token_hex(32)
     save_private(args.hub_file,{'hosts':[{'host':args.host,'token_hash':hashlib.sha256(token.encode()).hexdigest()}]})

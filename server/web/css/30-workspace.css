@@ -86,3 +86,7 @@ dialog#trio-archives{width:min(520px,calc(100% - 32px));border:1px solid var(--l
 .terminal-controls input[type=number] { width:80px; }
 .terminal-controls button, .terminal-controls select, .terminal-controls input { min-height:44px; }
 .terminal-actions { display:flex; flex-wrap:wrap; gap:8px; margin:12px 0; }
+
+.agent-control-link { cursor:pointer; }
+.agent-control-link:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+.message-head strong.agent-control-link:hover { text-decoration:underline; text-underline-offset:3px; }

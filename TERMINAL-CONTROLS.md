@@ -5,6 +5,10 @@ agents. The existing native compaction and approval inbox stay with the runtimes
 Quartet supervises. External sessions are never silently taken over or resumed by
 a second runtime process.
 
+Tap an agent’s message avatar or name to open its controls as the owner.
+Bindings use the exact Quartet member ID, never a display-name guess. Multiple
+paired sessions show a chooser; unpaired sessions explain that pairing is needed.
+
 A paired Linux host bridge provides tmux snapshots and explicit owner actions.
 The owner opens **Terminal controls**, refreshes the snapshot, and can:
 
@@ -32,7 +36,7 @@ Run on the agent's host, under the tmux-owning user:
 ```sh
 python server/nth_terminal.py pair --host workstation --url https://hub.example:8765 \
   --hub-file /private/terminal-hosts.json --spoke-file /private/terminal-bridge.json \
-  --binding worker --name Worker --provider claude --pane %3
+  --member-id worker-id --binding worker --name Worker --provider claude --pane %3
 ```
 
 Both files are created exclusively with mode 0600. The command never prints the
@@ -45,7 +49,7 @@ Add another agent or deliberately rebind a replaced process:
 
 ```sh
 python server/nth_terminal.py bind --config /private/terminal-bridge.json \
-  --binding reviewer --name Reviewer --provider codex --pane %4
+  --member-id reviewer-id --binding reviewer --name Reviewer --provider codex --pane %4
 python server/nth_terminal.py run --config /private/terminal-bridge.json
 ```
 
