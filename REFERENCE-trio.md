@@ -422,3 +422,12 @@ lock, with interruptible backoff from 0.5 to 30 seconds. Listener status becomes
 ended only after terminal persistence commits. Reconciliation retires unexpectedly
 dead listeners with no committed terminal state and schedules a replacement after
 0.5 seconds; re-enable requires no filter, owner or service change.
+
+### Agent-only wake group
+
+`!agents` wakes every agent in the current channel, bypassing wake filters like
+`!all`, but excludes human members. It changes wake targeting, not message
+visibility. `!all` still wakes everyone. Explicit individual bangs can be
+combined with `!agents`. The group keyword is reserved for bangs; use a human
+member’s ID if their display name is “agents”. Incoming agent bubbles are blue
+and human bubbles green; your own right-aligned bubbles retain their theme.

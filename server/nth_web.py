@@ -1552,7 +1552,7 @@ def _parse_sigils_against_roster(
 
     Mirrors the parser in nth_server.nth_send so web-operator posts carry
     the same wake semantics as MCP-agent posts. @all + !all short-circuit
-    to every-member; #all has no analogue (reference-to-everyone is just
+    to every-member; !agents wakes only agent members. #all has no analogue (reference-to-everyone is just
     noise). Members named literally 'all' are skipped so they don't
     double-count against the keyword shortcuts.
 
@@ -1563,13 +1563,14 @@ def _parse_sigils_against_roster(
     share a stem (ambiguity — force the agent to type the literal).
     """
     members = db.execute(
-        "SELECT id, name FROM members WHERE channel = ?",
+        "SELECT * FROM members WHERE channel = ?",
         (channel,),
     ).fetchall()
     lowered = content.lower()
     all_ids = [m["id"] for m in members]
     at_all   = re.search(r"@all(?:\b|$)", lowered) is not None
     bang_all = re.search(r"!all(?:\b|$)", lowered) is not None
+    bang_agents = re.search(r"!agents(?![\w-])", lowered) is not None
     mention_ids: List[str] = list(all_ids) if at_all   else []
     bang_ids:    List[str] = list(all_ids) if bang_all else []
     ref_ids:     List[str] = []
@@ -1577,7 +1578,11 @@ def _parse_sigils_against_roster(
     # claimed, so the guest-stem pass doesn't shadow a real identity.
     hit_at: set = set()
     hit_ref: set = set()
-    hit_bang: set = set()
+    if bang_agents and not bang_all:
+        bang_ids = [m["id"] for m in members if
+                    (m["kind"] if "kind" in m.keys() and m["kind"] else "agent") == "agent"
+                    and not m["id"].startswith("_op_")]
+    hit_bang: set = set(bang_ids)
     literal_names_lower: set = set()
     for m in members:
         name = (m["name"] or "").strip()
@@ -1594,7 +1599,7 @@ def _parse_sigils_against_roster(
             if mid not in hit_ref:
                 ref_ids.append(mid)
                 hit_ref.add(mid)
-        if not bang_all:
+        if not bang_all and mid.lower() != "agents":
             if re.search(r"!" + id_esc + r"(?:\b|$)", content, re.IGNORECASE):
                 if mid not in hit_bang:
                     bang_ids.append(mid)
@@ -1611,7 +1616,7 @@ def _parse_sigils_against_roster(
             if re.search(r"#" + name_esc + r"(?:\b|$)", content, re.IGNORECASE):
                 ref_ids.append(mid)
                 hit_ref.add(mid)
-        if not bang_all and mid not in hit_bang:
+        if not bang_all and mid not in hit_bang and name.lower() != "agents":
             if re.search(r"!" + name_esc + r"(?:\b|$)", content, re.IGNORECASE):
                 bang_ids.append(mid)
                 hit_bang.add(mid)
@@ -1625,7 +1630,7 @@ def _parse_sigils_against_roster(
         if not stem:
             continue
         guest_by_stem.setdefault(stem.lower(), []).append(m)
-    _RESERVED_STEMS = {"all", "everyone", "here", "channel"}
+    _RESERVED_STEMS = {"all", "agents", "everyone", "here", "channel"}
     for stem_lower, guests in guest_by_stem.items():
         if stem_lower in _RESERVED_STEMS:
             continue  # never let a stem fight the @all/!all broadcast shortcut

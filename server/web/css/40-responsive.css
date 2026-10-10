@@ -302,3 +302,38 @@
   :root[data-theme] .message.msg:not(.me) .message-head strong{ order:-1; }
   :root[data-theme] .message.msg.message-grouped:not(.me):not(.retracted) .message-head .header-avatar{ display:none; }
 }
+
+/* Sender roles are semantic across themes; outgoing bubbles keep their theme. */
+:root {
+  --sender-agent-bg: #e3f1ff;
+  --sender-agent-ink: #18334d;
+  --sender-human-bg: #e5f5e8;
+  --sender-human-ink: #193e27;
+}
+:root[data-theme^="dark-"] {
+  --sender-agent-bg: #203b53;
+  --sender-agent-ink: #e3f1ff;
+  --sender-human-bg: #234331;
+  --sender-human-ink: #e5f5e8;
+}
+:root[data-theme] .message.msg[data-sender-kind="agent"]:not(.me) {
+  --sender-bg: var(--sender-agent-bg);
+  --sender-ink: var(--sender-agent-ink);
+}
+:root[data-theme] .message.msg[data-sender-kind="human"]:not(.me) {
+  --sender-bg: var(--sender-human-bg);
+  --sender-ink: var(--sender-human-ink);
+}
+:root[data-theme] .message.msg[data-sender-kind]:not(.me) .bubble {
+  background: var(--sender-bg);
+  color: var(--sender-ink);
+}
+:root[data-theme] .message.msg[data-sender-kind]:not(.me) .bubble::after {
+  background: var(--sender-bg);
+}
+.inline-agents {
+  background: var(--sender-agent-bg);
+  color: var(--sender-agent-ink);
+  border-radius: 4px;
+  padding: 0 3px;
+}

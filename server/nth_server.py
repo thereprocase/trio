@@ -1921,7 +1921,7 @@ def _parse_sigils(db, channel: str, content: str) -> tuple[list, list, list]:
       #name  → refs     (never wakes on any filter; grep via nth_pounds)
       !name  → bangs    (ALWAYS wakes the target, bypasses every filter)
     @all / !all both broadcast — @all pings everyone under their filter,
-    !all wakes everyone unconditionally. There is no #all.
+    !all wakes everyone unconditionally; !agents wakes only agents. There is no #all.
 
     Sigils govern WAKE, not visibility — a DM's recipients are set
     separately. Shared by nth_send and nth_dm so both carry identical wake
@@ -1931,7 +1931,7 @@ def _parse_sigils(db, channel: str, content: str) -> tuple[list, list, list]:
     bang_ids: list = []
     if "@" in content or "#" in content or "!" in content:
         all_members = db.execute(
-            "SELECT id, name FROM members WHERE channel = ?",
+            "SELECT * FROM members WHERE channel = ?",
             (channel,),
         ).fetchall()
         try:
@@ -1947,13 +1947,18 @@ def _parse_sigils(db, channel: str, content: str) -> tuple[list, list, list]:
         # doesn't broadcast; "@all" or "@all " or "@all," does.
         at_all   = re.search(r"@all(?:\b|$)",  content_lower) is not None
         bang_all = re.search(r"!all(?:\b|$)",  content_lower) is not None
+        bang_agents = re.search(r"!agents(?![\w-])", content_lower) is not None
         if at_all:
             mention_ids = list(all_ids)
         if bang_all:
             bang_ids = list(all_ids)
         hit_at: set = set()
         hit_ref: set = set()
-        hit_bang: set = set()
+        if bang_agents and not bang_all:
+            bang_ids = [m["id"] for m in all_members if
+                        (m["kind"] if "kind" in m.keys() and m["kind"] else "agent") == "agent"
+                        and not m["id"].startswith("_op_")]
+        hit_bang: set = set(bang_ids)
         literal_names_lower: set = set()
         for m in all_members:
             name_stripped = (m["name"] or "").strip()
@@ -1971,7 +1976,7 @@ def _parse_sigils(db, channel: str, content: str) -> tuple[list, list, list]:
                 if mid not in hit_ref:
                     ref_ids.append(mid)
                     hit_ref.add(mid)
-            if not bang_all:
+            if not bang_all and mid.lower() != "agents":
                 if re.search(r"!" + id_esc + r"(?:\b|$)", content, re.IGNORECASE):
                     if mid not in hit_bang:
                         bang_ids.append(mid)
@@ -1995,7 +2000,7 @@ def _parse_sigils(db, channel: str, content: str) -> tuple[list, list, list]:
                     if hash_pat.search(content):
                         ref_ids.append(mid)
                         hit_ref.add(mid)
-                if not bang_all and mid not in hit_bang:
+                if not bang_all and mid not in hit_bang and candidate.lower() != "agents":
                     bang_pat = re.compile(r"!" + name_esc + r"(?:\b|$)", re.IGNORECASE)
                     if bang_pat.search(content):
                         bang_ids.append(mid)
@@ -2013,7 +2018,7 @@ def _parse_sigils(db, channel: str, content: str) -> tuple[list, list, list]:
             if not stem:
                 continue
             guest_by_stem.setdefault(stem.lower(), []).append(m)
-        _RESERVED_STEMS = {"all", "everyone", "here", "channel"}
+        _RESERVED_STEMS = {"all", "agents", "everyone", "here", "channel"}
         for stem_lower, guests in guest_by_stem.items():
             if stem_lower in _RESERVED_STEMS:
                 continue  # never let a stem fight the @all/!all broadcast shortcut
@@ -2189,7 +2194,7 @@ def nth_send(channel: str, member_id: str, message: str = "", task: bool = False
                 Stored in `refs`. Never wakes on `at` / `all`; does wake on
                 `about`. Grep all refs on demand via nth_pounds.
       • !name — BANG. UNFILTERABLE. Wakes the target regardless of filter.
-                !all wakes every member in the channel. For genuine
+                !all wakes every member; !agents wakes only agent members in the channel. For genuine
                 emergencies or channel-close signalling only — casual use
                 is abusive because agents CANNOT opt out.
 

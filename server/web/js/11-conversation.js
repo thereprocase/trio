@@ -100,7 +100,7 @@
       member_id: msg.member_id,
       author: nameFor(msg.member_id, msg.member_name),
       isOwn: msg.member_id === op,
-      role: msg.member_id === op ? '' : (memberObj.kind || 'agent'),
+      role: msg.member_id === op ? '' : (String(msg.member_id || '').startsWith('_op_') ? 'human' : (memberObj.kind || 'agent')),
       isPrivate: isPrivate(msg),
       isSystem: M.isSystemContent(msg.content || ''),
       channel: msg.channel || state.channel || '',
@@ -271,11 +271,11 @@
         // @all / !all broadcast — rainbow shimmer, independent of any member
         // match (there's no member literally named "all"). Only `all` is wired
         // to a broadcast server-side, so `everyone` renders as plain text.
-        if ((match[1] === '@' || match[1] === '!') && wordLower === 'all') {
+        if (((match[1] === '@' || match[1] === '!') && wordLower === 'all') || (match[1] === '!' && wordLower === 'agents')) {
           changed = true;
           frag.append(document.createTextNode(text.slice(cursor, match.index)));
           const span = document.createElement('span');
-          span.className = 'sigil inline-all';
+          span.className = 'sigil ' + (wordLower === 'agents' ? 'inline-agents' : 'inline-all');
           span.textContent = match[0];
           frag.append(span);
           cursor = match.index + match[0].length;
@@ -673,6 +673,7 @@
     const card = document.createElement('article'); card.className = 'message msg' + (vm.isSystem ? ' system-message' : '') + (!vm.isSystem && vm.isOwn ? ' own me' : '') + (!vm.isSystem && vm.isPrivate ? ' private' : '');
     card.dataset.messageId = vm.id;
     card.dataset.sender = msg.member_id || '';
+    if (!vm.isSystem && !vm.isOwn) card.dataset.senderKind = vm.role === 'human' ? 'human' : 'agent';
     card.dataset.createdAt = vm.createdAt || '';
     if (vm.isSystem) {
       const content = document.createElement('div'); content.className = 'message-content msg-body';

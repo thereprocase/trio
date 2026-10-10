@@ -46,10 +46,10 @@
   function getText() { const el = input(); return el ? (el.textContent || '') : ''; }
   function mentionInfo(sigil, word) {
     const w = word.toLowerCase();
-    // Only `all` is a real broadcast — the server parses @all/!all and nothing
-    // else (see nth_web _parse_sigils_against_roster). Don't chip `everyone`:
+    // Group wake targets are @all/!all and !agents. Do not chip `everyone`:
     // it stays plain text, an honest "this won't wake anyone" signal.
     if ((sigil === '@' || sigil === '!') && w === 'all') return { cls: 'inline-all' };
+    if (sigil === '!' && w === 'agents') return { cls: 'inline-agents' };
     if (sigil !== '@') return null;
     for (const m of (state.members?.values() || [])) {
       if (m && ((m.name && m.name.toLowerCase() === w) || (m.id && m.id.toLowerCase() === w))) {
@@ -1282,6 +1282,9 @@
     // for the ping + bang sigils when the query is a prefix of all/everyone.
     if ((token.sigil === '@' || token.sigil === '!') && ('all'.startsWith(q) || 'everyone'.startsWith(q))) {
       matches.unshift({ id: 'all', name: 'all', kind: 'everyone' });
+    }
+    if (token.sigil === '!' && 'agents'.startsWith(q)) {
+      matches.unshift({ id: 'agents', name: 'agents', kind: 'agents only' });
     }
     if (matches.length) openAutocomplete(token, matches); else closeAutocomplete();
   }

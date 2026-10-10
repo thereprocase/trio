@@ -142,6 +142,39 @@ async function measure() {
     await Promise.all([...list.querySelectorAll('.message-attachment img')].map(image => image.decode()));
 
   })()`);
+  // Role colors use real rendered cards and every registered theme. Own
+  // bubbles must be identical with the new stylesheet block removed.
+  const roles = await evaluate(`(() => {
+    const results = [];
+    const list = document.getElementById('messages');
+    Trio.state.members.set('human', {id:'human', name:'Human', kind:'human'});
+    const cards = ['agent', 'human', '_op_legacy', 'operator'].map((id, i) =>
+      Trio.conversation.cardFor({id:100+i, member_id:id, content:'Role color', created_at:'2026-01-01T12:00:00Z'}));
+    list.append(...cards);
+    const style = document.querySelector('style');
+    const full = style.textContent;
+    const before = full.split('/* Sender roles are semantic across themes;')[0];
+    const color = c => getComputedStyle(c.querySelector('.bubble')).backgroundColor;
+    for (const theme of ${JSON.stringify(themes)}) {
+      document.documentElement.dataset.theme = theme;
+      const colors = cards.map(color);
+      style.textContent = before;
+      const ownBefore = color(cards[3]);
+      style.textContent = full;
+      results.push({theme, colors, ownBefore, kinds:cards.map(c => c.dataset.senderKind || '')});
+    }
+    cards.forEach(c => c.remove());
+    return results;
+  })()`);
+  for (const {theme, colors, ownBefore, kinds} of roles) {
+    assert.deepStrictEqual(kinds, ['agent', 'human', 'human', '']);
+    const dark = theme.startsWith('dark-');
+    assert.strictEqual(colors[0], dark ? 'rgb(32, 59, 83)' : 'rgb(227, 241, 255)', theme + ' agent blue');
+    assert.strictEqual(colors[1], dark ? 'rgb(35, 67, 49)' : 'rgb(229, 245, 232)', theme + ' human green');
+    assert.strictEqual(colors[2], colors[1], theme + ' legacy operator human');
+    assert.strictEqual(colors[3], ownBefore, theme + ' own unchanged');
+  }
+  console.log('PASS: human/agent colors and unchanged own bubbles across ' + roles.length + ' themes');
   let passed = 0;
   const failures = [], measurements = [];
   for (const width of [320, 360, 390, 412, 768, 1280]) {
