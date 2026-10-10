@@ -9,9 +9,9 @@ run synchronously inside the Codex app-server daemon and cannot wake an idle
 thread, so this hook starts a detached waiter and returns at once; on the first
 message that passes the filter the waiter runs
 
-    codex queue --thread <session id> --message <wake text>
+    turn/start on the existing owning daemon control socket
 
-which starts a turn in an idle thread, or queues one behind a running turn.
+which starts a turn in an idle thread, or steers a running turn atomically.
 `setup.py` registers the hook in Codex's hooks.json for four events:
 
     tool    PostToolUse on the Trio/Quartet connect, listen and ack tools of any
@@ -32,13 +32,12 @@ window closes (the daemon keeps a busy thread loaded), until the session ends.
 
 Arming spawns `nth_codex_hook.py wait` in a new session with stdin, stdout and
 stderr on the null device: Codex waits for the hook's pipes to close, and kills
-the hook's process group when its timeout expires. The waiter queues one wake and
+the hook's process group when its timeout expires. The waiter submits one batch and
 exits; the Stop hook of the turn that wake starts arms the next waiter.
 
-The wake is the same fixed sentence a Claude session gets, built from integers
-and sanitized identifiers. It reaches the thread as a user message, so it never
-carries message text or a sender's name: the agent reads those through the poll
-tool, as untrusted data.
+Wakes include bounded, explicitly labelled untrusted peer content; acknowledgement
+remains a separate agent action. Oversize messages retain the poll recovery hint.
+Claude's stderr wake remains metadata-only.
 """
 import argparse
 import json
@@ -367,7 +366,7 @@ def relay_owns(session_id):
 
 
 def codex_binary():
-    """The codex executable for `codex queue`: TRIO_CODEX_BINARY, then codex on PATH,
+    """The installed Codex executable: TRIO_CODEX_BINARY, then codex on PATH,
     then the codex_binary saved by `setup.py --codex-binary`. Never the process that
     ran the hook: that is the daemon, whose path an update may already have replaced."""
     override = os.environ.get('TRIO_CODEX_BINARY')
@@ -381,33 +380,41 @@ def codex_binary():
     return saved if isinstance(saved, str) and Path(saved).is_file() else None
 
 
-def queue_wake(session_id, text):
-    """Queue the wake into the thread: 'queued', 'failed' or 'unknown'.
+def steer_wake(session_id, text):
+    """Submit once to the owning daemon. turn/start atomically steers a busy turn.
 
-    A refusal is retried. A timeout is not: the message may have been queued after
-    all, so it is 'unknown' and counts as delivered, and the next waiter does not
-    announce the same ids again. A failure leaves the marks where they were."""
-    binary = codex_binary()
-    if not binary:
-        return 'failed'
-    command = [binary, 'queue', '--thread', session_id, '--message', text]
-    for attempt in range(QUEUE_ATTEMPTS):
-        try:
-            result = subprocess.run(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                    stderr=subprocess.DEVNULL, timeout=QUEUE_TIMEOUT_SECONDS)
-        except subprocess.TimeoutExpired:
-            return 'unknown'
-        except OSError:
+    The installed protocol explicitly supports adding input to an active turn.
+    We only address loaded threads; never resume on a different server. No queue
+    fallback and no retry after submission: a lost response is ambiguous.
+    """
+    from nth_codex_socket import CodexSocketClient
+    endpoint = 'unix://' + str(codex_home() / 'app-server-control' / 'app-server-control.sock')
+    client = CodexSocketClient(endpoint)
+    submitted = False
+    try:
+        client.start(timeout=5)
+        thread = client.request('thread/read', {'threadId': session_id, 'includeTurns': False},
+                                timeout=5).get('thread', {})
+        if thread.get('status', {}).get('type') not in ('active', 'idle'):
             return 'failed'
-        if result.returncode == 0:
-            return 'queued'
-        if attempt + 1 < QUEUE_ATTEMPTS:
-            time.sleep(QUEUE_RETRY_SECONDS * (attempt + 1))
-    return 'failed'
+        submitted = True
+        client.request('turn/start', {'threadId': session_id,
+                       'input': [{'type': 'text', 'text': text, 'text_elements': []}]}, timeout=10)
+        return 'delivered'
+    except Exception as exc:
+        # A protocol refusal has a definite response; a transport loss after
+        # sending must not be retried and accidentally duplicate model input.
+        from nth_codex_runtime import CodexProtocolError
+        if isinstance(exc, CodexProtocolError) and str(exc).startswith('turn/start:'):
+            return 'failed'
+        return 'unknown' if submitted else 'failed'
+    finally:
+        client.stop()
 
 
 class QueueSink:
-    """How a waiter reaches a Codex thread: `codex queue`. See core.StderrSink."""
+    """Steer a loaded Codex thread through its owning daemon. See core.StderrSink."""
+    full_messages = True
     client = 'codex'
     name_servers = True
 
@@ -434,13 +441,13 @@ class QueueSink:
         return ''
 
     def deliver(self, lines):
-        result = queue_wake(self.session_id, '\n'.join(lines))
+        result = steer_wake(self.session_id, '\n'.join(lines))
         if result == 'unknown':
-            self.outcome = {'note': 'codex queue timed out: the wake may not have been queued, and its '
+            self.outcome = {'note': 'Codex delivery response lost or timed out: the wake may have arrived, and its '
                                     'messages count as announced'}
-        if result in ('queued', 'unknown'):
+        if result in ('delivered', 'unknown'):
             core.shadow_actual(self)
-        return result in ('queued', 'unknown')
+        return result in ('delivered', 'unknown')
 
 
 def spawn_waiter(session_id, supervisor):

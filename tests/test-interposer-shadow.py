@@ -636,8 +636,8 @@ class ShadowTests(unittest.TestCase):
     def test_queue_actual_queued_unknown_only(self):
         sink=codex.QueueSink(SESSION,None)
         sink.shadow_record=(SESSION,[],[],1)
-        for result in ('queued','unknown','failed'):
-            with patch.object(codex,'queue_wake',return_value=result):
+        for result in ('delivered','unknown','failed'):
+            with patch.object(codex,'steer_wake',return_value=result):
                 self.assertEqual(sink.deliver(['fixed notice']),result!='failed')
         self.assertEqual(len(shadow.records('actual')),2)
 

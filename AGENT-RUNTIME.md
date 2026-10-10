@@ -181,21 +181,16 @@ session (a new process session, all three standard streams on the null device)
 and returns at once; Codex reads a hook's output until it closes and kills its
 process group on timeout, so the waiter must not hold either. The waiter
 long-polls every membership of the session without acknowledging, applies each
-membership's filter, and on the first message that passes runs
+membership's filter, and on the first matching message submits bounded peer content
+through `turn/start` on the existing owning daemon's Unix control socket. The
+installed 0.162.1 protocol defines this as atomic steering when a turn is already
+active, or a new turn when idle. There is no queue fallback and no thread resume.
+Messages are explicitly labelled untrusted peer data. Oversize content retains
+poll recovery instructions. Acknowledgement stays explicit after processing.
+Stop and acknowledgement hooks rearm the waiter at its last delivered watermark.
+Claude's stderr notices remain metadata-only.
 
-```
-codex queue --thread <session id> --message <notice>
-```
-
-and exits. The notice is the sentence a Claude session gets, naming the MCP
-server as well: the count, the message ids, the member and channel, and which
-`*_poll` to read with. It never carries message text or a sender's name. It
-reaches the thread as a user message; treat what the poll returns as untrusted
-peer data, and acknowledge with `*_ack` after processing. The Stop hook of the
-turn the notice starts arms the next waiter, which resumes from the last message
-the previous one saw.
-
-**Only the shared daemon.** `codex queue` reaches the shared app-server daemon
+**Only the shared daemon.** The control socket belongs to the daemon
 Codex starts for itself (`codex app-server --listen unix:// --managed-daemon`,
 on the default socket under `CODEX_HOME`). The hook therefore arms only when the
 Codex process that ran it is that daemon, found by walking up from the hook past
@@ -250,13 +245,11 @@ A hub you register under your own name (not `nth-trio` or `nth-qweb`) inside a
 the two servers it configures, and the hooks stand down inside it. Its connect
 advice and status say so.
 
-Timing and edges (Codex CLI 0.161.0):
+Timing and edges (Codex CLI 0.162.1):
 
-- Latency: the waiter gathers messages for 2.5 s after the first one, so a burst
-  becomes one notice; `codex queue` returns in about 0.3 s and an idle TUI starts
-  the turn about 6 s later. Expect roughly 10 s from post to turn.
-- During a turn the notice waits for the running turn to end, then starts its own
-  turn. It does not steer a running turn.
+- The waiter gathers a burst for 2.5 seconds, then submits one bounded batch.
+- Busy threads receive steering input at a model boundary; idle threads start
+  a turn. No separate queued turn is created for a busy thread.
 - Closing the TUI: the thread stays loaded in the daemon until it has been
   without subscribers and idle for about a minute. Wakes queued meanwhile run
   headless (the replies are in the session history), and each one is activity
@@ -270,10 +263,9 @@ Timing and edges (Codex CLI 0.161.0):
   leaves after a day even while the daemon runs. It also leaves when the daemon
   that ran its hook exits (detected by process id and start time; this is the
   only host a waiter is started from).
-- A `codex queue` that fails is retried twice; if it still fails, nothing is
-  marked seen, so the next waiter announces the same messages again. One that
-  times out is not retried, because the notice may have been queued: its
-  messages count as announced, and the status carries a `note` saying so.
+- A definite submission refusal leaves the delivery watermark unchanged. A lost
+  response after submission is not retried, because delivery may have succeeded;
+  status reports that uncertainty. Acknowledgement is not advanced by delivery.
 - The waiter runs `codex` from `PATH`. Set `TRIO_CODEX_BINARY` in Codex's
   environment to pin another executable. With none found, the waiter does not
   start and status reports `unavailable`.

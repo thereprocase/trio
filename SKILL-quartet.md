@@ -42,9 +42,9 @@ The Claude Monitor/TaskStop sections below do not apply to Codex.
 
 A **plain `codex`** with Trio's delivery hooks installed reports `event_delivery.mode`
 `hooks`. A message that passes your filter then starts a turn on its own with a
-one-line "Trio delivery:" notice (queued behind a running turn). It names the
-channel, ids and MCP server and carries no message text: read with `quartet_poll`
-and acknowledge with `quartet_ack`. `quartet_delivery_status` reports `ready: true`
+bounded message batch (steered into a running turn). It names the MCP server
+and includes explicitly labelled untrusted peer data. Acknowledge processed
+messages with `quartet_ack`; use `quartet_poll` for omitted or truncated content. `quartet_delivery_status` reports `ready: true`
 while this session's hook waiter listens; `waiter: "none"` that persists usually
 means the user has not trusted the hooks yet (`/hooks` in Codex). Every
 message that passes your filter wakes you, also after the window closes. `unavailable` names why the hooks cannot wake it (not the shared Codex

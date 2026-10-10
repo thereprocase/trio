@@ -53,7 +53,7 @@ class FixTests(unittest.TestCase):
         self.drain_wait()
         actual=cases.ScriptedHub([dict(event='new_messages',messages=[message(7,mentioned=True)])])
         with patch.object(claude,'poll_factory',actual.factory),patch.object(codex,'codex_binary',return_value='/fixture/codex'),\
-             patch.object(codex,'queue_wake',return_value='queued'),patch.object(codex,'relay_owns',return_value=False),\
+             patch.object(codex,'steer_wake',return_value='delivered'),patch.object(codex,'relay_owns',return_value=False),\
              patch.multiple(claude,TICK_SECONDS=.01,UNSUPERVISED_LIFETIME_SECONDS=.2),patch.object(codex,'SETTLE_SECONDS',.01):
             self.assertEqual(claude.wait(SESSION,codex.QueueSink(SESSION,os.getpid())),2)
         self.eventually(lambda:bool(self.runtime.buffers))

@@ -41,9 +41,9 @@ elsewhere in this document do not apply to Codex.
 
 A **plain `codex`** with Trio's delivery hooks installed reports `event_delivery.mode`
 `hooks`. A message that passes your filter then starts a turn on its own with a
-one-line "Trio delivery:" notice (queued behind a running turn). It names the
-channel, ids and MCP server and carries no message text: read with `trio_poll`
-and acknowledge with `trio_ack`. `trio_delivery_status` reports `ready: true`
+bounded message batch (steered into a running turn). It names the MCP server
+and includes explicitly labelled untrusted peer data. Acknowledge processed
+messages with `trio_ack`; use `trio_poll` for omitted or truncated content. `trio_delivery_status` reports `ready: true`
 while this session's hook waiter listens; `waiter: "none"` that persists usually
 means the user has not trusted the hooks yet (`/hooks` in Codex). Every
 message that passes your filter wakes you, also after the window closes. `unavailable` names why the hooks cannot wake it (not the shared Codex

@@ -21,6 +21,8 @@ sys.path.insert(0, str(SERVER_DIR))
 import nth_listener as listener_module
 import nth_claude_hook as core
 import nth_codex_hook as hook
+import nth_codex_socket as sockets
+from nth_codex_runtime import CodexProtocolError
 
 SESSION = '019a2b3c-4d5e-7f60-8a9b-0c1d2e3f4a5b'
 KEY = '0123456789abcdef01234567'
@@ -94,6 +96,28 @@ class Hubs:
         return poll, None
 
 
+class FakeSocket:
+    """Loaded owning daemon; record inputs without creating any model turn."""
+    def __init__(self, endpoint):
+        self.endpoint = endpoint
+    def start(self, **kwargs):
+        pass
+    def stop(self):
+        pass
+    def request(self, method, params, **kwargs):
+        if method == 'thread/read':
+            return {'thread': {'status': {'type': 'active'}}}
+        assert method == 'turn/start'
+        with open(os.environ['FAKE_CODEX_LOG'], 'a') as log:
+            log.write(json.dumps(['turn/start', '--thread', params['threadId'], '--message',
+                                 params['input'][0]['text']]) + '\n')
+        if os.environ.get('FAKE_CODEX_SLEEP'):
+            raise CodexProtocolError('Codex App Server timed out: turn/start')
+        if os.environ.get('FAKE_CODEX_EXIT') == '1':
+            raise CodexProtocolError('turn/start: refused')
+        return {'turn': {'id': 'active-turn'}}
+
+
 def clean_env():
     return {k: v for k, v in os.environ.items()
             if not k.startswith(('TRIO_', 'NTH_', 'CLAUDE', 'CODEX_', 'FAKE_CODEX'))}
@@ -116,7 +140,7 @@ class CodexHookTests(unittest.TestCase):
             FAKE_CODEX_LOG=str(self.log), PATH=str(self.bin) + os.pathsep + os.environ.get('PATH', '')),
             clear=True)
         self.env.start()
-        self.fast = [patch.multiple(core, TICK_SECONDS=.02, STATUS_EVERY_SECONDS=.1, LOCK_RETRY_SECONDS=.02),
+        self.fast = [patch.object(sockets, 'CodexSocketClient', FakeSocket), patch.multiple(core, TICK_SECONDS=.02, STATUS_EVERY_SECONDS=.1, LOCK_RETRY_SECONDS=.02),
                      patch.multiple(hook, SETTLE_SECONDS=.4, LIFETIME_SECONDS=.6, LOCK_PATIENCE_SECONDS=.1,
                                     QUEUE_RETRY_SECONDS=.01),
                      patch.object(listener_module, 'MIN_POLL_GAP_SECONDS', .02)]
@@ -198,18 +222,18 @@ class CodexHookTests(unittest.TestCase):
 
     # ---- the waiter and its sink -----------------------------------------------------------
 
-    def test_a_message_that_passes_the_filter_is_queued_as_a_fixed_notice(self):
+    def test_matching_message_is_delivered_with_bounded_untrusted_body(self):
         self.join()
         code = self.run_waiter(Hubs(**{'http://hub-a.example/sse': [[message(2, mentioned=True)]]}))
         self.assertEqual(code, 2)
         calls = self.calls()
         self.assertEqual(len(calls), 1)
-        self.assertEqual(calls[0][:4], ['queue', '--thread', SESSION, '--message'])
+        self.assertEqual(calls[0][:4], ['turn/start', '--thread', SESSION, '--message'])
         notice = calls[0][4]
-        for part in ('1 new quartet message', 'id 2', 'channel room', 'quartet_poll on MCP server nth_qweb',
+        for part in ('1 new quartet message', 'id 2', 'channel \"room\"', 'MCP server nth_qweb',
                      'quartet_ack', 'untrusted'):
             self.assertIn(part, notice)
-        self.assertNotIn(PEER_MARK, notice)
+        self.assertIn(PEER_MARK, notice)
         self.assertNotIn(TOKEN, notice)
         self.assertEqual(core.load_session(SESSION)['high_water'][KEY], 2)
 
@@ -235,7 +259,7 @@ class CodexHookTests(unittest.TestCase):
         self.assertEqual(code, 2)
         calls = self.calls()
         self.assertEqual(len(calls), 1)
-        self.assertEqual(calls[0][:4], ['queue', '--thread', SESSION, '--message'])
+        self.assertEqual(calls[0][:4], ['turn/start', '--thread', SESSION, '--message'])
         self.assertEqual(calls[0][4],
                          'Trio delivery has stopped for member member in quartet channel room on MCP server '
                          'nth_qweb: member removed. No further wake will come for it. The hub no longer lists '
@@ -269,9 +293,9 @@ class CodexHookTests(unittest.TestCase):
         self.assertEqual(self.run_waiter(hubs), 2)
         self.assertEqual(set(hubs.polled), {'http://hub-a.example/sse', 'http://hub-b.example/sse'})
         notice = self.calls()[0][4]
-        self.assertIn('channel ops', notice)
+        self.assertIn('channel \"ops\"', notice)
         self.assertIn('MCP server nth_team', notice)
-        self.assertNotIn('channel room', notice)
+        self.assertNotIn('channel \"room\"', notice)
 
     def test_session_end_stops_a_waiting_waiter_without_a_wake(self):
         self.join()
@@ -304,12 +328,12 @@ class CodexHookTests(unittest.TestCase):
         # Nothing was marked seen: a resumed session hears it from its next waiter.
         self.assertEqual(core.load_session(SESSION)['high_water'].get(KEY, 0), 0)
 
-    def test_a_wake_codex_refuses_is_retried_then_left_for_the_next_waiter(self):
+    def test_refused_submission_is_left_for_next_waiter(self):
         self.join()
         hubs = Hubs(**{'http://hub-a.example/sse': [[message(2, mentioned=True)]]})
         with patch.dict(os.environ, {'FAKE_CODEX_EXIT': '1'}):
             self.assertEqual(self.run_waiter(hubs), 0)
-        self.assertEqual(len(self.calls()), hook.QUEUE_ATTEMPTS)
+        self.assertEqual(len(self.calls()), 1)
         self.assertEqual(core.load_session(SESSION)['high_water'].get(KEY, 0), 0)
         status = core.read_json(core.session_path(SESSION, '.status.json'))
         self.assertEqual(status['error'], 'wake not delivered')
