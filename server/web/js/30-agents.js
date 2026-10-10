@@ -204,6 +204,33 @@
     }
     article.append(actions); return article;
   }
+  function quotaPanel(usage = {}) {
+    const section = document.createElement('section'); section.className = 'agent-quota-panel';
+    const title = document.createElement('h3'); title.textContent = 'Shared account limits'; section.append(title);
+    const windows = (usage.windows || []).filter(q => typeof q.used_percentage === 'number' && Number.isFinite(q.used_percentage));
+    if (!windows.length) { const note = document.createElement('p'); note.textContent = 'Usage readings unavailable for this session.'; section.append(note); return section; }
+    for (const q of windows) {
+      const row = document.createElement('div'); row.className = 'agent-quota-row';
+      const label = document.createElement('div'); label.textContent = q.label + ' · ' + Math.round(q.used_percentage) + '% used · ' + Math.round(100-q.used_percentage) + '% remaining';
+      const meter = document.createElement('progress'); meter.max = 100; meter.value = q.used_percentage; meter.setAttribute('aria-label', q.label + ' quota used');
+      const detail = document.createElement('small');
+      const age = q.updated_at ? Math.max(0,Math.floor(Date.now()/1000-q.updated_at)) : null;
+      const stale = age === null || age > 300 || (q.resets_at && q.resets_at < Date.now()/1000);
+      detail.textContent = (q.resets_at ? 'Resets ' + new Date(q.resets_at*1000).toLocaleString() : 'Reset time unavailable')
+        + ' · ' + (age === null ? 'Reading age unavailable' : 'Read ' + Math.floor(age/60) + ' min ago') + (stale ? ' · cached' : '');
+      row.append(label,meter,detail); section.append(row);
+    }
+    return section;
+  }
+  async function managedQuota(provider, target) {
+    try {
+      const usage = await Trio.api.get('/api/usage'); let windows = [];
+      if (provider === 'claude') windows = [['five_hour','5 hour'],['seven_day','Weekly']].map(([key,label]) => ({...usage.claude?.[key],label}));
+      if (provider === 'codex') windows = (usage.codex?.quotas || []).map(q => ({...q,updated_at:usage.codex.updated_at,
+        label:(q.label || 'Codex') + ' · ' + (q.window_duration_mins === 300 ? '5 hour' : q.window_duration_mins === 10080 ? 'Weekly' : q.window_duration_mins ? q.window_duration_mins + ' minute' : q.kind)}));
+      if (target.isConnected) target.replaceChildren(quotaPanel({windows}));
+    } catch (_) { if (target.isConnected) target.replaceChildren(quotaPanel()); }
+  }
   function isOwner() { return ['loopback','tailscale'].includes(state.operator?.source); }
   async function openMember(id) {
     if (!isOwner()) return;
@@ -261,6 +288,7 @@
     const status = document.createElement('p'); status.setAttribute('aria-live', 'polite');
     const screen = document.createElement('pre'); screen.className = 'terminal-screen'; screen.tabIndex = 0;
     const history = document.createElement('div');
+    const quotas = document.createElement('div');
     const text = document.createElement('input'); text.type = 'text'; text.maxLength = 2000; text.placeholder = 'Reply or slash command'; text.setAttribute('aria-label', 'Terminal input');
     const pause = document.createElement('input'); pause.type = 'number'; pause.min = '100'; pause.max = '1000'; pause.step = '100'; pause.value = '200';
     const pauseLabel = document.createElement('label'); pauseLabel.textContent = 'Pause between keys (ms) '; pauseLabel.append(pause);
@@ -278,6 +306,7 @@
         if (!current) throw new Error('Terminal binding no longer exists');
         heading.textContent = current.name + ' · Terminal';
         screen.textContent = current.screen || current.problem || 'No current screen';
+        quotas.replaceChildren(quotaPanel(current.usage));
         status.textContent = current.online && current.available ? 'Snapshot captured ' + new Date(current.updated * 1000).toLocaleTimeString() : 'Terminal unavailable';
         history.replaceChildren();
         for (const cmd of current.commands || []) { const row = document.createElement('p'); row.textContent = cmd.action + ': ' + cmd.status + (cmd.result ? ' — ' + cmd.result : ''); history.append(row); }
@@ -300,7 +329,7 @@
     const refresh = document.createElement('button'); refresh.type = 'button'; refresh.textContent = 'Refresh snapshot'; refresh.addEventListener('click', refreshTerminal);
     const close = document.createElement('button'); close.type = 'button'; close.textContent = 'Close'; close.addEventListener('click', () => dialog.close());
     const note = document.createElement('p'); note.textContent = 'Review the screen before answering a prompt. “Sent” means keys reached tmux; check the screen for completion. Actions are never retried automatically.';
-    dialog.append(heading,status,screen,text,pauseLabel,enters,buttons,refresh,close,note,history);
+    dialog.append(heading,status,quotas,screen,text,pauseLabel,enters,buttons,refresh,close,note,history);
     dialog.addEventListener('close', () => dialog.remove()); document.body.append(dialog); dialog.showModal(); await refreshTerminal();
   }
   function renderPage(panel) {
@@ -604,11 +633,13 @@
         + `<div class="manage-section"><span class="manage-label">Configure</span>${cfgEditor}</div>`
         + (caps.includes('archive') ? section('Danger zone', btn('archive', 'danger'), true) : '');
     }
-    const html = detail + sections;
+    const html = '<div class="managed-quota"></div>' + detail + sections;
     Trio.ui.modal('Manage agent: ' + vm.name, html, undefined, { submit: false, cancelLabel: 'Close' });
     setTimeout(() => {
       const panel = document.getElementById('trio-control-modal');
       if (!panel) return;
+      const quotaHost = panel.querySelector('.managed-quota');
+      if (quotaHost) managedQuota(vm.provider, quotaHost);
       panel.querySelectorAll('[data-agent-action]').forEach(button => button.addEventListener('click', () => {
         const actionName = button.dataset.agentAction;
         if (actionName === 'compact') {
@@ -1137,5 +1168,5 @@
     });
     modelField?.addEventListener('change', rebuildEffort);
   }
-  Trio.agents = { openMember, bindMemberControl, terminalControls, init, mount, unmount, render, renderPage, refresh, renderActivityEvent, loadDiscovery, normalizeModels, modelOptions, orderedProviders, providerLabel, initialEffortFor, FIRST_RUN, permissionOptions, viewModel, actionCaps, actionLabel, statusIcon, formatLastActive, action, create, effortsForModel, effortOptions, effortSlider, wireEffortSlider, lastEffort, rememberEffort, selection, toggleSelected, clearSelection, bulkAction, reportBulk, bulkAttributeJobs, showBulkAttributes, showBulkChannels, showBulkCompact };
+  Trio.agents = { quotaPanel, openMember, bindMemberControl, terminalControls, init, mount, unmount, render, renderPage, refresh, renderActivityEvent, loadDiscovery, normalizeModels, modelOptions, orderedProviders, providerLabel, initialEffortFor, FIRST_RUN, permissionOptions, viewModel, actionCaps, actionLabel, statusIcon, formatLastActive, action, create, effortsForModel, effortOptions, effortSlider, wireEffortSlider, lastEffort, rememberEffort, selection, toggleSelected, clearSelection, bulkAction, reportBulk, bulkAttributeJobs, showBulkAttributes, showBulkChannels, showBulkCompact };
 })();

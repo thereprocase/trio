@@ -92,3 +92,19 @@ No live session receives input merely because it is paired.
 Rollback: stop the bridge, restore the backed-up web files, and restart the web
 service. Existing channels, identities, agent processes and native approvals are
 unchanged. The two terminal_* SQLite tables may remain for audit purposes.
+
+## Account usage windows
+
+The owner panel shows the provider's available quota windows, used/remaining
+percentages, reset times, and reading age. These are shared account limits, not
+per-agent allowances. Managed agents use the hub's existing provider usage feed.
+Paired terminals use only explicitly selected local data, never the hub account:
+add `--usage-file /private/path --usage-format claude-statusline` or
+`--usage-format codex-session` when pairing or binding. A Codex source must be
+that session's JSONL file; a Claude source is its account's statusline cache.
+
+Only whitelisted quota scalars cross the bridge. No credentials, account IDs,
+transcript text or cache paths are sent as usage data. Missing windows are
+unavailable, not zero. Old or unknown-age readings are marked cached. A Claude
+cache file's modification time is not treated as the quota's update timestamp.
+The bridge does not invoke a model or send `/usage` into a live terminal to refresh.

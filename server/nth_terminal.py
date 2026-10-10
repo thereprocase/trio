@@ -8,6 +8,8 @@ import argparse
 import hashlib
 import hmac
 import json
+import math
+from datetime import datetime
 import os
 from pathlib import Path
 import re
@@ -162,7 +164,7 @@ def exchange(path, host, payload, now=None):
             'name':str(snap.get('name',snap['binding']))[:100], 'member_id':str(snap.get('member_id',''))[:80], 'provider':str(snap.get('provider',''))[:20],
             'pane':str(snap.get('pane',''))[:20], 'available':snap.get('available') is True,
             'screen':screen,'screen_hash':hashlib.sha256(screen.encode()).hexdigest(),
-            'problem':str(snap.get('problem',''))[:160]})
+            'usage':clean_usage(snap.get('usage')), 'problem':str(snap.get('problem',''))[:160]})
     db=connect(path)
     try:
         with db:
@@ -192,6 +194,68 @@ def exchange(path, host, payload, now=None):
         db.close()
 
 
+def clean_usage(value):
+    """Only quota scalars cross the bridge; no account IDs or source file paths."""
+    if not isinstance(value,dict):return {'windows':[]}
+    windows=[]
+    for row in value.get('windows',[])[:12] if isinstance(value.get('windows'),list) else []:
+        if not isinstance(row,dict):continue
+        pct=row.get('used_percentage')
+        if type(pct) not in (int,float) or not 0<=pct<=100 or not math.isfinite(pct):continue
+        reset=row.get('resets_at');updated=row.get('updated_at')
+        windows.append({'label':str(row.get('label','Usage'))[:60], 'used_percentage':pct,
+          'resets_at':reset if type(reset) in (int,float) and 0<reset<1e11 and math.isfinite(reset) else None,
+          'updated_at':updated if type(updated) in (int,float) and 0<updated<1e11 and math.isfinite(updated) else None})
+    return {'windows':windows,'source':str(value.get('source',''))[:40]}
+
+
+def read_usage(binding):
+    """Read only an explicitly selected local cache/transcript; never refresh via a model."""
+    path=binding.get('usage_file');format=binding.get('usage_format')
+    if not path:return {'windows':[]}
+    def timestamp(value):
+        if isinstance(value,str):
+            try:return datetime.fromisoformat(value.replace('Z','+00:00')).timestamp()
+            except ValueError:return None
+        return value
+    try:
+        source=Path(path)
+        if not source.is_file():return {'windows':[]}
+        with source.open('rb') as f:
+            f.seek(0,2);size=f.tell()
+            if format=='claude-statusline':
+                if size>1024*1024:return {'windows':[]}
+                f.seek(0);raw=json.load(f);limits=raw.get('_cached_rate_limits',{})
+                rows=[]
+                for key,quota in limits.items() if isinstance(limits,dict) else []:
+                    if not isinstance(quota,dict) or key not in ('five_hour','seven_day','seven_day_sonnet','seven_day_opus'):continue
+                    rows.append({'label':{'five_hour':'5 hour','seven_day':'Weekly','seven_day_sonnet':'Weekly · Sonnet','seven_day_opus':'Weekly · Opus'}[key],
+                      'used_percentage':quota.get('used_percentage',quota.get('utilization')),
+                      'resets_at':timestamp(quota.get('resets_at')),'updated_at':timestamp(quota.get('updated_at',raw.get('_cached_rate_limits_at')))})
+                return clean_usage({'windows':rows,'source':'Claude statusline cache'})
+            if format=='codex-session':
+                start=max(0,size-512*1024);f.seek(start)
+                if start:f.readline()
+                lines=f.read().decode('utf-8',errors='replace').splitlines()
+                for line in reversed(lines):
+                    try:record=json.loads(line)
+                    except ValueError:continue
+                    payload=record.get('payload',{})
+                    limits=payload.get('rate_limits') if isinstance(payload,dict) else None
+                    if not isinstance(limits,dict):continue
+                    rows=[]
+                    for key in ('primary','secondary'):
+                        quota=limits.get(key)
+                        if not isinstance(quota,dict):continue
+                        minutes=quota.get('window_minutes')
+                        label='5 hour' if minutes==300 else 'Weekly' if minutes==10080 else (str(minutes)+' minute' if type(minutes) in (int,float) else key.title())
+                        rows.append({'label':label,'used_percentage':quota.get('used_percent'),
+                          'resets_at':timestamp(quota.get('resets_at')),'updated_at':timestamp(record.get('timestamp'))})
+                    return clean_usage({'windows':rows,'source':'Codex session telemetry'})
+    except (OSError,ValueError,TypeError,AttributeError):pass
+    return {'windows':[]}
+
+
 class Tmux:
     def __init__(self, socket=None):
         self.command=['tmux']+(['-S',socket] if socket else [])
@@ -218,6 +282,7 @@ class Tmux:
     def snapshot(self,binding):
         result={k:binding[k] for k in ('binding','name','pane','provider')}
         result['member_id']=binding.get('member_id','')
+        result['usage']=read_usage(binding)
         try:
             generation=self.identity(binding)
             if generation != binding.get('generation'):
@@ -295,13 +360,16 @@ def main(argv=None):
     pair.add_argument('--hub-file',required=True);pair.add_argument('--spoke-file',required=True)
     pair.add_argument('--member-id',required=True);pair.add_argument('--binding',required=True);pair.add_argument('--name',required=True);pair.add_argument('--pane',required=True)
     pair.add_argument('--provider',choices=['claude','codex'],required=True);pair.add_argument('--socket')
+    for command in (pair,bind):
+        command.add_argument('--usage-file');command.add_argument('--usage-format',choices=['claude-statusline','codex-session'])
     args=parser.parse_args(argv)
     if args.command=='run':return bridge(args.config)
+    if bool(args.usage_file)!=bool(args.usage_format):parser.error('usage file and format must be supplied together')
     if not ID.fullmatch(args.member_id):parser.error('invalid Quartet member ID')
     if args.command=='bind':
         cfg=private_json(args.config)
         if not ID.fullmatch(args.binding):parser.error('invalid binding')
-        binding={'binding':args.binding,'name':args.name,'pane':args.pane,'provider':args.provider,'member_id':args.member_id}
+        binding={'binding':args.binding,'name':args.name,'pane':args.pane,'provider':args.provider,'member_id':args.member_id,'usage_file':args.usage_file,'usage_format':args.usage_format}
         binding['generation']=Tmux(cfg.get('socket')).identity(binding)
         cfg['bindings']=[b for b in cfg['bindings'] if b['binding']!=args.binding]+[binding]
         tmp=Path(args.config).with_name(Path(args.config).name+'.'+secrets.token_hex(4))
@@ -310,7 +378,7 @@ def main(argv=None):
         return
     if not ID.fullmatch(args.host) or not ID.fullmatch(args.binding) or not re.fullmatch(r'%[0-9]+',args.pane):
         parser.error('invalid host, binding or pane')
-    binding={'binding':args.binding,'name':args.name,'pane':args.pane,'provider':args.provider,'member_id':args.member_id}
+    binding={'binding':args.binding,'name':args.name,'pane':args.pane,'provider':args.provider,'member_id':args.member_id,'usage_file':args.usage_file,'usage_format':args.usage_format}
     binding['generation']=Tmux(args.socket).identity(binding)
     token=secrets.token_hex(32)
     save_private(args.hub_file,{'hosts':[{'host':args.host,'token_hash':hashlib.sha256(token.encode()).hexdigest()}]})
