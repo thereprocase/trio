@@ -95,5 +95,35 @@ check('open() with an empty / url-less list is a safe no-op', () => {
   assert.strictEqual(img().src, before, 'a no-op open leaves the current view untouched');
 });
 
+function pointer(type,id,x,y) {
+  for (const fn of img()._listeners[type] || []) fn({pointerId:id,pointerType:'touch',clientX:x,clientY:y});
+}
+check('pinch zoom anchors at fingers and transitions smoothly to one-finger pan', () => {
+  lb.open([{url:'https://x/pinch.png'}]);
+  img().getBoundingClientRect=()=>({left:0,top:0,width:200,height:200});
+  pointer('pointerdown',1,50,100);pointer('pointerdown',2,150,100);
+  pointer('pointermove',2,250,100);
+  assert.strictEqual(img().style.transform,'translate(50px,0px) scale(2)');
+  pointer('pointerup',2,250,100);pointer('pointermove',1,70,100);
+  assert.strictEqual(img().style.transform,'translate(70px,0px) scale(2)');
+  pointer('pointerup',1,70,100);
+  img()._listeners.click[0]();
+  assert.strictEqual(img().style.transform,'translate(70px,0px) scale(2)','pinch release must not toggle zoom');
+});
+check('pinch limits scale and resets gesture on image change', () => {
+  lb.open([{url:'https://x/a.png'},{url:'https://x/b.png'}]);
+  pointer('pointerdown',1,50,100);pointer('pointerdown',2,150,100);
+  pointer('pointermove',2,2050,100);assert.ok(img().style.transform.endsWith('scale(6)'));
+  pointer('pointermove',2,51,100);assert.strictEqual(img().style.transform,'translate(0px,0px) scale(1)');
+  next()._listeners.click[0]();pointer('pointermove',1,500,500);
+  assert.strictEqual(img().style.transform,'translate(0px,0px) scale(1)');
+});
+check('cancel releases gesture state', () => {
+  pointer('pointerdown',1,50,100);pointer('pointerdown',2,150,100);
+  pointer('pointercancel',1,50,100);pointer('pointercancel',2,150,100);
+  const before=img().style.transform;pointer('pointermove',1,400,400);
+  assert.strictEqual(img().style.transform,before);assert.ok(!img().classList.contains('dragging'));
+});
+
 console.log(`\n${passed} passed, ${failures.length} failed`);
 if (failures.length) { console.error('FAILURES: ' + failures.join(', ')); process.exit(1); }

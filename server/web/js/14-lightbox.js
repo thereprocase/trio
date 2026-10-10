@@ -33,6 +33,8 @@
   // Drag-to-pan state. pointerMoved distinguishes a pan from a click so a
   // pan-release doesn't trigger click-to-zoom.
   let dragging = false, pointerMoved = false;
+  const pointers = new Map();
+  let pinch = null;
   let dragStartX = 0, dragStartY = 0, panStartX = 0, panStartY = 0;
 
   function build() {
@@ -95,7 +97,7 @@
     // Clear per-session state on close so a drag interrupted by Escape can't
     // leave `dragging` true and pan the next image on a bare pointermove.
     dialog.addEventListener('close', () => {
-      items = []; dragging = false; pointerMoved = false;
+      items = []; clearGesture(); pointerMoved = false;
       imgEl.classList.remove('dragging');
     });
     imgEl.addEventListener('wheel', onWheel, { passive: false });
@@ -103,6 +105,7 @@
     imgEl.addEventListener('pointermove', onPointerMove);
     imgEl.addEventListener('pointerup', endDrag);
     imgEl.addEventListener('pointercancel', endDrag);
+    imgEl.addEventListener('lostpointercapture', endDrag);
     // Single click toggles zoom (matches the zoom-in / grab cursor). A click
     // that was really a pan-drag is ignored via the pointerMoved guard.
     imgEl.addEventListener('click', onImageClick);
@@ -161,25 +164,57 @@
     applyTransform();
   }
 
-  function resetZoom() { scale = 1; tx = 0; ty = 0; applyTransform(); }
+  function resetZoom() { clearGesture(); scale = 1; tx = 0; ty = 0; applyTransform(); }
 
   function onWheel(e) {
     e.preventDefault();
     zoomBy(e.deltaY < 0 ? STEP : -STEP);
   }
 
+  function clearGesture() {
+    const ids = [...pointers.keys()];
+    pointers.clear(); pinch = null; dragging = false;
+    imgEl?.classList.remove('dragging');
+    ids.forEach(id => { try { imgEl.releasePointerCapture(id); } catch (_) {} });
+  }
+
   function onPointerDown(e) {
-    pointerMoved = false;              // reset each press so click-zoom can tell
-    if (scale <= 1) return;           // a plain click from a pan
-    dragging = true;
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
+    if (pointers.size >= 2) return;
+    if (!pointers.size) pointerMoved = false;
+    pointers.set(e.pointerId, {x:e.clientX, y:e.clientY});
+    try { imgEl.setPointerCapture(e.pointerId); } catch (_) {}
+    if (pointers.size === 2) {
+      const [a,b] = [...pointers.values()];
+      const rect = imgEl.getBoundingClientRect();
+      pinch = {distance:Math.max(1, Math.hypot(b.x-a.x,b.y-a.y)), scale, tx, ty,
+        x:(a.x+b.x)/2, y:(a.y+b.y)/2,
+        cx:rect.left+rect.width/2-tx, cy:rect.top+rect.height/2-ty};
+      pointerMoved = true; dragging = false;
+      imgEl.classList.add('dragging');
+      return;
+    }
+    dragging = scale > 1;
     dragStartX = e.clientX; dragStartY = e.clientY;
     panStartX = tx; panStartY = ty;
-    imgEl.setPointerCapture(e.pointerId);
-    imgEl.classList.add('dragging');
+    imgEl.classList.toggle('dragging', dragging);
   }
 
   function onPointerMove(e) {
+    if (!pointers.has(e.pointerId)) return;
+    pointers.set(e.pointerId, {x:e.clientX,y:e.clientY});
+    if (pinch && pointers.size === 2) {
+      const [a,b] = [...pointers.values()];
+      scale = clampScale(pinch.scale * Math.hypot(b.x-a.x,b.y-a.y) / pinch.distance);
+      const ratio = scale / pinch.scale;
+      tx = (a.x+b.x)/2 - pinch.cx - (pinch.x-pinch.cx-pinch.tx)*ratio;
+      ty = (a.y+b.y)/2 - pinch.cy - (pinch.y-pinch.cy-pinch.ty)*ratio;
+      if (scale === 1) { tx = 0; ty = 0; }
+      applyTransform();
+      return;
+    }
     if (!dragging) return;
+    if (Math.hypot(e.clientX-dragStartX,e.clientY-dragStartY) < 3) return;
     pointerMoved = true;
     tx = panStartX + (e.clientX - dragStartX);
     ty = panStartY + (e.clientY - dragStartY);
@@ -187,10 +222,16 @@
   }
 
   function endDrag(e) {
-    if (!dragging) return;
-    dragging = false;
-    imgEl.classList.remove('dragging');
+    if (!pointers.delete(e.pointerId)) return;
+    pinch = null;
     try { imgEl.releasePointerCapture(e.pointerId); } catch (_) {}
+    const remaining = [...pointers.values()][0];
+    dragging = !!remaining && scale > 1;
+    if (remaining) {
+      dragStartX = remaining.x; dragStartY = remaining.y;
+      panStartX = tx; panStartY = ty;
+    }
+    imgEl.classList.toggle('dragging', dragging);
   }
 
   // Single click toggles zoom: 1x → a comfortable 2.5x, otherwise back to fit.
