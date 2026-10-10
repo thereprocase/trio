@@ -6,7 +6,12 @@ s.members=new Map([['worker',{id:'worker',name:'Worker',kind:'agent'}]]);
 const msg={id:42,channel:'room',member_id:'worker',member_name:'Worker',content:'Do not copy this text',created_at:'2026-01-01T12:00:00Z'};
 const card=T.conversation.cardFor(msg);
 function fire(type,x,y,extra={}) {for(const fn of card._listeners[type]||[])fn({touches:[{clientX:x,clientY:y}],cancelable:true,preventDefault(){},target:card,...extra});}
-fire('touchstart',50,50);fire('touchmove',130,55);fire('touchend',130,55);
+fire('touchstart',50,50);fire('touchmove',130,55);
+assert.ok(!card.style.transform, 'row stays still');
+assert.ok(card.querySelector('.message-content').style.transform.includes('translateX'), 'only bubble moves');
+assert.strictEqual(card.querySelector('.swipe-reply-icon').style.opacity,'1');
+fire('touchend',130,55);
+assert.strictEqual(card.querySelector('.swipe-reply-icon').style.opacity,'0');
 assert.strictEqual(s.composerReply.id,42);assert.ok(s.selectedTargets.has('worker'));
 const body=T.composer.buildSendPayload();assert.strictEqual(body.reply_to,42);assert.ok(!body.content.includes(msg.content));
 assert.ok(cx.document.getElementById('target-bar').querySelector('.reply-draft'));

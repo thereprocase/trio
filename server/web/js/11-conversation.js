@@ -695,14 +695,21 @@
         showMessageActions(card, content, msg, body);
       }, 500);
     };
+    const replyIcon = document.createElement('span'); replyIcon.className = 'swipe-reply-icon';
+    replyIcon.setAttribute('aria-hidden', 'true');
+    replyIcon.innerHTML = '<svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 5 3 11l6 6M3 11h10a7 7 0 0 1 7 7"/></svg>';
+    card.append(replyIcon);
     let swipe = null;
-    const resetSwipe = () => { swipe = null; card.style.transform = ''; card.classList.remove('swipe-reply-ready'); };
+    const resetSwipe = () => { swipe = null; content.style.transform = ''; replyIcon.style.opacity = '0'; card.classList.remove('swipe-reply-ready'); };
     const startSwipe = event => {
       resetSwipe();
       if (state.readOnly || msg.retracted_at || event.touches.length !== 1 ||
           interactiveMessageTarget(event.target) || event.target?.closest?.('pre,code') ||
           event.touches[0].clientX < 24) return;
       const touch = event.touches[0];
+      replyIcon.style.left = ((content.offsetLeft || 0) + 8) + 'px';
+      const rect = card.getBoundingClientRect();
+      replyIcon.style.top = Math.max(16, Math.min(touch.clientY - rect.top, Math.max(16, rect.height - 16))) + 'px';
       swipe = { x: touch.clientX, y: touch.clientY, ready: false };
     };
     card.addEventListener('touchstart', startSwipe, { passive: true });
@@ -712,11 +719,13 @@
       const dx = event.touches[0].clientX - swipe.x, dy = event.touches[0].clientY - swipe.y;
       if (Math.abs(dy) > 16 && Math.abs(dy) > Math.abs(dx)) { resetSwipe(); return; }
       if (dx < -12) { resetSwipe(); return; }
-      swipe.ready = false; card.style.transform = ''; card.classList.remove('swipe-reply-ready');
-      if (dx > 12 && dx > Math.abs(dy) * 1.5) {
+      swipe.ready = false; content.style.transform = ''; replyIcon.style.opacity = '0'; card.classList.remove('swipe-reply-ready');
+      if (dx > 4 && dx > Math.abs(dy) * 1.5) {
         if (event.cancelable) event.preventDefault();
+        event.stopPropagation?.(); Trio.appRefresh?.pull?.cancel();
         clearPress(); swipe.ready = dx >= 64;
-        card.style.transform = 'translateX(' + Math.min(dx * 0.5, 48) + 'px)';
+        content.style.transform = 'translateX(' + Math.min(dx * 0.5, 48) + 'px)';
+        replyIcon.style.opacity = String(Math.min(dx / 64, 1));
         card.classList.toggle('swipe-reply-ready', swipe.ready);
       }
     }, { passive: false });
