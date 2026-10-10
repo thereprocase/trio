@@ -12,8 +12,9 @@ assert.ok(card.querySelector('.message-content').style.transform.includes('trans
 assert.strictEqual(card.querySelector('.swipe-reply-icon').style.opacity,'1');
 fire('touchend',130,55);
 assert.strictEqual(card.querySelector('.swipe-reply-icon').style.opacity,'0');
-assert.strictEqual(s.composerReply.id,42);assert.ok(s.selectedTargets.has('worker'));
-const body=T.composer.buildSendPayload();assert.strictEqual(body.reply_to,42);assert.ok(!body.content.includes(msg.content));
+assert.strictEqual(s.composerReply.id,42);assert.ok(!s.selectedTargets.has('worker'));
+const body=T.composer.buildSendPayload();assert.strictEqual(body.reply_to,42);assert.strictEqual(body.content,'↪ @Worker');
+T.composer.replyTo(msg);assert.strictEqual(T.composer.buildSendPayload().content,'↪ @Worker','repeat reply does not duplicate prefix');assert.ok(!body.content.includes(msg.content));
 assert.ok(cx.document.getElementById('target-bar').querySelector('.reply-draft'));
 s.channel='other';T.composer.refresh();assert.strictEqual(s.composerReply,null);
 s.channel='room';T.composer.refresh();assert.strictEqual(s.composerReply.id,42);
@@ -22,5 +23,11 @@ fire('touchstart',50,50);fire('touchmove',55,140);fire('touchend',55,140);assert
 fire('touchstart',50,50);fire('touchmove',130,55);fire('touchcancel',130,55);fire('touchend',130,55);assert.strictEqual(s.composerReply,null);
 fire('touchstart',50,50);fire('touchmove',130,55);fire('touchmove',52,50);fire('touchend',52,50);assert.strictEqual(s.composerReply,null);
 fire('touchstart',50,50);fire('touchmove',130,55);fire('touchstart',130,55,{touches:[{},{}]});fire('touchend',130,55);assert.strictEqual(s.composerReply,null);
+cx.document.getElementById('input').textContent='Existing draft';
+T.composer.replyTo(msg);assert.strictEqual(T.composer.buildSendPayload().content,'↪ @Worker Existing draft');
+T.composer.replyTo({...msg,id:43,member_id:'other',member_name:'Other'});
+assert.strictEqual(T.composer.buildSendPayload().content,'↪ @Other Existing draft');
+assert.strictEqual(T.composer.buildSendPayload().reply_to,43);
+cx.document.getElementById('target-bar').querySelector('.reply-draft').onclick();
 s.readOnly=true;fire('touchstart',50,50);fire('touchmove',130,55);fire('touchend',130,55);assert.strictEqual(s.composerReply,null);
 console.log('PASS: swipe attaches ID and author; cancel, vertical scroll, read-only and conversation draft isolation');

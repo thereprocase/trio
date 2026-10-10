@@ -253,10 +253,16 @@
   function replyTo(msg) {
     if (state.readOnly || !msg || msg.retracted_at || !Number.isInteger(msg.id)) return;
     if (msg.channel && msg.channel !== state.channel) return;
-    state.composerReply = { id: msg.id };
+    let draft = getText();
+    const previousPrefix = state.composerReply?.prefix;
+    if (previousPrefix && draft.startsWith(previousPrefix)) draft = draft.slice(previousPrefix.length);
+    const name = state.members?.get(msg.member_id)?.name || msg.member_name || msg.member_id;
+    const prefix = name ? '↪ @' + name + ' ' : '↪ ';
+    state.composerReply = { id: msg.id, prefix };
     state.replyDrafts[conversationId()] = state.composerReply;
-    if (msg.member_id && msg.member_id !== state.operator?.id) state.selectedTargets.add(msg.member_id);
-    renderTargets(); input()?.focus();
+    input()?.focus();
+    setValue(prefix + draft, (prefix + draft).length);
+    saveDraft(); renderTargets(); updateSendState();
   }
   function insertTarget(id) { if (id) { state.selectedTargets.add(id); renderTargets(); input()?.focus(); } }
   // Mentions now live INLINE in the text (@name / @all, inserted at the caret),
