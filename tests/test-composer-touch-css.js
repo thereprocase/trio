@@ -12,7 +12,7 @@ function check(name, condition) {
 }
 
 const touchRule = css.match(
-  /@media\s*\(hover:none\)\s*and\s*\(pointer:coarse\)\s*\{[\s\S]*?\.composer-shell\s+\.composer-input\s*\{\s*font-size:16px;\s*\}[\s\S]*?\}/);
+  /@media\s*\(hover:none\)\s*and\s*\(pointer:coarse\)\s*\{[\s\S]*?\.composer-shell\s+\.composer-input(?:\s*,[^{}]+)?\s*\{\s*font-size:16px;\s*\}[\s\S]*?\}/);
 check('touch-primary composer uses the 16px iOS focus-zoom threshold',
       Boolean(touchRule));
 check('composer protection is capability-based, not capped at the 880px drawer breakpoint',

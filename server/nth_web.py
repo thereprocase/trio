@@ -4852,7 +4852,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
         self.wfile.write(payload)
 
     def _json(self, obj: Any, status: int = 200, set_cookie_token: Optional[str] = None) -> None:
-        payload = json.dumps(obj).encode("utf-8")
+        payload = json.dumps(obj, separators=(",", ":")).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(payload)))

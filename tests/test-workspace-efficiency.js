@@ -1,0 +1,21 @@
+'use strict';
+const assert=require('assert'),{load}=require('./dom-harness');
+const timers=new Map();let seq=0;
+const cx=load({setup:s=>{s.setTimeout=(fn,ms)=>{const id=++seq;timers.set(id,{fn,ms});return id;};s.clearTimeout=id=>timers.delete(id);s.setInterval=()=>0;}});
+const T=cx.hooks.Trio,d=cx.document;
+(async()=>{
+ let calls=0;T.api.get=async()=>{calls++;return {channels:[],tasks:[],mentions:[],questions:[],approvals:[]};};T.agents.refresh=async()=>{};
+ T.state.workspaceLoading=false;d.hidden=true;d.visibilityState='hidden';
+ await T.workspace.refresh();assert.strictEqual(calls,0,'no background snapshot polling');
+ d.hidden=false;d.visibilityState='visible';T.state.operator={source:'tailscale'};
+ T.workspace.mount();
+ const emit=type=>T.events.dispatchEvent(new Event(type));
+ emit('workspace:stream-open');await new Promise(r=>setImmediate(r));
+ const first=calls;assert.ok(first>0);
+ emit('workspace:stream-open');await new Promise(r=>setImmediate(r));assert.ok(calls>first,'every reconnect refreshes workspace');
+ timers.clear();emit('message');const timer=[...timers.entries()].find(([,v])=>v.ms===600);assert.ok(timer);
+ emit('message');emit('message');assert.ok(timers.has(timer[0]),'traffic cannot postpone refresh indefinitely');
+ d.hidden=true;timer[1].fn();const hiddenCalls=calls;await new Promise(r=>setImmediate(r));assert.strictEqual(calls,hiddenCalls);
+ T.workspace.unmount();
+ console.log('PASS: background quiet, reconnect snapshot, bounded live refresh');
+})().catch(e=>{console.error(e);process.exitCode=1;});
