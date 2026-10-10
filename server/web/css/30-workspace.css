@@ -76,3 +76,13 @@
 .toast-action{border:0;background:transparent;color:var(--accent);font:inherit;font-weight:800;cursor:pointer;padding:0;text-decoration:underline;text-underline-offset:2px}
 dialog#trio-archives{width:min(520px,calc(100% - 32px));border:1px solid var(--line);border-radius:var(--r-xl);background:var(--surface);color:var(--ink);box-shadow:var(--shadow-lg)}#trio-archives::backdrop{background:rgba(30,25,20,.35)}#trio-archives ul{padding-left:18px}#trio-archives li{margin:10px 0}.modal-close{float:right}
 .directory-avatar[src]{padding:8px;object-fit:contain}
+
+/* Owner-only, explicitly paired terminal sessions. */
+.terminal-sessions { margin-top:24px; }
+.terminal-controls { width:min(760px,94vw); max-height:90vh; overflow:auto; border:1px solid var(--line); border-radius:var(--r-sm); background:var(--surface); color:var(--ink); padding:20px; }
+.terminal-controls::backdrop { background:rgba(0,0,0,.5); }
+.terminal-screen { white-space:pre-wrap; overflow-wrap:anywhere; max-height:45vh; overflow:auto; background:var(--code-bg); color:var(--ink); padding:12px; font:13px/1.4 monospace; }
+.terminal-controls input[type=text] { display:block; width:100%; margin:12px 0; }
+.terminal-controls input[type=number] { width:80px; }
+.terminal-controls button, .terminal-controls select, .terminal-controls input { min-height:44px; }
+.terminal-actions { display:flex; flex-wrap:wrap; gap:8px; margin:12px 0; }

@@ -204,8 +204,77 @@
     }
     article.append(actions); return article;
   }
+  // Paired terminals remain external sessions: no supervisor takeover.
+  function terminalSection(panel) {
+    const section = document.createElement('section'); section.className = 'terminal-sessions';
+    const title = document.createElement('h3'); title.textContent = 'Terminal sessions';
+    const list = document.createElement('div'); list.className = 'roster-grid';
+    section.append(title, list); panel.append(section);
+    Trio.api.get('/api/terminals').then(data => {
+      if (!section.isConnected) return;
+      if (!data.sessions?.length) {
+        const help = document.createElement('p'); help.textContent = 'Pair a host with trio terminal to control existing tmux sessions.'; list.append(help); return;
+      }
+      for (const session of data.sessions) {
+        const row = document.createElement('article'); row.className = 'agent-card';
+        const name = document.createElement('strong'); name.textContent = session.name;
+        const detail = document.createElement('p'); detail.textContent = session.host + ' · ' + session.provider + ' · ' + session.pane + ' · ' + (session.online && session.available ? 'Connected' : 'Unavailable');
+        const open = document.createElement('button'); open.type = 'button'; open.textContent = 'Terminal controls'; open.addEventListener('click', () => terminalControls(session.id));
+        row.append(name, detail, open); list.append(row);
+      }
+    }).catch(() => { const p = document.createElement('p'); p.textContent = 'Terminal controls are available to the workspace owner.'; list.append(p); });
+  }
+  async function terminalControls(id) {
+    const dialog = document.createElement('dialog'); dialog.className = 'terminal-controls';
+    const heading = document.createElement('h2'); heading.textContent = 'Terminal controls';
+    const status = document.createElement('p'); status.setAttribute('aria-live', 'polite');
+    const screen = document.createElement('pre'); screen.className = 'terminal-screen'; screen.tabIndex = 0;
+    const history = document.createElement('div');
+    const text = document.createElement('input'); text.type = 'text'; text.maxLength = 2000; text.placeholder = 'Reply or slash command'; text.setAttribute('aria-label', 'Terminal input');
+    const pause = document.createElement('input'); pause.type = 'number'; pause.min = '100'; pause.max = '1000'; pause.step = '100'; pause.value = '200';
+    const pauseLabel = document.createElement('label'); pauseLabel.textContent = 'Pause between keys (ms) '; pauseLabel.append(pause);
+    const enters = document.createElement('select');
+    for (const n of [0,1,2]) { const option = document.createElement('option'); option.value = String(n); option.textContent = n + ' Enter presses'; enters.append(option); }
+    enters.value = '1'; enters.setAttribute('aria-label', 'Enter presses');
+    const buttons = document.createElement('div'); buttons.className = 'terminal-actions';
+    let current = null, busy = false;
+    const controls = [];
+    const enable = () => controls.forEach(b => { b.disabled = busy || !current?.online || !current?.available; });
+    async function refreshTerminal() {
+      try {
+        const data = await Trio.api.get('/api/terminals');
+        current = data.sessions.find(s => s.id === id);
+        if (!current) throw new Error('Terminal binding no longer exists');
+        heading.textContent = current.name + ' · Terminal';
+        screen.textContent = current.screen || current.problem || 'No current screen';
+        status.textContent = current.online && current.available ? 'Snapshot captured ' + new Date(current.updated * 1000).toLocaleTimeString() : 'Terminal unavailable';
+        history.replaceChildren();
+        for (const cmd of current.commands || []) { const row = document.createElement('p'); row.textContent = cmd.action + ': ' + cmd.status + (cmd.result ? ' — ' + cmd.result : ''); history.append(row); }
+      } catch (error) { current = null; status.textContent = error.message; }
+      enable();
+    }
+    async function sendTerminal(action) {
+      if (busy || !current?.online || !current?.available) return;
+      busy = true; enable();
+      try {
+        const result = await Trio.api.post('/api/terminals/action', {session:id, generation:current.generation, screen_hash:current.screen_hash,
+          action, text:action === 'reply' ? text.value : '', pause_ms:Number(pause.value), enter_count:action === 'compact' ? 2 : Number(enters.value)});
+        status.textContent = 'Action ' + result.status + '. Refresh to inspect the result.';
+      } catch (error) { status.textContent = error.message; }
+      finally { busy = false; current = null; enable(); }
+    }
+    for (const [label,action] of [['Compact (2 Enter presses)','compact'],['Interrupt','interrupt'],['Send input','reply']]) {
+      const button = document.createElement('button'); button.type = 'button'; button.textContent = label; button.disabled = true; button.addEventListener('click', () => sendTerminal(action)); buttons.append(button); controls.push(button);
+    }
+    const refresh = document.createElement('button'); refresh.type = 'button'; refresh.textContent = 'Refresh snapshot'; refresh.addEventListener('click', refreshTerminal);
+    const close = document.createElement('button'); close.type = 'button'; close.textContent = 'Close'; close.addEventListener('click', () => dialog.close());
+    const note = document.createElement('p'); note.textContent = 'Review the screen before answering a prompt. “Sent” means keys reached tmux; check the screen for completion. Actions are never retried automatically.';
+    dialog.append(heading,status,screen,text,pauseLabel,enters,buttons,refresh,close,note,history);
+    dialog.addEventListener('close', () => dialog.remove()); document.body.append(dialog); dialog.showModal(); await refreshTerminal();
+  }
   function renderPage(panel) {
     panel.replaceChildren();
+    Promise.resolve().then(() => { if (panel.isConnected) terminalSection(panel); });
     const hero = document.createElement('div'); hero.className = 'view-hero'; hero.innerHTML = '<h2>Agent roster</h2><p>Everyone working in this workspace</p>';
     const toolbar = document.createElement('div'); toolbar.className = 'roster-toolbar';
     const segment = document.createElement('div'); segment.className = 'seg';
@@ -1037,5 +1106,5 @@
     });
     modelField?.addEventListener('change', rebuildEffort);
   }
-  Trio.agents = { init, mount, unmount, render, renderPage, refresh, renderActivityEvent, loadDiscovery, normalizeModels, modelOptions, orderedProviders, providerLabel, initialEffortFor, FIRST_RUN, permissionOptions, viewModel, actionCaps, actionLabel, statusIcon, formatLastActive, action, create, effortsForModel, effortOptions, effortSlider, wireEffortSlider, lastEffort, rememberEffort, selection, toggleSelected, clearSelection, bulkAction, reportBulk, bulkAttributeJobs, showBulkAttributes, showBulkChannels, showBulkCompact };
+  Trio.agents = { terminalControls, init, mount, unmount, render, renderPage, refresh, renderActivityEvent, loadDiscovery, normalizeModels, modelOptions, orderedProviders, providerLabel, initialEffortFor, FIRST_RUN, permissionOptions, viewModel, actionCaps, actionLabel, statusIcon, formatLastActive, action, create, effortsForModel, effortOptions, effortSlider, wireEffortSlider, lastEffort, rememberEffort, selection, toggleSelected, clearSelection, bulkAction, reportBulk, bulkAttributeJobs, showBulkAttributes, showBulkChannels, showBulkCompact };
 })();

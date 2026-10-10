@@ -793,3 +793,12 @@ combined with `!agents`. The group keyword is reserved for bangs; use a human
 member’s ID if their display name is “agents”. Incoming human and agent bubbles use distinct palettes for the selected theme;
 your own right-aligned bubbles retain their styling. @ recipients do not add
 a separate pill row; messages mentioning you get a subtle themed outline.
+
+### Owner terminal controls
+
+The Agents page can show explicitly paired Linux tmux sessions. The owner can
+inspect a current screen, compact, interrupt, or send literal text with timed
+Enter presses. Pairing pins the agent process; it is separate from message
+delivery and does not grant peers control. Lost actions are never replayed.
+External screen snapshots are not structured runtime approvals. See
+[terminal controls](TERMINAL-CONTROLS.md) for pairing, outcomes and rollback.

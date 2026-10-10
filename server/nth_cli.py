@@ -668,6 +668,9 @@ def _ensure_codex_locked(binary=None):
 
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
+    if argv[:1] == ['terminal']:
+        from nth_terminal import main as terminal_main
+        return terminal_main(argv[1:])
     # Forward Codex's complete argv unchanged, including flags with values.
     if argv[:1] == ['codex']:
         os.umask(0o077)

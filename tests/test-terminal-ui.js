@@ -1,0 +1,23 @@
+'use strict';
+const assert = require('assert');
+const {load} = require('./dom-harness');
+(async () => {
+  const cx=load(), Trio=cx.hooks.Trio, doc=cx.document || cx.hooks.document;
+  const original=doc.createElement.bind(doc);
+  doc.createElement=tag=>{const e=original(tag);if(tag==='dialog'){e.showModal=()=>{};e.close=()=>e.remove();}return e;};
+  const session={id:'host:worker',name:'Worker',provider:'claude',pane:'%1',host:'host',online:true,available:true,generation:'g',screen_hash:'h',screen:'<script>untrusted prompt</script>',updated:100,commands:[]};
+  Trio.api.get=async()=>({sessions:[session]});
+  const posts=[];Trio.api.post=async(url,body)=>{posts.push({url,body});return {status:'queued'};};
+  await Trio.agents.terminalControls(session.id);
+  const panel=doc.body.querySelector('.terminal-controls');
+  assert.ok(panel);assert.strictEqual(panel.querySelector('pre').textContent,session.screen);
+  assert.strictEqual(panel.querySelector('script'),null,'terminal output is text, not HTML');
+  const compact=[...panel.querySelectorAll('button')].find(b=>b.textContent.startsWith('Compact'));
+  assert.strictEqual(compact.disabled,false);await compact._listeners.click[0]();
+  await Promise.resolve();await Promise.resolve();
+  assert.strictEqual(posts.length,1);assert.strictEqual(posts[0].body.action,'compact');
+  assert.strictEqual(posts[0].body.enter_count,2);assert.strictEqual(posts[0].body.pause_ms,200);
+  assert.strictEqual(posts[0].body.generation,'g');assert.strictEqual(posts[0].body.screen_hash,'h');
+  assert.ok(compact.disabled,'new snapshot required after sending');
+  console.log('PASS: owner terminal UI, literal snapshot, pinned action, timed Enter defaults');
+})().catch(e=>{console.error(e);process.exitCode=1;});

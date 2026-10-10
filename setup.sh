@@ -59,6 +59,7 @@ if [ "${1:-}" = "hub-service" ] || [ "${1:-}" = "upgrade" ]; then
              nth_constants.py nth_doctor.py codex_context_publisher.py \
              nth_supervisor.py nth_request_log.py \
              nth_agent_manager.py \
+             nth_terminal.py \
              nth_codex_runtime.py nth_codex_socket.py nth_codex_relay.py \
              nth_event_sources.py nth_event_service.py nth_event_access.py \
              nth_cli.py nth_quartet_proxy.py nth_watch.py nth_claude_channel.py nth_claude_hook.py \
@@ -397,12 +398,14 @@ if [ -f "$SCRIPT_DIR/SKILL-trio.md" ]; then
     cp "$SCRIPT_DIR/SKILL-trio.md" "$TRIO_SKILL_DIR/SKILL.md"
     [ -f "$SCRIPT_DIR/REFERENCE-trio.md" ] && cp "$SCRIPT_DIR/REFERENCE-trio.md" "$TRIO_SKILL_DIR/REFERENCE.md"
     [ -f "$SCRIPT_DIR/PROTOCOLS-trio.md" ] && cp "$SCRIPT_DIR/PROTOCOLS-trio.md" "$TRIO_SKILL_DIR/PROTOCOLS.md"
+    [ -f "$SCRIPT_DIR/TERMINAL-CONTROLS.md" ] && cp "$SCRIPT_DIR/TERMINAL-CONTROLS.md" "$TRIO_SKILL_DIR/TERMINAL-CONTROLS.md"
     [ -f "$SCRIPT_DIR/DESIGN.md" ] && cp "$SCRIPT_DIR/DESIGN.md" "$TRIO_SKILL_DIR/DESIGN.md"
 fi
 if [ -f "$SCRIPT_DIR/SKILL-quartet.md" ]; then
     cp "$SCRIPT_DIR/SKILL-quartet.md" "$QUARTET_SKILL_DIR/SKILL.md"
     [ -f "$SCRIPT_DIR/REFERENCE-quartet.md" ] && cp "$SCRIPT_DIR/REFERENCE-quartet.md" "$QUARTET_SKILL_DIR/REFERENCE.md"
     [ -f "$SCRIPT_DIR/PROTOCOLS-quartet.md" ] && cp "$SCRIPT_DIR/PROTOCOLS-quartet.md" "$QUARTET_SKILL_DIR/PROTOCOLS.md"
+    [ -f "$SCRIPT_DIR/TERMINAL-CONTROLS.md" ] && cp "$SCRIPT_DIR/TERMINAL-CONTROLS.md" "$QUARTET_SKILL_DIR/TERMINAL-CONTROLS.md"
     [ -f "$SCRIPT_DIR/DESIGN.md" ] && cp "$SCRIPT_DIR/DESIGN.md" "$QUARTET_SKILL_DIR/DESIGN.md"
 fi
 # Remove old single-skill install
@@ -456,6 +459,7 @@ cp "$SCRIPT_DIR/server/nth_interposer_hubs.py" "$SERVER_DIR/nth_interposer_hubs.
 cp "$SCRIPT_DIR/server/nth_interposer_runtime.py" "$SERVER_DIR/nth_interposer_runtime.py"
 cp "$SCRIPT_DIR/server/nth_interposer_shadow.py" "$SERVER_DIR/nth_interposer_shadow.py"
 cp "$SCRIPT_DIR/server/nth_agent_manager.py" "$SERVER_DIR/nth_agent_manager.py"
+cp "$SCRIPT_DIR/server/nth_terminal.py" "$SERVER_DIR/nth_terminal.py"
 # Quota-burn series + the arithmetic over it.
 cp "$SCRIPT_DIR/server/nth_usage.py" "$SERVER_DIR/nth_usage.py"
 # Conversation identity (canonical DM thread keys). nth_web imports it at

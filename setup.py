@@ -231,7 +231,8 @@ def install(target_home, *, quartet_url='', clients=('claude', 'codex'),
                                       (f'REFERENCE-{flavor}.md', 'REFERENCE.md'),
                                       (f'PROTOCOLS-{flavor}.md', 'PROTOCOLS.md'),
                                       ('DESIGN.md', 'DESIGN.md'),
-                                      ('AGENT-RUNTIME.md', 'AGENT-RUNTIME.md')):
+                                      ('AGENT-RUNTIME.md', 'AGENT-RUNTIME.md'),
+                                      ('TERMINAL-CONTROLS.md', 'TERMINAL-CONTROLS.md')):
                 if (ROOT / source_name).exists():
                     copy_file(ROOT / source_name, destination / name)
     config_path = runtime / 'native.json'

@@ -4609,6 +4609,8 @@ class NthWebHandler(BaseHTTPRequestHandler):
             self._handle_usage()
         elif path == "/api/usage/requests":
             self._handle_usage_requests(parsed)
+        elif path == "/api/terminals":
+            self._handle_terminals()
         elif path == "/api/agents":
             self._handle_agents_list(parsed)
         elif path == "/api/agent-models":
@@ -4741,7 +4743,11 @@ class NthWebHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         if self._reject_cross_site():
             return
-        if parsed.path == "/api/edit":
+        if parsed.path == "/api/terminals/exchange":
+            self._handle_terminal_exchange()
+        elif parsed.path == "/api/terminals/action":
+            self._handle_terminal_action()
+        elif parsed.path == "/api/edit":
             self._handle_edit()
         elif parsed.path == "/api/delete":
             self._handle_delete()
@@ -5553,6 +5559,41 @@ class NthWebHandler(BaseHTTPRequestHandler):
     # launch its default app) — it only `open -R` (reveal/select in Finder).
     _PATH_VALIDATE_CAP = 200          # max candidates per validate request
     _PATH_MAX_LEN = 4096              # ignore absurdly long candidates
+
+    def _handle_terminals(self) -> None:
+        if self._require_operator("view paired terminals") is None:
+            return
+        from nth_terminal import list_sessions
+        self._json({"sessions": list_sessions(self.db_path)})
+
+    def _handle_terminal_action(self) -> None:
+        ident = self._require_operator("control paired terminals")
+        if ident is None:
+            return
+        params = self._read_json_body()
+        if params is None:
+            return
+        from nth_terminal import queue
+        try:
+            result = queue(self.db_path, params, ident.member_id)
+        except ValueError as exc:
+            self._error(409, str(exc))
+            return
+        self._json(result)
+
+    def _handle_terminal_exchange(self) -> None:
+        from nth_terminal import authenticate, exchange
+        host = authenticate(self.headers.get("Authorization"))
+        if host is None:
+            self._error(403, "terminal bridge is not paired")
+            return
+        payload = self._read_json_body(max_bytes=5 * 1024 * 1024)
+        if payload is None:
+            return
+        try:
+            self._json(exchange(self.db_path, host, payload))
+        except ValueError as exc:
+            self._error(400, str(exc))
 
     def _handle_agents_list(self, parsed) -> None:
         """Roster of every managed (and external) agent + placements + live
