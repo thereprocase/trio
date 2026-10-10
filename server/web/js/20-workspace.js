@@ -534,6 +534,7 @@
       const label = member.name || member.id || 'Channel member';
       face.setAttribute('aria-label', label + (status === 'working' ? ' — actively working' : ''));
       face.title = label + toolSuffix(member, status);
+      if (controlAgent(member)) Trio.agents?.bindMemberControl?.(face, member.id, label);
       pile.append(face);
     });
     if (overflow) {
@@ -1797,6 +1798,21 @@
   function memberIsRemovable(member) {
     return !!member && member.kind !== 'human' && member.id !== operatorId();
   }
+  function controlAgent(member) {
+    return member?.id && member.kind !== 'human' && !String(member.id).startsWith('_op_') && member.id !== operatorId();
+  }
+  function bindDrawerControls() {
+    const list = $('channel-drawer-members');
+    if (!list) return;
+    for (const row of list.querySelectorAll('.channel-member')) {
+      const id = row.getAttribute('data-control-member');
+      if (!id) continue;
+      const name = row.querySelector('.channel-member-name');
+      for (const element of [row.firstElementChild, name]) {
+        if (element) Trio.agents?.bindMemberControl?.(element, id, name?.textContent || id);
+      }
+    }
+  }
   function detailMember(member) {
     const name = member.name || member.id || 'Unknown member';
     const status = channelStatus(member);
@@ -1820,7 +1836,7 @@
     const opId = state.operator?.id || state.meta?.operator?.id;
     const isAgent = member.kind !== 'human' && member.id !== opId;
     const subagents = isAgent ? `<div class="channel-member-subagents" data-subagents-for="${esc(member.id)}"></div>` : '';
-    return `<div class="channel-member${status === 'archived' ? ' is-archived' : ''}">${avatarFor(member, status)}<div class="channel-member-copy"><div class="channel-member-name">${esc(name)}</div><div class="channel-member-status">${esc(statusText)}</div>${delivery}${tool}${subagents}</div>${contextBadge(member)}${channelStatusChip(status)}${removeBtn}</div>`;
+    return `<div ${controlAgent(member) ? `data-control-member="${esc(member.id)}" ` : ''}class="channel-member${status === 'archived' ? ' is-archived' : ''}">${avatarFor(member, status)}<div class="channel-member-copy"><div class="channel-member-name">${esc(name)}</div><div class="channel-member-status">${esc(statusText)}</div>${delivery}${tool}${subagents}</div>${contextBadge(member)}${channelStatusChip(status)}${removeBtn}</div>`;
   }
   // Subagent list under an agent's drawer row. "Recent spawns" — tool_events
   // records Task/Agent starts only (no completion), so this is honestly labelled
@@ -2018,6 +2034,7 @@
     if (!list) return;
     const { members, count } = drawerMembers();
     list.innerHTML = members.length ? members.map(detailMember).join('') : '<div class="channel-drawer-empty">Waiting for the current roster…</div>';
+    bindDrawerControls();
     const heading = $('channel-drawer-members-heading');
     if (heading) heading.textContent = 'Members · ' + count;
     hydrateDrawerSubagents();
@@ -2052,6 +2069,7 @@
     const connection = $('h-conn')?.querySelector('.conn-label')?.textContent || (archived ? 'Archived' : 'Live');
     $('channel-drawer-title').textContent = title;
     body.innerHTML = `<section class="channel-drawer-section"><h3>Topic</h3><div class="channel-drawer-topic">${esc(channel?.topic || (dm ? 'Private conversation' : 'No topic'))}</div></section><section class="channel-drawer-section channel-members-section"><h3><span id="channel-drawer-members-heading">Members · ${memberCount}</span>${canEditMembers ? `<button type="button" class="icon-btn edit-members-toggle" id="edit-members-toggle" aria-label="Edit members" aria-pressed="false" title="Edit members">${navIcon('edit')}</button>` : ''}</h3><div id="channel-drawer-members">${members.length ? members.map(detailMember).join('') : '<div class="channel-drawer-empty">Waiting for the current roster…</div>'}</div>${canEditMembers ? `<button type="button" class="btn ghost add-member-btn" id="add-member-btn" hidden>${navIcon('plus')}<span>Add member</span></button>` : ''}</section><section class="channel-drawer-section"><h3>Tasks · ${tasks.length}</h3>${tasks.length ? tasks.slice(0, 4).map(detailTask).join('') : '<div class="channel-drawer-empty">No open tasks.</div>'}${tasks.length > 4 ? '<div class="channel-drawer-empty">+' + (tasks.length - 4) + ' more tasks</div>' : ''}<button type="button" class="btn ghost" id="open-channel-tasks">Open tasks view</button></section><section class="channel-drawer-section"><h3>Activity</h3><div class="kv"><span class="k">Messages loaded</span><span class="v" id="channel-drawer-msgcount" title="Capped at the most recent 500 — not literally every message in this conversation's history">${messageCountLabel()}</span></div><div class="kv"><span class="k">${dm ? 'Conversation size' : 'Channel size'}</span><span class="v" id="channel-drawer-size" title="Rough estimate of this ${dm ? 'conversation' : 'channel'}'s message-history size — a different measurement than an individual agent's own context-fullness badge above">…</span></div><div class="kv"><span class="k">Connection</span><span class="v live">${esc(connection)}</span></div></section>${!dm && state.channel ? '<section class="channel-drawer-section push-section" id="channel-drawer-push"></section>' : ''}<section class="channel-drawer-section"><h3>${dm ? 'Conversation' : 'Channel'}</h3><div class="channel-drawer-actions"><button type="button" class="btn" id="edit-channel-objective">${dm ? 'Conversation settings' : 'Edit objective'}</button>${state.channel ? `<button type="button" class="btn danger" id="archive-channel-drawer">${dm ? (archived ? 'Restore conversation' : 'Archive conversation') : (archived ? 'Restore channel' : 'Archive channel')}</button>` : ''}</div></section>`;
+    bindDrawerControls();
     $('app')?.classList.add('channel-details-open'); drawer.classList.add('open'); drawer.setAttribute('aria-hidden', 'false'); $('details-btn')?.classList.add('menu-active'); $('face-pile')?.setAttribute('aria-expanded', 'true');
     if (!refresh) $('channel-drawer-close')?.focus();
     $('open-channel-tasks')?.addEventListener('click', () => { closeDetails(); navigateView('tasks'); });

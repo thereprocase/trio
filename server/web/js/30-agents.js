@@ -224,7 +224,7 @@
   }
   async function managedQuota(provider, target) {
     try {
-      const usage = await Trio.api.get('/api/usage'); let windows = [];
+      const usage = await Trio.api.get('/api/usage?refresh=0'); let windows = [];
       if (provider === 'claude') windows = [['five_hour','5 hour'],['seven_day','Weekly']].map(([key,label]) => ({...usage.claude?.[key],label}));
       if (provider === 'codex') windows = (usage.codex?.quotas || []).map(q => ({...q,updated_at:usage.codex.updated_at,
         label:(q.label || 'Codex') + ' · ' + (q.window_duration_mins === 300 ? '5 hour' : q.window_duration_mins === 10080 ? 'Weekly' : q.window_duration_mins ? q.window_duration_mins + ' minute' : q.kind)}));

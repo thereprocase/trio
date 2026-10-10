@@ -487,6 +487,26 @@ try:
     check("usage: a sample was persisted for the next request to rate against",
           len(nu.load_history()) == 1)
 
+    # Opening terminal controls reads meters without launching a refresh or
+    # writing a new sample from old cached numbers.
+    from unittest.mock import patch
+    with patch.object(nsup, "maybe_refresh_usage_cli", side_effect=AssertionError("refresh")), \
+            patch.object(nu, "record_sample", side_effect=AssertionError("sample write")):
+        st, body = http(port, "/api/usage?refresh=0")
+    check("passive usage: cache is served without refresh or sample writes",
+          st == 200 and strict.decode(body)["claude"]["five_hour"]["used_percentage"] == 33.0)
+
+    from nth_codex_runtime import CodexRuntimeManager
+    cached_runtime = CodexRuntimeManager.__new__(CodexRuntimeManager)
+    cached_runtime._account_usage_lock = threading.Lock()
+    cached_runtime._account_usage_cache = {"available": True, "updated_at": 123}
+    with patch.object(cached_runtime, "ensure_started", side_effect=AssertionError("provider start")):
+        check("passive Codex usage: returns old cache without starting provider",
+              cached_runtime.account_usage(refresh=False) == {"available": True, "updated_at": 123})
+        cached_runtime._account_usage_cache = {}
+        check("passive Codex usage: empty cache stays unavailable",
+              cached_runtime.account_usage(refresh=False) == {"available": False})
+
     # ── each quota keeps its OWN freshness ──
     # A stale statusline five-hour figure must not inherit a fresh CLI
     # seven-day figure's timestamp: that presents a 3-hour-old number as

@@ -519,7 +519,7 @@ class CodexRuntimeManager:
                           trio_mcp=False)
         return result
 
-    def account_usage(self, max_age: float = 60.0) -> Dict[str, Any]:
+    def account_usage(self, max_age: float = 60.0, refresh: bool = True) -> Dict[str, Any]:
         """Return cached ChatGPT rate limits and Codex daily token activity.
 
         Both methods are account metadata calls exposed by Codex App Server;
@@ -528,6 +528,8 @@ class CodexRuntimeManager:
         versa), and surface a partial result instead of discarding useful data.
         """
         with self._account_usage_lock:
+            if not refresh:
+                return dict(self._account_usage_cache) or {"available": False}
             now = time.time()
             if (self._account_usage_cache
                     and now - self._account_usage_checked < max_age):

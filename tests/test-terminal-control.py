@@ -44,6 +44,15 @@ with tempfile.TemporaryDirectory() as tmp:
         rejects(lambda:t.validate_action(bad))
     rejects(lambda:t.exchange(db,'local',[],now=132))
 
+    # A busy screen must not prevent interrupting the same, freshly paired process.
+    t.exchange(db,'local',{'sessions':[snap]},now=140)
+    interrupt={**params,'action':'interrupt','screen_hash':'previous screen'}
+    rejects(lambda:t.queue(db,{**interrupt,'generation':'replacement'},'owner',now=141))
+    rejects(lambda:t.queue(db,interrupt,'owner',now=160))
+    rejects(lambda:t.queue(db,{**interrupt,'action':'reply'},'owner',now=141))
+    t.queue(db,interrupt,'owner',now=141)
+    assert t.exchange(db,'local',{'sessions':[snap]},now=142)['commands'][0]['action']=='interrupt'
+
 class Fake(t.Tmux):
     def __init__(self):self.calls=[];self.n=0
     def snapshot(self,b):return {'available':True,'generation':'g','screen_hash':'h'}
@@ -66,4 +75,19 @@ f.identity=identity
 with patch.object(t.time,'sleep'):
     assert f.execute({'pane':'%1'},job)['status']=='uncertain'
 assert len(f.calls)==1,'no Enter after process replacement'
-print('PASS: authentication, host scope, stale screens, expiry, no replay, exact timed keys, process replacement')
+# Screen content may change while a pinned agent is busy; only interrupt ignores it.
+interrupt={**job,'action':'interrupt','screen_hash':'previous screen'}
+f=Fake()
+assert f.execute({'pane':'%1'},interrupt)['status']=='sent'
+assert f.calls==[('send-keys','-t','%1','C-c')]
+for action in ('compact','reply'):
+    f=Fake()
+    assert f.execute({'pane':'%1'},{**interrupt,'action':action})['status']=='refused'
+    assert not f.calls
+for snapshot in ({'available':False,'generation':'g','screen_hash':'h'},
+                 {'available':True,'generation':'replacement','screen_hash':'h'}):
+    f=Fake();f.snapshot=lambda b,snapshot=snapshot:snapshot
+    assert f.execute({'pane':'%1'},interrupt)['status']=='refused' and not f.calls
+f=Fake();f.identity=lambda b:'replacement'
+assert f.execute({'pane':'%1'},interrupt)['status']=='refused' and not f.calls
+print('PASS: authentication, host scope, stale screens, expiry, no replay, exact timed keys, process replacement, busy-screen interrupt')

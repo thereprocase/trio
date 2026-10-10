@@ -4606,7 +4606,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
         elif path == "/api/health":
             self._handle_health()
         elif path == "/api/usage":
-            self._handle_usage()
+            self._handle_usage(refresh=parse_qs(parsed.query).get("refresh", ["1"])[0] != "0")
         elif path == "/api/usage/requests":
             self._handle_usage_requests(parsed)
         elif path == "/api/terminals":
@@ -4942,7 +4942,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
             return
         self._json({"ok": True, "approval_id": approval_id, "decision": decision})
 
-    def _handle_usage(self) -> None:
+    def _handle_usage(self, refresh: bool = True) -> None:
         """Account-level quota, burn rate and token consumption for the home
         screen.
 
@@ -4969,7 +4969,8 @@ class NthWebHandler(BaseHTTPRequestHandler):
         sd: List[Any] = [None, None, None, None]
         # Keep the account usage fresh even from the dashboard: kick a
         # rate-gated, non-blocking `claude -p "/usage"` refresh.
-        nsup.maybe_refresh_usage_cli()
+        if refresh:
+            nsup.maybe_refresh_usage_cli()
         # Statusline file — the FALLBACK source. It only advances on an
         # interactive render, so its mtime is genuinely its age.
         try:
@@ -5063,7 +5064,8 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 finally:
                     cdb.close()
             if has_codex_agent:
-                codex_account = get_supervisor().codex.account_usage()
+                codex_account = (get_supervisor().codex.account_usage() if refresh else
+                                 get_supervisor().codex.account_usage(refresh=False))
         except Exception as exc:
             # Surfaced in the response, but also worth a console line: the panel
             # just shows Codex as unavailable, which looks the same as "no Codex
@@ -5075,8 +5077,9 @@ class NthWebHandler(BaseHTTPRequestHandler):
 
         # Record source-tagged Claude and Codex samples, then derive %/hr trends
         # and forecasts from the resulting series.
-        history = nusage.record_sample(
+        history = (nusage.record_sample(
             fh_pct, sd_pct, fh_src, sd_src, codex_current, now=now)
+            if refresh else nusage.load_history())
         # Each quota's windows are capped at its own reset period.
         # window_start = when the CURRENT quota window began. Exact when the
         # provider told us the reset time; None when it did not, in which case

@@ -110,7 +110,9 @@ def queue(path, params, actor, now=None):
             if not row or now - row['updated'] > MAX_AGE:
                 raise ValueError('terminal is offline; refresh before acting')
             snapshot = json.loads(row['snapshot'])
-            if not snapshot.get('available') or params.get('generation') != row['generation'] or params.get('screen_hash') != snapshot.get('screen_hash'):
+            # Output from a busy agent must not prevent stopping that same process.
+            if (not snapshot.get('available') or params.get('generation') != row['generation']
+                    or (command['action'] != 'interrupt' and params.get('screen_hash') != snapshot.get('screen_hash'))):
                 raise ValueError('terminal changed; refresh before acting')
             pending = db.execute("SELECT 1 FROM terminal_commands WHERE session=? AND status IN ('queued','dispatched') AND updated>?", (row['id'], now-30)).fetchone()
             if pending:
@@ -300,7 +302,8 @@ class Tmux:
         try:
             params=validate_action(job)
             snap=self.snapshot(binding)
-            if not snap.get('available') or snap['generation']!=job['generation'] or snap['screen_hash']!=job['screen_hash']:
+            if (not snap.get('available') or snap['generation']!=job['generation']
+                    or (params['action']!='interrupt' and snap['screen_hash']!=job['screen_hash'])):
                 return {'id':job['id'],'status':'refused','detail':'Pane or screen changed; refresh and try again'}
             def keys(*args):
                 nonlocal sent

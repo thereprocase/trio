@@ -67,8 +67,9 @@ A bridge credential can report and collect commands for its own host only; it
 cannot use the owner controls. Agent-facing MCP tools cannot enqueue commands.
 CSRF checks apply to the browser routes.
 
-The snapshot must be fresh (12 seconds) and its screen and process must still
-match when input starts. The process is checked before each keystroke group.
+The snapshot must be fresh (12 seconds), and the process must still match when
+input starts. Compact/reply also require a matching screen. Interrupt permits
+changing output so it can stop a streaming agent. The process is checked before each keystroke group.
 These are best-effort process checks across tmux calls, not a kernel-atomic lock
 on the terminal; use a dedicated pane for the bound agent. Terminal screens and
 keystrokes are untrusted content, never interpreted as shell commands by the
@@ -97,7 +98,8 @@ unchanged. The two terminal_* SQLite tables may remain for audit purposes.
 
 The owner panel shows the provider's available quota windows, used/remaining
 percentages, reset times, and reading age. These are shared account limits, not
-per-agent allowances. Managed agents use the hub's existing provider usage feed.
+per-agent allowances. Managed agents read the hub's existing provider usage cache without starting
+a CLI or refreshing through a model.
 Paired terminals use only explicitly selected local data, never the hub account:
 add `--usage-file /private/path --usage-format claude-statusline` or
 `--usage-format codex-session` when pairing or binding. A Codex source must be
