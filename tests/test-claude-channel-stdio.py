@@ -150,10 +150,9 @@ class StdioChannelTests(unittest.TestCase):
         self.assertNotIn(ambient, ids)
         event = receiver_events()[0]
         lead, body = event['content'].split('\n', 1)
-        self.assertIn('trio_ack', lead)
+        self.assertIn('Ack '+str(mention), lead)
         payload = json.loads(body)
-        self.assertEqual((payload['event'], payload['event_id']), ('new_messages', f'channel-test:{mention}'))
-        self.assertEqual(payload['messages'][0]['id'], mention)
+        self.assertEqual(payload[0]['id'], mention)
         self.assertEqual((event['meta']['mentioned'], event['meta']['sender']), ('true', 'sender'))
         self.assertNotIn(receiver['session_token'], json.dumps(event))
 

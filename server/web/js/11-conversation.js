@@ -668,6 +668,10 @@
         const copy = makeCopyButton(copySource, { title:'Copy markdown', className:'menu-copy' });
         copy.addEventListener('click', closeMessageActions); menu.append(copy);
       }
+      if (!state.readOnly) {
+        const reply = document.createElement('button'); reply.type = 'button'; reply.textContent = 'Reply';
+        reply.addEventListener('click', () => { closeMessageActions(); Trio.composer?.replyTo(msg); }); menu.append(reply);
+      }
       const actions = isOwn(msg) && !state.readOnly ? [...(body ? [['Edit', () => edit(msg, body)]] : []), ['Delete', () => retract(msg)]] : [];
       for (const [label, fn] of actions) {
         const button = document.createElement('button'); button.type = 'button'; button.textContent = label;
@@ -691,6 +695,37 @@
         showMessageActions(card, content, msg, body);
       }, 500);
     };
+    let swipe = null;
+    const resetSwipe = () => { swipe = null; card.style.transform = ''; card.classList.remove('swipe-reply-ready'); };
+    const startSwipe = event => {
+      resetSwipe();
+      if (state.readOnly || msg.retracted_at || event.touches.length !== 1 ||
+          interactiveMessageTarget(event.target) || event.target?.closest?.('pre,code') ||
+          event.touches[0].clientX < 24) return;
+      const touch = event.touches[0];
+      swipe = { x: touch.clientX, y: touch.clientY, ready: false };
+    };
+    card.addEventListener('touchstart', startSwipe, { passive: true });
+    card.addEventListener('touchmove', event => {
+      if (!swipe) return;
+      if (event.touches.length !== 1) { resetSwipe(); return; }
+      const dx = event.touches[0].clientX - swipe.x, dy = event.touches[0].clientY - swipe.y;
+      if (Math.abs(dy) > 16 && Math.abs(dy) > Math.abs(dx)) { resetSwipe(); return; }
+      if (dx < -12) { resetSwipe(); return; }
+      swipe.ready = false; card.style.transform = ''; card.classList.remove('swipe-reply-ready');
+      if (dx > 12 && dx > Math.abs(dy) * 1.5) {
+        if (event.cancelable) event.preventDefault();
+        clearPress(); swipe.ready = dx >= 64;
+        card.style.transform = 'translateX(' + Math.min(dx * 0.5, 48) + 'px)';
+        card.classList.toggle('swipe-reply-ready', swipe.ready);
+      }
+    }, { passive: false });
+    card.addEventListener('touchend', () => {
+      if (!swipe) return;
+      const ready = swipe.ready; resetSwipe();
+      if (ready) { clearPress(); closeMessageActions(); Trio.composer?.replyTo(msg); }
+    });
+    card.addEventListener('touchcancel', resetSwipe);
     card.addEventListener('pointerdown', startPress);
     card.addEventListener('pointermove', event => { if (Math.hypot(event.clientX - pressX, event.clientY - pressY) >= 10) clearPress(); });
     card.addEventListener('pointerup', clearPress);

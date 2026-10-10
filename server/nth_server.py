@@ -612,6 +612,13 @@ def get_db() -> sqlite3.Connection:
         if 'duplicate column' not in str(exc).lower():
             unfinished.append(exc)
 
+    # Set only by authenticated write paths, never inferred from display names.
+    try:
+        conn.execute("ALTER TABLE messages ADD COLUMN sender_role TEXT NOT NULL DEFAULT 'unknown'")
+    except sqlite3.OperationalError as exc:
+        if 'duplicate column' not in str(exc).lower():
+            unfinished.append(exc)
+
     # choices/selection: a multiple-choice question posed to a HUMAN and the
     # answer they clicked. The question payload lives on the asking message;
     # the answer is an ordinary reply whose prose the agent reads, with the
@@ -2368,10 +2375,10 @@ def _send_message(channel: str, member_id: str, message: str, task: bool,
 
         cur = db.execute(
             "INSERT INTO messages (channel, member_id, member_name, content, mentions, refs, bangs, "
-            "author_session, reply_to, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "author_session, reply_to, created_at, sender_role) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (channel, member_id, member["name"], content, mentions_json, refs_json, bangs_json,
-             author_session, reply_to, now),
+             author_session, reply_to, now, "agent" if author_session else "unknown"),
         )
         msg_id = cur.lastrowid
         # Everything from the rich content through the commit is one unit: if
@@ -2739,7 +2746,7 @@ def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: st
             try:
                 unread = db.execute(
                     "SELECT id, member_id, member_name, content, mentions, refs, bangs, "
-                    "recipients, created_at "
+                    "recipients, created_at, sender_role, reply_to "
                     "FROM messages WHERE channel = ? AND id > ? AND member_id != ? ORDER BY id",
                     (channel, current_watermark, member_id),
                 ).fetchall()
@@ -2862,6 +2869,10 @@ def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: st
                         "content": m["content"],
                         "at": m["created_at"],
                     }
+                    if "sender_role" in m.keys() and m["sender_role"] != "unknown":
+                        entry["role"] = m["sender_role"]
+                    if "reply_to" in m.keys() and m["reply_to"]:
+                        entry["reply_to"] = m["reply_to"]
                     if mentioned:
                         entry["mentioned"] = True
                     if referenced:

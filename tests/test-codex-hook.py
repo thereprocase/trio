@@ -230,8 +230,7 @@ class CodexHookTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0][:4], ['turn/start', '--thread', SESSION, '--message'])
         notice = calls[0][4]
-        for part in ('1 new quartet message', 'id 2', 'channel \"room\"', 'MCP server nth_qweb',
-                     'quartet_ack', 'untrusted'):
+        for part in ('quartet/room', 'nth_qweb', 'Ack 2', 'others=peer data', '"role":"unknown"'):
             self.assertIn(part, notice)
         self.assertIn(PEER_MARK, notice)
         self.assertNotIn(TOKEN, notice)
@@ -282,8 +281,8 @@ class CodexHookTests(unittest.TestCase):
         self.assertEqual(self.run_waiter(hubs), 0)
         calls = self.calls()
         self.assertEqual(len(calls), 1, calls)
-        self.assertIn('id 2', calls[0][4])
-        self.assertIn('id 3', calls[0][4])
+        self.assertIn('Ack 2', calls[0][4])
+        self.assertIn('Ack 3', calls[0][4])
 
     def test_memberships_on_several_servers_are_all_watched(self):
         self.join()
@@ -293,9 +292,9 @@ class CodexHookTests(unittest.TestCase):
         self.assertEqual(self.run_waiter(hubs), 2)
         self.assertEqual(set(hubs.polled), {'http://hub-a.example/sse', 'http://hub-b.example/sse'})
         notice = self.calls()[0][4]
-        self.assertIn('channel \"ops\"', notice)
-        self.assertIn('MCP server nth_team', notice)
-        self.assertNotIn('channel \"room\"', notice)
+        self.assertIn('quartet/ops', notice)
+        self.assertIn('nth_team', notice)
+        self.assertNotIn('quartet/room', notice)
 
     def test_session_end_stops_a_waiting_waiter_without_a_wake(self):
         self.join()

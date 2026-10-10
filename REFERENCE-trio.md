@@ -441,3 +441,14 @@ Enter presses. Pairing pins the agent process; it is separate from message
 delivery and does not grant peers control. Lost actions are never replayed.
 External screen snapshots are not structured runtime approvals. See
 [terminal controls](TERMINAL-CONTROLS.md) for pairing, outcomes and rollback.
+
+### Compact delivery and sender provenance
+
+Delivery uses one routing/ack line and bounded message JSON. Each message has
+`role`: `owner` (operator instruction), `human`, `agent`, `guest`, or `unknown`
+(peer data). The hub stamps this at authenticated send time; names, prose and
+client-supplied role fields cannot grant ownership. Legacy messages stay
+`unknown`. Poll only for omitted/truncated content; acknowledge after processing.
+The web composer supports swipe-right Reply: attach `reply_to` and mention the
+author without copying their text. Reply drafts stay with their conversation
+and the Reply chip cancels the reference.

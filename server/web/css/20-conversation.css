@@ -415,3 +415,7 @@ body.compact .day-separator, body.compact .unread-divider { margin:4px 0; }
 .header-avatar, .bubble-time, .bubble-time-space, .targets-toggle, .menu-copy{ display:none; }
 
 .message-identity{ display:contents; }
+
+/* Horizontal reply feedback uses the active theme. Native scrolling stays enabled. */
+.message.swipe-reply-ready { outline: 2px solid var(--accent); outline-offset: 2px; }
+.reply-draft { font-weight: 600; }

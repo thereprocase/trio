@@ -1,0 +1,21 @@
+'use strict';
+const assert=require('assert'),{load}=require('./dom-harness');
+const cx=load(),T=cx.hooks.Trio,s=T.state;
+s.channel='room';s.dmKey='';s.readOnly=false;s.operator={id:'owner'};
+s.members=new Map([['worker',{id:'worker',name:'Worker',kind:'agent'}]]);
+const msg={id:42,channel:'room',member_id:'worker',member_name:'Worker',content:'Do not copy this text',created_at:'2026-01-01T12:00:00Z'};
+const card=T.conversation.cardFor(msg);
+function fire(type,x,y,extra={}) {for(const fn of card._listeners[type]||[])fn({touches:[{clientX:x,clientY:y}],cancelable:true,preventDefault(){},target:card,...extra});}
+fire('touchstart',50,50);fire('touchmove',130,55);fire('touchend',130,55);
+assert.strictEqual(s.composerReply.id,42);assert.ok(s.selectedTargets.has('worker'));
+const body=T.composer.buildSendPayload();assert.strictEqual(body.reply_to,42);assert.ok(!body.content.includes(msg.content));
+assert.ok(cx.document.getElementById('target-bar').querySelector('.reply-draft'));
+s.channel='other';T.composer.refresh();assert.strictEqual(s.composerReply,null);
+s.channel='room';T.composer.refresh();assert.strictEqual(s.composerReply.id,42);
+cx.document.getElementById('target-bar').querySelector('.reply-draft').onclick();assert.strictEqual(s.composerReply,null);
+fire('touchstart',50,50);fire('touchmove',55,140);fire('touchend',55,140);assert.strictEqual(s.composerReply,null);
+fire('touchstart',50,50);fire('touchmove',130,55);fire('touchcancel',130,55);fire('touchend',130,55);assert.strictEqual(s.composerReply,null);
+fire('touchstart',50,50);fire('touchmove',130,55);fire('touchmove',52,50);fire('touchend',52,50);assert.strictEqual(s.composerReply,null);
+fire('touchstart',50,50);fire('touchmove',130,55);fire('touchstart',130,55,{touches:[{},{}]});fire('touchend',130,55);assert.strictEqual(s.composerReply,null);
+s.readOnly=true;fire('touchstart',50,50);fire('touchmove',130,55);fire('touchend',130,55);assert.strictEqual(s.composerReply,null);
+console.log('PASS: swipe attaches ID and author; cancel, vertical scroll, read-only and conversation draft isolation');

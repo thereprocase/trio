@@ -15,6 +15,7 @@
   // to X's array even after you navigate to Y. targetDrafts[cid] holds the
   // @-target ids (rebuilt into the selectedTargets Set on load).
   state.targetDrafts = state.targetDrafts || {};
+  state.replyDrafts = state.replyDrafts || {};
   state.attachmentStore = state.attachmentStore || {};
   let recognition = null, recorder = null, stream = null, localRecording = null;
   // Metering is a SEPARATE stream from the one MediaRecorder/SpeechRecognition
@@ -146,6 +147,7 @@
   function loadComposerAux() {
     const cid = conversationId();
     state.selectedTargets = new Set(state.targetDrafts[cid] || []);
+    state.composerReply = state.replyDrafts[cid] || null;
     state.pendingAttachments = attStore(cid);
     renderTargets(); renderAttachments(); updateSendState();
   }
@@ -169,6 +171,13 @@
   function renderTargets() {
     const bar = byId('target-bar'); if (!bar) return;
     bar.replaceChildren();
+    if (state.composerReply?.id) {
+      const reply = document.createElement('button'); reply.type = 'button'; reply.className = 'target-chip reply-draft';
+      reply.textContent = '↪ Reply #' + state.composerReply.id + ' ×';
+      reply.setAttribute('aria-label', 'Cancel reply to message ' + state.composerReply.id);
+      reply.onclick = () => { state.composerReply = null; delete state.replyDrafts[conversationId()]; renderTargets(); };
+      bar.append(reply);
+    }
     state.selectedTargets.forEach(id => {
       const chip = document.createElement('button'); chip.type = 'button'; chip.className = 'target-chip';
       chip.textContent = '@' + targetName(id) + ' ×';
@@ -241,6 +250,14 @@
     else { state.selectedTargets = new Set(all); renderTargets(); saveDraft(); updateSendState(); }
   }
   function setTargets(ids) { state.selectedTargets = new Set(ids || []); renderTargets(); }
+  function replyTo(msg) {
+    if (state.readOnly || !msg || msg.retracted_at || !Number.isInteger(msg.id)) return;
+    if (msg.channel && msg.channel !== state.channel) return;
+    state.composerReply = { id: msg.id };
+    state.replyDrafts[conversationId()] = state.composerReply;
+    if (msg.member_id && msg.member_id !== state.operator?.id) state.selectedTargets.add(msg.member_id);
+    renderTargets(); input()?.focus();
+  }
   function insertTarget(id) { if (id) { state.selectedTargets.add(id); renderTargets(); input()?.focus(); } }
   // Mentions now live INLINE in the text (@name / @all, inserted at the caret),
   // so the content is sent verbatim. The server derives the wake set by parsing
@@ -425,18 +442,21 @@
     try {
       const body = buildSendPayload();
       body.content = content;
+      const cid = conversationId();
       const result = await api.post(apiUrl('/api/send'), body);
       // Clear THIS conversation's composer state (text + @-targets + images);
       // other threads' drafts are untouched (Bug C).
-      const cid = conversationId();
       delete state.drafts[cid];
       state.targetDrafts[cid] = [];
+      delete state.replyDrafts[cid];
       attStore(cid).forEach(revokePreview);
       state.attachmentStore[cid] = [];
-      state.selectedTargets = new Set();
-      state.pendingAttachments = attStore(cid);
-      inputValue(''); state.composerReply = null;
-      renderTargets(); renderAttachments(); updateSendState();
+      if (conversationId() === cid) {
+        state.selectedTargets = new Set();
+        state.pendingAttachments = attStore(cid);
+        inputValue(''); state.composerReply = null;
+        renderTargets(); renderAttachments(); updateSendState();
+      }
       if (result?.message) Trio.conversation?.upsert(result.message);
       events.dispatchEvent(new CustomEvent('sent', { detail: result }));
       return true;
@@ -1488,5 +1508,5 @@
   // around them need a live MediaRecorder and SpeechRecognition, which the
   // harness deliberately does not fake, but the decisions they encode are the
   // part that regressed and they are testable on their own.
-  Trio.composer = { init, mount, unmount, render: renderTargets, refresh, send, conversationId, dictationState, setTargets, insertTarget, targetOrder, toggleTarget, clearTargets, toggleAllTargets, upload, toggleDictation, stopDictation, buildSendPayload, syncReadOnly, setDictationButtonState, speechErrorMessage, hasBrowserDictation, makeSpeechAccumulator, unavailableReason, humanEngineError, chooseDictationEngine, collapseSpeech, sttHealthNow, refreshSttHealth, applySpokenSigils };
+  Trio.composer = { replyTo, init, mount, unmount, render: renderTargets, refresh, send, conversationId, dictationState, setTargets, insertTarget, targetOrder, toggleTarget, clearTargets, toggleAllTargets, upload, toggleDictation, stopDictation, buildSendPayload, syncReadOnly, setDictationButtonState, speechErrorMessage, hasBrowserDictation, makeSpeechAccumulator, unavailableReason, humanEngineError, chooseDictationEngine, collapseSpeech, sttHealthNow, refreshSttHealth, applySpokenSigils };
 })();

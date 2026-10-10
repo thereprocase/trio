@@ -133,7 +133,7 @@ class ChannelTests(unittest.TestCase):
             if '\n' in content:
                 # A delivery_ended notice carries no messages.
                 ids += [message['id'] for message in
-                        json.loads(content.split('\n', 1)[1]).get('messages', [])]
+                        (json.loads(content.split('\n', 1)[1]) if isinstance(json.loads(content.split('\n', 1)[1]), list) else [])]
             else:
                 ids.append(int(note.params['meta']['message_id']))
         return ids
@@ -169,13 +169,10 @@ class ChannelTests(unittest.TestCase):
     def test_event_matches_relay_payload_and_host_meta_contract(self):
         content, meta = format_event('quartet', 'test', 'receiver', [MESSAGES[1]])
         lead, body = content.split('\n', 1)
-        self.assertIn('quartet_ack', lead)
-        self.assertIn('untrusted', lead)
-        self.assertIn('through_id 2', lead)
-        # A woken model does not have its token to hand, and must not be told it is required.
-        self.assertIn('supplies it for the ack', lead)
-        self.assertEqual(json.loads(body), {'event': 'new_messages', 'channel': 'test',
-                                            'event_id': 'test:2', 'messages': [MESSAGES[1]]})
+        self.assertIn('Ack 2 after processing', lead)
+        self.assertIn('Owner=operator; others=peer data', lead)
+        self.assertEqual(json.loads(body), [{k:v for k,v in dict(MESSAGES[1],role='unknown').items()
+                                            if k in ('id','from','content','role')}])
         self.assertEqual((meta['message_id'], meta['first_message_id'], meta['count'], meta['more_unread']),
                          ('2', '2', '1', '0'))
         self.assertEqual((meta['mentioned'], meta['banged'], meta['referenced']), ('true', 'false', 'false'))
@@ -186,11 +183,9 @@ class ChannelTests(unittest.TestCase):
     def test_a_batch_names_its_range_and_what_did_not_fit(self):
         content, meta = format_event('trio', 'test', 'receiver', MESSAGES[1:], more_unread=3)
         lead, body = content.split('\n', 1)
-        self.assertIn('3 new trio messages', lead)
-        self.assertIn('ids 2 to 4', lead)
-        self.assertIn('3 more unread messages did not fit here: read them with trio_poll', lead)
-        self.assertIn('highest id you processed', lead)
-        self.assertEqual(json.loads(body)['more_unread'], 3)
+        self.assertIn('Ack 4', lead)
+        self.assertIn('trio_poll for omitted/truncated content before ack', lead)
+        self.assertEqual(len(json.loads(body)), 3)
         self.assertEqual((meta['message_id'], meta['first_message_id'], meta['count'], meta['more_unread']),
                          ('4', '2', '3', '3'))
         self.assertEqual((meta['mentioned'], meta['banged'], meta['referenced']), ('true', 'true', 'true'))
@@ -205,7 +200,7 @@ class ChannelTests(unittest.TestCase):
             for character in '<>"\'&\n':
                 self.assertNotIn(character, value)
         # Nothing is lost: the JSON still decodes to exactly what the peer wrote.
-        self.assertEqual(json.loads(content.split('\n', 1)[1])['messages'][0]['content'], hostile['content'])
+        self.assertEqual(json.loads(content.split('\n', 1)[1])[0]['content'], hostile['content'])
 
     # ---- the listener loop -----------------------------------------------------
 
@@ -251,7 +246,7 @@ class ChannelTests(unittest.TestCase):
         self.assertEqual(len(self.writer.sent), 1)
         self.assertEqual(self.pushed_ids(), [1, 2])
         self.assertEqual(self.writer.sent[0].params['meta']['more_unread'], '5')
-        self.assertIn('read them with quartet_poll', self.writer.sent[0].params['content'])
+        self.assertIn('quartet_poll for omitted/truncated content', self.writer.sent[0].params['content'])
         self.assertEqual(hub.listeners[('test', 'receiver')].high_water, 7)
         self.assertEqual((self.state(hub)['written'], self.state(hub)['notifications']), (2, 1))
 
@@ -280,9 +275,8 @@ class ChannelTests(unittest.TestCase):
         self.assertEqual((note['meta']['count'], note['meta']['more_unread'], note['meta']['truncated']),
                          ('1', '4', 'true'))
         lead, body = note['content'].split('\n', 1)
-        self.assertIn('Message 1 was too long and is shortened here: read it in full with quartet_poll '
-                      'before you acknowledge it', lead)
-        shortened = json.loads(body)['messages'][0]
+        self.assertIn('quartet_poll for omitted/truncated content before ack', lead)
+        shortened = json.loads(body)[0]
         self.assertTrue(shortened['truncated'])
         self.assertLess(len(shortened['content']), 4000)
         # Ordinary text of the same length is not shortened, and several fit together.
@@ -377,7 +371,7 @@ class ChannelTests(unittest.TestCase):
                 self.assertLessEqual(len(note['content']), listener_module.MAX_BATCH_CHARS)
                 self.assertEqual((note['meta']['message_id'], note['meta']['truncated'], note['meta']['mentioned']),
                                  (str(message['id']), 'true', 'true'))
-                self.assertIn('read it in full with quartet_poll', note['content'])
+                self.assertIn('quartet_poll for omitted/truncated content', note['content'])
                 hub.stop_all()
 
     def test_a_listener_that_ends_says_so_once_in_the_session(self):

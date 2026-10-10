@@ -514,6 +514,18 @@ def _hostname_slug() -> str:
     return _slug(socket.gethostname()) or "host"
 
 
+def delivery_role(ident):
+    """Persist authenticated provenance; permissive tailnet mode is not ownership."""
+    if ident.source == IDENTITY_SOURCE_LOOPBACK:
+        return 'owner'
+    if ident.source == IDENTITY_SOURCE_TAILSCALE:
+        owner = tailnet_owner()
+        return 'owner' if owner and ident.login.casefold() == owner.casefold() else 'human'
+    if ident.source == IDENTITY_SOURCE_MEMBER or ident.tailnet_verified:
+        return 'human'
+    return 'guest'
+
+
 @dataclass
 class OperatorIdentity:
     member_id: str
@@ -9337,15 +9349,15 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 cursor = db.execute(
                     "INSERT INTO messages "
                     "(channel, member_id, member_name, content, created_at, "
-                    " mentions, refs, bangs, recipients, reply_to, selection) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    " mentions, refs, bangs, recipients, reply_to, selection, sender_role) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (send_channel, op_id, op_name, posted_content, now,
                      json.dumps(mention_ids) if mention_ids else "",
                      json.dumps(ref_ids)     if ref_ids     else "",
                      json.dumps(bang_ids)    if bang_ids    else "",
                      json.dumps(recipient_ids) if recipient_ids else "[]",
                      reply_to,
-                     selection_json if selection_json else ""),
+                     selection_json if selection_json else "", delivery_role(ident)),
                 )
                 msg_id = cursor.lastrowid
                 # Link any uploaded attachments to this message (own, unlinked).
