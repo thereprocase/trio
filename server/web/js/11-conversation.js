@@ -532,7 +532,7 @@
   }
 
   function renderTargets(msg) {
-    const targets = [['!', msg.bangs, 'bang'], ['@', msg.mentions, 'to'], ['#', msg.refs, 'about']]
+    const targets = [['!', msg.bangs, 'bang'], ['#', msg.refs, 'about']]
       .filter(([, ids]) => ids && ids.length);
     if (!targets.length) return null;
     const bar = document.createElement('div'); bar.className = 'message-targets';
@@ -675,6 +675,8 @@
     card.dataset.sender = msg.member_id || '';
     if (!vm.isSystem && !vm.isOwn) card.dataset.senderKind = vm.role === 'human' ? 'human' : 'agent';
     card.dataset.createdAt = vm.createdAt || '';
+    const mentionsMe = !vm.isSystem && !vm.isOwn && !vm.isRetracted && vm.mentions.includes(operator().id);
+    if (mentionsMe) card.classList.add('mentions-me');
     if (vm.isSystem) {
       const content = document.createElement('div'); content.className = 'message-content msg-body';
       const body = document.createElement('div'); paintBody(card, body, vm); content.append(body);
@@ -723,6 +725,7 @@
     const pageOnly = vm.page && !vm.isRetracted && !vm.content.trim();
     if (!ask && !pageOnly) {
       body = document.createElement('div'); body.className = 'message-body bubble'; paintBody(card, body, vm);
+      if (mentionsMe) { body.title = 'Mentions you'; body.setAttribute('aria-label', 'Message mentioning you'); }
       if (!vm.isRetracted) {
         card.classList.add('has-bubble-time');
         phoneStamp = Trio.time.element(vm.createdAt, { prefix:numberPrefix() });

@@ -364,3 +364,89 @@
   --ink:#e8eaee; --ink-2:#b0b6c0; --ink-3:#767d88; --bubble-agent:#22262c; --code-bg:#16191d; --code-ink:#56d4e0;
   --accent:#3dd0e0; --accent-strong:#5fdcec; --accent-tint:#103038;
 }
+
+/* Incoming sender roles follow each theme; own-message tokens stay independent. */
+:root[data-theme="light-1"] {
+  --sender-agent-bg: #e1e8e3; --sender-agent-ink: #292b25; --sender-agent-border: #aab9ad;
+  --sender-human-bg: #ebe3d9; --sender-human-ink: #292b25; --sender-human-border: #bfb09f;
+}
+:root[data-theme="light-2"] {
+  --sender-agent-bg: #dfe7ee; --sender-agent-ink: #202a32; --sender-agent-border: #a9b9c7;
+  --sender-human-bg: #e2ebe7; --sender-human-ink: #202a32; --sender-human-border: #aabfb6;
+}
+:root[data-theme="light-3"] {
+  --sender-agent-bg: #e0e4e9; --sender-agent-ink: #262830; --sender-agent-border: #adb6c1;
+  --sender-human-bg: #e9e3e9; --sender-human-ink: #262830; --sender-human-border: #bdb0bd;
+}
+:root[data-theme="light-4"] {
+  --sender-agent-bg: #e6e1d8; --sender-agent-ink: #302c25; --sender-agent-border: #baaf9e;
+  --sender-human-bg: #e1e6dd; --sender-human-ink: #302c25; --sender-human-border: #afbaa7;
+}
+:root[data-theme="light-5"] {
+  --sender-agent-bg: #eadfd9; --sender-agent-ink: #332923; --sender-agent-border: #c1ada2;
+  --sender-human-bg: #e1e5df; --sender-human-ink: #332923; --sender-human-border: #afb9aa;
+}
+:root[data-theme="light-6"] {
+  --sender-agent-bg: #e9e0cf; --sender-agent-ink: #302c22; --sender-agent-border: #c0b08e;
+  --sender-human-bg: #dfe5dc; --sender-human-ink: #302c22; --sender-human-border: #adbaa4;
+}
+:root[data-theme="dark-1"] {
+  --sender-agent-bg: #2c3741; --sender-agent-ink: #edf0f3; --sender-agent-border: #627688;
+  --sender-human-bg: #343d35; --sender-human-ink: #edf0f3; --sender-human-border: #708473;
+}
+:root[data-theme="dark-2"] {
+  --sender-agent-bg: #29372e; --sender-agent-ink: #eaf0e8; --sender-agent-border: #617d69;
+  --sender-human-bg: #39382b; --sender-human-ink: #eaf0e8; --sender-human-border: #898363;
+}
+:root[data-theme="dark-3"] {
+  --sender-agent-bg: #34383f; --sender-agent-ink: #f0eef1; --sender-agent-border: #747d8c;
+  --sender-human-bg: #3e353d; --sender-human-ink: #f0eef1; --sender-human-border: #897181;
+}
+:root[data-theme="dark-4"] {
+  --sender-agent-bg: #243840; --sender-agent-ink: #e9f1f4; --sender-agent-border: #5d7e8b;
+  --sender-human-bg: #343544; --sender-human-ink: #e9f1f4; --sender-human-border: #75728e;
+}
+:root[data-theme="dark-5"] {
+  --sender-agent-bg: #343439; --sender-agent-ink: #f2efea; --sender-agent-border: #777780;
+  --sender-human-bg: #3e3933; --sender-human-ink: #f2efea; --sender-human-border: #8b7e6e;
+}
+:root[data-theme="dark-6"] {
+  --sender-agent-bg: #41342d; --sender-agent-ink: #f4eee7; --sender-agent-border: #91715d;
+  --sender-human-bg: #353b32; --sender-human-ink: #f4eee7; --sender-human-border: #78886c;
+}
+:root[data-theme="historic-win98"] {
+  --sender-agent-bg: #d9dce7; --sender-agent-ink: #20232b; --sender-agent-border: #858ba7;
+  --sender-human-bg: #d7e3df; --sender-human-ink: #20232b; --sender-human-border: #78998c;
+}
+:root[data-theme="historic-gameboy"] {
+  --sender-agent-bg: #c4cfa1; --sender-agent-ink: #20251a; --sender-agent-border: #59663b;
+  --sender-human-bg: #a5b384; --sender-human-ink: #20251a; --sender-human-border: #4e6034;
+}
+:root[data-theme="historic-geocities"] {
+  --sender-agent-bg: #252c49; --sender-agent-ink: #f3eff5; --sender-agent-border: #657bab;
+  --sender-human-bg: #3d2c45; --sender-human-ink: #f3eff5; --sender-human-border: #9779a0;
+}
+:root[data-theme="inspired-ipod"] {
+  --sender-agent-bg: #dce4ed; --sender-agent-ink: #202a35; --sender-agent-border: #98acc1;
+  --sender-human-bg: #e6e7df; --sender-human-ink: #202a35; --sender-human-border: #b0b39c;
+}
+:root[data-theme="inspired-messenger"] {
+  --sender-agent-bg: #303a45; --sender-agent-ink: #f1f3f5; --sender-agent-border: #687d91;
+  --sender-human-bg: #334037; --sender-human-ink: #f1f3f5; --sender-human-border: #6d8b75;
+}
+:root[data-theme="inspired-slack"] {
+  --sender-agent-bg: #e7dfe7; --sender-agent-ink: #29242b; --sender-agent-border: #baa5ba;
+  --sender-human-bg: #dce8e5; --sender-human-ink: #29242b; --sender-human-border: #9fbdb4;
+}
+:root[data-theme="inspired-trailhead"] {
+  --sender-agent-bg: #343d31; --sender-agent-ink: #f2f0e7; --sender-agent-border: #798e6b;
+  --sender-human-bg: #443a2b; --sender-human-ink: #f2f0e7; --sender-human-border: #9a825c;
+}
+:root[data-theme="inspired-high-tide"] {
+  --sender-agent-bg: #dce8ed; --sender-agent-ink: #202e33; --sender-agent-border: #9ebac6;
+  --sender-human-bg: #e0e8df; --sender-human-ink: #202e33; --sender-human-border: #aec0a9;
+}
+:root[data-theme="inspired-rescue"] {
+  --sender-agent-bg: #e2e6eb; --sender-agent-ink: #1f2328; --sender-agent-border: #a2afbd;
+  --sender-human-bg: #eaecd9; --sender-human-ink: #1f2328; --sender-human-border: #b4b98d;
+}

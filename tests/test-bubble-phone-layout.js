@@ -105,6 +105,7 @@ async function measure() {
     Trio.state.members = new Map([
       ['operator', { id:'operator', name:'Operator' }],
       ['agent', { id:'agent', name:'Agent', kind:'agent' }],
+      ['human', { id:'human', name:'Human', kind:'human' }],
       ['coordinator', { id:'coordinator', name:'BuildCoordinator', kind:'agent' }],
       ['long', { id:'long', name:'Member' + 'LongName'.repeat(9), kind:'agent' }]
     ]);
@@ -116,6 +117,7 @@ async function measure() {
     const messages = [
       { id:1, member_id:'operator', content:prose, mentions:['agent'] },
       { id:2, member_id:'agent', content:prose, mentions:['operator'], reply_to:1 },
+      { id:17, member_id:'human', content:'I can check the hardware this afternoon.' },
       { id:3, member_id:'operator', content:'Short reply.' },
       { id:4, member_id:'agent', content:'Short reply.' },
       { id:5, member_id:'operator', content:'Private reply.', recipients:['agent'], is_dm:true },
@@ -161,19 +163,33 @@ async function measure() {
       style.textContent = before;
       const ownBefore = color(cards[3]);
       style.textContent = full;
-      results.push({theme, colors, ownBefore, kinds:cards.map(c => c.dataset.senderKind || '')});
+      results.push({theme, colors, ownBefore, inks:cards.map(c => getComputedStyle(c.querySelector('.bubble')).color), kinds:cards.map(c => c.dataset.senderKind || '')});
     }
     cards.forEach(c => c.remove());
     return results;
   })()`);
-  for (const {theme, colors, ownBefore, kinds} of roles) {
+  const luminance = color => {
+    const rgb = color.match(/[\d.]+/g).slice(0, 3).map(Number).map(v => {
+      v /= 255; return v <= .04045 ? v / 12.92 : ((v + .055) / 1.055) ** 2.4;
+    });
+    return rgb[0] * .2126 + rgb[1] * .7152 + rgb[2] * .0722;
+  };
+  const tokenSource = fs.readFileSync(path.join(web, 'css/00-tokens.css'), 'utf8');
+  const pairs = new Set();
+  for (const {theme, colors, ownBefore, kinds, inks} of roles) {
     assert.deepStrictEqual(kinds, ['agent', 'human', 'human', '']);
-    const dark = theme.startsWith('dark-');
-    assert.strictEqual(colors[0], dark ? 'rgb(44, 53, 61)' : 'rgb(226, 231, 236)', theme + ' agent blue');
-    assert.strictEqual(colors[1], dark ? 'rgb(46, 56, 49)' : 'rgb(227, 233, 227)', theme + ' human green');
+    const block = tokenSource.split(':root[data-theme="' + theme + '"] {').pop().split('}')[0];
+    assert.ok(block.includes('--sender-agent-bg:') && block.includes('--sender-human-bg:'), theme + ' explicit role palette');
+    assert.notStrictEqual(colors[0], colors[1], theme + ' roles distinguishable');
+    pairs.add(colors.slice(0, 2).join('/'));
+    for (let i = 0; i < 2; i++) {
+      const a = luminance(colors[i]), b = luminance(inks[i]);
+      assert.ok((Math.max(a,b)+.05)/(Math.min(a,b)+.05) >= 4.5, theme + ' readable role text');
+    }
     assert.strictEqual(colors[2], colors[1], theme + ' legacy operator human');
     assert.strictEqual(colors[3], ownBefore, theme + ' own unchanged');
   }
+  assert.strictEqual(pairs.size, themes.length, 'every theme has its own role palette');
   console.log('PASS: human/agent colors and unchanged own bubbles across ' + roles.length + ' themes');
   let passed = 0;
   const failures = [], measurements = [];
@@ -269,7 +285,7 @@ async function measure() {
         }
         if (mobile) {
           assert.strictEqual(geometry.coarse, true, 'touch rules active');
-          assert.ok(geometry.chipHits.length >= 4 && geometry.chipHits.flat().every(Boolean), 'recipient chip edges are reachable');
+          assert.ok(geometry.chipHits.length >= 2 && geometry.chipHits.flat().every(Boolean), 'recipient chip edges are reachable');
           assert.ok(geometry.incomingMetadata.headerChildren.some(child => child.className === 'private-badge'), 'incoming private fixture');
           assert.ok(geometry.incomingMetadata.headerChildren.some(child => child.className === 'task-chip'), 'incoming task fixture');
           assert.ok(geometry.incomingMetadata.headerChildren.some(child => child.className.includes('confidence-')), 'incoming confidence fixture');

@@ -304,21 +304,10 @@
 }
 
 /* Sender roles are semantic across themes; outgoing bubbles keep their theme. */
+/* Fallback for a missing/unknown theme; registered themes supply their own tokens. */
 :root {
-  --sender-agent-bg: #e2e7ec;
-  --sender-agent-ink: #1c252d;
-  --sender-agent-border: #aebbc6;
-  --sender-human-bg: #e3e9e3;
-  --sender-human-ink: #1f2921;
-  --sender-human-border: #b0bfb2;
-}
-:root[data-theme^="dark-"] {
-  --sender-agent-bg: #2c353d;
-  --sender-agent-ink: #edf0f3;
-  --sender-agent-border: #677887;
-  --sender-human-bg: #2e3831;
-  --sender-human-ink: #edf2ed;
-  --sender-human-border: #6a8070;
+  --sender-agent-bg: #e2e7ec; --sender-agent-ink: #1c252d; --sender-agent-border: #aebbc6;
+  --sender-human-bg: #e3e9e3; --sender-human-ink: #1f2921; --sender-human-border: #b0bfb2;
 }
 :root[data-theme] .message.msg[data-sender-kind="agent"]:not(.me) {
   --sender-bg: var(--sender-agent-bg);
@@ -343,4 +332,10 @@
   color: var(--sender-agent-ink);
   border-radius: 4px;
   padding: 0 3px;
+}
+
+/* A personal mention gets a theme-colored edge without another metadata row. */
+:root[data-theme] .message.msg.mentions-me:not(.me) .bubble {
+  outline: 2px solid color-mix(in srgb, var(--accent) 65%, var(--sender-border));
+  outline-offset: 1px;
 }

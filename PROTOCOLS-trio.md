@@ -445,5 +445,6 @@ dead listeners with no committed terminal state and schedules a replacement afte
 `!all`, but excludes human members. It changes wake targeting, not message
 visibility. `!all` still wakes everyone. Explicit individual bangs can be
 combined with `!agents`. The group keyword is reserved for bangs; use a human
-member’s ID if their display name is “agents”. Incoming agent bubbles are blue
-and human bubbles green; your own right-aligned bubbles retain their theme.
+member’s ID if their display name is “agents”. Incoming human and agent bubbles use distinct palettes for the selected theme;
+your own right-aligned bubbles retain their styling. @ recipients do not add
+a separate pill row; messages mentioning you get a subtle themed outline.

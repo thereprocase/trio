@@ -123,7 +123,7 @@ async function measure() {
     window.syntheticMessages=[
       ...Array.from({length:6},(_,i)=>({...base,id:i+1,member_id:i<3?'agent':'peer',content:['Ready.','Acknowledged.','On it.'][i%3],created_at:'2026-01-01T12:0'+i+':00Z'})),
       {...base,id:7,member_id:'operator',content:'Thanks.'},
-      {...base,id:8,member_id:'agent',content:'The first pass is ready for review. The narrow layout now has room for short acknowledgements as well as longer explanations.\n\nEach update keeps the conversation in order and retains the original text. A reviewer can follow the reply marker, expand the recipients, or copy the message from its actions menu.\n\nThe next step is to compare the screenshots and verify the interaction targets.',mentions:['operator','peer','helper','reviewer'],reply_to:7},
+      {...base,id:8,member_id:'agent',content:'The first pass is ready for review. The narrow layout now has room for short acknowledgements as well as longer explanations.\n\nEach update keeps the conversation in order and retains the original text. A reviewer can follow the reply marker, expand the recipients, or copy the message from its actions menu.\n\nThe next step is to compare the screenshots and verify the interaction targets.',refs:['operator','peer','helper','reviewer'],reply_to:7},
       {...base,id:9,member_id:'long',content:'A long sender name remains available.'},
       {...base,id:10,member_id:'agent',content:'A long recipient name still fits.',mentions:['long'],reply_to:9},
       {...base,id:11,member_id:'peer',content:'[joined] Peer'},

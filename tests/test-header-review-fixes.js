@@ -147,17 +147,18 @@ async function measure() {
       ['long',{id:'long',name:'AnExtremelyLongSyntheticParticipantName',kind:'agent'}]
     ]);
     const base={channel:'layout-demo',created_at:'2026-01-01T12:00:00Z'};
+    // References retain expandable chips; @ mentions now use personal outlines.
     window.syntheticMessages=[
       {...base,id:1,member_id:'agent',content:'Ready.'},
       {...base,id:2,member_id:'agent',content:'Acknowledged.'},
       {...base,id:3,member_id:'long',content:'Long name sample.'},
-      {...base,id:4,member_id:'operator',content:'OK.',mentions:['long','peer','helper','reviewer','agent'],reply_to:3},
-      {...base,id:5,member_id:'agent',content:'Recipients and reply.',bangs:['operator'],mentions:['long','peer','helper','reviewer','agent'],refs:['long','peer'],reply_to:4},
+      {...base,id:4,member_id:'operator',content:'OK.',refs:['long','peer','helper','reviewer','agent'],reply_to:3},
+      {...base,id:5,member_id:'agent',content:'Recipients and reply.',bangs:['operator'],refs:['long','peer','helper','reviewer','agent'],reply_to:4},
       {...base,id:6,member_id:'peer',content:'[The entire last paragraph is a clickable link with several words to wrap near the timestamp and test the reachable link area on each line.](https://example.com)'},
       {...base,id:7,member_id:'operator',content:'[The entire last paragraph is a clickable link with several words to wrap near the timestamp and test the reachable link area on each line.](https://example.com)'},
       {...base,id:8,member_id:'agent',content:'[joined] Agent'},
       {...base,id:9,member_id:'peer',content:'Deleted message',retracted_at:'2026-01-01T12:01:00Z'},
-      {...base,id:10,member_id:'agent',content:'Private task.',recipients:['operator'],mentions:['operator'],task_id:123,confidence:'high'},
+      {...base,id:10,member_id:'agent',content:'Private task.',recipients:['operator'],refs:['operator'],task_id:123,confidence:'high'},
       {...base,id:11,member_id:'operator',content:'Edited text with a link [final linked words](https://example.com)',edited_at:'2026-01-01T12:01:00Z'}
     ];
     window.paintSynthetic=()=>{
