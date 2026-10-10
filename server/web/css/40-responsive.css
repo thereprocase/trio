@@ -305,28 +305,35 @@
 
 /* Sender roles are semantic across themes; outgoing bubbles keep their theme. */
 :root {
-  --sender-agent-bg: #e3f1ff;
-  --sender-agent-ink: #18334d;
-  --sender-human-bg: #e5f5e8;
-  --sender-human-ink: #193e27;
+  --sender-agent-bg: #e2e7ec;
+  --sender-agent-ink: #1c252d;
+  --sender-agent-border: #aebbc6;
+  --sender-human-bg: #e3e9e3;
+  --sender-human-ink: #1f2921;
+  --sender-human-border: #b0bfb2;
 }
 :root[data-theme^="dark-"] {
-  --sender-agent-bg: #203b53;
-  --sender-agent-ink: #e3f1ff;
-  --sender-human-bg: #234331;
-  --sender-human-ink: #e5f5e8;
+  --sender-agent-bg: #2c353d;
+  --sender-agent-ink: #edf0f3;
+  --sender-agent-border: #677887;
+  --sender-human-bg: #2e3831;
+  --sender-human-ink: #edf2ed;
+  --sender-human-border: #6a8070;
 }
 :root[data-theme] .message.msg[data-sender-kind="agent"]:not(.me) {
   --sender-bg: var(--sender-agent-bg);
   --sender-ink: var(--sender-agent-ink);
+  --sender-border: var(--sender-agent-border);
 }
 :root[data-theme] .message.msg[data-sender-kind="human"]:not(.me) {
   --sender-bg: var(--sender-human-bg);
   --sender-ink: var(--sender-human-ink);
+  --sender-border: var(--sender-human-border);
 }
 :root[data-theme] .message.msg[data-sender-kind]:not(.me) .bubble {
   background: var(--sender-bg);
   color: var(--sender-ink);
+  border-color: var(--sender-border);
 }
 :root[data-theme] .message.msg[data-sender-kind]:not(.me) .bubble::after {
   background: var(--sender-bg);

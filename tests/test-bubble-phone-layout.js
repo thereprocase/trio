@@ -169,8 +169,8 @@ async function measure() {
   for (const {theme, colors, ownBefore, kinds} of roles) {
     assert.deepStrictEqual(kinds, ['agent', 'human', 'human', '']);
     const dark = theme.startsWith('dark-');
-    assert.strictEqual(colors[0], dark ? 'rgb(32, 59, 83)' : 'rgb(227, 241, 255)', theme + ' agent blue');
-    assert.strictEqual(colors[1], dark ? 'rgb(35, 67, 49)' : 'rgb(229, 245, 232)', theme + ' human green');
+    assert.strictEqual(colors[0], dark ? 'rgb(44, 53, 61)' : 'rgb(226, 231, 236)', theme + ' agent blue');
+    assert.strictEqual(colors[1], dark ? 'rgb(46, 56, 49)' : 'rgb(227, 233, 227)', theme + ' human green');
     assert.strictEqual(colors[2], colors[1], theme + ' legacy operator human');
     assert.strictEqual(colors[3], ownBefore, theme + ' own unchanged');
   }
