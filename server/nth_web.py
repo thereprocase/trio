@@ -2179,6 +2179,18 @@ def _message_event(db: sqlite3.Connection, r: sqlite3.Row,
     }
 
 
+def channel_history_page(db, channel, before, limit=50):
+    """A bounded public-channel page; private messages belong to the DM view."""
+    rows = db.execute(
+        "SELECT * FROM messages WHERE channel = ? AND id < ? "
+        "AND (recipients IS NULL OR recipients = '' OR recipients = '[]') "
+        "ORDER BY id DESC LIMIT ?", (channel, before, limit + 1)).fetchall()
+    more = len(rows) > limit
+    rows = rows[:limit]
+    return {"messages": [_message_event(db, row, channel) for row in reversed(rows)],
+            "before_id": int(rows[-1]["id"]) if rows else None, "has_more": more}
+
+
 class EventHub:
     """Single background thread watches the DB and pushes JSON events to any
     subscribed SSE client. Each client owns a queue.Queue of pending payloads."""
@@ -2203,7 +2215,7 @@ class EventHub:
     def subscribe(self, viewer_id: Optional[str] = None,
                   all_seeing: bool = True,
                   include_history: bool = True,
-                  catch_up_after_id: Optional[int] = None) -> queue.Queue:
+                  catch_up_after_id: Optional[int] = None, paged: bool = False) -> queue.Queue:
         """Register an SSE subscriber, scoped to what this viewer may see.
 
         An all-seeing operator (loopback / tailnet) receives every message. Any
@@ -2229,7 +2241,7 @@ class EventHub:
             primed = self._prime_payloads(
                 viewer_id, all_seeing, through_id,
                 include_history=include_history,
-                catch_up_after_id=catch_up_after_id)
+                catch_up_after_id=catch_up_after_id, paged=paged)
             # Capacity derives from the actual prime, rather than assuming a
             # fixed number of control envelopes.  The live tail remains
             # bounded: a client that cannot drain the extra buffer is removed
@@ -2272,7 +2284,7 @@ class EventHub:
     def _prime_payloads(self, viewer_id: Optional[str], all_seeing: bool,
                         through_id: int,
                         include_history: bool = True,
-                        catch_up_after_id: Optional[int] = None) -> List[str]:
+                        catch_up_after_id: Optional[int] = None, paged: bool = False) -> List[str]:
         # try/finally so queue.Full or a transient sqlite error doesn't leak
         # the connection. A leaked read connection holds a SHARED lock and,
         # worse, if Python's default isolation_level has auto-BEGUN any write,
@@ -2297,7 +2309,11 @@ class EventHub:
                 {"type": "roster", "channel": self.channel, "members": members}))
             payloads.append(json.dumps(
                 {"type": "context", "sessions": _read_context_snapshots()}))
-            if catch_up_after_id is not None:
+            page = None
+            if paged and include_history:
+                page = channel_history_page(db, self.channel, through_id + 1)
+                payloads.extend(json.dumps(event) for event in reversed(page["messages"]))
+            elif catch_up_after_id is not None:
                 rows = db.execute(
                     "SELECT id, member_id, member_name, content, mentions, refs, bangs, "
                     "recipients, reply_to, choices, selection, "
@@ -2325,7 +2341,8 @@ class EventHub:
                         continue
                     payloads.append(json.dumps(ev))
             if include_history:
-                payloads.append(json.dumps({"type": "history_ready", "channel": self.channel}))
+                payloads.append(json.dumps({"type": "history_ready", "channel": self.channel,
+                    **({"before_id": page["before_id"], "has_more": page["has_more"]} if page is not None else {})}))
         except sqlite3.Error:
             pass
         finally:
@@ -4680,6 +4697,8 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 },
                 "server_host": socket.gethostname(),
             }, set_cookie_token=token if is_new else None)
+        elif path == "/api/history":
+            self._handle_history_page(parsed)
         elif path == "/api/events":
             ch = self._channel_for_request(parsed)
             if ch is None:
@@ -4697,6 +4716,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 self._hub_for_channel(ch),
                 viewer_id=ident.member_id,
                 all_seeing=is_all_seeing(ident.member_id),
+                paged=parse_qs(parsed.query).get("paged") == ["1"],
             )
         elif path == "/api/push/vapid-public-key":
             self._handle_push_public_key()
@@ -4867,8 +4887,35 @@ class NthWebHandler(BaseHTTPRequestHandler):
     def _error(self, status: int, msg: str) -> None:
         self._json({"error": msg}, status=status)
 
+    def _handle_history_page(self, parsed) -> None:
+        channel = self._channel_for_request(parsed)
+        if channel is None:
+            self._error(400, "channel query param required")
+            return
+        if self.landing_mode and not self._channel_exists(channel):
+            self._error(404, "channel not found")
+            return
+        self._resolve_identity()  # Same public-channel visibility as /api/events.
+        try:
+            before = int(parse_qs(parsed.query).get("before", [""])[0])
+            if not 0 < before < 2**53:
+                raise ValueError()
+        except (ValueError, TypeError):
+            self._error(400, "before must be a positive message id")
+            return
+        db = None
+        try:
+            db = sqlite3.connect(str(self.db_path), timeout=5)
+            db.row_factory = sqlite3.Row
+            self._json({"ok": True, **channel_history_page(db, channel, before)})
+        except sqlite3.Error:
+            self._error(500, "could not load older messages")
+        finally:
+            if db is not None:
+                db.close()
+
     def _serve_sse(self, hub: EventHub, viewer_id: Optional[str] = None,
-                   all_seeing: bool = True) -> None:
+                   all_seeing: bool = True, paged: bool = False) -> None:
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-store")
@@ -4876,7 +4923,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
         self.send_header("X-Accel-Buffering", "no")
         self.end_headers()
 
-        q = hub.subscribe(viewer_id=viewer_id, all_seeing=all_seeing)
+        q = hub.subscribe(viewer_id=viewer_id, all_seeing=all_seeing, paged=paged)
         try:
             last_heartbeat = time.monotonic()
             while True:

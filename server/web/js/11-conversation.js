@@ -1028,12 +1028,42 @@
     pendingWasNear = wasNear;
     pendingInsertFrame = requestAnimationFrame(flushPendingInserts);
   }
+  function updateHistoryButton() {
+    const list = dom(), page = state.channelHistory;
+    const stick = !state.loadingOlder && nearBottom(list);
+    list?.querySelector('.history-older')?.remove();
+    if (!list || state.dmKey || !page?.has_more) return;
+    const button = document.createElement('button'); button.type = 'button'; button.className = 'history-older btn';
+    button.textContent = page.loading ? 'Loading older messages…' : page.error ? 'Retry older messages' : 'Load older messages';
+    button.disabled = !!page.loading;
+    button.addEventListener('click', loadOlder);
+    list.insertBefore(button, list.firstChild);
+    if (stick) list.scrollTop = list.scrollHeight;
+  }
+  async function loadOlder() {
+    const page = state.channelHistory, channel = state.channel;
+    if (state.dmKey || !page?.has_more || page.loading || !page.before_id) return;
+    page.loading = true; page.error = false; updateHistoryButton();
+    try {
+      const data = await Trio.api.get('/api/history?channel=' + encodeURIComponent(channel) + '&before=' + page.before_id, false);
+      if (state.channelHistory !== page || state.channel !== channel || state.dmKey) return;
+      const list = dom(), top = list.scrollTop, height = list.scrollHeight;
+      for (const msg of data.messages || []) {
+        if (msg.channel === channel && !isPrivate(msg) && !state.messages.has(msg.id)) state.messages.set(msg.id, msg);
+      }
+      page.before_id = data.before_id; page.has_more = data.has_more;
+      state.historyExpanded = true; state.loadingOlder = true;
+      try { render(); } finally { state.loadingOlder = false; }
+      list.scrollTop = top + list.scrollHeight - height;
+    } catch (_) { if (state.channelHistory === page) page.error = true; }
+    finally { page.loading = false; if (state.channelHistory === page) updateHistoryButton(); }
+  }
   function render() {
     const list = dom(); if (!list) return;
     // A full render already paints every state.messages entry; discard a
     // scheduled incremental tail so the same cards cannot be appended twice.
     cancelPendingInserts();
-    const stick = nearBottom(list); list.replaceChildren(); state.messageDomById.clear();
+    const stick = !state.loadingOlder && nearBottom(list); list.replaceChildren(); state.messageDomById.clear();
     const messages = ordered();
     if (!messages.length) {
       const empty = document.createElement('div'); empty.className = 'conversation-empty';
@@ -1080,6 +1110,7 @@
     const saved = state.scrollPositions[convId()];
     if (stick) { list.scrollTop = list.scrollHeight; markRead(); }
     else if (saved != null) { list.scrollTop = saved; }
+    updateHistoryButton();
   }
 
   function upsert(msg) {
@@ -1169,6 +1200,7 @@
   }
 
   function pruneMessages(limit = 500) {
+    if (state.historyExpanded) return; // Keep history explicitly requested in this visit.
     const entries = [...state.messages.entries()];
     if (entries.length <= limit) return;
     entries.sort((a, b) => b[0] - a[0]).slice(limit).forEach(([id]) => {
@@ -1232,7 +1264,7 @@
     render();
     const list = dom(); const jump = document.getElementById('jump-latest');
     if (list && jump) {
-      const onScroll = () => { jump.classList.toggle('hidden', nearBottom(list)); state.scrollPositions[convId()] = list.scrollTop; markRead(); };
+      const onScroll = () => { jump.classList.toggle('hidden', nearBottom(list)); state.scrollPositions[convId()] = list.scrollTop; markRead(); if (list.scrollTop < 160 && !nearBottom(list) && !state.channelHistory?.error) loadOlder(); };
       const onClick = () => { list.scrollTop = list.scrollHeight; markRead(); };
       list.addEventListener('scroll', onScroll); listeners.listScroll = [list, onScroll];
       jump.addEventListener('click', onClick); listeners.jumpClick = [jump, onClick];
@@ -1249,5 +1281,5 @@
   }
   function mount() { init(); }
 
-  Trio.conversation = { init, mount, unmount, render, ingest, upsert, paintBody, cardFor, syncMessageGroups, viewModel, answerPayload, isPrivate, seedWatermark, syncReadState, pageCard, pageCaption };
+  Trio.conversation = { loadOlder, updateHistoryButton, init, mount, unmount, render, ingest, upsert, paintBody, cardFor, syncMessageGroups, viewModel, answerPayload, isPrivate, seedWatermark, syncReadState, pageCard, pageCaption };
 })();

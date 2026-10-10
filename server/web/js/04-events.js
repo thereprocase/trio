@@ -105,6 +105,13 @@
     const type = payload.type || 'message';
     if (type === 'history_ready' && payload.channel === Trio.state.channel && !Trio.state.dmKey) {
       Trio.state.channelLoading = false;
+      if ('has_more' in payload) {
+        const old = Trio.state.channelHistory;
+        if (!old || old.channel !== payload.channel || (payload.before_id && payload.before_id < old.before_id)) {
+          Trio.state.channelHistory = {channel:payload.channel, before_id:payload.before_id, has_more:payload.has_more};
+        }
+        Trio.conversation?.updateHistoryButton?.();
+      }
       if (!Trio.state.messages?.size) Trio.conversation?.render?.();
     }
     // Cross-channel chimes wired up a second, multiplexed SSE stream
@@ -203,7 +210,7 @@
     setConnection('connecting…', true);
     notify('connecting');
     channelStartedAt = Date.now();
-    const source = new EventSource(Trio.api.url('/api/events'));
+    const source = new EventSource(Trio.api.url('/api/events' + (Trio.state.dmKey ? '' : '?paged=1')));
     stream = source;
     source.onopen = () => {
       if (stream !== source) return;

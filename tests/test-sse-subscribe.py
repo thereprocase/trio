@@ -60,6 +60,26 @@ try:
           primed[-1] == {"type": "history_ready", "channel": channel})
     hub.unsubscribe(q)
 
+    paged_q = hub.subscribe(paged=True)
+    paged_events = []
+    while not paged_q.empty():
+        paged_events.append(json.loads(paged_q.get_nowait()))
+    paged_ids = [e["id"] for e in paged_events if e.get("type") == "message"]
+    check("paged prime sends newest 50 first", paged_ids == list(reversed(ids[-50:])))
+    check("paged prime supplies older cursor", paged_events[-1]["before_id"] == ids[-50] and paged_events[-1]["has_more"])
+    db = srv.get_db()
+    older = web.channel_history_page(db, channel, ids[-50])
+    db.close()
+    check("older page has no gaps or duplicates", [e["id"] for e in older["messages"]] == ids[-100:-50])
+    db = srv.get_db()
+    db.execute("UPDATE messages SET recipients = ? WHERE id = ?", ('["private-peer"]', ids[-1]))
+    db.commit()
+    public_page = web.channel_history_page(db, channel, ids[-1] + 1)
+    check("channel pages exclude private rows", ids[-1] not in [e["id"] for e in public_page["messages"]])
+    db.execute("UPDATE messages SET recipients = '[]' WHERE id = ?", (ids[-1],))
+    db.commit(); db.close()
+    hub.unsubscribe(paged_q)
+
     index_q = hub.subscribe(include_history=False)
     index_prime = []
     while not index_q.empty():

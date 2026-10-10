@@ -200,6 +200,7 @@
     if (!isDm) state.dmRouteResolved = true;
     state.dmLoading = false;
     state.channelLoading = !isDm;
+    state.channelHistory = null; state.historyExpanded = false;
     state.dmError = '';
     // Leaving a DM for a channel must also drop the DM's target identity —
     // otherwise buildSendPayload falls through to state.dmTargetId and stamps
