@@ -131,6 +131,13 @@ try:
           "the failure a last_read watermark cannot avoid",
           reads_for(operator_id) == {mids[0], mids[1], mids[4]})
 
+    st_channels, channels_body = http(port, "/api/channels")
+    channel_read = next(c for c in channels_body["channels"] if c["code"] == CH)
+    check("channel cursor: persisted newest read is returned across requests",
+          st_channels == 200 and channel_read["last_read"] == mids[4])
+    check("channel cursor: an earlier unread hole is preserved",
+          channel_read["first_unread"] <= mids[2] < channel_read["last_read"])
+
     # ── idempotence in both directions ──────────────────────────────────────
     st_r, body_r = http(port, "/api/messages/mark-read", "POST",
                         {"ids": [mids[0], mids[1]]})

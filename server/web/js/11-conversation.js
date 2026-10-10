@@ -162,7 +162,11 @@
   // `serverLastRead` is the operator's own watermark from the roster; without
   // it (roster not in yet) the base stays unset and the divider is simply not
   // drawn, which is the honest answer to "we do not know what you had read".
-  function seedWatermark(serverLastRead) {
+  function seedWatermark(serverLastRead, firstUnread) {
+    clearTimeout(entryTimer); entryTimer = null;
+    entryPending = firstUnread !== undefined;
+    entryFirstUnread = firstUnread;
+    readStateKnown = firstUnread !== undefined || !!state.dmKey;
     const key = convId();
     state.dividerBaseByConv = state.dividerBaseByConv || {};
     state.lastSeenByConv = state.lastSeenByConv || {};
@@ -171,7 +175,7 @@
     // first one this session. (loadConversation runs per navigation — a
     // same-channel partial switch deliberately bypasses it — so this cannot
     // move the divider out from under someone who is mid-read.)
-    state.dividerBaseByConv[key] = Number(serverLastRead) || 0;
+    state.dividerBaseByConv[key] = firstUnread != null ? Number(firstUnread) - 1 : Number(serverLastRead) || 0;
     // The READ watermark is only seeded, never rewound: it may already have
     // advanced past the server's value locally, and lowering it would re-send
     // reads the server has already recorded.
@@ -181,28 +185,76 @@
     }
   }
   function dividerBase() { return Number(state.dividerBaseByConv?.[convId()]) || 0; }
-  function markRead() { const list = ordered(); const last = list[list.length - 1]; if (last && Number(last.id) > seenId()) setSeenId(last.id); flushRead(); }
-  let flushRefreshTimer = null;
+  let entryPending = false, entryFirstUnread = null, entryTimer = null;
+  let readStateKnown = false, readTimer = null, flushRefreshTimer = null;
+  const savedReads = new Map(), pendingReads = new Map();
+  function syncReadState(row) {
+    if (state.dmKey || !row || row.code !== state.channel) return;
+    if (!readStateKnown) {
+      seedWatermark(row.last_read, row.first_unread);
+      readStateKnown = true;
+    }
+    markRead();
+  }
+  function markRead() {
+    if (entryPending) {
+      if (!entryTimer && ordered().length) {
+        const key = convId();
+        entryTimer = setTimeout(() => {
+          entryTimer = null;
+          if (key !== convId()) return;
+          entryPending = false;
+          render();
+          const list = dom();
+          const first = ordered().find(m => Number(m.id) >= Number(entryFirstUnread));
+          if (list && entryFirstUnread != null && first) {
+            const card = state.messageDomById.get(first.id);
+            if (card) list.scrollTop += card.getBoundingClientRect().top - list.getBoundingClientRect().top;
+          }
+          entryPending = false;
+          markRead();
+        }, 250);
+      }
+      return;
+    }
+    clearTimeout(readTimer);
+    readTimer = setTimeout(flushRead, 200);
+  }
   function flushRead() {
-    if (state.readOnly) return;
+    if (state.readOnly || document.hidden || state.view !== 'conversation') return;
+    if (!state.dmKey && !readStateKnown) return;
     const op = state.operator?.id;
-    if (!op) return;
-    state.readFlushByConv = state.readFlushByConv || {};
-    const key = convId();
-    const lastFlushed = Number(state.readFlushByConv[key]) || 0;
+    const list = dom();
+    if (!op || !list) return;
+    const key = op + ':' + convId();
+    const saved = savedReads.get(key) || new Set(); savedReads.set(key, saved);
+    const pending = pendingReads.get(key) || new Set(); pendingReads.set(key, pending);
+    const bounds = list.getBoundingClientRect();
+    if (bounds.bottom <= bounds.top) return;
     const ids = [];
     for (const msg of ordered()) {
-      if (Number(msg.id) <= lastFlushed) continue;
-      if (msg.member_id !== op) ids.push(msg.id);
+      if (saved.has(msg.id) || pending.has(msg.id)) continue;
+      const card = state.messageDomById.get(msg.id);
+      if (!card) continue;
+      const rect = card.getBoundingClientRect();
+      // The bottom of the message must have been reached. A tall message
+      // merely starting above the fold is not yet read.
+      if (rect.bottom > bounds.top && rect.bottom <= bounds.bottom && rect.top < bounds.bottom) ids.push(msg.id);
     }
     if (!ids.length) return;
-    state.readFlushByConv[key] = Math.max(...ids);
+    ids.forEach(id => pending.add(id));
     Trio.api.post('/api/messages/mark-read', { ids }).then(() => {
+      ids.forEach(id => saved.add(id));
+      if (key === op + ':' + convId()) setSeenId(Math.max(seenId(), ...ids));
       if (Trio.workspace?.refresh) {
         clearTimeout(flushRefreshTimer);
-        flushRefreshTimer = setTimeout(() => Trio.workspace.refresh(), 1500);
+        flushRefreshTimer = setTimeout(() => Trio.workspace.refresh(), 300);
       }
-    }).catch(err => console.warn('flush read failed', err));
+    }).catch(err => {
+      console.warn('flush read failed', err);
+      // Keep failed IDs eligible; retry only against the current visible view.
+      clearTimeout(readTimer); readTimer = setTimeout(flushRead, 1500);
+    }).finally(() => ids.forEach(id => pending.delete(id)));
   }
 
   // Icon markup is static, trusted constants — innerHTML is safe here. Do NOT
@@ -965,7 +1017,8 @@
     // see. A base of 0 means "we never knew what you had read", and no
     // divider is drawn rather than marking the whole history unread.
     const base = dividerBase();
-    let unread = base ? messages.findIndex(msg => Number(msg.id) > base) : -1;
+    let unread = entryFirstUnread != null ? messages.findIndex(msg => Number(msg.id) >= Number(entryFirstUnread))
+      : base ? messages.findIndex(msg => Number(msg.id) > base) : -1;
     let unreadRel = -1;
     // No age-based collapse any more, so the divider index needs no remapping:
     // the rendered list IS the full list. (It used to be a slice, and mapping
@@ -1128,7 +1181,7 @@
     render();
     const list = dom(); const jump = document.getElementById('jump-latest');
     if (list && jump) {
-      const onScroll = () => { jump.classList.toggle('hidden', nearBottom(list)); state.scrollPositions[convId()] = list.scrollTop; if (nearBottom(list)) markRead(); };
+      const onScroll = () => { jump.classList.toggle('hidden', nearBottom(list)); state.scrollPositions[convId()] = list.scrollTop; markRead(); };
       const onClick = () => { list.scrollTop = list.scrollHeight; markRead(); };
       list.addEventListener('scroll', onScroll); listeners.listScroll = [list, onScroll];
       jump.addEventListener('click', onClick); listeners.jumpClick = [jump, onClick];
@@ -1136,6 +1189,7 @@
   }
   function unmount() {
     cancelPendingInserts();
+    clearTimeout(readTimer); clearTimeout(entryTimer); entryTimer = null;
     for (const [type, fn] of Object.entries(listeners)) {
       if (Array.isArray(fn) && fn[0]?.removeEventListener) { fn[0].removeEventListener(type === 'listScroll' ? 'scroll' : 'click', fn[1]); }
       else { events?.removeEventListener(type, fn); }
@@ -1144,5 +1198,5 @@
   }
   function mount() { init(); }
 
-  Trio.conversation = { init, mount, unmount, render, ingest, upsert, paintBody, cardFor, syncMessageGroups, viewModel, answerPayload, isPrivate, seedWatermark, pageCard, pageCaption };
+  Trio.conversation = { init, mount, unmount, render, ingest, upsert, paintBody, cardFor, syncMessageGroups, viewModel, answerPayload, isPrivate, seedWatermark, syncReadState, pageCard, pageCaption };
 })();

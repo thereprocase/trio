@@ -167,8 +167,8 @@ check('reading one conversation does not advance another\'s read watermark', () 
     created_at: new Date().toISOString(),
     mentions: [], refs: [], bangs: [], recipients: [],
   });
-  assert.strictEqual(Trio.state.lastSeenByConv['right'], 99,
-    "the read conversation's watermark should advance to the newest message");
+  assert.strictEqual(Trio.state.lastSeenByConv['right'], 1,
+    'inserting history must not claim a read before visible content is saved');
   assert.strictEqual(Trio.state.lastSeenByConv['left'], 1,
     "reading one conversation moved another's watermark — the accessors are "
     + 'not per conversation');

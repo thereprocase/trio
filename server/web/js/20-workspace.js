@@ -178,11 +178,10 @@
     else loadConversation(code, '#' + code, channelSubtitle(readOnly), readOnly, false);
   }
   // The operator's server-side read watermark for the conversation being
-  // opened. Lives on their own roster row; absent until the roster lands.
+  // opened. Read records belong to the authenticated user, across devices.
   function operatorLastRead() {
-    const opId = state.operator?.id || state.meta?.operator?.id;
-    if (!opId) return 0;
-    const row = state.members instanceof Map ? state.members.get(opId) : null;
+    if (state.dmKey) return 0;
+    const row = (state.channels || []).find(c => c.code === state.channel);
     return Number(row?.last_read) || 0;
   }
   function loadConversation(channel, title, subtitle, readOnly = false, isDm = false, isAudit = false) {
@@ -227,9 +226,20 @@
     // The prime burst calls markRead() on every message while the view sits at
     // the bottom, so anything computed after it would already be caught up —
     // which is why the divider never used to appear on entry. The operator's
-    // own last_read comes off the roster; if the roster is not in yet the base
-    // stays 0 and no divider is drawn, which is the honest answer.
-    Trio.conversation?.seedWatermark?.(operatorLastRead());
+    // saved per-channel read state comes from /api/channels, never the agent roster.
+    Trio.conversation?.seedWatermark?.(isDm ? 0 : operatorLastRead());
+    if (!isDm) {
+      const readGeneration = navGen;
+      // Fetch before restoring/marking reads: another device may have advanced
+      // this user's position since the sidebar was last refreshed.
+      api.get('/api/channels').then(data => {
+        if (navGen !== readGeneration || state.channel !== channel || state.dmKey) return;
+        state.channels = data.channels || [];
+        Trio.store.set('workspace.channels', state.channels);
+        Trio.conversation?.syncReadState?.(state.channels.find(c => c.code === channel));
+        renderRail();
+      }).catch(err => console.warn('read position refresh failed', err));
+    }
     Trio.conversation?.render?.();
     Trio.composer?.syncReadOnly?.();
     // Swap the composer to THIS conversation's own draft/targets/images now that
@@ -1597,7 +1607,7 @@
     renderRail();
     const query = state.channel ? '?channel=' + encodeURIComponent(state.channel) : '';
     const requests = [
-      api.get('/api/channels').then(data => { state.channels = data.channels || []; Trio.store.set('workspace.channels', state.channels); renderRail(); markLoaded('channels'); }),
+      api.get('/api/channels').then(data => { state.channels = data.channels || []; Trio.store.set('workspace.channels', state.channels); Trio.conversation?.syncReadState?.(state.channels.find(c => c.code === state.channel)); renderRail(); markLoaded('channels'); }),
       api.get('/api/dms').then(data => { state.dms = data; Trio.store.set('workspace.dms', state.dms); renderRail(); markLoaded('dms'); }),
       api.get('/api/meta' + query).then(data => { state.meta = {...state.meta, ...data}; Trio.store.set('workspace.meta', state.meta); renderRail(); markLoaded('meta'); }),
       api.get('/api/tasks' + query).then(data => { state.tasks = data.tasks || []; Trio.store.set('workspace.tasks', state.tasks); markLoaded('tasks'); }),

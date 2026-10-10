@@ -6709,6 +6709,15 @@ class NthWebHandler(BaseHTTPRequestHandler):
             db.execute("PRAGMA busy_timeout=3000")
             rows = db.execute(
                 "SELECT c.code, c.status, c.pinned_message_id, c.archived_at, "
+                "  (SELECT MAX(m.id) FROM messages m JOIN message_reads mr "
+                "     ON mr.message_id=m.id AND mr.member_id=? "
+                "     WHERE m.channel=c.code AND (m.recipients IS NULL "
+                "       OR m.recipients='' OR m.recipients='[]')) AS last_read, "
+                "  (SELECT MIN(m.id) FROM messages m WHERE m.channel=c.code "
+                "     AND m.member_id != ? AND (m.recipients IS NULL "
+                "       OR m.recipients='' OR m.recipients='[]') "
+                "     AND NOT EXISTS (SELECT 1 FROM message_reads mr "
+                "       WHERE mr.message_id=m.id AND mr.member_id=?)) AS first_unread, "
                 "  (SELECT COUNT(*) FROM members m "
                 "     WHERE m.channel = c.code AND m.active = 1) AS members, "
                 "  (SELECT MAX(created_at) FROM messages msg "
@@ -6760,7 +6769,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 + ("AND c.archived_at IS NOT NULL " if archived
                    else "AND c.archived_at IS NULL ") +
                 "ORDER BY last_at DESC",
-                (operator_id, operator_id,
+                (operator_id, operator_id, operator_id, operator_id, operator_id,
                  operator_id, f'"{operator_id}"', operator_id,
                  AGENT_INBOX_CHANNEL)).fetchall()
             # ONE query for every channel's newest message, rather than one
@@ -6801,6 +6810,8 @@ class NthWebHandler(BaseHTTPRequestHandler):
                     "topic": topic,
                     "members": r["members"],
                     "last_at": last_at,
+                    "last_read": r["last_read"] or 0,
+                    "first_unread": r["first_unread"],
                     "preview": preview,
                     "archived_at": r["archived_at"],
                     # Report the cap, not cap+1, and say so — the client
