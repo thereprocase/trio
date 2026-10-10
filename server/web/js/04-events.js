@@ -103,6 +103,10 @@
   function dispatch(payload) {
     if (payload == null) return;
     const type = payload.type || 'message';
+    if (type === 'history_ready' && payload.channel === Trio.state.channel && !Trio.state.dmKey) {
+      Trio.state.channelLoading = false;
+      if (!Trio.state.messages?.size) Trio.conversation?.render?.();
+    }
     // Cross-channel chimes wired up a second, multiplexed SSE stream
     // (/api/workspace/events) that emits a 'roster' event per channel's
     // hub, not just the one currently open. This used to overwrite

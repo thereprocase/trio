@@ -56,6 +56,8 @@ try:
           len(message_ids) == web.HISTORY_LIMIT)
     check("prime retains the newest HISTORY_LIMIT ids in chronological order",
           message_ids == ids[-web.HISTORY_LIMIT:])
+    check("history completion follows every primed message",
+          primed[-1] == {"type": "history_ready", "channel": channel})
     hub.unsubscribe(q)
 
     index_q = hub.subscribe(include_history=False)

@@ -2324,6 +2324,8 @@ class EventHub:
                     if not _event_visible_to(ev, viewer_id, all_seeing):
                         continue
                     payloads.append(json.dumps(ev))
+            if include_history:
+                payloads.append(json.dumps({"type": "history_ready", "channel": self.channel}))
         except sqlite3.Error:
             pass
         finally:

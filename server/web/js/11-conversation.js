@@ -1038,7 +1038,8 @@
     if (!messages.length) {
       const empty = document.createElement('div'); empty.className = 'conversation-empty';
       const p = document.createElement('p');
-      if (state.dmLoading) { p.textContent = 'Loading private conversation…'; }
+      if (state.channelLoading && !state.dmKey) { p.textContent = 'Loading conversation…'; }
+      else if (state.dmLoading) { p.textContent = 'Loading private conversation…'; }
       else if (state.dmError) { p.textContent = 'Could not load conversation: ' + state.dmError; }
       else if (state.dmKey) { p.textContent = 'No messages yet. This is the start of your private conversation.'; }
       else { p.textContent = 'No messages yet. Say hello to get things moving.'; }
@@ -1134,6 +1135,7 @@
     if (previous && Object.keys(msg).every(key =>
       JSON.stringify(previous[key]) === JSON.stringify(msg[key]))) return;
     const wasNear = nearBottom(dom());
+    dom()?.querySelector('.conversation-empty')?.remove();
     state.messages.set(msg.id, Object.assign({}, previous || {}, msg));
     const existing = state.messageDomById.get(msg.id);
     const list = dom();
