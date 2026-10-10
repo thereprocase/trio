@@ -70,7 +70,7 @@
    15px. With the composer empty the phone geometry is byte-identical; a draft
    on a wrap boundary may gain a line (at 360px, 149px -> 176px). */
 @media (hover:none) and (pointer:coarse){
-  .composer-shell .composer-input{ font-size:16px; }
+  .composer-shell .composer-input, .terminal-controls input, .terminal-controls select, .agent-page-search{ font-size:16px; }
   /* The mic and attach buttons are 34px squares, under the ~44px a fingertip
      needs; the mic is the one you tap again, without looking, to stop. */
   .composer-actions .comp-tool{ width:44px; height:44px; }

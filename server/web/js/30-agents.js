@@ -240,7 +240,7 @@
     const sessions = results[1].status === 'fulfilled' ? (results[1].value.sessions || []).filter(s => s.member_id === id) : [];
     if (sessions.length === 1) { await terminalControls(sessions[0].id); return; }
     if (sessions.length > 1) {
-      const dialog = document.createElement('dialog'); dialog.className = 'terminal-controls';
+      const dialog = document.createElement('dialog'); dialog.className = 'terminal-controls'; dialog.setAttribute('aria-label', 'Terminal controls');
       const title = document.createElement('h2'); title.textContent = 'Choose agent session'; dialog.append(title);
       for (const session of sessions) {
         const button = document.createElement('button'); button.type = 'button'; button.textContent = session.name + ' · ' + session.host + ' · ' + session.pane;
@@ -283,7 +283,7 @@
     }).catch(() => { const p = document.createElement('p'); p.textContent = 'Terminal controls are available to the workspace owner.'; list.append(p); });
   }
   async function terminalControls(id) {
-    const dialog = document.createElement('dialog'); dialog.className = 'terminal-controls';
+    const dialog = document.createElement('dialog'); dialog.className = 'terminal-controls'; dialog.setAttribute('aria-label', 'Terminal controls');
     const heading = document.createElement('h2'); heading.textContent = 'Terminal controls';
     const status = document.createElement('p'); status.setAttribute('aria-live', 'polite');
     const screen = document.createElement('pre'); screen.className = 'terminal-screen'; screen.tabIndex = 0;
@@ -296,26 +296,31 @@
     for (const n of [0,1,2]) { const option = document.createElement('option'); option.value = String(n); option.textContent = n + ' Enter presses'; enters.append(option); }
     enters.value = '1'; enters.setAttribute('aria-label', 'Enter presses');
     const buttons = document.createElement('div'); buttons.className = 'terminal-actions';
-    let current = null, busy = false;
+    let current = null, busy = false, refreshVersion = 0;
     const controls = [];
     const enable = () => controls.forEach(b => { b.disabled = busy || !current?.online || !current?.available; });
     async function refreshTerminal() {
+      if (busy) return;
+      const version = ++refreshVersion;
+      current = null; enable();
       try {
         const data = await Trio.api.get('/api/terminals');
+        if (version !== refreshVersion) return;
         current = data.sessions.find(s => s.id === id);
         if (!current) throw new Error('Terminal binding no longer exists');
         heading.textContent = current.name + ' · Terminal';
+        dialog.setAttribute('aria-label', heading.textContent);
         screen.textContent = current.screen || current.problem || 'No current screen';
         quotas.replaceChildren(quotaPanel(current.usage));
         status.textContent = current.online && current.available ? 'Snapshot captured ' + new Date(current.updated * 1000).toLocaleTimeString() : 'Terminal unavailable';
         history.replaceChildren();
         for (const cmd of current.commands || []) { const row = document.createElement('p'); row.textContent = cmd.action + ': ' + cmd.status + (cmd.result ? ' — ' + cmd.result : ''); history.append(row); }
-      } catch (error) { current = null; status.textContent = error.message; }
+      } catch (error) { if (version !== refreshVersion) return; current = null; status.textContent = error.message; }
       enable();
     }
     async function sendTerminal(action) {
       if (busy || !current?.online || !current?.available) return;
-      busy = true; enable();
+      busy = true; ++refreshVersion; enable();
       try {
         const result = await Trio.api.post('/api/terminals/action', {session:id, generation:current.generation, screen_hash:current.screen_hash,
           action, text:action === 'reply' ? text.value : '', pause_ms:Number(pause.value), enter_count:action === 'compact' ? 2 : Number(enters.value)});
@@ -330,9 +335,12 @@
     const close = document.createElement('button'); close.type = 'button'; close.textContent = 'Close'; close.addEventListener('click', () => dialog.close());
     const note = document.createElement('p'); note.textContent = 'Review the screen before answering a prompt. “Sent” means keys reached tmux; check the screen for completion. Actions are never retried automatically.';
     dialog.append(heading,status,quotas,screen,text,pauseLabel,enters,buttons,refresh,close,note,history);
-    dialog.addEventListener('close', () => dialog.remove()); document.body.append(dialog); dialog.showModal(); await refreshTerminal();
+    dialog.addEventListener('close', () => { ++refreshVersion; dialog.remove(); }); document.body.append(dialog); dialog.showModal(); await refreshTerminal();
   }
   function renderPage(panel) {
+    const previousSearch = panel.querySelector('.agent-page-search');
+    const restoreSearch = previousSearch && document.activeElement === previousSearch;
+    const caret = restoreSearch ? [previousSearch.selectionStart, previousSearch.selectionEnd, previousSearch.selectionDirection] : null;
     panel.replaceChildren();
     Promise.resolve().then(() => { if (panel.isConnected) terminalSection(panel); });
     const hero = document.createElement('div'); hero.className = 'view-hero'; hero.innerHTML = '<h2>Agent roster</h2><p>Everyone working in this workspace</p>';
@@ -376,6 +384,7 @@
     list.forEach(vm => grid.append(directoryCard(vm)));
     panel.append(hero, toolbar, grid);
     renderBulkBar();
+    if (restoreSearch) { search.focus({preventScroll:true}); search.setSelectionRange(...caret); }
   }
   // ── Bulk management ──────────────────────────────────────────────────────
   // One selection set shared by the roster page; every bulk operation posts to
