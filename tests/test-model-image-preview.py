@@ -32,6 +32,9 @@ jpg = encode(photo, 'JPEG', exif=exif, quality=100, subsampling=0)
 result, _, meta = media.prepare_model_image(jpg, [0, 30, 30, 30], False)
 assert meta['original_dimensions'] == [30, 60]
 assert Image.open(io.BytesIO(result)).getpixel((15, 15))[2] > 240
+png_exif = encode(photo, exif=exif)
+_, _, png_meta = media.prepare_model_image(png_exif)
+assert png_meta['original_dimensions'] == [30, 60]
 assert raw == encode(original)
 try: media.prepare_model_image(b'x' * (media.MAX_MODEL_SOURCE_BYTES + 1))
 except ValueError as e: assert str(e) == 'source_too_large'

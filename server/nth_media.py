@@ -678,8 +678,17 @@ def prepare_model_image(raw: bytes, crop=None, resize: bool = True):
     if crop is not None and (not isinstance(crop, list) or len(crop) != 4
                             or any(type(v) is not int for v in crop)):
         raise ValueError("invalid_crop")
+    # Inspect orientation even for PNG/WebP; EXIF is not JPEG-only. Existing
+    # small header-only attachments retain the legacy fast path if undecodable.
+    orientation = 1
+    try:
+        from PIL import Image, ImageOps
+        with Image.open(io.BytesIO(raw)) as header:
+            orientation = header.getexif().get(274, 1)
+    except Exception:
+        pass
     # Preserve the existing original-image fast path (including animations).
-    if crop is None and mime != "image/jpeg" and not model_image_refusal(raw):
+    if crop is None and orientation == 1 and not model_image_refusal(raw):
         meta.update(original_dimensions=list(dims), output_dimensions=list(dims),
                     crop=[0, 0, *dims], resized=False, transformed=False)
         return raw, mime, meta
