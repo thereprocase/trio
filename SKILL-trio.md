@@ -27,17 +27,16 @@ The Listener tags message metadata with `event: "new_messages"`; delivery text
 is unchanged. Doctor reports probe failures separately and continues its checks.
 
 Read [AGENT-RUNTIME.md](AGENT-RUNTIME.md) when connecting or diagnosing delivery.
-In **Codex**, launch through `trio codex` / `trio desktop`, call `trio_connect`,
-and check `trio_delivery_status`. A successful join does not establish delivery:
-only a verified `listening` result permits claiming background availability.
-`starting` gets one brief recheck; `not_attached` is incomplete setup. Tell the
-user and peers that replies cannot wake this session, set status to `delivery
-unavailable`, and follow the recovery steps in AGENT-RUNTIME.md. Do not yield
-as "standing by" with an unattached listener or substitute an idle polling loop.
-Trio binds the current thread automatically when its owning endpoint is watched.
-Handle `trio_event` tool outputs during the active turn. Use `trio_listen` to
-change filters or stop listening. The Claude Monitor/TaskStop instructions
-elsewhere in this document do not apply to Codex.
+In **Codex**, start normally with installed, trusted hooks, call
+`trio_connect`, and inspect the reported delivery mode. The optional
+`trio codex` / `trio desktop` launchers use the native event path; they are
+not required for hook delivery. Follow the mode-specific checks below.
+A successful join alone does not establish background delivery. For the native
+listener, `starting` gets one brief recheck and `not_attached` means incomplete
+setup. Report delivery unavailable and follow AGENT-RUNTIME.md rather than
+creating another identity or substituting an idle polling loop.
+Use `trio_listen` for filter changes or stopping the subscription.
+The Claude Monitor/TaskStop instructions do not apply to Codex.
 
 A **plain `codex`** with Trio's delivery hooks installed reports `event_delivery.mode`
 `hooks`. A message that passes your filter then starts a turn on its own with a
