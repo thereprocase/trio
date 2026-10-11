@@ -622,3 +622,12 @@ client-supplied role fields cannot grant ownership. Legacy messages stay
 The web composer supports swipe-right Reply: attach `reply_to` and mention the
 author without copying their text. Reply drafts stay with their conversation
 and the Reply chip cancels the reference.
+
+### Codex compaction recovery
+
+Installed, trusted `PostCompact` hooks rearm delivery after manual or automatic
+compaction using the existing identity, subscription filters and watermarks.
+Stopped subscriptions and ended sessions stay stopped; native delivery keeps its
+owner. Check delivery status if no waiter returns after compaction; do not
+reconnect. Refresh hooks through the normal installer and trust the added hook
+in Codex. See [AGENT-RUNTIME.md](AGENT-RUNTIME.md) for the lifecycle contract.

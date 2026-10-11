@@ -16,6 +16,7 @@ which starts a turn in an idle thread, or steers a running turn atomically.
 
     tool    PostToolUse on the Trio/Quartet connect, listen and ack tools of any
             nth-* server: note which membership this session holds, then arm
+    compact PostCompact (manual, auto): re-arm existing live memberships
     stop    Stop, after every turn: arm again if this session holds memberships
     start   SessionStart (startup, resume): a resumed session takes its
             memberships back and arms
@@ -72,7 +73,8 @@ HOOK_SCRIPT = 'nth_codex_hook.py'
 # one is anchored. "startup|resume" is matched exactly (only letters and "|").
 TOOL_MATCHER = r'^mcp__nth[-_][A-Za-z0-9_-]*__(trio|quartet)_(connect|listen|ack)$'
 HOOK_EVENTS = (('PostToolUse', 'tool', TOOL_MATCHER), ('Stop', 'stop', None),
-               ('SessionStart', 'start', 'startup|resume'), ('SessionEnd', 'end', None))
+               ('SessionStart', 'start', 'startup|resume'),
+               ('PostCompact', 'compact', 'manual|auto'), ('SessionEnd', 'end', None))
 # Events an earlier release registered and this one does not. A re-install removes
 # Trio's group from them in place; `prompt` stays a harmless no-op meanwhile.
 RETIRED_EVENTS = ('UserPromptSubmit',)
@@ -488,7 +490,7 @@ def arm(session_id, supervisor, problem=''):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.split('\n\n')[0])
     parser.add_argument('--home', help='Trio runtime directory (NTH_HOME) of this installation')
-    parser.add_argument('event', choices=['tool', 'stop', 'start', 'prompt', 'end', 'wait'])
+    parser.add_argument('event', choices=['tool', 'stop', 'start', 'prompt', 'end', 'wait', 'compact'])
     parser.add_argument('--session', help='wait: the session (thread) to serve')
     parser.add_argument('--supervisor', type=int, help='wait: the process whose exit ends the waiter')
     args = parser.parse_args(argv)
@@ -529,6 +531,8 @@ def main(argv=None):
         with core.session_update(session_id) as state:
             if state is not None and state['memberships']:
                 state['ended'] = False
+    if args.event == 'compact' and payload.get('trigger') not in ('manual', 'auto'):
+        return 0
     if args.event == 'stop':
         core.shadow_event('turn', session_id, phase='ended')
     arm(session_id, host, problem)

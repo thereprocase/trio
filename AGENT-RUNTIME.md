@@ -138,7 +138,7 @@ is no longer valid. Never reclaim a revoked identity automatically.
 
 ### Hook mode: plain `codex` with the delivery hooks installed
 
-`python setup.py install` (with Codex among `--clients`) registers four command
+`python setup.py install` (with Codex among `--clients`) registers five command
 hooks in `CODEX_HOME/hooks.json` (`~/.codex/hooks.json` by default), so a
 plainly launched Codex CLI is woken without `trio codex`. They run
 `nth_codex_hook.py` with this installation's interpreter:
@@ -149,7 +149,16 @@ plainly launched Codex CLI is woken without `trio codex`. They run
   of them;
 - Stop, after every turn;
 - SessionStart with source `startup` or `resume`;
+- PostCompact with trigger `manual` or `auto`, to rearm delivery after compaction;
 - SessionEnd, which records that the session is over.
+
+PostCompact rearms only existing, non-ended memberships through the normal waiter
+lock. It preserves stopped subscriptions, filters and delivery watermarks, and
+defers to native delivery when that session already has a native owner. It does
+not reconnect, create identities or retry an ambiguously submitted wake. An idle
+waiter consumed during a running turn is normal; a persistently absent waiter
+after compaction requires a delivery-status check. New or changed hooks require
+Codex trust after the normal installer refresh.
 
 The installer writes `hooks.json` rather than the `[hooks]` table of
 `config.toml`, so that file and its comments are never rewritten. It keeps

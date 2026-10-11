@@ -399,6 +399,59 @@ class CodexHookTests(unittest.TestCase):
         self.assertEqual([args[0] for args in spawned], [SESSION])
         self.assertEqual([args[0] for args in self.run_main('stop', {'session_id': SESSION})[1]], [SESSION])
 
+    def test_postcompact_rearms_same_membership_without_changing_state(self):
+        self.join()
+        before = core.load_session(SESSION)
+        for trigger in ('manual', 'auto'):
+            code, spawned = self.run_main('compact',
+                {'session_id': SESSION, 'hook_event_name': 'PostCompact', 'trigger': trigger})
+            self.assertEqual(code, 0)
+            self.assertEqual([args[0] for args in spawned], [SESSION])
+            self.assertEqual(core.load_session(SESSION), before)
+
+    def test_postcompact_recovers_definite_failed_wake_without_duplicate_delivery(self):
+        self.join()
+        hubs = Hubs(**{'http://hub-a.example/sse': [[message(2, mentioned=True)]]})
+        with patch.object(hook, 'steer_wake', return_value='failed'):
+            self.assertEqual(self.run_waiter(hubs), 0)
+        self.assertLess(core.load_session(SESSION)['high_water'].get(KEY, 0), 2)
+        self.assertEqual(len(self.run_main('compact',
+                         {'session_id': SESSION, 'trigger': 'manual'})[1]), 1)
+        self.assertEqual(self.run_waiter(hubs), 2)
+        self.assertEqual(self.run_waiter(hubs), 0)
+        self.assertEqual(len(self.calls()), 1)
+        self.assertEqual(core.load_session(SESSION)['high_water'][KEY], 2)
+
+    def test_postcompact_preserves_explicit_subscription_stop(self):
+        import nth_event_access as access
+        self.install()
+        self.join()
+        with patch.dict(os.environ, {'TRIO_NATIVE_CLIENT': 'codex'}):
+            access.listen('room', 'member', TOKEN, enabled=False, session=SESSION)
+        before = core.membership_config(KEY)
+        self.assertFalse(before['enabled'])
+        self.run_main('compact', {'session_id': SESSION, 'trigger': 'auto'})
+        self.assertEqual(core.membership_config(KEY), before)
+        hubs = Hubs(**{'http://hub-a.example/sse': [[message(2, mentioned=True)]]})
+        self.assertEqual(self.run_waiter(hubs), 0)
+        self.assertEqual(self.calls(), [])
+        self.assertEqual(hubs.polled, [])
+
+    def test_postcompact_does_not_revive_ended_or_unknown_sessions(self):
+        self.assertEqual(self.run_main('compact', {'session_id': SESSION, 'trigger': 'manual'})[1], [])
+        self.join()
+        self.run_main('end', {'session_id': SESSION})
+        self.assertEqual(self.run_main('compact', {'session_id': SESSION, 'trigger': 'auto'})[1], [])
+        self.assertTrue(core.load_session(SESSION)['ended'])
+
+    def test_postcompact_requires_known_trigger_and_defers_to_native_owner(self):
+        self.join()
+        for trigger in (None, '', 'resume'):
+            self.assertEqual(self.run_main('compact', {'session_id': SESSION, 'trigger': trigger})[1], [])
+        (self.home / 'events' / 'codex-server.json').write_text(json.dumps({'pid': 4242}))
+        self.assertEqual(self.run_main('compact', {'session_id': SESSION, 'trigger': 'manual'},
+                                      codex_host=lambda: (4242, ''))[1], [])
+
     def test_resume_takes_an_ended_session_back_and_other_starts_do_not(self):
         self.join()
         self.run_main('end', {'session_id': SESSION})
@@ -761,6 +814,7 @@ class RegistrationTests(unittest.TestCase):
                                             'command': '/venv/bin/python /nth/server/nth_codex_hook.py '
                                                        '--home /nth tool'})
         self.assertEqual(data['hooks']['SessionStart'][0]['matcher'], 'startup|resume')
+        self.assertEqual(data['hooks']['PostCompact'][0]['matcher'], 'manual|auto')
         self.assertNotIn('matcher', data['hooks']['Stop'][0])
         self.assertEqual(data['hooks']['SessionEnd'][0]['hooks'][0]['timeout'], 3)
         for event, action, _ in hook.HOOK_EVENTS:
