@@ -89,13 +89,13 @@ if [ "${1:-}" = "hub-service" ] || [ "${1:-}" = "upgrade" ]; then
         rm -rf "$HUB_VENV"
         python3 -m venv "$HUB_VENV"
     fi
-    if ! "$HUB_VENV/bin/python" -c "from mcp.server.fastmcp import FastMCP; import uvicorn" &>/dev/null; then
-        echo "Installing into hub venv: mcp<2 uvicorn==0.52.1"
+    if ! "$HUB_VENV/bin/python" -c "from mcp.server.fastmcp import FastMCP; import uvicorn; import PIL; assert (12, 3) <= tuple(map(int, PIL.__version__.split('.')[:2])) < (13, 0)" &>/dev/null; then
+        echo "Installing into hub venv: mcp<2 uvicorn==0.52.1 Pillow>=12.3,<13"
         "$HUB_VENV/bin/python" -m pip install --quiet --upgrade pip
         "$HUB_VENV/bin/python" -m pip install --quiet --only-binary :all: "mcp<2" "uvicorn==0.52.1" "Pillow>=12.3,<13"
     fi
-    if ! "$HUB_VENV/bin/python" -c "from mcp.server.fastmcp import FastMCP; import uvicorn" &>/dev/null; then
-        echo "ERROR: hub venv cannot import FastMCP + uvicorn. Hub NOT restarted."
+    if ! "$HUB_VENV/bin/python" -c "from mcp.server.fastmcp import FastMCP; import uvicorn; import PIL; assert (12, 3) <= tuple(map(int, PIL.__version__.split('.')[:2])) < (13, 0)" &>/dev/null; then
+        echo "ERROR: hub venv cannot import FastMCP + uvicorn + supported Pillow. Hub NOT restarted."
         exit 1
     fi
 
@@ -360,7 +360,7 @@ if [ "$MODE" = "hub" ]; then
 fi
 
 NEED_INSTALL=0
-"$VENV_PY" -c "from mcp.server.fastmcp import FastMCP" &>/dev/null || NEED_INSTALL=1
+"$VENV_PY" -c "from mcp.server.fastmcp import FastMCP; import PIL; assert (12, 3) <= tuple(map(int, PIL.__version__.split('.')[:2])) < (13, 0)" &>/dev/null || NEED_INSTALL=1
 if [ "$MODE" = "hub" ]; then
     "$VENV_PY" -c "import uvicorn" &>/dev/null || NEED_INSTALL=1
 fi
@@ -371,8 +371,8 @@ if [ "$NEED_INSTALL" = "1" ]; then
     "$VENV_PY" -m pip install --quiet --only-binary :all: "${VENV_PKGS[@]}"
 fi
 
-if ! "$VENV_PY" -c "from mcp.server.fastmcp import FastMCP" &>/dev/null; then
-    echo "ERROR: venv python cannot import FastMCP after install."
+if ! "$VENV_PY" -c "from mcp.server.fastmcp import FastMCP; import PIL; assert (12, 3) <= tuple(map(int, PIL.__version__.split('.')[:2])) < (13, 0)" &>/dev/null; then
+    echo "ERROR: venv python cannot import FastMCP + supported Pillow after install."
     echo "Debug: $VENV_PY -m pip install mcp"
     exit 1
 fi
