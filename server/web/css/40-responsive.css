@@ -339,3 +339,8 @@
   outline: 2px solid color-mix(in srgb, var(--accent) 65%, var(--sender-border));
   outline-offset: 1px;
 }
+
+.channel-pin-banner { display:flex;align-items:center;gap:8px;padding:8px 16px;border-bottom:1px solid var(--sender-border);flex-shrink:0; }
+.channel-pin-banner button {border:1px solid currentColor;border-radius:8px;padding:8px 10px;background:transparent;color:inherit;min-height:40px;cursor:pointer;}
+.channel-pin-banner .channel-pin-open {flex:1;min-width:0;text-align:left;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;border-color:transparent;}
+.channel-pin-body {max-height:60dvh;overflow:auto;overflow-wrap:anywhere;}

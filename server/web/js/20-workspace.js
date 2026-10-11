@@ -626,7 +626,60 @@
     button.innerHTML = `${visual}<span class="dm-copy"><span class="dm-name">${esc(label)}</span></span>${dm.unread ? '<span class="unread-dot" aria-label="Unread"></span>' : ''}`;
     button.addEventListener('click', () => openDm(dm, false, audit)); return button;
   }
+  let pinState = null, pinChannel = '', pinLoading = false;
+  function renderPin() {
+    const banner = $('channel-pin-banner'); if (!banner) return;
+    const visible = state.view === 'conversation' && !state.dmKey && state.channel;
+    banner.classList.toggle('hidden', !visible || !pinState || pinChannel !== state.channel);
+    banner.textContent = '';
+    if (!visible || !pinState || pinChannel !== state.channel) return;
+    const open = document.createElement('button'); open.type = 'button'; open.className = 'channel-pin-open';
+    open.textContent = pinState.pin ? '📌 ' + pinState.pin.content.replace(/\s+/g, ' ').slice(0, 160) : '📌 No pinned message';
+    open.title = 'Open channel pin'; open.onclick = openPin; banner.append(open);
+    if (pinState.pin && pinState.can_edit) {
+      const remove = document.createElement('button'); remove.type = 'button'; remove.textContent = 'Unpin';
+      remove.onclick = () => changePin(null); banner.append(remove);
+    }
+  }
+  async function refreshPin(force = false) {
+    if (state.dmKey || state.view !== 'conversation' || !state.channel) { renderPin(); return; }
+    const channel = state.channel;
+    if (pinLoading && pinChannel === channel) return;
+    if (!force && pinChannel === channel && pinState) { renderPin(); return; }
+    if (pinChannel !== channel) pinState = null;
+    pinChannel = channel; pinLoading = true; renderPin();
+    try {
+      const data = await api.get('/api/channel-pin?channel=' + encodeURIComponent(channel));
+      if (state.channel === channel && !state.dmKey) { pinState = data; renderPin(); }
+    } catch (error) { if (error.status !== 403) console.warn('Pin refresh failed', error); }
+    finally { if (pinChannel === channel) pinLoading = false; }
+  }
+  function openPin() {
+    const pin = pinState?.pin;
+    Trio.ui.modal('Pinned message', pin
+      ? '<div class="channel-pin-body">' + Trio.markdown.renderMarkdown(pin.content) + [...new Set(pin.content.match(/\/pages\/[A-Za-z0-9_-]+/g) || [])].map((href, i) => '<p><a target="_blank" rel="noopener" href="' + esc(href) + '">Open linked page ' + (i + 1) + '</a></p>').join('') + (pin.attachments || []).map(a => {
+          const href = api.url('/api/attachment/' + encodeURIComponent(a.id));
+          return '<p><a target="_blank" rel="noopener" href="' + esc(href) + '">'
+            + (/^image\/(png|jpeg|gif|webp)$/.test(a.mime || '') ? '<img style="max-width:100%;height:auto" loading="lazy" src="' + esc(href) + '" alt="' + esc(a.filename || 'Attached image') + '">' : esc(a.filename || 'Attachment')) + '</a></p>';
+        }).join('') + '</div>'
+      : '<p>Long-press a message and choose Pin to channel.</p>', null, {submit:false,cancelLabel:'Close'});
+  }
+  async function changePin(messageId) {
+    const channel = state.channel;
+    if (state.dmKey || !channel) return;
+    try {
+      // Always obtain the current objective before offering a replacement.
+      const shownId = pinState?.pinned_id;
+      const current = await api.get('/api/channel-pin?channel=' + encodeURIComponent(channel));
+      if (messageId === null && current.pinned_id !== shownId) { await refreshPin(true); throw new Error('Pin changed. Open the current pin before removing it.'); }
+      if (state.channel !== channel || state.dmKey) return;
+      if (messageId !== null && current.pinned_id && current.pinned_id !== messageId && !window.confirm('Replace the current channel pin?')) return;
+      const data = await api.post('/api/channel-pin?channel=' + encodeURIComponent(channel), {message_id:messageId, expected_id:current.pinned_id});
+      if (state.channel === channel && !state.dmKey) { pinChannel=channel;pinState=data;renderPin(); }
+    } catch (error) { Trio.ui.toast(error.message || 'Could not update pin'); }
+  }
   function renderRail() {
+    refreshPin();
     const rail = $('workspace-rail'); if (!rail) return;
     const nav = groupNavigation(state.channels || [], state.dms || {});
     rail.textContent = '';
@@ -1637,6 +1690,7 @@
       return;
     }
     state.workspaceLoading = true; state.workspaceError = '';
+    refreshPin(true);
     renderRail();
     const query = state.channel ? '?channel=' + encodeURIComponent(state.channel) : '';
     const loaders = [
@@ -2290,7 +2344,7 @@
   let streamOpenListener = null;
   function mount() { routeFeedClaimed = false; mountFaceMedia(); const isOperator = state.operator?.source === 'loopback' || state.operator?.source === 'tailscale'; if (isOperator) { streamOpenListener = () => { clearTimeout(liveRefreshDebounce); liveRefreshDebounce = null; refresh(); }; Trio.events?.addEventListener?.('workspace:stream-open', streamOpenListener); } else refresh(); renderFacePile(); if (!refreshInterval) refreshInterval = setInterval(refresh, 15000); if (!agentsInterval) agentsInterval = setInterval(pollAgents, 5000); unroute = Trio.router?.on?.(onRoute); wsl = onWorkspaceUpdate; Trio.events?.addEventListener?.('workspace:updated', wsl); preferencesChanged = onPreferencesChanged; Trio.events?.addEventListener?.('preferences:changed', preferencesChanged); Trio.events?.addEventListener?.('roster', renderFacePile); Trio.events?.addEventListener?.('roster', refreshDrawerMembers); Trio.events?.addEventListener?.('message', onMessageForDrawer); Trio.events?.addEventListener?.('message', onMessageLiveRefresh); const searchBtn = $('search-btn'); if (searchBtn) { searchBtn.addEventListener('click', openSearch); } const detailsBtn = $('details-btn'); if (detailsBtn) { detailsClick = showDetails; detailsBtn.addEventListener('click', detailsClick); } const drawerClose = $('channel-drawer-close'); if (drawerClose) drawerClose.addEventListener('click', closeDetails); const drawerResize = $('channel-drawer-resize'); if (drawerResize) drawerResize.addEventListener('pointerdown', startDrawerResize); const menuButton = $('channel-more-btn'); if (menuButton) { menuButtonClick = openChannelMenu; menuButton.addEventListener('click', menuButtonClick); } const accountTrigger = $('account-trigger'); if (accountTrigger) { accountTriggerClick = openAccountMenu; accountTrigger.addEventListener('click', accountTriggerClick); } menuClick = event => { if (!event.target.closest('#channel-menu, #channel-more-btn')) closeChannelMenu(); if (!event.target.closest('#account')) closeAccountMenu(); }; menuKeydown = event => { if (event.key === 'Escape') { closeChannelMenu(); closeDetails(); closeAccountMenu(); } }; document.addEventListener('click', menuClick); document.addEventListener('keydown', menuKeydown); searchKeydown = onSearchKey; document.addEventListener('keydown', searchKeydown); }
   function unmount() { routeFeedClaimed = false; unmountFaceMedia(); closeChannelMenu(); closeDetails(); if (drawerResizeEnd) drawerResizeEnd(); if (refreshInterval) { clearInterval(refreshInterval); refreshInterval = null; } if (agentsInterval) { clearInterval(agentsInterval); agentsInterval = null; } if (unroute) { unroute(); unroute = null; } if (wsl) { Trio.events?.removeEventListener?.('workspace:updated', wsl); wsl = null; } if (preferencesChanged) { Trio.events?.removeEventListener?.('preferences:changed', preferencesChanged); preferencesChanged = null; } Trio.events?.removeEventListener?.('roster', renderFacePile); Trio.events?.removeEventListener?.('roster', refreshDrawerMembers); Trio.events?.removeEventListener?.('message', onMessageForDrawer); Trio.events?.removeEventListener?.('message', onMessageLiveRefresh); clearTimeout(liveRefreshDebounce); liveRefreshDebounce = null; clearTimeout(drawerActivityDebounce); const searchBtn = $('search-btn'); if (searchBtn && openSearch) searchBtn.removeEventListener('click', openSearch); const detailsBtn = $('details-btn'); if (detailsBtn && detailsClick) detailsBtn.removeEventListener('click', detailsClick); const drawerClose = $('channel-drawer-close'); if (drawerClose) drawerClose.removeEventListener('click', closeDetails); const drawerResize = $('channel-drawer-resize'); if (drawerResize) drawerResize.removeEventListener('pointerdown', startDrawerResize); const menuButton = $('channel-more-btn'); if (menuButton && menuButtonClick) menuButton.removeEventListener('click', menuButtonClick); const accountTrigger = $('account-trigger'); if (accountTrigger && accountTriggerClick) accountTrigger.removeEventListener('click', accountTriggerClick); closeAccountMenu(); if (menuClick) document.removeEventListener('click', menuClick); if (menuKeydown) document.removeEventListener('keydown', menuKeydown); if (searchKeydown) document.removeEventListener('keydown', searchKeydown); }
-  Trio.workspace = {init: mount, mount, unmount, render: renderRail, renderFacePile, facePileModel,
+  Trio.workspace = {canPin: () => !!pinState?.can_edit && pinChannel === state.channel, changePin, refreshPin, init: mount, mount, unmount, render: renderRail, renderFacePile, facePileModel,
     channelMetadataSettled, channelMetadataReady, renderChannelMetadataState,
     didClaimRouteFeed: () => routeFeedClaimed, refresh, archive, archiveCurrent, openChannel, openDm, openDmByKey, openDmDialog, dmTargets, groupNavigation, isStaleThread, staleThreadDays, attentionCount, selectors, showView, search: openSearch, doSearch, modal, toast, showDetails, channelStatus, toolSuffix, usageTone, resetLabel, contextBadge, formatTokenEstimate, refreshDrawerActivity, refreshDrawerMembers, messageCountLabel, createChannel, openTaskModal, detailMember, renderSubagentList, subagentsFromResponse, openAccountMenu, closeAccountMenu, dismissQuestion, undismissQuestion, isQuestionDismissed, trendChip, dailyChangeLine, projectionLine};
 })();

@@ -652,15 +652,15 @@
     return !!target?.closest?.('a,button,input,textarea,select,fieldset,.msg-time');
   }
   function showMessageActions(card, content, msg, body) {
-    const phone = window.matchMedia('(max-width:640px)').matches;
-    if (msg.retracted_at || (!phone && (!isOwn(msg) || state.readOnly))) return;
+    if (msg.retracted_at) return;
     const existing = content.querySelector('.message-actions-menu');
     if (existing && state.activeMessageActions === existing && !existing.classList.contains('hidden')) {
       closeMessageActions();
       return;
     }
     closeMessageActions();
-    let menu = existing;
+    existing?.remove();
+    let menu = null;
     if (!menu) {
       menu = document.createElement('div'); menu.className = 'message-actions-menu hidden';
       const copySource = () => state.messages.get(msg.id)?.content ?? msg.content ?? '';
@@ -671,6 +671,10 @@
       if (!state.readOnly) {
         const reply = document.createElement('button'); reply.type = 'button'; reply.textContent = 'Reply';
         reply.addEventListener('click', () => { closeMessageActions(); Trio.composer?.replyTo(msg); }); menu.append(reply);
+      }
+      if (!state.dmKey && !isPrivate(msg) && !state.readOnly && Trio.workspace?.canPin()) {
+        const pin = document.createElement('button'); pin.type='button';pin.textContent='Pin to channel';
+        pin.onclick=()=>{closeMessageActions();Trio.workspace?.changePin(msg.id);};menu.append(pin);
       }
       const actions = isOwn(msg) && !state.readOnly ? [...(body ? [['Edit', () => edit(msg, body)]] : []), ['Delete', () => retract(msg)]] : [];
       for (const [label, fn] of actions) {
@@ -688,7 +692,7 @@
     const clearPress = () => { if (pressTimer) { clearTimeout(pressTimer); pressTimer = null; } };
     const startPress = event => {
       if (event.isPrimary === false || (event.button != null && event.button !== 0) || interactiveMessageTarget(event.target)) return;
-      if (!isOwn(msg) && !window.matchMedia('(max-width:640px)').matches) return;
+
       clearPress(); pressX = event.clientX; pressY = event.clientY;
       pressTimer = setTimeout(() => {
         pressTimer = null;
@@ -741,7 +745,7 @@
     card.addEventListener('pointercancel', clearPress);
     card.addEventListener('pointerleave', clearPress);
     card.addEventListener('contextmenu', event => {
-      if (interactiveMessageTarget(event.target) || (!isOwn(msg) && !window.matchMedia('(max-width:640px)').matches)) return;
+      if (interactiveMessageTarget(event.target)) return;
       event.preventDefault(); clearPress();
       showMessageActions(card, content, msg, body);
     });

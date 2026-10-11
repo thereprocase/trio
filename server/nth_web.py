@@ -4655,6 +4655,8 @@ class NthWebHandler(BaseHTTPRequestHandler):
             self._handle_tools(parsed)
         elif self.landing_mode and path == "/api/landing":
             self._json(_landing_snapshot(self.db_path))
+        elif path == "/api/channel-pin":
+            self._handle_channel_pin(parsed)
         elif path == "/api/channels":
             self._handle_channels(parsed)
         elif path == "/api/dms":
@@ -4830,6 +4832,8 @@ class NthWebHandler(BaseHTTPRequestHandler):
             self._handle_transcribe()
         elif parsed.path == "/api/messages/mark-read":
             self._handle_message_read()
+        elif parsed.path == "/api/channel-pin":
+            self._handle_channel_pin(parsed, update=True)
         elif parsed.path == "/api/channels":
             self._handle_channel_create()
         elif parsed.path == "/api/archives":
@@ -8888,6 +8892,57 @@ class NthWebHandler(BaseHTTPRequestHandler):
             "with": with_id,
             "messages": merged,
         })
+
+    def _handle_channel_pin(self, parsed, update=False) -> None:
+        """The existing single channel objective, never a private-message pin."""
+        if update:
+            ident = self._require_operator("manage channel pins")
+            if ident is None:
+                return
+        else:
+            _, ident, _ = self._resolve_identity()
+        channel = self._channel_for_request(parsed)
+        if not channel or channel == AGENT_INBOX_CHANNEL:
+            self._error(400, "a public channel is required")
+            return
+        body = self._read_json_body(max_bytes=1024) if update else None
+        if update and body is None:
+            return
+        with sqlite3.connect(str(self.db_path), timeout=5) as db:
+            db.row_factory = sqlite3.Row
+            if update:
+                db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT pinned_message_id, status, archived_at FROM channels WHERE code=?", (channel,)).fetchone()
+            if row is None:
+                self._error(404, "channel not found")
+                return
+            if update:
+                mid = body.get("message_id")
+                if mid is not None and (type(mid) is not int or mid <= 0 or mid >= 2**53):
+                    self._error(400, "message_id must be a positive integer or null")
+                    return
+                if row["archived_at"] or row["status"] != "active":
+                    self._error(409, "channel is not active")
+                    return
+                if "expected_id" not in body or body["expected_id"] != row["pinned_message_id"]:
+                    self._error(409, "pin changed; reopen it before updating")
+                    return
+                if mid is not None and db.execute(
+                    "SELECT 1 FROM messages WHERE id=? AND channel=? AND retracted_at IS NULL "
+                    "AND (recipients IS NULL OR recipients='' OR recipients='[]')", (mid, channel)).fetchone() is None:
+                    self._error(404, "public message not found")
+                    return
+                db.execute("UPDATE channels SET pinned_message_id=?, updated_at=? WHERE code=?", (mid, now_iso(), channel))
+                pin_id = mid
+            else:
+                pin_id = row["pinned_message_id"]
+            pin = db.execute("SELECT id, member_name, content FROM messages WHERE id=? AND channel=? "
+                "AND retracted_at IS NULL AND (recipients IS NULL OR recipients='' OR recipients='[]')",
+                (pin_id, channel)).fetchone() if pin_id else None
+            result = {"ok": True, "channel": channel, "pinned_id": pin_id,
+                      "pin": {**dict(pin), "attachments": attachments_for_message(db, pin["id"])} if pin else None,
+                      "can_edit": ident.source in LOCAL_PATH_ALLOWED_SOURCES and row["status"] == "active" and not row["archived_at"]}
+        self._json(result)
 
     def _handle_channel_create(self) -> None:
         """Create a channel from the operator console.
