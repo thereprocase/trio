@@ -772,7 +772,7 @@ PAGE_PATH_PREFIX = "/pages/"
 # origin: its scripts run, and it can reach neither the dashboard's cookies,
 # storage nor API. connect-src 'none' stops it calling out; forms, popups and
 # top navigation stay blocked because the sandbox does not allow them.
-PAGE_CSP = ("sandbox allow-scripts; default-src 'none'; style-src 'unsafe-inline'; "
+PAGE_CSP = ("sandbox allow-scripts allow-downloads; default-src 'none'; style-src 'unsafe-inline'; "
             "script-src 'unsafe-inline'; img-src data:; connect-src 'none'; "
             "frame-ancestors 'self'")
 PAGE_HEADERS = (

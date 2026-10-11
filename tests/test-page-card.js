@@ -56,7 +56,7 @@ check('the preview frame loads only on click, sandboxed to scripts without same-
   button._listeners.click[0]({ preventDefault() {} });
   const frame = pc.querySelector('iframe');
   assert.ok(frame, 'frame after the click');
-  assert.strictEqual(frame.getAttribute('sandbox'), 'allow-scripts');
+  assert.strictEqual(frame.getAttribute('sandbox'), 'allow-scripts allow-downloads');
   assert.ok(!/allow-same-origin/.test(frame.getAttribute('sandbox')));
   assert.strictEqual(frame.getAttribute('referrerpolicy'), 'no-referrer');
   assert.strictEqual(frame.src, '/pages/' + ID);

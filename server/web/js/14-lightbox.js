@@ -25,6 +25,7 @@
   let zoomLabel = null;
   let prevBtn = null;
   let nextBtn = null;
+  let downloads = null;
 
   let items = [];
   let index = 0;
@@ -86,6 +87,8 @@
     zoomLabel.addEventListener('click', resetZoom);
     const inn = toolBtn('Zoom in', '+', () => zoomBy(STEP));
     toolbar.append(out, zoomLabel, inn);
+    downloads = document.createElement('div'); downloads.className = 'quartet-image-downloads';
+    toolbar.append(downloads);
 
     counterEl = document.createElement('div');
     counterEl.className = 'lightbox-counter';
@@ -138,6 +141,8 @@
     errEl.hidden = true; imgEl.hidden = false;   // clear any prior error state
     imgEl.src = it.url || '';
     imgEl.alt = it.alt || '';
+    downloads.replaceChildren(window.TrioImageExport.button(it.url, it.alt));
+    const original = document.createElement('a'); original.href = it.url; original.download = it.alt || 'image'; original.textContent = 'Original'; downloads.append(original);
     resetZoom();
     const multi = items.length > 1;
     prevBtn.hidden = !multi;

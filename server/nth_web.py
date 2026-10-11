@@ -10199,7 +10199,14 @@ class NthWebHandler(BaseHTTPRequestHandler):
         if nmedia.page_expired(row["expires_at"]):
             self._error(410, "this page has expired")
             return
-        body = (row["html"] or "").encode("utf-8")
+        # Add downloads to existing snapshots without rewriting stored originals.
+        enhancement = ('<style>.quartet-image-downloads{display:flex;gap:12px;flex-wrap:wrap;'
+                       'align-items:center;margin:12px 0;padding:10px;background:#fff;color:#222;'
+                       'font:16px system-ui}.quartet-image-downloads button,.quartet-image-downloads a'
+                       '{padding:10px;color:#174ea6;cursor:pointer}body{-webkit-user-select:text;user-select:text}</style>'
+                       '<script>' + PAGE_IMAGE_EXPORT_SCRIPT +
+                       '\nTrioImageExport.enhance(document);</script>')
+        body = ((row["html"] or "") + enhancement).encode("utf-8")
         self.send_response(200)
         for name, value in nmedia.PAGE_HEADERS:
             self.send_header(name, value)
@@ -10375,7 +10382,7 @@ WEB_JS_FILES = (
     "js/01-store.js", "js/02-api.js", "js/03-router.js", "js/04-events.js",
     "js/05-loader.js", "js/06-core.js", "js/07-lifecycle.js",
     "js/08-sidebar.js", "js/09-time.js", "js/09-ui.js", "js/10-markdown.js",
-    "js/11-conversation.js", "js/12-composer.js", "js/13-file-links.js",
+    "js/11-conversation.js", "js/12-composer.js", "js/13-file-links.js", "js/13-image-export.js",
     "js/14-lightbox.js", "js/20-workspace.js", "js/30-agents.js",
     "js/40-preferences.js", "js/41-gameboy-controls.js", "js/42-ipod-controls.js",
     "js/45-notifications.js", "js/46-data.js", "js/47-push.js",
@@ -10398,6 +10405,8 @@ def _read_web_source(relative_path: str) -> str:
             f"required web source missing: {relative_path} — server/web/ must "
             "be installed alongside nth_web.py"
         ) from exc
+
+PAGE_IMAGE_EXPORT_SCRIPT = _read_web_source("js/13-image-export.js")
 
 # Strip the test-only hook block (between the sentinel markers) from the served
 # browser bundle so the internal `state` reference is never exposed on a global

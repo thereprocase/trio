@@ -81,7 +81,7 @@
     preview.addEventListener('click', () => {
       if (card.querySelector('iframe')) return;
       const frame = document.createElement('iframe'); frame.className = 'page-card-frame';
-      frame.setAttribute('sandbox', 'allow-scripts');
+      frame.setAttribute('sandbox', 'allow-scripts allow-downloads');
       frame.setAttribute('referrerpolicy', 'no-referrer');
       frame.title = 'Preview: ' + (page.title || 'page');
       frame.src = path;
@@ -688,10 +688,13 @@
     state.activeMessageActions = menu;
   }
   function bindMessageActions(card, content, msg, body) {
+    const more = document.createElement('button'); more.type = 'button'; more.className = 'message-more';
+    more.textContent = '⋯'; more.setAttribute('aria-label', 'Message actions');
+    more.addEventListener('click', () => showMessageActions(card, content, msg, body)); (content.querySelector('.message-head') || content).append(more);
     let pressTimer = null, pressX = 0, pressY = 0;
     const clearPress = () => { if (pressTimer) { clearTimeout(pressTimer); pressTimer = null; } };
     const startPress = event => {
-      if (event.isPrimary === false || (event.button != null && event.button !== 0) || interactiveMessageTarget(event.target)) return;
+      if (event.isPrimary === false || (event.button != null && event.button !== 0) || interactiveMessageTarget(event.target) || body?.contains(event.target)) return;
 
       clearPress(); pressX = event.clientX; pressY = event.clientY;
       pressTimer = setTimeout(() => {
@@ -714,11 +717,12 @@
       replyIcon.style.left = ((content.offsetLeft || 0) + 8) + 'px';
       const rect = card.getBoundingClientRect();
       replyIcon.style.top = Math.max(16, Math.min(touch.clientY - rect.top, Math.max(16, rect.height - 16))) + 'px';
-      swipe = { x: touch.clientX, y: touch.clientY, ready: false };
+      swipe = { x: touch.clientX, y: touch.clientY, ready: false, started: Date.now() };
     };
     card.addEventListener('touchstart', startSwipe, { passive: true });
     card.addEventListener('touchmove', event => {
       if (!swipe) return;
+      if (window.getSelection?.()?.toString() || (!swipe.ready && Date.now() - swipe.started > 300)) { resetSwipe(); return; }
       if (event.touches.length !== 1) { resetSwipe(); return; }
       const dx = event.touches[0].clientX - swipe.x, dy = event.touches[0].clientY - swipe.y;
       if (Math.abs(dy) > 16 && Math.abs(dy) > Math.abs(dx)) { resetSwipe(); return; }
@@ -745,7 +749,7 @@
     card.addEventListener('pointercancel', clearPress);
     card.addEventListener('pointerleave', clearPress);
     card.addEventListener('contextmenu', event => {
-      if (interactiveMessageTarget(event.target)) return;
+      if (interactiveMessageTarget(event.target) || body?.contains(event.target) || window.getSelection?.()?.toString()) return;
       event.preventDefault(); clearPress();
       showMessageActions(card, content, msg, body);
     });
@@ -886,6 +890,12 @@
           link.textContent = '📄 ' + (attachment.filename || ('Attachment #' + attachment.id));
         }
         attachments.append(link);
+        if (/^image\/(png|jpeg|gif|webp)$/.test(attachment.mime || '')) {
+          const downloads = document.createElement('div'); downloads.className = 'quartet-image-downloads';
+          downloads.append(window.TrioImageExport.button(href, attachment.filename));
+          const original = document.createElement('a'); original.href = href; original.download = attachment.filename || 'image'; original.textContent = 'Download original';
+          downloads.append(original); attachments.append(downloads);
+        }
       });
       if (attachments.children.length) content.append(attachments);
     }

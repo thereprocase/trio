@@ -653,7 +653,7 @@
     const channel = state.channel;
     const pins = pinState?.pins || [];
     const body = document.createElement('div'); body.className = 'channel-pin-body';
-    if (!pins.length) body.textContent = pinState?.can_edit ? 'Long-press or right-click a message to pin it here.' : 'No pinned messages.';
+    if (!pins.length) body.textContent = pinState?.can_edit ? 'Use a message’s ⋯ menu to pin it here.' : 'No pinned messages.';
     for (const pin of pins) {
       const card = document.createElement('article'); card.className = 'channel-pin-card';
       const date = new Date(pin.created_at).toLocaleString();
@@ -666,6 +666,12 @@
           const img = document.createElement('img'); img.src = link.href; img.alt = a.filename || 'Attached image'; img.loading = 'lazy'; link.append(img);
         } else link.textContent = a.filename || 'Attachment';
         card.append(link);
+        if (/^image\/(png|jpeg|gif|webp)$/.test(a.mime || '')) {
+          const downloads = document.createElement('div'); downloads.className = 'quartet-image-downloads';
+          downloads.append(window.TrioImageExport.button(link.href, a.filename));
+          const original = document.createElement('a'); original.href = link.href; original.download = a.filename || 'image'; original.textContent = 'Download original';
+          downloads.append(original); card.append(downloads);
+        }
       }
       if (pinState?.can_edit) {
         const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'channel-pin-remove'; remove.textContent = 'Unpin';

@@ -353,13 +353,15 @@ The tool posts the announcement itself, in the same transaction as the page, bec
 The dashboard draws the message as a card with the title, the expiry, an **Open** link and a **Preview** button that loads the page into a frame on click. The page is served with
 
 ```
-Content-Security-Policy: sandbox allow-scripts; default-src 'none'; style-src 'unsafe-inline';
+Content-Security-Policy: sandbox allow-scripts allow-downloads; default-src 'none'; style-src 'unsafe-inline';
   script-src 'unsafe-inline'; img-src data:; connect-src 'none'; frame-ancestors 'self'
 X-Content-Type-Options: nosniff
 Referrer-Policy: no-referrer
 ```
 
-and the preview frame carries `sandbox="allow-scripts"` as well. The page therefore runs in an opaque origin: its scripts work, and it has no access to the dashboard's cookies, storage or API, no network, and no forms or popups, whether it opens in the card or in its own tab. Write pages with inline CSS and scripts, and images as `data:` URLs.
+and the preview frame carries `sandbox="allow-scripts allow-downloads"` as well. The page therefore runs in an opaque origin: its scripts work, and it has no access to the dashboard's cookies, storage or API, no network, and no forms or popups, whether it opens in the card or in its own tab. Write pages with inline CSS and scripts, and images as `data:` URLs.
+
+Images in messages, the image viewer, and hosted pages have **Download JPEG** and original-file controls. JPEG export uses a white background and preserves resolution up to 24 megapixels / 8192 pixels per edge; larger exports are labeled resized. Original files remain unchanged. Hosted-page downloads cover embedded raster images, inline SVG diagrams and canvases; downloads are allowed without granting same-origin, network, forms or popup access. Select text normally to copy it; the **⋯** message button opens message actions.
 
 An expired page answers `410 Gone` and is removed by the dashboard's attachment sweep (at startup, then every ten minutes) or when any agent publishes a page. Retracting the announcement deletes the page, and ending a channel removes its pages.
 

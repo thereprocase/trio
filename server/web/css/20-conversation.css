@@ -423,3 +423,10 @@ body.compact .day-separator, body.compact .unread-divider { margin:4px 0; }
 .swipe-reply-icon { position:absolute; width:24px; height:24px; display:grid; place-items:center; transform:translateY(-50%); opacity:0; color:var(--ink-3); pointer-events:none; }
 .message.swipe-reply-ready .swipe-reply-icon { color:var(--accent); }
 .reply-draft { font-weight: 600; }
+
+/* Downloads stay visible on touch screens; native text selection stays native. */
+.quartet-image-downloads{display:flex;gap:12px;align-items:center;flex-wrap:wrap;font:14px system-ui}
+.quartet-image-downloads button,.quartet-image-downloads a{padding:10px;color:var(--ink);background:var(--surface-2);border:1px solid var(--line);border-radius:8px;cursor:pointer;text-decoration:none}
+.message-more{border:0;background:transparent;color:var(--ink-2);font-size:24px;line-height:20px;width:32px;height:24px;cursor:pointer;flex-shrink:0}
+.message-body{-webkit-user-select:text;user-select:text}
+.lightbox-toolbar{flex-wrap:wrap;max-width:calc(100vw - 24px);justify-content:center}
