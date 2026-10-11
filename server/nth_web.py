@@ -8954,7 +8954,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
             for mid in ids:
                 pin = db.execute("SELECT id, member_name, content, created_at FROM messages WHERE id=? AND channel=? AND retracted_at IS NULL AND (recipients IS NULL OR recipients='' OR recipients='[]')", (mid, channel)).fetchone()
                 if pin:
-                    pins.append({**dict(pin), "attachments": attachments_for_message(db, mid)})
+                    pins.append({**dict(pin), "attachments": attachments_for_message(db, mid), "page": nmedia.page_for_message(db, mid)})
             result = {"ok": True, "channel": channel, "pinned_ids": ids, "pins": pins,
                       "can_edit": ident.source in LOCAL_PATH_ALLOWED_SOURCES and row["status"] == "active" and not row["archived_at"]}
         self._json(result)

@@ -657,8 +657,9 @@
     for (const pin of pins) {
       const card = document.createElement('article'); card.className = 'channel-pin-card';
       const date = new Date(pin.created_at).toLocaleString();
-      card.innerHTML = '<div class="channel-pin-meta">#' + pin.id + ' · ' + esc(date) + '</div>' + Trio.markdown.renderMarkdown(pin.content)
+      card.innerHTML = '<div class="channel-pin-meta">#' + pin.id + ' · ' + esc(date) + '</div>' + Trio.markdown.renderMarkdown(Trio.conversation.pageCaption(pin))
         + [...new Set(pin.content.match(/\/pages\/[A-Za-z0-9_-]+/g) || [])].map((href, i) => '<p><a target="_blank" rel="noopener" href="' + esc(href) + '">Open page' + (i ? ' ' + (i + 1) : '') + '</a></p>').join('');
+      if (pin.page) card.append(Trio.conversation.pageCard(pin.page));
       for (const a of pin.attachments || []) {
         const link = document.createElement('a'); link.href = api.url('/api/attachment/' + encodeURIComponent(a.id)); link.target = '_blank'; link.rel = 'noopener';
         if (/^image\/(png|jpeg|gif|webp)$/.test(a.mime || '')) {

@@ -15,6 +15,7 @@ with tempfile.TemporaryDirectory() as tmp:
  db.execute("INSERT INTO messages(channel,member_id,member_name,content,created_at,recipients) VALUES('alpha',?,'Alpha','private',?,?)",(a['member_id'],web.now_iso(),'["secret"]'))
  private=db.execute('SELECT last_insert_rowid()').fetchone()[0]
  db.execute("INSERT INTO attachments(channel,message_id,member_id,mime,filename,path,created_at) VALUES('alpha',?,?,'image/png','reference.png','/synthetic/reference.png',?)",(first,a['member_id'],web.now_iso()))
+ db.execute("INSERT INTO pages(id,channel,message_id,member_id,title,html,bytes,created_at,expires_at) VALUES('abcdefghijklmnopqrstuv','alpha',?,?,'Reference page','<p>test</p>',11,?,?)",(first,a['member_id'],web.now_iso(),'2099-01-01T00:00:00Z'))
  db.commit();db.close()
  handler=type('PinHandler',(web.NthWebHandler,),{'db_path':srv.DB_PATH,'landing_mode':True})
  server=web.QuietThreadingHTTPServer(('127.0.0.1',0),handler);threading.Thread(target=server.serve_forever,daemon=True).start()
@@ -28,6 +29,7 @@ with tempfile.TemporaryDirectory() as tmp:
   assert call({'message_ids':[first],'expected_ids':[]})[0]==200
   assert call()[1]['pins'][0]['id']==first
   assert call()[1]['pins'][0]['attachments'][0]['filename']=='reference.png'
+  assert call()[1]['pins'][0]['page']['path']=='/pages/abcdefghijklmnopqrstuv'
   assert call({'message_ids':[first,other],'expected_ids':[first]})[0]==404
   assert call({'message_ids':[private],'expected_ids':[first]})[0]==404
   assert call({'message_ids':[True],'expected_ids':[first]})[0]==400
