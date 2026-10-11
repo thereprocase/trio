@@ -26,6 +26,7 @@ import sqlite3
 import stat
 import struct
 import tempfile
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, NamedTuple, Optional, Tuple
@@ -656,7 +657,19 @@ MAX_MODEL_SOURCE_BYTES = 25 * 1024 * 1024
 MAX_MODEL_SOURCE_PIXELS = 80_000_000
 
 
+_model_image_jobs = threading.BoundedSemaphore(1)
+
+
 def prepare_model_image(raw: bytes, crop=None, resize: bool = True):
+    if not _model_image_jobs.acquire(blocking=False):
+        raise ValueError("image_transform_busy")
+    try:
+        return _prepare_model_image(raw, crop, resize)
+    finally:
+        _model_image_jobs.release()
+
+
+def _prepare_model_image(raw: bytes, crop=None, resize: bool = True):
     """Return bytes, MIME, and geometry. Crop uses EXIF-oriented original pixels.
 
     Pillow is lazy/optional for legacy original-sized images; transforms never

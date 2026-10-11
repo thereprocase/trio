@@ -76,3 +76,27 @@ with tempfile.TemporaryDirectory(prefix='image_preview_') as home:
     denied = srv.nth_image(AGENT_INBOX_CHANNEL, c['member_id'], did, crop=[0,0,10,10])
     assert json.loads(denied)['reason'] == 'not_found'
     print('PASS: native private crop visible only to DM participants')
+
+import asyncio
+import threading
+from unittest.mock import patch
+async def responsive():
+    entered, release = threading.Event(), threading.Event()
+    def slow(*args):
+        entered.set(); assert release.wait(2); return 'done'
+    with patch.object(srv, 'nth_image', slow):
+        job = asyncio.create_task(srv.nth_image_tool('test', 'member', 1))
+        for _ in range(100):
+            if entered.is_set(): break
+            await asyncio.sleep(.001)
+        assert entered.is_set() and not job.done(), repr(job.exception()) if job.done() else 'not entered'
+        release.set(); assert await job == 'done'
+asyncio.run(responsive())
+assert media._model_image_jobs.acquire(False)
+try:
+    try: media.prepare_model_image(raw)
+    except ValueError as e: assert str(e) == 'image_transform_busy'
+    else: raise AssertionError('concurrent decode admitted')
+finally: media._model_image_jobs.release()
+assert media.prepare_model_image(raw)[2]['output_dimensions'][0] == 2000
+print('PASS: event loop remains responsive, concurrent decode rejected, permit released')

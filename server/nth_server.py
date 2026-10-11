@@ -12,6 +12,7 @@ The user-facing skill is /nth. The MCP server name is controlled by the
 NTH_SERVER_NAME environment variable (default: nth-cluster).
 """
 
+import asyncio
 import json
 import os
 import random
@@ -2925,7 +2926,6 @@ def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: st
         db.close()
 
 
-@mcp.tool(name=f"{TOOL_PREFIX}_image")
 def nth_image(channel: str, member_id: str, attachment_id: int, session_token: str = "",
               crop: Optional[List[int]] = None, resize: bool = True) -> Any:
     """Fetch a bounded preview or crop, preserving the stored original.
@@ -2987,6 +2987,20 @@ def nth_image(channel: str, member_id: str, attachment_id: int, session_token: s
                 Image(data=output, format=POLL_IMAGE_FORMATS[mime])]
     finally:
         db.close()
+
+
+@mcp.tool(name=f"{TOOL_PREFIX}_image")
+async def nth_image_tool(channel: str, member_id: str, attachment_id: int,
+                         session_token: str = "", crop: Optional[List[int]] = None,
+                         resize: bool = True) -> Any:
+    """Fetch an image preview or crop=[x,y,width,height] in EXIF-oriented original
+    pixels. resize=False gives lossless 1:1 pixels; resize=True fits model limits.
+    Returns original hash/reference/dimensions plus output/crop geometry.
+    Originals stay unchanged. Source:25MiB/80MP; output:2000px/3.75MB.
+    One decode runs at a time; image_transform_busy means retry later.
+    """
+    return await asyncio.to_thread(nth_image, channel, member_id, attachment_id,
+                                   session_token, crop, resize)
 
 
 # Optional dashboard address, so trio_page can return a link a person can open.
