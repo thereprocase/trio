@@ -8901,6 +8901,14 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 return
         else:
             _, ident, _ = self._resolve_identity()
+        if ident.source == IDENTITY_SOURCE_PENDING:
+            self._error(403, "pick a name to join this channel first")
+            return
+        # Match the task board's channel-read boundary. Landing query strings
+        # are routing input, not proof that a guest may read that channel.
+        if self.landing_mode and not is_all_seeing(ident.member_id):
+            self._error(403, "only the hub operator can read another channel's pin")
+            return
         channel = self._channel_for_request(parsed)
         if not channel or channel == AGENT_INBOX_CHANNEL:
             self._error(400, "a public channel is required")

@@ -35,8 +35,13 @@ with tempfile.TemporaryDirectory() as tmp:
   real=handler._resolve_identity
   class Guest:source='guest';member_id='guest'
   handler._resolve_identity=lambda self:(None,Guest(),False)
+  assert call()[0]==403  # arbitrary landing-channel reads are forbidden
+  handler.landing_mode=False;handler.channel='alpha'
   assert call()[1]['pin']['id']==first and call()[1]['can_edit'] is False
   assert call({'message_id':None,'expected_id':first})[0]==403
+  Guest.source=web.IDENTITY_SOURCE_PENDING
+  assert call()[0]==403
+  handler.landing_mode=True
   handler._resolve_identity=real
   assert call({'message_id':None,'expected_id':first})[0]==200
   assert call()[1]['pin'] is None
