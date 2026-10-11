@@ -562,11 +562,10 @@ r1 = send_items([{"data_base64": b64(heavy), "filename": "full-res-dyno-chart.pn
 check("poll setup: images of every size are accepted for the dashboard", r1.get("ok") is True)
 out, payload, items = poll_as(DEE, DEE_TOKEN)
 check("poll: many large images still come back as text alone", isinstance(out, str))
-check("poll: an image over 3.75 MB is listed as not fetchable, too_large_for_model",
-      items.get("full-res-dyno-chart.png", {}).get("fetchable") is False
-      and items["full-res-dyno-chart.png"].get("reason") == "too_large_for_model")
-check("poll: an image over 2000 px is listed as not fetchable, with its dimensions",
-      items.get("wide-timeline-strip.png", {}).get("reason") == "too_large_for_model"
+check("poll: an image over 3.75 MB is available for preview",
+      items.get("full-res-dyno-chart.png", {}).get("fetchable") is True)
+check("poll: an image over 2000 px is available for preview, with original dimensions",
+      items.get("wide-timeline-strip.png", {}).get("fetchable") is True
       and items["wide-timeline-strip.png"].get("width") == 2001)
 check("poll: images within the limits are listed as fetchable",
       items.get("engine-bay-left-side.png", {}).get("fetchable") is True
@@ -638,12 +637,12 @@ try:
     fetch(DEE, r1["attachments"][2]["id"])
 finally:
     srv._read_attachment_file = _real_read
-check("image tool: an image over 3.75 MB is refused as too_large_for_model, unread",
-      body.get("reason") == "too_large_for_model" and not got)
-check("image tool: the one file it reads is bounded by the per-image cap",
-      reads == [nmedia.MAX_MODEL_IMAGE_BYTES])
+check("image tool: a corrupt oversized synthetic image is refused after decode",
+      body.get("reason") == "unreadable_image" and not got)
+check("image tool: source reads are bounded by the original-source cap",
+      reads == [nmedia.MAX_MODEL_SOURCE_BYTES, nmedia.MAX_MODEL_SOURCE_BYTES])
 body, got = fetch(DEE, r1["attachments"][1]["id"])
-check("image tool: an image over 2000 px is refused", body.get("reason") == "too_large_for_model" and not got)
+check("image tool: a corrupt oversized synthetic header is refused", body.get("reason") == "unreadable_image" and not got)
 check("image tool: a non-member is refused",
       "error" in fetch("stranger", r1["attachments"][2]["id"])[0])
 body, _ = fetch(DEE, r1["attachments"][2]["id"], tok="not-a-token")

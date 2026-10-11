@@ -452,3 +452,16 @@ client-supplied role fields cannot grant ownership. Legacy messages stay
 The web composer supports swipe-right Reply: attach `reply_to` and mention the
 author without copying their text. Reply drafts stay with their conversation
 and the Reply chip cancels the reference.
+
+### Image previews and original-resolution crops
+
+The image tool preserves stored originals and returns a bounded preview by default.
+Use `crop=[x,y,width,height]` in orientation-corrected original-image pixels.
+`resize=false` requests a lossless 1:1 crop; `resize=true` fits the crop within
+2000 pixels per side and 3.75 MB. Large native crops are refused, never silently
+downsampled. Original inputs may be up to 25 MiB and 80 million pixels, including
+images with a 12,000-pixel long edge. Responses retain the original SHA256, byte
+count, encoded/oriented dimensions, channel/attachment reference, selected crop,
+and output dimensions. Transformed animations use frame 0. Existing visibility,
+retention and session checks apply to every crop; a reference is not an access token.
+Transforms require Pillow in the server environment; no automatic installation occurs.

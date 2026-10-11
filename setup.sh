@@ -92,7 +92,7 @@ if [ "${1:-}" = "hub-service" ] || [ "${1:-}" = "upgrade" ]; then
     if ! "$HUB_VENV/bin/python" -c "from mcp.server.fastmcp import FastMCP; import uvicorn" &>/dev/null; then
         echo "Installing into hub venv: mcp<2 uvicorn==0.52.1"
         "$HUB_VENV/bin/python" -m pip install --quiet --upgrade pip
-        "$HUB_VENV/bin/python" -m pip install --quiet --only-binary :all: "mcp<2" "uvicorn==0.52.1"
+        "$HUB_VENV/bin/python" -m pip install --quiet --only-binary :all: "mcp<2" "uvicorn==0.52.1" "Pillow>=12.3,<13"
     fi
     if ! "$HUB_VENV/bin/python" -c "from mcp.server.fastmcp import FastMCP; import uvicorn" &>/dev/null; then
         echo "ERROR: hub venv cannot import FastMCP + uvicorn. Hub NOT restarted."
@@ -354,7 +354,7 @@ fi
 
 # Pin mcp to 1.x: SDK 2.0.0 removed mcp.server.fastmcp (FastMCP), which the
 # entire server is built on, and quartet_server.py patches 1.x internals.
-VENV_PKGS=("mcp<2")
+VENV_PKGS=("mcp<2" "Pillow>=12.3,<13")
 if [ "$MODE" = "hub" ]; then
     VENV_PKGS+=("uvicorn==0.52.1")
 fi

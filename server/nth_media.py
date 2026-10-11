@@ -1,7 +1,7 @@
 """Shared rules for rich content: attachment types and storage, file reads on an
 agent's machine, and burner pages.
 
-Standard library only. Three processes import it:
+Standard-library core, with lazy Pillow for model image transforms. Three processes import it:
 
   * nth_web (the dashboard) sniffs and stores human uploads, serves attachments
     and pages, and sweeps what has expired;
@@ -650,6 +650,79 @@ def model_image_refusal(data: bytes) -> Optional[str]:
     if max(dims) > MAX_MODEL_IMAGE_SIDE:
         return TOO_LARGE_FOR_MODEL
     return None
+
+
+MAX_MODEL_SOURCE_BYTES = 25 * 1024 * 1024
+MAX_MODEL_SOURCE_PIXELS = 80_000_000
+
+
+def prepare_model_image(raw: bytes, crop=None, resize: bool = True):
+    """Return bytes, MIME, and geometry. Crop uses EXIF-oriented original pixels.
+
+    Pillow is lazy/optional for legacy original-sized images; transforms never
+    mutate storage. A native crop is lossless PNG and is never downsampled.
+    """
+    import hashlib
+    import io
+    if len(raw) > MAX_MODEL_SOURCE_BYTES:
+        raise ValueError("source_too_large")
+    dims = image_dimensions(raw)
+    if dims is None or min(dims) <= 0:
+        raise ValueError(UNREADABLE_IMAGE)
+    if dims[0] * dims[1] > MAX_MODEL_SOURCE_PIXELS:
+        raise ValueError("source_pixel_limit")
+    mime = sniff_image_mime(raw)
+    meta = {"original_sha256": hashlib.sha256(raw).hexdigest(),
+            "original_bytes": len(raw), "encoded_dimensions": list(dims),
+            "coordinate_space": "exif_oriented_original", "frame": 0}
+    if crop is not None and (not isinstance(crop, list) or len(crop) != 4
+                            or any(type(v) is not int for v in crop)):
+        raise ValueError("invalid_crop")
+    # Preserve the existing original-image fast path (including animations).
+    if crop is None and mime != "image/jpeg" and not model_image_refusal(raw):
+        meta.update(original_dimensions=list(dims), output_dimensions=list(dims),
+                    crop=[0, 0, *dims], resized=False, transformed=False)
+        return raw, mime, meta
+    try:
+        from PIL import Image, ImageOps
+    except ImportError:
+        raise ValueError("image_transform_unavailable") from None
+    try:
+        with Image.open(io.BytesIO(raw)) as source:
+            if source.width * source.height > MAX_MODEL_SOURCE_PIXELS:
+                raise ValueError("source_pixel_limit")
+            source.seek(0)
+            oriented = ImageOps.exif_transpose(source)
+            width, height = oriented.size
+            box = crop if crop is not None else [0, 0, width, height]
+            x, y, w, h = box
+            if min(x, y) < 0 or min(w, h) <= 0 or x + w > width or y + h > height:
+                raise ValueError("invalid_crop")
+            if not resize and max(w, h) > MAX_MODEL_IMAGE_SIDE:
+                raise ValueError("native_crop_exceeds_limit")
+            im = oriented.crop((x, y, x + w, y + h)).convert("RGBA")
+            if resize:
+                im.thumbnail((MAX_MODEL_IMAGE_SIDE, MAX_MODEL_IMAGE_SIDE), Image.Resampling.LANCZOS)
+            # PNG preserves alpha and native-crop pixels. If a preview remains
+            # too large, reduce dimensions, not quality or transparency.
+            for _ in range(16):
+                output = io.BytesIO()
+                im.save(output, format="PNG")
+                data = output.getvalue()
+                if len(data) <= MAX_MODEL_IMAGE_BYTES:
+                    meta.update(original_dimensions=[width, height], crop=box,
+                                output_dimensions=list(im.size),
+                                resized=im.size != (w, h), transformed=True)
+                    return data, "image/png", meta
+                if not resize:
+                    raise ValueError("native_crop_exceeds_limit")
+                im = im.resize((max(1, im.width * 3 // 4), max(1, im.height * 3 // 4)),
+                               Image.Resampling.LANCZOS)
+            raise ValueError("preview_exceeds_limit")
+    except ValueError:
+        raise
+    except Exception:
+        raise ValueError(UNREADABLE_IMAGE) from None
 
 
 # ── Retention of DM images from agents ───────────────────────────────────

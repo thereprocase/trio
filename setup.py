@@ -217,7 +217,7 @@ def install(target_home, *, quartet_url='', clients=('claude', 'codex'),
         if not python.exists():
             subprocess.run([sys.executable, '-m', 'venv', str(venv)], check=True)
         subprocess.run([str(python), '-m', 'pip', 'install', '--only-binary=:all:',
-                        'mcp>=1.26,<2', 'websockets>=15,<16'], check=True)
+                        'mcp>=1.26,<2', 'websockets>=15,<16', 'Pillow>=12.3,<13'], check=True)
     else:
         python = Path(sys.executable)
     for source in (ROOT / 'server').rglob('*'):

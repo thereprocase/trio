@@ -2539,7 +2539,7 @@ def _attachment_meta(channel: str, a) -> dict:
     if a["mime"] not in POLL_IMAGE_FORMATS:
         item.update(fetchable=False, reason="not_an_image")
         return item
-    if a["bytes"] is not None and a["bytes"] > nmedia.MAX_MODEL_IMAGE_BYTES:
+    if a["bytes"] is not None and a["bytes"] > nmedia.MAX_MODEL_SOURCE_BYTES:
         item.update(fetchable=False, reason=nmedia.TOO_LARGE_FOR_MODEL)
         return item
     if not (width and height):
@@ -2556,8 +2556,8 @@ def _attachment_meta(channel: str, a) -> dict:
             item.update(fetchable=False, reason=nmedia.UNREADABLE_IMAGE)
             return item
         # A header past the first 256 KB is left to the image tool to judge.
-    if width and height and max(width, height) > nmedia.MAX_MODEL_IMAGE_SIDE:
-        item.update(fetchable=False, reason=nmedia.TOO_LARGE_FOR_MODEL)
+    if width and height and width * height > nmedia.MAX_MODEL_SOURCE_PIXELS:
+        item.update(fetchable=False, reason="source_pixel_limit")
         return item
     item["fetchable"] = True
     return item
@@ -2926,21 +2926,16 @@ def nth_poll(channel: str, member_id: str, wait_seconds: int = 15, from_name: st
 
 
 @mcp.tool(name=f"{TOOL_PREFIX}_image")
-def nth_image(channel: str, member_id: str, attachment_id: int, session_token: str = "") -> Any:
-    """Fetch one image attachment as an image block.
+def nth_image(channel: str, member_id: str, attachment_id: int, session_token: str = "",
+              crop: Optional[List[int]] = None, resize: bool = True) -> Any:
+    """Fetch a bounded preview or crop, preserving the stored original.
 
-    Poll lists attachments (id, filename, size, dimensions, `fetchable`) and
-    sends no image bytes. Call this when you need to look at one. The image is
-    returned when you can see its message (the same rule as poll: broadcasts,
-    and DMs you are a party to) and when a model can take it: at most 3.75 MB,
-    at most 2000 px on a side, with a readable header. Anything else gets a
-    JSON refusal with a `reason`.
-
-    Args:
-        channel: Channel code (the DM channel for an image in a DM)
-        member_id: Your member ID
-        attachment_id: The attachment `id` from a poll entry
-        session_token: Your session token
+    crop=[x,y,width,height] uses orientation-corrected ORIGINAL pixels, not
+    preview pixels. resize=True fits the whole image or crop within model
+    limits; resize=False returns a 1:1 lossless crop or a size refusal.
+    Responses include original hash/dimensions/reference and output geometry.
+    Source limits: 25 MiB, 80 million pixels. Output: 2000px/side, 3.75MB.
+    Transformed animations use frame 0. Visibility/session rules are unchanged.
     """
     err = validate_channel_code(channel)
     if err:
@@ -2975,21 +2970,21 @@ def nth_image(channel: str, member_id: str, attachment_id: int, session_token: s
         if not fmt:
             return refuse("not_an_image", f"Attachment #{attachment_id} is {row['mime']}; "
                           "it can be opened in the dashboard.")
-        cap = nmedia.MAX_MODEL_IMAGE_BYTES
-        if row["bytes"] is not None and row["bytes"] > cap:
-            return refuse(nmedia.TOO_LARGE_FOR_MODEL,
-                          f"Image #{attachment_id} is over the {cap}-byte limit a model accepts.")
+        cap = nmedia.MAX_MODEL_SOURCE_BYTES
         raw = _read_attachment_file(channel, row["path"], max_bytes=cap)
         if raw is None:
             return refuse("missing", f"Image #{attachment_id} is no longer stored.")
-        refusal = nmedia.model_image_refusal(raw)
-        if refusal:
-            return refuse(refusal, f"Image #{attachment_id} cannot be sent to a model ({refusal}).")
+        try:
+            output, mime, geometry = nmedia.prepare_model_image(raw, crop, resize)
+        except ValueError as exc:
+            return refuse(str(exc), "Cannot render this image request; use a smaller crop "
+                          "or resize=True if a native crop exceeds model limits.")
         return [json.dumps({"ok": True, "attachment_id": attachment_id,
-                            "message_id": row["message_id"], "mime": row["mime"],
-                            "filename": row["filename"] or "",
+                            "message_id": row["message_id"], "mime": mime,
+                            "original_ref": {"channel": channel, "attachment_id": attachment_id},
+                            "filename": row["filename"] or "", **geometry,
                             "note": IMAGE_PEER_NOTE}),
-                Image(data=raw, format=fmt)]
+                Image(data=output, format=POLL_IMAGE_FORMATS[mime])]
     finally:
         db.close()
 
