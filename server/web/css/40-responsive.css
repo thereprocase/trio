@@ -340,7 +340,12 @@
   outline-offset: 1px;
 }
 
-.channel-pin-banner { display:flex;align-items:center;gap:8px;padding:8px 16px;border-bottom:1px solid var(--sender-border);flex-shrink:0; }
-.channel-pin-banner button {border:1px solid currentColor;border-radius:8px;padding:8px 10px;background:transparent;color:inherit;min-height:40px;cursor:pointer;}
-.channel-pin-banner .channel-pin-open {flex:1;min-width:0;text-align:left;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;border-color:transparent;}
-.channel-pin-body {max-height:60dvh;overflow:auto;overflow-wrap:anywhere;}
+.channel-pins-button {position:relative;flex-shrink:0;}
+.channel-pin-count {position:absolute;right:0;top:0;font-size:10px;font-weight:700;line-height:15px;min-width:15px;border-radius:8px;background:var(--accent);color:var(--bg);}
+.channel-pin-body {max-height:62dvh;overflow:auto;overflow-wrap:anywhere;}
+.channel-pin-card {padding:14px 0;border-bottom:1px solid var(--sender-border);}
+.channel-pin-card:first-child {padding-top:0;}
+.channel-pin-card:last-child {border-bottom:0;}
+.channel-pin-card img {display:block;max-width:100%;max-height:180px;object-fit:contain;border-radius:8px;margin:10px 0;}
+.channel-pin-meta {font-size:12px;opacity:.7;margin-bottom:8px;}
+.channel-pin-remove {display:block;margin-top:10px;padding:6px 12px;border:1px solid currentColor;border-radius:8px;background:transparent;color:inherit;cursor:pointer;}

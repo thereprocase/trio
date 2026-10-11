@@ -24,31 +24,37 @@ with tempfile.TemporaryDirectory() as tmp:
    with urllib.request.urlopen(req) as r:return r.status,json.load(r)
   except urllib.error.HTTPError as e:return e.code,json.load(e)
  try:
-  assert call()[1]['pin'] is None
-  assert call({'message_id':first,'expected_id':None})[0]==200
-  assert call()[1]['pin']['id']==first
-  assert call()[1]['pin']['attachments'][0]['filename']=='reference.png'
-  assert call({'message_id':other,'expected_id':first})[0]==404
-  assert call({'message_id':private,'expected_id':first})[0]==404
-  assert call({'message_id':True,'expected_id':first})[0]==400
-  assert call({'message_id':None,'expected_id':None})[0]==409
+  assert call()[1]['pins']==[]
+  assert call({'message_ids':[first],'expected_ids':[]})[0]==200
+  assert call()[1]['pins'][0]['id']==first
+  assert call()[1]['pins'][0]['attachments'][0]['filename']=='reference.png'
+  assert call({'message_ids':[first,other],'expected_ids':[first]})[0]==404
+  assert call({'message_ids':[private],'expected_ids':[first]})[0]==404
+  assert call({'message_ids':[True],'expected_ids':[first]})[0]==400
+  assert call({'message_ids':[first,first],'expected_ids':[first]})[0]==400
+  assert call({'message_ids':[],'expected_ids':[]})[0]==409
+  db=srv.get_db();db.execute("INSERT INTO messages(channel,member_id,member_name,content,created_at) VALUES('alpha',?,'Alpha','second reference',?)",(a['member_id'],web.now_iso()));second=db.execute('SELECT last_insert_rowid()').fetchone()[0];db.commit();db.close()
+  assert call({'message_ids':[first,second],'expected_ids':[first]})[0]==200
+  assert [p['id'] for p in call()[1]['pins']]==[first,second]
+  db=srv.get_db();assert db.execute("SELECT pinned_message_id FROM channels WHERE code='alpha'").fetchone()[0] is None;db.close()
   real=handler._resolve_identity
   class Guest:source='guest';member_id='guest'
   handler._resolve_identity=lambda self:(None,Guest(),False)
-  assert call()[0]==403  # arbitrary landing-channel reads are forbidden
+  assert call()[0]==403
   handler.landing_mode=False;handler.channel='alpha'
-  assert call()[1]['pin']['id']==first and call()[1]['can_edit'] is False
-  assert call({'message_id':None,'expected_id':first})[0]==403
+  assert len(call()[1]['pins'])==2 and call()[1]['can_edit'] is False
+  assert call({'message_ids':[],'expected_ids':[first,second]})[0]==403
   Guest.source=web.IDENTITY_SOURCE_PENDING
   assert call()[0]==403
-  handler.landing_mode=True
-  handler._resolve_identity=real
-  assert call({'message_id':None,'expected_id':first})[0]==200
-  assert call()[1]['pin'] is None
+  handler.landing_mode=True;handler._resolve_identity=real
   db=srv.get_db();db.execute('UPDATE messages SET retracted_at=? WHERE id=?',(web.now_iso(),first));db.commit();db.close()
-  assert call({'message_id':first,'expected_id':None})[0]==404
+  assert [p['id'] for p in call()[1]['pins']]==[second]
+  assert call({'message_ids':[first],'expected_ids':[first,second]})[0]==404
+  assert call({'message_ids':[second],'expected_ids':[first,second]})[0]==200
+  assert call({'message_ids':[],'expected_ids':[second]})[0]==200
+  assert call()[1]['pins']==[]
   db=srv.get_db();db.execute("UPDATE channels SET archived_at=? WHERE code='alpha'",(web.now_iso(),));db.commit();db.close()
   assert call()[1]['can_edit'] is False
-  assert call({'message_id':None,'expected_id':None})[0]==409
-  print('PASS: pin/read/unpin, cross-channel/private denial, types, stale CAS, guest read-only')
+  assert call({'message_ids':[],'expected_ids':[]})[0]==409
+  print('PASS: two pins, objective unchanged, remove one/all, stale CAS, attachment, cross-channel/private/retracted denial, guest/pending admission')
  finally:server.shutdown();server.server_close()

@@ -628,18 +628,13 @@
   }
   let pinState = null, pinChannel = '', pinLoading = false;
   function renderPin() {
-    const banner = $('channel-pin-banner'); if (!banner) return;
+    const button = $('channel-pins-button'); if (!button) return;
     const visible = state.view === 'conversation' && !state.dmKey && state.channel;
-    banner.classList.toggle('hidden', !visible || !pinState || pinChannel !== state.channel);
-    banner.textContent = '';
-    if (!visible || !pinState || pinChannel !== state.channel) return;
-    const open = document.createElement('button'); open.type = 'button'; open.className = 'channel-pin-open';
-    open.textContent = pinState.pin ? '📌 ' + pinState.pin.content.replace(/\s+/g, ' ').slice(0, 160) : '📌 No pinned message';
-    open.title = 'Open channel pin'; open.onclick = openPin; banner.append(open);
-    if (pinState.pin && pinState.can_edit) {
-      const remove = document.createElement('button'); remove.type = 'button'; remove.textContent = 'Unpin';
-      remove.onclick = () => changePin(null); banner.append(remove);
-    }
+    button.classList.toggle('hidden', !visible || !pinState || pinChannel !== state.channel);
+    const count = pinState?.pins?.length || 0;
+    button.querySelector('.channel-pin-count').textContent = count || '';
+    button.setAttribute('aria-label', 'Pinned messages (' + count + ')');
+    button.onclick = openPin;
   }
   async function refreshPin(force = false) {
     if (state.dmKey || state.view !== 'conversation' || !state.channel) { renderPin(); return; }
@@ -655,28 +650,44 @@
     finally { if (pinChannel === channel) pinLoading = false; }
   }
   function openPin() {
-    const pin = pinState?.pin;
-    Trio.ui.modal('Pinned message', pin
-      ? '<div class="channel-pin-body">' + Trio.markdown.renderMarkdown(pin.content) + [...new Set(pin.content.match(/\/pages\/[A-Za-z0-9_-]+/g) || [])].map((href, i) => '<p><a target="_blank" rel="noopener" href="' + esc(href) + '">Open linked page ' + (i + 1) + '</a></p>').join('') + (pin.attachments || []).map(a => {
-          const href = api.url('/api/attachment/' + encodeURIComponent(a.id));
-          return '<p><a target="_blank" rel="noopener" href="' + esc(href) + '">'
-            + (/^image\/(png|jpeg|gif|webp)$/.test(a.mime || '') ? '<img style="max-width:100%;height:auto" loading="lazy" src="' + esc(href) + '" alt="' + esc(a.filename || 'Attached image') + '">' : esc(a.filename || 'Attachment')) + '</a></p>';
-        }).join('') + '</div>'
-      : '<p>Long-press a message and choose Pin to channel.</p>', null, {submit:false,cancelLabel:'Close'});
-  }
-  async function changePin(messageId) {
     const channel = state.channel;
-    if (state.dmKey || !channel) return;
+    const pins = pinState?.pins || [];
+    const body = document.createElement('div'); body.className = 'channel-pin-body';
+    if (!pins.length) body.textContent = pinState?.can_edit ? 'Long-press or right-click a message to pin it here.' : 'No pinned messages.';
+    for (const pin of pins) {
+      const card = document.createElement('article'); card.className = 'channel-pin-card';
+      const date = new Date(pin.created_at).toLocaleString();
+      card.innerHTML = '<div class="channel-pin-meta">#' + pin.id + ' · ' + esc(date) + '</div>' + Trio.markdown.renderMarkdown(pin.content)
+        + [...new Set(pin.content.match(/\/pages\/[A-Za-z0-9_-]+/g) || [])].map((href, i) => '<p><a target="_blank" rel="noopener" href="' + esc(href) + '">Open page' + (i ? ' ' + (i + 1) : '') + '</a></p>').join('');
+      for (const a of pin.attachments || []) {
+        const link = document.createElement('a'); link.href = api.url('/api/attachment/' + encodeURIComponent(a.id)); link.target = '_blank'; link.rel = 'noopener';
+        if (/^image\/(png|jpeg|gif|webp)$/.test(a.mime || '')) {
+          const img = document.createElement('img'); img.src = link.href; img.alt = a.filename || 'Attached image'; img.loading = 'lazy'; link.append(img);
+        } else link.textContent = a.filename || 'Attachment';
+        card.append(link);
+      }
+      if (pinState?.can_edit) {
+        const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'channel-pin-remove'; remove.textContent = 'Unpin';
+        remove.onclick = async () => { if (state.channel !== channel || state.dmKey) return; remove.disabled = true; const ok = await changePin(pin.id, true); if (ok) card.remove(); else remove.disabled = false; if (!body.children.length) body.textContent = 'No pinned messages.'; };
+        card.append(remove);
+      }
+      body.append(card);
+    }
+    Trio.ui.modal('Pinned messages', '<div id="pin-modal-content"></div>', null, {submit:false,cancelLabel:'Close'});
+    $('pin-modal-content').replaceWith(body);
+  }
+  async function changePin(messageId, remove = false) {
+    const channel = state.channel;
+    if (state.dmKey || !channel) return false;
     try {
-      // Always obtain the current objective before offering a replacement.
-      const shownId = pinState?.pinned_id;
       const current = await api.get('/api/channel-pin?channel=' + encodeURIComponent(channel));
-      if (messageId === null && current.pinned_id !== shownId) { await refreshPin(true); throw new Error('Pin changed. Open the current pin before removing it.'); }
-      if (state.channel !== channel || state.dmKey) return;
-      if (messageId !== null && current.pinned_id && current.pinned_id !== messageId && !window.confirm('Replace the current channel pin?')) return;
-      const data = await api.post('/api/channel-pin?channel=' + encodeURIComponent(channel), {message_id:messageId, expected_id:current.pinned_id});
+      if (state.channel !== channel || state.dmKey) return false;
+      const ids = current.pinned_ids || [];
+      const next = remove ? ids.filter(id => id !== messageId) : [...new Set([...ids, messageId])];
+      const data = await api.post('/api/channel-pin?channel=' + encodeURIComponent(channel), {message_ids:next, expected_ids:ids});
       if (state.channel === channel && !state.dmKey) { pinChannel=channel;pinState=data;renderPin(); }
-    } catch (error) { Trio.ui.toast(error.message || 'Could not update pin'); }
+      return true;
+    } catch (error) { Trio.ui.toast(error.message || 'Could not update pins'); return false; }
   }
   function renderRail() {
     refreshPin();

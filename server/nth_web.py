@@ -2044,6 +2044,10 @@ def ensure_ask_columns(db: sqlite3.Connection) -> None:
     the feature landed — and without this the SSE poll's SELECT of `choices`
     crash-loops on 'no such column'. Mirrors ensure_attachments_table: the web
     side owns its own forward-compatibility. Each ALTER is idempotent."""
+    had_pins = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='channel_pins'").fetchone()
+    db.execute("CREATE TABLE IF NOT EXISTS channel_pins (channel TEXT NOT NULL, message_id INTEGER NOT NULL, PRIMARY KEY(channel,message_id))")
+    if not had_pins:
+        db.execute("INSERT OR IGNORE INTO channel_pins SELECT code,pinned_message_id FROM channels WHERE pinned_message_id IS NOT NULL")
     for table, col, defn in (
         ("members",  "kind",      "TEXT NOT NULL DEFAULT 'agent'"),
         ("members",  "model",     "TEXT NOT NULL DEFAULT ''"),
@@ -8894,7 +8898,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
         })
 
     def _handle_channel_pin(self, parsed, update=False) -> None:
-        """The existing single channel objective, never a private-message pin."""
+        """Channel reference pins, independent of the existing channel objective."""
         if update:
             ident = self._require_operator("manage channel pins")
             if ident is None:
@@ -8924,31 +8928,34 @@ class NthWebHandler(BaseHTTPRequestHandler):
             if row is None:
                 self._error(404, "channel not found")
                 return
+            ids = [r[0] for r in db.execute("SELECT message_id FROM channel_pins WHERE channel=? ORDER BY message_id", (channel,))]
             if update:
-                mid = body.get("message_id")
-                if mid is not None and (type(mid) is not int or mid <= 0 or mid >= 2**53):
-                    self._error(400, "message_id must be a positive integer or null")
+                requested = body.get("message_ids")
+                expected = body.get("expected_ids")
+                def valid_ids(value):
+                    return isinstance(value, list) and len(value) <= 20 and all(type(v) is int and 0 < v < 2**53 for v in value) and len(set(value)) == len(value)
+                if not valid_ids(requested) or not valid_ids(expected):
+                    self._error(400, "message_ids and expected_ids must be unique positive integer lists (maximum 20)")
                     return
                 if row["archived_at"] or row["status"] != "active":
                     self._error(409, "channel is not active")
                     return
-                if "expected_id" not in body or body["expected_id"] != row["pinned_message_id"]:
-                    self._error(409, "pin changed; reopen it before updating")
+                if sorted(expected) != ids:
+                    self._error(409, "pins changed; reopen before updating")
                     return
-                if mid is not None and db.execute(
-                    "SELECT 1 FROM messages WHERE id=? AND channel=? AND retracted_at IS NULL "
-                    "AND (recipients IS NULL OR recipients='' OR recipients='[]')", (mid, channel)).fetchone() is None:
-                    self._error(404, "public message not found")
-                    return
-                db.execute("UPDATE channels SET pinned_message_id=?, updated_at=? WHERE code=?", (mid, now_iso(), channel))
-                pin_id = mid
-            else:
-                pin_id = row["pinned_message_id"]
-            pin = db.execute("SELECT id, member_name, content FROM messages WHERE id=? AND channel=? "
-                "AND retracted_at IS NULL AND (recipients IS NULL OR recipients='' OR recipients='[]')",
-                (pin_id, channel)).fetchone() if pin_id else None
-            result = {"ok": True, "channel": channel, "pinned_id": pin_id,
-                      "pin": {**dict(pin), "attachments": attachments_for_message(db, pin["id"])} if pin else None,
+                for mid in requested:
+                    if db.execute("SELECT 1 FROM messages WHERE id=? AND channel=? AND retracted_at IS NULL AND (recipients IS NULL OR recipients='' OR recipients='[]')", (mid, channel)).fetchone() is None:
+                        self._error(404, "public message not found")
+                        return
+                db.execute("DELETE FROM channel_pins WHERE channel=?", (channel,))
+                db.executemany("INSERT INTO channel_pins(channel,message_id) VALUES(?,?)", [(channel,mid) for mid in requested])
+                ids = sorted(requested)
+            pins = []
+            for mid in ids:
+                pin = db.execute("SELECT id, member_name, content, created_at FROM messages WHERE id=? AND channel=? AND retracted_at IS NULL AND (recipients IS NULL OR recipients='' OR recipients='[]')", (mid, channel)).fetchone()
+                if pin:
+                    pins.append({**dict(pin), "attachments": attachments_for_message(db, mid)})
+            result = {"ok": True, "channel": channel, "pinned_ids": ids, "pins": pins,
                       "can_edit": ident.source in LOCAL_PATH_ALLOWED_SOURCES and row["status"] == "active" and not row["archived_at"]}
         self._json(result)
 
