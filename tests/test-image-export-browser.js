@@ -10,8 +10,9 @@ const source=read('web/js/13-image-export.js');
 const png='data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=';
 const fixture=`<!doctype html><title>Download test</title><p id="words">Select these words normally.</p>
 <svg xmlns="http://www.w3.org/2000/svg" width="320" height="160"><rect width="320" height="160" fill="white"/><text x="10" y="50">Wiring diagram</text><image href="${png}" x="180" y="20" width="80" height="80"/></svg>
+<style>.page-red{fill:rgb(255,0,0)}</style><svg viewBox="0 0 900 260"><rect class="page-red" width="900" height="260"/></svg>
 <img alt="Raster diagram" src="${png}"><canvas width="320" height="160"></canvas>
-<script>${source};TrioImageExport.enhance(document)</script>`;
+<script>${source};TrioImageExport.start();document.addEventListener('DOMContentLoaded',()=>{const c=document.createElement('canvas');c.width=100;c.height=60;document.body.append(c);});</script>`;
 const csp="sandbox allow-scripts allow-downloads; default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:; connect-src 'none'; frame-ancestors 'self'";
 const app=`<!doctype html><div id="messages"></div><script>
 window.Trio={state:{operator:{id:'owner'},readOnly:false},api:{},events:new EventTarget(),actions:{},avatarTone:()=> 'eucalyptus'};
@@ -29,11 +30,15 @@ const server=http.createServer((req,res)=>{
     const page=await browser.newPage({acceptDownloads:true,viewport:{width:390,height:844}});
     const base='http://127.0.0.1:'+server.address().port;
     await page.goto(base+'/page');
-    assert.strictEqual(await page.getByRole('button',{name:'Download JPEG',exact:true}).count(),3);
-    for(let i=0;i<3;i++) {
+    assert.strictEqual(await page.getByRole('button',{name:'Download JPEG',exact:true}).count(),5);
+    for(let i=0;i<5;i++) {
       const wait=page.waitForEvent('download'); await page.getByRole('button').nth(i).click(); const d=await wait;
       assert(d.suggestedFilename().endsWith('.jpg')); assert.strictEqual(await d.failure(),null);
       const bytes=fs.readFileSync(await d.path()); assert(bytes.subarray(0,3).equals(Buffer.from([255,216,255])));
+      if(i===1) {
+        const pixels=await page.evaluate(async data=>{const im=new Image(); im.src=data;await im.decode();const c=document.createElement('canvas');c.width=im.width;c.height=im.height;const ctx=c.getContext('2d');ctx.drawImage(im,0,0);return {w:im.width,h:im.height,rgb:[...ctx.getImageData(10,10,1,1).data]};},'data:image/jpeg;base64,'+bytes.toString('base64'));
+        assert.strictEqual(pixels.w,900);assert.strictEqual(pixels.h,260);assert(pixels.rgb[0]>240 && pixels.rgb[1]<10 && pixels.rgb[2]<10,'page CSS retained');
+      }
     }
     assert.strictEqual(await page.evaluate(()=>{try{return localStorage.length}catch(e){return e.name}}),'SecurityError');
     await page.goto(base+'/preview');

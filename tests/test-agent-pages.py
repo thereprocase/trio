@@ -211,7 +211,7 @@ try:
 
     # The loopback operator is the owner.
     st, headers, text = get(port, PAGE_ID)
-    check("serve: the owner gets the page", st == 200 and text.startswith(HTML) and "TrioImageExport.enhance(document)" in text)
+    check("serve: the owner gets the page", st == 200 and text.startswith(HTML) and "TrioImageExport.start()" in text)
     check("serve: the CSP is exactly the sandbox policy",
           headers.get("Content-Security-Policy") == EXPECTED_CSP)
     check("serve: the sandbox never grants same-origin",
@@ -232,7 +232,7 @@ try:
 
     as_identity(GUEST_IN)
     st, _h, text = get(port, DM_PAGE)
-    check("dm: the participating guest opens the DM page", st == 200 and text.startswith(HTML) and "TrioImageExport.enhance(document)" in text)
+    check("dm: the participating guest opens the DM page", st == 200 and text.startswith(HTML) and "TrioImageExport.start()" in text)
     as_identity(GUEST_OUT)
     st, _h, text = get(port, DM_PAGE)
     check("dm: a guest outside the DM gets 404, the same as no page at all",

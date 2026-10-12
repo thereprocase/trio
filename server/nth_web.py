@@ -10205,7 +10205,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
                        'font:16px system-ui}.quartet-image-downloads button,.quartet-image-downloads a'
                        '{padding:10px;color:#174ea6;cursor:pointer}body{-webkit-user-select:text;user-select:text}</style>'
                        '<script>' + PAGE_IMAGE_EXPORT_SCRIPT +
-                       '\nTrioImageExport.enhance(document);</script>')
+                       '\nTrioImageExport.start();</script>')
         body = ((row["html"] or "") + enhancement).encode("utf-8")
         self.send_response(200)
         for name, value in nmedia.PAGE_HEADERS:

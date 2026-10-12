@@ -10,12 +10,41 @@
     a.href = url; a.download = name; document.body.append(a); a.click(); a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 60000);
   }
+  // A standalone SVG loses page CSS and viewBox-only intrinsic dimensions.
+  // Snapshot presentation at click time, while leaving the original untouched.
+  function svgURL(source) {
+    const clone = source.cloneNode(true), box = source.viewBox.baseVal;
+    const explicit = axis => {
+      const attr = source.getAttribute(axis);
+      return attr && !attr.includes('%') ? source[axis].baseVal.value : 0;
+    };
+    const w = explicit('width') || box.width || 300;
+    const h = explicit('height') || box.height || 150;
+    clone.setAttribute('width', String(w)); clone.setAttribute('height', String(h));
+    const properties = ['color','fill','fill-opacity','fill-rule','stroke','stroke-width',
+      'stroke-opacity','stroke-dasharray','stroke-dashoffset','stroke-linecap','stroke-linejoin',
+      'opacity','font-family','font-size','font-weight','font-style','letter-spacing',
+      'word-spacing','text-anchor','dominant-baseline','visibility','display','paint-order',
+      'text-decoration','vector-effect','clip-path','mask','filter'];
+    const originals = [source, ...source.querySelectorAll('*')];
+    const copies = [clone, ...clone.querySelectorAll('*')];
+    originals.forEach((node, i) => {
+      const style = getComputedStyle(node);
+      for (const prop of properties) {
+        let value = style.getPropertyValue(prop);
+        // Computed local fragment URLs must remain local in the standalone SVG.
+        value = value.replace(/url\(["']?[^)"']*#([^)'" ]+)["']?\)/g, 'url(#$1)');
+        if (value) copies[i].style.setProperty(prop, value);
+      }
+    });
+    return 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(new XMLSerializer().serializeToString(clone));
+  }
   async function jpeg(source, name) {
     let image = source;
     if (typeof source === 'string' || source.localName === 'svg') {
       image = new Image();
       const url = typeof source === 'string' ? source :
-        'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(new XMLSerializer().serializeToString(source));
+        svgURL(source);
       image.src = url;
     }
     if (image.localName !== 'canvas') await image.decode();
@@ -66,5 +95,14 @@
       bar.append(original); el.after(bar);
     });
   }
-  window.TrioImageExport = {button, jpeg, enhance};
+  function start() {
+    enhance(document);
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', () => enhance(document), {once:true});
+    // Also cover charts/figures inserted by asynchronous page scripts.
+    new MutationObserver(records => {
+      if (records.some(r => [...r.addedNodes].some(n => n.nodeType === 1 &&
+          (n.matches?.('img,svg,canvas') || n.querySelector?.('img,svg,canvas'))))) enhance(document);
+    }).observe(document.documentElement, {childList:true, subtree:true});
+  }
+  window.TrioImageExport = {button, jpeg, enhance, start};
 })();
