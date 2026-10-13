@@ -304,13 +304,8 @@
   }
   function updateSendState() { const send = byId('send'); if (send) send.disabled = !validate(); }
 
-  // What the server accepts (it sniffs the bytes; this only gives a fast, clear
-  // refusal). Office files are ZIPs. A type the browser leaves blank, common for
-  // HEIC and logs, is judged by its extension.
-  const UPLOAD_TYPES = /^(image\/(png|jpeg|gif|webp|heic|heif)|application\/(pdf|zip|x-zip-compressed|vnd\.openxmlformats-officedocument\..+)|text\/(plain|csv))$/;
-  const UPLOAD_EXTENSIONS = /\.(png|jpe?g|gif|webp|heic|heif|pdf|zip|docx|xlsx|pptx|txt|csv|log|md)$/i;
-  const UPLOAD_ACCEPT = 'image/*,.heic,.heif,application/pdf,.pdf,.zip,.docx,.xlsx,.pptx,.txt,.csv,.log,.md';
-  const MAX_UPLOAD_MB = 25;
+  const UPLOAD_ACCEPT = ''; // Any file; the server serves non-images as downloads.
+  const MAX_UPLOAD_MB = /*__UPLOAD_MAX_MB__*/250;
   const INLINE_IMAGE = /^image\/(png|jpeg|gif|webp)$/;
   async function uploadAll(files) {
     // One at a time, in order: each keeps its own placeholder and error.
@@ -318,7 +313,6 @@
   }
   async function upload(file) {
     if (!file) return;
-    if (!UPLOAD_TYPES.test(file.type || '') && !UPLOAD_EXTENSIONS.test(file.name || '')) throw new Error((file.name || 'That file') + ': attach images, HEIC photos, PDFs, ZIP or Office files, or text');
     if (file.size > MAX_UPLOAD_MB * 1024 * 1024) throw new Error((file.name || 'File') + ' is larger than ' + MAX_UPLOAD_MB + ' MB');
     // Bind this upload to the conversation it started in. `arr` is that
     // thread's source-of-truth array; we render only while it's still the one

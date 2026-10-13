@@ -43,21 +43,21 @@ def env_bytes(name: str, default: int) -> int:
 
 # ── Attachment types and limits ───────────────────────────────────────────
 
-MAX_UPLOAD_BYTES = env_bytes("NTH_UPLOAD_MAX_BYTES", 25 * 1024 * 1024)  # hard cap per file
+MAX_UPLOAD_BYTES = env_bytes("NTH_UPLOAD_MAX_BYTES", 250 * 1024 * 1024)  # hard cap per file
 # Total attachment bytes one member may hold in one channel. The per-file cap
 # bounds a single request; this bounds the SUM, so an identity allowed to attach
 # cannot fill the disk one legal file at a time. Anything linked to a message is
 # kept until its channel goes (agents' DM images: DM_AGENT_ATTACH_RETENTION_DAYS),
 # so this quota is the only bound on that right.
-MAX_MEMBER_ATTACH_BYTES = env_bytes("NTH_ATTACH_QUOTA_BYTES", 200 * 1024 * 1024)
+MAX_MEMBER_ATTACH_BYTES = env_bytes("NTH_ATTACH_QUOTA_BYTES", 2 * 1024 * 1024 * 1024)
 
 # Images every browser renders, shown inline in the conversation.
 ALLOWED_IMAGE_MIME = {
     "image/png": ".png", "image/jpeg": ".jpg",
     "image/gif": ".gif", "image/webp": ".webp",
 }
-# Everything a person may attach from the dashboard. The type always comes from
-# the bytes (sniff_attachment_mime), never from the client. Anything outside
+# Known dashboard attachment types come from the bytes, never from the client.
+# Unrecognized files use application/octet-stream. Anything outside
 # ALLOWED_IMAGE_MIME is served as a download and never rendered by the page.
 # Office documents are ZIP containers and arrive as application/zip under their
 # own filename; phones send photos as HEIC/HEIF, which only some browsers show.
@@ -67,10 +67,10 @@ ALLOWED_ATTACH_MIME = {
     "application/pdf": ".pdf",
     "application/zip": ".zip",
     "text/plain": ".txt",
+    "application/octet-stream": ".bin",
 }
-# Extensions a download may keep, by sniffed type. The type comes from the bytes and
-# the name from the client, so without this a text file could be saved as run.bat or
-# Invoice.hta and run on a double-click. Any other extension gets the type's own added.
+# Strict extensions for agent image names and callers that do not opt into
+# preserving dashboard download filenames.
 ATTACH_NAME_EXTENSIONS = {
     "image/png": {".png"}, "image/jpeg": {".jpg", ".jpeg"}, "image/gif": {".gif"},
     "image/webp": {".webp"}, "image/heic": {".heic"}, "image/heif": {".heif", ".heic"},
@@ -93,12 +93,14 @@ _HEIC_BRANDS = {b"heic", b"heix", b"hevc", b"hevx", b"heim", b"heis", b"hevm", b
 _HEIF_BRANDS = {b"mif1", b"msf1"}
 
 
-def attachment_filename(raw_name: str, mime: str) -> str:
-    """The stored name for an upload: sanitised, and ending in an extension the sniffed
-    type allows, so what the operator saves is the kind of file its bytes are."""
+def attachment_filename(raw_name: str, mime: str, *, preserve_original: bool = False) -> str:
+    """Sanitize names; dashboard downloads preserve the supplied extension.
+
+    Agent images retain the stricter name/type rule by default.
+    """
     ext = ALLOWED_ATTACH_MIME[mime]
     name = re.sub(r"[^\w.\- ]", "_", raw_name)[:120].strip(" .") or ("file" + ext)
-    if Path(name).suffix.lower() not in ATTACH_NAME_EXTENSIONS.get(mime, {ext}):
+    if not preserve_original and Path(name).suffix.lower() not in ATTACH_NAME_EXTENSIONS.get(mime, {ext}):
         name = name[:120 - len(ext)] + ext
     return name
 

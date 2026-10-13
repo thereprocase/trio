@@ -9914,7 +9914,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
         self._json({"ok": True, "path": abspath})
 
     def _handle_upload(self) -> None:
-        """Accept a raw image body (Content-Type = mime, X-Filename header),
+        """Accept a raw file body (Content-Type = mime, X-Filename header),
         validate by magic bytes, store on disk, and create an unlinked
         attachments row. The subsequent /api/send links it to a message."""
         token, ident, _is_new = self._resolve_identity()
@@ -9952,15 +9952,14 @@ class NthWebHandler(BaseHTTPRequestHandler):
         if len(data) != length:
             self._error(400, "incomplete upload")
             return
-        mime = sniff_attachment_mime(data)
-        if mime not in ALLOWED_ATTACH_MIME:
-            self._error(400, "unsupported file type (images, HEIC, PDF, ZIP/Office, or plain text)")
-            return
+        # Browser uploads may contain any file format. Unknown bytes stay opaque
+        # and are always served as downloads under the existing access checks.
+        mime = sniff_attachment_mime(data) or "application/octet-stream"
         ext = ALLOWED_ATTACH_MIME[mime]
         # X-Filename is percent-encoded by the client (HTTP headers must be
         # ISO-8859-1, but filenames — e.g. macOS screenshots — carry Unicode).
         raw_name = unquote(self.headers.get("X-Filename", "") or "")
-        filename = attachment_filename(raw_name, mime)
+        filename = attachment_filename(raw_name, mime, preserve_original=True)
 
         db = None
         try:
@@ -10476,6 +10475,7 @@ def _render_web_source(relative_path: str) -> str:
         _read_web_source(relative_path)
         .replace("/*__STT_LANG__*/'en-US'", json.dumps(_web_speech_lang(STT_LANGUAGE)))
         .replace("/*__ASK_HELPERS__*/", _load_ask_helpers())
+        .replace("/*__UPLOAD_MAX_MB__*/250", str(nmedia.MAX_UPLOAD_BYTES / (1024 * 1024)))
     )
 
 
