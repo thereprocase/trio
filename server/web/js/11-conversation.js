@@ -135,6 +135,107 @@
   function date(iso) { return Trio.time.day(iso); }
   function nearBottom(el) { return !el || el.scrollHeight - el.scrollTop - el.clientHeight < 80; }
   function convId() { return state.dmKey ? 'dm:' + state.dmKey : (state.channel || 'home'); }
+  // A read receipt is not a viewport: an old unread hole must not pull a
+  // reopened app away from the message the reader actually left on screen.
+  // Store IDs/geometry only, scoped to this origin, user and conversation.
+  const POSITION_PREFIX = 'trio:reading-position:v1:';
+  let entryPosition = null, entryGeneration = 0, restoringEntry = false;
+  let positionUnavailable = false, visiblePositionKey = null;
+  let positionObserver = null, positionTimer = null, stablePosition = null;
+  function positionKey() {
+    const op = operator().id;
+    return op ? POSITION_PREFIX + JSON.stringify([op, convId()]) : null;
+  }
+  function storedPosition() {
+    try {
+      const key = positionKey(), p = key && JSON.parse(window.localStorage.getItem(key) || 'null');
+      if (!p || !Number.isSafeInteger(p.id) || p.id <= 0 || !Number.isFinite(p.offset)
+          || Math.abs(p.offset) > 1000000 || typeof p.bottom !== 'boolean') return null;
+      return p;
+    } catch { return null; } // Storage blocked/full: keep the server fallback.
+  }
+  function savePosition() {
+    if (entryPending || restoringEntry || positionUnavailable || state.view !== 'conversation') return;
+    const list = dom(), key = positionKey();
+    if (!list || !key || key !== visiblePositionKey) return;
+    const bounds = list.getBoundingClientRect();
+    if (bounds.bottom <= bounds.top) return;
+    if (stablePosition) {
+      try { window.localStorage.setItem(key, JSON.stringify(stablePosition)); } catch { /* no storage */ }
+      return; // Do not capture a transient image/font layout before its observer runs.
+    }
+    for (const msg of ordered()) {
+      const card = state.messageDomById.get(msg.id), rect = card?.getBoundingClientRect();
+      if (!rect || rect.bottom <= bounds.top || rect.top >= bounds.bottom) continue;
+      const p = {id: Number(msg.id), offset: rect.top - bounds.top, bottom: nearBottom(list)};
+      try { window.localStorage.setItem(key, JSON.stringify(p)); } catch { /* no storage */ }
+      return;
+    }
+  }
+  function applyPosition(p) {
+    const list = dom();
+    if (!list) return false;
+    if (p.bottom) { list.scrollTop = list.scrollHeight; return true; }
+    const card = state.messageDomById.get(p.id);
+    if (!card) return false;
+    list.scrollTop += card.getBoundingClientRect().top - list.getBoundingClientRect().top - p.offset;
+    return true;
+  }
+  function stopPositionWatch() {
+    positionObserver?.disconnect(); positionObserver = null;
+    clearTimeout(positionTimer); positionTimer = null; stablePosition = null;
+  }
+  function watchPosition(p) {
+    stopPositionWatch(); stablePosition = p;
+    // Images, fonts and previews can grow AFTER the history is painted.
+    // Hold the anchor during initial layout, until the reader takes control.
+    if (typeof ResizeObserver !== 'undefined') {
+      positionObserver = new ResizeObserver(() => { if (stablePosition) applyPosition(stablePosition); });
+      for (const card of state.messageDomById.values()) positionObserver.observe(card);
+    }
+    positionTimer = setTimeout(stopPositionWatch, 10000);
+  }
+  function takeScrollControl() {
+    positionUnavailable = false;
+    if (entryPending) {
+      entryGeneration++; clearTimeout(entryTimer); entryTimer = null;
+      entryPending = false; entryPosition = null; restoringEntry = false;
+    }
+    stopPositionWatch();
+  }
+  async function restoreEntry() {
+    const generation = entryGeneration, key = convId(), p = entryPosition;
+    entryTimer = null; restoringEntry = true;
+    // The normal prime is only 50 messages. Page older history when the saved
+    // anchor lies outside it, without treating intermediate paints as reads.
+    for (let pages = 0; p && !p.bottom && !state.messageDomById.has(p.id)
+        && !state.dmKey && state.channelHistory?.has_more && pages < 40; pages++) {
+      const before = state.channelHistory.before_id;
+      if (Number(before) <= p.id) break; // Deleted/retracted anchor, not an older page.
+      await loadOlder();
+      if (generation !== entryGeneration || key !== convId()) return;
+      if (state.channelHistory?.error || state.channelHistory?.before_id === before) break;
+    }
+    if (generation !== entryGeneration || key !== convId()) return;
+    render(); // Paint the freshly seeded unread divider, without marking the prime read.
+    const list = dom();
+    if (p) {
+      positionUnavailable = !applyPosition(p);
+      if (!positionUnavailable) watchPosition(p);
+      else Trio.ui?.toast?.('Your saved message is not in the available history. Scroll to choose a new position.');
+    }
+    else if (!p && list && entryFirstUnread != null) {
+      const first = ordered().find(m => Number(m.id) >= Number(entryFirstUnread));
+      const card = first && state.messageDomById.get(first.id);
+      if (card) list.scrollTop += card.getBoundingClientRect().top - list.getBoundingClientRect().top;
+    }
+    // If the anchor was deleted or unavailable, retain the saved record;
+    // only real scrolling may replace it, rather than an incomplete prime.
+    entryPending = false; restoringEntry = false;
+    state.scrollPositions[key] = list?.scrollTop || 0;
+    entryPosition = null;
+    markRead();
+  }
   // ── Read watermarks ──────────────────────────────────────────────────────
   // TWO values, per conversation, because they answer different questions.
   //
@@ -163,8 +264,11 @@
   // it (roster not in yet) the base stays unset and the divider is simply not
   // drawn, which is the honest answer to "we do not know what you had read".
   function seedWatermark(serverLastRead, firstUnread) {
-    clearTimeout(entryTimer); entryTimer = null;
-    entryPending = firstUnread !== undefined;
+    clearTimeout(entryTimer); entryTimer = null; clearTimeout(readTimer);
+    stopPositionWatch(); entryGeneration++; restoringEntry = false;
+    visiblePositionKey = positionKey(); positionUnavailable = false;
+    entryPosition = storedPosition();
+    entryPending = firstUnread !== undefined || !!entryPosition;
     entryFirstUnread = firstUnread;
     readStateKnown = firstUnread !== undefined || !!state.dmKey;
     const key = convId();
@@ -198,22 +302,12 @@
   }
   function markRead() {
     if (entryPending) {
-      if (!entryTimer && ordered().length) {
-        const key = convId();
-        entryTimer = setTimeout(() => {
-          entryTimer = null;
-          if (key !== convId()) return;
-          entryPending = false;
-          render();
-          const list = dom();
-          const first = ordered().find(m => Number(m.id) >= Number(entryFirstUnread));
-          if (list && entryFirstUnread != null && first) {
-            const card = state.messageDomById.get(first.id);
-            if (card) list.scrollTop += card.getBoundingClientRect().top - list.getBoundingClientRect().top;
-          }
-          entryPending = false;
-          markRead();
-        }, 250);
+      if (!entryTimer && !restoringEntry && (readStateKnown || entryPosition) && !state.channelLoading
+          && !state.dmLoading && ordered().length) {
+        entryTimer = setTimeout(() => { restoreEntry().catch(err => {
+          console.warn('restore reading position failed', err);
+          restoringEntry = false;
+        }); }, 250);
       }
       return;
     }
@@ -221,6 +315,8 @@
     readTimer = setTimeout(flushRead, 200);
   }
   function flushRead() {
+    if (entryPending || restoringEntry) return;
+    savePosition();
     if (state.readOnly || document.hidden || state.view !== 'conversation') return;
     if (!state.dmKey && !readStateKnown) return;
     const op = state.operator?.id;
@@ -1125,6 +1221,8 @@
     if (stick) { list.scrollTop = list.scrollHeight; markRead(); }
     else if (saved != null) { list.scrollTop = saved; }
     updateHistoryButton();
+    if (stablePosition) { const p = stablePosition; applyPosition(p); watchPosition(p); }
+    if (entryPending) markRead();
   }
 
   function upsert(msg) {
@@ -1275,16 +1373,24 @@
     events.addEventListener('message_update', onMessage); listeners.message_update = onMessage;
     events.addEventListener('roster', onRoster); listeners.roster = onRoster;
     events.addEventListener('preferences:changed', onPrefsChanged); listeners['preferences:changed'] = onPrefsChanged;
+    events.addEventListener('history_ready', markRead); listeners.history_ready = markRead;
+    window.addEventListener('pagehide', savePosition);
+    document.addEventListener('visibilitychange', savePosition);
     render();
     const list = dom(); const jump = document.getElementById('jump-latest');
     if (list && jump) {
-      const onScroll = () => { jump.classList.toggle('hidden', nearBottom(list)); state.scrollPositions[convId()] = list.scrollTop; markRead(); if (list.scrollTop < 160 && !nearBottom(list) && !state.channelHistory?.error) loadOlder(); };
-      const onClick = () => { list.scrollTop = list.scrollHeight; markRead(); };
+      const onScroll = () => { jump.classList.toggle('hidden', nearBottom(list)); state.scrollPositions[convId()] = list.scrollTop; savePosition(); markRead(); if (!entryPending && list.scrollTop < 160 && !nearBottom(list) && !state.channelHistory?.error) loadOlder(); };
+      const onClick = () => { takeScrollControl(); list.scrollTop = list.scrollHeight; savePosition(); markRead(); };
+      for (const type of ['wheel', 'touchstart', 'pointerdown', 'keydown']) list.addEventListener(type, takeScrollControl, {passive: true});
       list.addEventListener('scroll', onScroll); listeners.listScroll = [list, onScroll];
       jump.addEventListener('click', onClick); listeners.jumpClick = [jump, onClick];
     }
   }
   function unmount() {
+    savePosition(); takeScrollControl();
+    window.removeEventListener('pagehide', savePosition);
+    document.removeEventListener('visibilitychange', savePosition);
+    for (const type of ['wheel', 'touchstart', 'pointerdown', 'keydown']) dom()?.removeEventListener(type, takeScrollControl);
     cancelPendingInserts();
     clearTimeout(readTimer); clearTimeout(entryTimer); entryTimer = null;
     for (const [type, fn] of Object.entries(listeners)) {
@@ -1295,5 +1401,5 @@
   }
   function mount() { init(); }
 
-  Trio.conversation = { loadOlder, updateHistoryButton, init, mount, unmount, render, ingest, upsert, paintBody, cardFor, syncMessageGroups, viewModel, answerPayload, isPrivate, seedWatermark, syncReadState, pageCard, pageCaption };
+  Trio.conversation = { loadOlder, updateHistoryButton, init, mount, unmount, render, ingest, upsert, paintBody, cardFor, syncMessageGroups, viewModel, answerPayload, isPrivate, seedWatermark, syncReadState, savePosition, pageCard, pageCaption };
 })();

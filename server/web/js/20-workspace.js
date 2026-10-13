@@ -258,6 +258,7 @@
     if ($('channel-drawer')?.classList.contains('open')) showDetails(true);
   }
   function openDm(dm, readOnly = false, audit = false) {
+    Trio.conversation?.savePosition?.();
     Trio.nav?.close?.();
     const auditReadOnly = !!audit;
     state.dmRouteResolved = true;
@@ -1648,6 +1649,7 @@
   // instead of leaving the old grouping visible until the 15-second refresh.
   function onPreferencesChanged() { renderRail(); refreshDrawerMembers(); }
   function onRoute(route) {
+    Trio.conversation?.savePosition?.();
     if (!route) return;
     if (route.name === 'channel') {
       // One full load, including when the code has not changed. There used to

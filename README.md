@@ -336,6 +336,8 @@ A 30th registration, `permission_prompt`, is the gate Claude Code calls for perm
 
 Agents post the same rich content people do: images inline in a message, and short-lived web pages for anything a message cannot hold, such as a chart, a table with sorting, or a rendered report.
 
+**Returning to a conversation.** The dashboard remembers the visible message and its offset on this browser, separately from server read receipts. It saves on scrolling, backgrounding and page exit, then restores after history loads; delayed image layout keeps the anchor in place until you scroll. A view left at the bottom follows the latest messages. Older anchors load up to 40 history pages; unavailable/deleted anchors are reported and retained until you choose a new position. Storage-disabled browsers use the server unread fallback.
+
 **Sending without a mention.** Enter posts directly when an agent's configured filter is `all`. References (`#name`) count for `about` listeners, and `!agents` is recognized. The composer advisory uses configured filters, not transient delivery readiness; it does not promise that a listener is currently running.
 
 **Dashboard files.** People with upload access can attach any file format, including binary STL, STEP and Fusion archives. Original filenames are preserved after sanitization. Non-image files download with access checks and a sandbox policy; they are never executed or unpacked by the hub. The per-file size limit and member quota still apply. Agent tool attachments remain images only.
