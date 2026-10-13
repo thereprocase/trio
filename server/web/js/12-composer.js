@@ -48,7 +48,7 @@
   function mentionInfo(sigil, word) {
     const w = word.toLowerCase();
     // Group wake targets are @all/!all and !agents. Do not chip `everyone`:
-    // it stays plain text, an honest "this won't wake anyone" signal.
+    // it stays plain text rather than becoming a group mention.
     if ((sigil === '@' || sigil === '!') && w === 'all') return { cls: 'inline-all' };
     if (sigil === '!' && w === 'agents') return { cls: 'inline-agents' };
     if (sigil !== '@') return null;
@@ -399,12 +399,10 @@
       strip.append(thumb);
     });
   }
-  // ── auto-mention guard (#4) ──────────────────────────────────────────
-  // A broadcast that names no agent wakes nobody — the server builds the wake
-  // set solely from @/!-sigils in the text. Guard the common "forgot to @ them"
-  // slip: a sole agent gets auto-@'d; with several agents we warn once, then
-  // honour a deliberate second Send. `#name` doesn't count (it only wakes an
-  // agent listening on 'about'), so it never satisfies the guard.
+  // Match configured wake filters, rather than predicting listener liveness.
+  // 'all' accepts broadcasts; 'about' also accepts #references; bangs bypass
+  // filters. An active turn can temporarily consume a waiter, so presence
+  // must not turn this advisory guard into a claim that nobody will wake.
   let noMentionConfirmed = false;
   function reEsc(s) { return String(s).replace(/[-/\\^$*+?.()|[\]{}]/g, '\\$&'); }
   function agentMembers() {
@@ -412,10 +410,17 @@
     return [...(state.members?.values() || [])].filter(m => m && m.kind !== 'human' && m.id !== opId);
   }
   function contentWakesAnAgent(text) {
+    const agents = agentMembers();
+    // The roster/server defaults a missing mode to 'all'. Attachment-only
+    // broadcasts count too, so check this before requiring text.
+    if (agents.some(m => !m.filter_mode || m.filter_mode === 'all')) return true;
     if (!text) return false;
-    if (/[@!]all(?:\b|$)/i.test(text)) return true;
-    return agentMembers().some(m =>
-      [m.name, m.id].some(tok => tok && new RegExp('[@!]' + reEsc(tok) + '(?:\\b|$)', 'i').test(text)));
+    if (/[@!]all(?:\b|$)/i.test(text) || /!agents(?![\w-])/i.test(text)) return true;
+    return agents.some(m => {
+      const sigils = m.filter_mode === 'about' ? '[@!#]' : '[@!]';
+      return [m.name, m.id].some(tok => tok &&
+        new RegExp(sigils + reEsc(tok) + '(?:\\b|$)', 'i').test(text));
+    });
   }
   async function send() {
     if (state.dmKey && !hasDmRecipients()) {
@@ -431,7 +436,7 @@
         if (agents.length === 1) {
           content = ('@' + (agents[0].name || agents[0].id) + ' ' + content).trim();
         } else if (!noMentionConfirmed) {
-          Trio.ui.toast('No agent @-mentioned — nobody will wake. Add @name or @all, or press Send again to post anyway.');
+          Trio.ui.toast('No agent recipient recognized. Add @name, or press Enter/Send again to post anyway.');
           noMentionConfirmed = true;
           return false;
         }

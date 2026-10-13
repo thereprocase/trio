@@ -1926,7 +1926,7 @@ def _parse_sigils(db, channel: str, content: str) -> tuple[list, list, list]:
 
     All three sigils resolve in the same roster pass:
       @name  → mentions (wakes the target under default filter modes)
-      #name  → refs     (never wakes on any filter; grep via nth_pounds)
+      #name  → refs     (wakes 'about' listeners; also available via nth_pounds)
       !name  → bangs    (ALWAYS wakes the target, bypasses every filter)
     @all / !all both broadcast — @all pings everyone under their filter,
     !all wakes everyone unconditionally; !agents wakes only agents. There is no #all.
