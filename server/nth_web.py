@@ -10299,9 +10299,27 @@ class NthWebHandler(BaseHTTPRequestHandler):
             handle.close()
             self._error(404, "file missing")
             return
+        mime = row["mime"]
+        if parse_qs(parsed.query).get("preview") == ["1"]:
+            # Same identity, visibility and channel-root checks as originals.
+            # Never fall back to a full animation on a failed preview: that
+            # would recreate the phone download/decode spike this avoids.
+            if mime not in ALLOWED_IMAGE_MIME:
+                handle.close()
+                self._error(415, "image preview unavailable")
+                return
+            try:
+                payload = nmedia.chat_image_preview(handle)
+            except Exception:
+                handle.close()
+                self._error(422, "image preview unavailable; open original")
+                return
+            handle.close()
+            handle = io.BytesIO(payload)
+            size, mime = len(payload), "image/jpeg"
         try:
             self.send_response(200)
-            self.send_header("Content-Type", row["mime"])
+            self.send_header("Content-Type", mime)
             self.send_header("Content-Length", str(size))
             # Access-controlled content (DM files, unpublished uploads): no shared caches.
             self.send_header("Cache-Control", "private, max-age=31536000, immutable")

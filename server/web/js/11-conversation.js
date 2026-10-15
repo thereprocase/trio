@@ -960,7 +960,7 @@
         if (/^image\/(png|jpeg|gif|webp)$/.test(attachment.mime || '')) {
           const alt = attachment.filename || 'Attached image';
           const at = gallery.length; gallery.push({ url: href, alt });
-          const image = document.createElement('img'); image.src = href; image.alt = alt; image.loading = 'lazy';
+          const image = document.createElement('img'); image.src = href + (href.includes('?') ? '&' : '?') + 'preview=1'; image.alt = alt; image.loading = 'lazy'; image.decoding = 'async';
           // Keyboard-openable to the same lightbox as a mouse click — otherwise
           // Enter on the wrapping link opens the raw image in a new tab and
           // keyboard/SR users never reach the gallery/zoom (mirrors composer).
@@ -972,6 +972,9 @@
           image.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') openHere(e); });
           image.addEventListener('error', () => { image.classList.add('error'); });
           link.append(image);
+          if (attachment.mime === 'image/gif') {
+            const play = document.createElement('span'); play.className = 'message-attachment-play'; play.textContent = '▶ Play GIF'; link.append(play);
+          }
           // The name says what the image shows; agents are asked to name theirs.
           if (attachment.filename) {
             const caption = document.createElement('span'); caption.className = 'message-attachment-caption';

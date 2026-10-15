@@ -27,6 +27,7 @@ import stat
 import struct
 import tempfile
 import threading
+from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, NamedTuple, Optional, Tuple
@@ -660,6 +661,56 @@ MAX_MODEL_SOURCE_PIXELS = 80_000_000
 
 
 _model_image_jobs = threading.BoundedSemaphore(1)
+
+# Chat previews are small stills, including frame zero of animations. Keep the
+# cache bounded and serialize decoding so opening a gallery cannot multiply
+# full-resolution image buffers. Call only AFTER attachment access/path checks.
+_chat_preview_lock = threading.Lock()
+_chat_preview_cache = OrderedDict()
+CHAT_PREVIEW_MAX_PIXELS = 16_000_000
+CHAT_PREVIEW_MAX_BYTES = 256 * 1024
+
+
+def chat_image_preview(handle) -> bytes:
+    import io
+    from PIL import Image, ImageOps
+    info = os.fstat(handle.fileno())
+    if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_MODEL_SOURCE_BYTES:
+        raise ValueError("preview_source_limit")
+    key = (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
+    with _chat_preview_lock:
+        cached = _chat_preview_cache.get(key)
+        if cached is not None:
+            _chat_preview_cache.move_to_end(key)
+            return cached
+        handle.seek(0)
+        with Image.open(handle) as source:
+            if source.width * source.height > CHAT_PREVIEW_MAX_PIXELS:
+                raise ValueError("preview_pixel_limit")
+            source.seek(0)
+            # JPEG can decode directly at a smaller resolution. Apply EXIF
+            # orientation before the final fit; preserve original file bytes.
+            source.draft("RGB", (960, 960))
+            image = ImageOps.exif_transpose(source)
+            image.thumbnail((960, 960), Image.Resampling.LANCZOS)
+            rgba = image.convert("RGBA")
+            matte = Image.new("RGBA", rgba.size, "white")
+            matte.alpha_composite(rgba)
+            image = matte.convert("RGB")
+            while True:
+                out = io.BytesIO()
+                image.save(out, format="JPEG", quality=80, optimize=True)
+                payload = out.getvalue()
+                if len(payload) <= CHAT_PREVIEW_MAX_BYTES:
+                    break
+                image = image.resize((max(1, image.width * 3 // 4),
+                                      max(1, image.height * 3 // 4)),
+                                     Image.Resampling.LANCZOS)
+        _chat_preview_cache[key] = payload
+        _chat_preview_cache.move_to_end(key)
+        while len(_chat_preview_cache) > 64:
+            _chat_preview_cache.popitem(last=False)
+        return payload
 
 
 def prepare_model_image(raw: bytes, crop=None, resize: bool = True):

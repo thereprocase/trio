@@ -102,6 +102,9 @@
     dialog.addEventListener('close', () => {
       items = []; clearGesture(); pointerMoved = false;
       imgEl.classList.remove('dragging');
+      // A hidden dialog must not keep decoding an animation or downloading
+      // its remaining frames after the user has returned to the conversation.
+      imgEl.removeAttribute('src');
     });
     imgEl.addEventListener('wheel', onWheel, { passive: false });
     imgEl.addEventListener('pointerdown', onPointerDown);

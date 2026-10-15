@@ -18,6 +18,8 @@ check('an image attachment carries its filename as a caption', () => {
   assert.ok(caption, 'caption present');
   assert.strictEqual(caption.textContent, 'headlights-option-A-segmented.png');
   assert.strictEqual(card.querySelector('img').alt, 'headlights-option-A-segmented.png');
+  assert.ok(card.querySelector('img').src.includes('preview=1'));
+  assert.ok(!card.querySelector('.message-attachment').href.includes('preview=1'));
 });
 
 check('the caption is text, never markup', () => {

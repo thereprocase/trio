@@ -664,7 +664,7 @@
       for (const a of pin.attachments || []) {
         const link = document.createElement('a'); link.href = api.url('/api/attachment/' + encodeURIComponent(a.id)); link.target = '_blank'; link.rel = 'noopener';
         if (/^image\/(png|jpeg|gif|webp)$/.test(a.mime || '')) {
-          const img = document.createElement('img'); img.src = link.href; img.alt = a.filename || 'Attached image'; img.loading = 'lazy'; link.append(img);
+          const img = document.createElement('img'); img.src = link.href + (link.href.includes('?') ? '&' : '?') + 'preview=1'; img.alt = a.filename || 'Attached image'; img.loading = 'lazy'; img.decoding = 'async'; link.append(img);
         } else link.textContent = a.filename || 'Attachment';
         card.append(link);
         if (/^image\/(png|jpeg|gif|webp)$/.test(a.mime || '')) {
