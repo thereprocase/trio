@@ -3,6 +3,9 @@
   const Trio = window.Trio = window.Trio || {};
   const events = Trio.events = Trio.events || new EventTarget();
   let stream;
+  let workspaceWanted = false;
+  let lifecyclePaused = false;
+  const hidden = () => lifecyclePaused || document.hidden || document.visibilityState === 'hidden';
   let currentChannel = null;
   let lastId = null;
   let state = 'connecting';
@@ -185,7 +188,7 @@
     if (!wasLive) notify('workspace:live'); else publish();
   }
   function ensureWatchdog() {
-    if (!watchdog) {
+    if (!watchdog && !hidden()) {
       watchdog = setInterval(() => checkEventFreshness(), WATCHDOG_INTERVAL_MS);
       // Browser timers are numeric; Node's test timers support unref so a
       // passive watchdog cannot keep a completed harness process alive.
@@ -206,7 +209,8 @@
       if (!workspaceLive) { setConnection('offline', true); notify('offline', { reason: 'no channel' }); }
       return;
     }
-    stream?.close();
+    stream?.close(); stream = null;
+    if (hidden()) { pauseStreams(); return; }
     channelLive = false;
     channelLastReceivedAt = 0;
     setConnection('connecting…', true);
@@ -237,7 +241,9 @@
   }
   let workspaceStream;
   function startWorkspaceEvents() {
-    workspaceStream?.close();
+    workspaceWanted = true;
+    workspaceStream?.close(); workspaceStream = null;
+    if (hidden()) { pauseStreams(); return; }
     workspaceLive = false;
     workspaceLastReceivedAt = 0;
     workspaceStartedAt = Date.now();
@@ -270,7 +276,7 @@
   }
   function restartVisibleStreams() {
     if (document.visibilityState === 'hidden' || document.hidden) return;
-    const hadWorkspace = !!workspaceStream;
+    const hadWorkspace = workspaceWanted;
     if (hadWorkspace) startWorkspaceEvents();
     if (currentChannel) startEvents(currentChannel);
   }
@@ -294,8 +300,20 @@
     }
     return true;
   }
+  function pauseStreams() {
+    // Keep route/feed intent and catch-up cursor, but close retrying sockets.
+    lifecyclePaused = true;
+    stream?.close(); stream = null;
+    workspaceStream?.close(); workspaceStream = null;
+    channelLive = false; workspaceLive = false;
+    channelStartedAt = channelLastReceivedAt = 0;
+    workspaceStartedAt = workspaceLastReceivedAt = 0;
+    maybeStopWatchdog();
+    setConnection('paused', true); notify('suspended');
+  }
   function recoverFromLifecycle() {
     if (document.visibilityState === 'hidden' || document.hidden) return;
+    lifecyclePaused = false;
     const now = Date.now();
     if (now - lastLifecycleRestartAt < 1_000) return;
     lastLifecycleRestartAt = now;
@@ -307,6 +325,7 @@
     document.addEventListener?.('visibilitychange', () => {
       if (document.visibilityState === 'hidden' || document.hidden) {
         sawHidden = true;
+        pauseStreams();
         // A new background/foreground cycle deserves its own recovery even
         // when it begins inside the prior cycle's signal-coalescing window.
         lastLifecycleRestartAt = 0;
@@ -314,10 +333,12 @@
       }
       if (sawHidden) { sawHidden = false; recoverFromLifecycle(); }
     });
-    window.addEventListener?.('pageshow', event => { if (event.persisted) recoverFromLifecycle(); });
+    window.addEventListener?.('pagehide', () => { sawHidden = true; lastLifecycleRestartAt = 0; pauseStreams(); });
+    window.addEventListener?.('pageshow', event => { if (event.persisted || lifecyclePaused) { sawHidden = false; recoverFromLifecycle(); } });
     window.addEventListener?.('online', recoverFromLifecycle);
   }
   function stopWorkspaceEvents() {
+    workspaceWanted = false;
     workspaceStream?.close(); workspaceStream = null; workspaceLive = false;
     workspaceStartedAt = 0; workspaceLastReceivedAt = 0;
     setConnection('offline', true); notify('workspace:offline'); maybeStopWatchdog();

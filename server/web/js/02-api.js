@@ -1,6 +1,13 @@
 (() => {
   'use strict';
   const Trio = window.Trio = window.Trio || {};
+  // Only automatic reads opt in. Never cancel or retry a user write here.
+  const backgroundReads = new Set();
+  const hidden = () => window.document?.hidden || window.document?.visibilityState === 'hidden';
+  const pausedRead = () => Object.assign(new Error('Background refresh paused'), {name:'AbortError'});
+  function pauseReads() { for (const controller of backgroundReads) controller.abort(); }
+  window.document?.addEventListener?.('visibilitychange', () => { if (hidden()) pauseReads(); });
+  window.addEventListener?.('pagehide', pauseReads);
   const CHANNEL_RE = /(^|&|\?)channel=/;
   const state = () => Trio.state || {};
   function url(path, channelScoped = true) {
@@ -56,6 +63,7 @@
   }
 
   async function request(method, path, body = null, channelScoped = true, options = {}) {
+    if (method === 'GET' && options.background && hidden()) throw pausedRead();
     const u = url(path, channelScoped);
     const init = { method, headers: {} };
     if (body !== null) {
@@ -70,6 +78,7 @@
     const abort = () => controller?.abort();
     if (controller) {
       init.signal = controller.signal;
+      if (options.background) backgroundReads.add(controller);
       if (options.signal?.aborted) abort();
       else options.signal?.addEventListener('abort', abort, {once:true});
       timer = setTimeout(() => { timedOut = true; controller.abort(); }, 15000);
@@ -89,6 +98,7 @@
     } finally {
       if (timer !== undefined) clearTimeout(timer);
       options.signal?.removeEventListener('abort', abort);
+      if (controller) backgroundReads.delete(controller);
       // Diagnostics must never alter the request result. No bodies or queries.
       try { Trio.diagnostics?.request(method, path, response?.status || 0, Date.now() - started, failure); } catch {}
     }

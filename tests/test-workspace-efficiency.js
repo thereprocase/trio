@@ -3,6 +3,9 @@ const assert=require('assert'),{load}=require('./dom-harness');
 const timers=new Map();let seq=0;
 const cx=load({setup:s=>{s.setTimeout=(fn,ms)=>{const id=++seq;timers.set(id,{fn,ms});return id;};s.clearTimeout=id=>timers.delete(id);s.setInterval=()=>0;}});
 const T=cx.hooks.Trio,d=cx.document;
+// Match the shipped pin button; getElementById only creates an empty div.
+d.getElementById('channel-pins-button').innerHTML='<span class="channel-pin-count"></span>';
+
 (async()=>{
  let calls=0;T.api.get=async()=>{calls++;return {channels:[],tasks:[],mentions:[],questions:[],approvals:[]};};T.agents.refresh=async()=>{};
  T.state.workspaceLoading=false;d.hidden=true;d.visibilityState='hidden';

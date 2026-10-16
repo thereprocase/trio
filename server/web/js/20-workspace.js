@@ -1692,7 +1692,7 @@
   function refreshMentions(summary = state.view !== 'messages') {
     if (mentionDetailPending) return mentionDetailPending;
     const version = ++mentionRequest;
-    const task = api.get('/api/mentions' + (summary ? '?summary=1' : '')).then(data => {
+    const task = backgroundGet('/api/mentions' + (summary ? '?summary=1' : '')).then(data => {
       if (version !== mentionRequest) return;
       state.mentionsSummaryOnly = summary;
       state.mentionsUnread = data.unread_count || 0;
@@ -1708,6 +1708,7 @@
     }
     return task;
   }
+  const backgroundGet = path => api.get(path, true, {background:true});
   let refreshPending = null;
   async function refresh({messageOnly = false} = {}) {
     // Hidden views need no snapshots; the stream-open hook catches up on return.
@@ -1721,14 +1722,14 @@
     renderRail();
     const query = state.channel ? '?channel=' + encodeURIComponent(state.channel) : '';
     const loaders = [
-      () => api.get('/api/channels').then(data => { state.channels = data.channels || []; Trio.store.set('workspace.channels', state.channels); Trio.conversation?.syncReadState?.(state.channels.find(c => c.code === state.channel)); renderRail(); markLoaded('channels'); }),
-      () => api.get('/api/dms').then(data => { state.dms = data; Trio.store.set('workspace.dms', state.dms); renderRail(); markLoaded('dms'); }),
-      () => api.get('/api/meta' + query).then(data => { state.meta = {...state.meta, ...data}; Trio.store.set('workspace.meta', state.meta); renderRail(); markLoaded('meta'); }),
-      () => api.get('/api/tasks' + query).then(data => { state.tasks = data.tasks || []; Trio.store.set('workspace.tasks', state.tasks); markLoaded('tasks'); }),
-      () => api.get('/api/approvals').then(data => { state.approvals = data.approvals || []; Trio.store.set('workspace.approvals', state.approvals); markLoaded('approvals'); }),
-      () => api.get('/api/questions').then(data => { state.questions = data.questions || []; Trio.store.set('workspace.questions', state.questions); markLoaded('questions'); }),
+      () => backgroundGet('/api/channels').then(data => { state.channels = data.channels || []; Trio.store.set('workspace.channels', state.channels); Trio.conversation?.syncReadState?.(state.channels.find(c => c.code === state.channel)); renderRail(); markLoaded('channels'); }),
+      () => backgroundGet('/api/dms').then(data => { state.dms = data; Trio.store.set('workspace.dms', state.dms); renderRail(); markLoaded('dms'); }),
+      () => backgroundGet('/api/meta' + query).then(data => { state.meta = {...state.meta, ...data}; Trio.store.set('workspace.meta', state.meta); renderRail(); markLoaded('meta'); }),
+      () => backgroundGet('/api/tasks' + query).then(data => { state.tasks = data.tasks || []; Trio.store.set('workspace.tasks', state.tasks); markLoaded('tasks'); }),
+      () => backgroundGet('/api/approvals').then(data => { state.approvals = data.approvals || []; Trio.store.set('workspace.approvals', state.approvals); markLoaded('approvals'); }),
+      () => backgroundGet('/api/questions').then(data => { state.questions = data.questions || []; Trio.store.set('workspace.questions', state.questions); markLoaded('questions'); }),
       () => refreshMentions(),
-      () => api.get('/api/usage').then(data => { state.usage = data; Trio.store.set('workspace.usage', state.usage); markLoaded('usage'); }),
+      () => backgroundGet('/api/usage').then(data => { state.usage = data; Trio.store.set('workspace.usage', state.usage); markLoaded('usage'); }),
       // Keep state.agents (live/busy/state + context %) fresh on the 15s
       // full-snapshot cadence, alongside the lightweight agent poll. The drawer, face-pile, and roster
       // card all read state.agents, which was otherwise only refetched on an
@@ -2326,6 +2327,7 @@
   }
   let drawerActivityDebounce = null;
   function onMessageForDrawer(event) {
+    if (document.hidden || document.visibilityState === 'hidden') return;
     clearTimeout(drawerActivityDebounce);
     const messageChannel = event?.detail?.channel;
     drawerActivityDebounce = setTimeout(() => refreshDrawerActivity(messageChannel), 400);
@@ -2338,6 +2340,24 @@
     const input = searchDialog.querySelector('.search-input');
     input.focus();
     input.addEventListener('input', () => { clearTimeout(searchTimer); searchTimer = setTimeout(() => doSearch(input.value.trim()), 200); });
+  }
+  let workspaceMounted = false;
+  function pauseWorkspacePolling() {
+    clearInterval(refreshInterval); refreshInterval = null;
+    clearInterval(agentsInterval); agentsInterval = null;
+    clearTimeout(liveRefreshDebounce); liveRefreshDebounce = null;
+    clearTimeout(drawerActivityDebounce); drawerActivityDebounce = null;
+  }
+  function resumeWorkspacePolling() {
+    if (!workspaceMounted || document.hidden || document.visibilityState === 'hidden') return;
+    if (!refreshInterval) refreshInterval = setInterval(refresh, 15000);
+    if (!agentsInterval) agentsInterval = setInterval(pollAgents, 5000);
+  }
+  function workspaceVisibility() {
+    if (document.hidden || document.visibilityState === 'hidden') { pauseWorkspacePolling(); return; }
+    resumeWorkspacePolling();
+    // Operators catch up after their workspace SSE baseline is captured.
+    if (!['loopback','tailscale'].includes(state.operator?.source)) void refresh();
   }
   let refreshInterval = null;
   let agentsInterval = null;
@@ -2385,8 +2405,8 @@
     faceMedia = null; faceMediaChange = null;
   }
   let streamOpenListener = null;
-  function mount() { routeFeedClaimed = false; mountFaceMedia(); const isOperator = state.operator?.source === 'loopback' || state.operator?.source === 'tailscale'; if (isOperator) { streamOpenListener = () => { clearTimeout(liveRefreshDebounce); liveRefreshDebounce = null; refresh(); }; Trio.events?.addEventListener?.('workspace:stream-open', streamOpenListener); } else refresh(); renderFacePile(); if (!refreshInterval) refreshInterval = setInterval(refresh, 15000); if (!agentsInterval) agentsInterval = setInterval(pollAgents, 5000); unroute = Trio.router?.on?.(onRoute); wsl = onWorkspaceUpdate; Trio.events?.addEventListener?.('workspace:updated', wsl); preferencesChanged = onPreferencesChanged; Trio.events?.addEventListener?.('preferences:changed', preferencesChanged); Trio.events?.addEventListener?.('roster', renderFacePile); Trio.events?.addEventListener?.('roster', refreshDrawerMembers); Trio.events?.addEventListener?.('message', onMessageForDrawer); Trio.events?.addEventListener?.('message', onMessageLiveRefresh); const searchBtn = $('search-btn'); if (searchBtn) { searchBtn.addEventListener('click', openSearch); } const detailsBtn = $('details-btn'); if (detailsBtn) { detailsClick = showDetails; detailsBtn.addEventListener('click', detailsClick); } const drawerClose = $('channel-drawer-close'); if (drawerClose) drawerClose.addEventListener('click', closeDetails); const drawerResize = $('channel-drawer-resize'); if (drawerResize) drawerResize.addEventListener('pointerdown', startDrawerResize); const menuButton = $('channel-more-btn'); if (menuButton) { menuButtonClick = openChannelMenu; menuButton.addEventListener('click', menuButtonClick); } const accountTrigger = $('account-trigger'); if (accountTrigger) { accountTriggerClick = openAccountMenu; accountTrigger.addEventListener('click', accountTriggerClick); } menuClick = event => { if (!event.target.closest('#channel-menu, #channel-more-btn')) closeChannelMenu(); if (!event.target.closest('#account')) closeAccountMenu(); }; menuKeydown = event => { if (event.key === 'Escape') { closeChannelMenu(); closeDetails(); closeAccountMenu(); } }; document.addEventListener('click', menuClick); document.addEventListener('keydown', menuKeydown); searchKeydown = onSearchKey; document.addEventListener('keydown', searchKeydown); }
-  function unmount() { routeFeedClaimed = false; unmountFaceMedia(); closeChannelMenu(); closeDetails(); if (drawerResizeEnd) drawerResizeEnd(); if (refreshInterval) { clearInterval(refreshInterval); refreshInterval = null; } if (agentsInterval) { clearInterval(agentsInterval); agentsInterval = null; } if (unroute) { unroute(); unroute = null; } if (wsl) { Trio.events?.removeEventListener?.('workspace:updated', wsl); wsl = null; } if (preferencesChanged) { Trio.events?.removeEventListener?.('preferences:changed', preferencesChanged); preferencesChanged = null; } Trio.events?.removeEventListener?.('roster', renderFacePile); Trio.events?.removeEventListener?.('roster', refreshDrawerMembers); Trio.events?.removeEventListener?.('message', onMessageForDrawer); Trio.events?.removeEventListener?.('message', onMessageLiveRefresh); clearTimeout(liveRefreshDebounce); liveRefreshDebounce = null; clearTimeout(drawerActivityDebounce); const searchBtn = $('search-btn'); if (searchBtn && openSearch) searchBtn.removeEventListener('click', openSearch); const detailsBtn = $('details-btn'); if (detailsBtn && detailsClick) detailsBtn.removeEventListener('click', detailsClick); const drawerClose = $('channel-drawer-close'); if (drawerClose) drawerClose.removeEventListener('click', closeDetails); const drawerResize = $('channel-drawer-resize'); if (drawerResize) drawerResize.removeEventListener('pointerdown', startDrawerResize); const menuButton = $('channel-more-btn'); if (menuButton && menuButtonClick) menuButton.removeEventListener('click', menuButtonClick); const accountTrigger = $('account-trigger'); if (accountTrigger && accountTriggerClick) accountTrigger.removeEventListener('click', accountTriggerClick); closeAccountMenu(); if (menuClick) document.removeEventListener('click', menuClick); if (menuKeydown) document.removeEventListener('keydown', menuKeydown); if (searchKeydown) document.removeEventListener('keydown', searchKeydown); }
+  function mount() { workspaceMounted = true; document.addEventListener('visibilitychange', workspaceVisibility); window.addEventListener('pagehide', pauseWorkspacePolling); window.addEventListener('pageshow', resumeWorkspacePolling); routeFeedClaimed = false; mountFaceMedia(); const isOperator = state.operator?.source === 'loopback' || state.operator?.source === 'tailscale'; if (isOperator) { streamOpenListener = () => { clearTimeout(liveRefreshDebounce); liveRefreshDebounce = null; refresh(); }; Trio.events?.addEventListener?.('workspace:stream-open', streamOpenListener); } else refresh(); renderFacePile(); resumeWorkspacePolling(); unroute = Trio.router?.on?.(onRoute); wsl = onWorkspaceUpdate; Trio.events?.addEventListener?.('workspace:updated', wsl); preferencesChanged = onPreferencesChanged; Trio.events?.addEventListener?.('preferences:changed', preferencesChanged); Trio.events?.addEventListener?.('roster', renderFacePile); Trio.events?.addEventListener?.('roster', refreshDrawerMembers); Trio.events?.addEventListener?.('message', onMessageForDrawer); Trio.events?.addEventListener?.('message', onMessageLiveRefresh); const searchBtn = $('search-btn'); if (searchBtn) { searchBtn.addEventListener('click', openSearch); } const detailsBtn = $('details-btn'); if (detailsBtn) { detailsClick = showDetails; detailsBtn.addEventListener('click', detailsClick); } const drawerClose = $('channel-drawer-close'); if (drawerClose) drawerClose.addEventListener('click', closeDetails); const drawerResize = $('channel-drawer-resize'); if (drawerResize) drawerResize.addEventListener('pointerdown', startDrawerResize); const menuButton = $('channel-more-btn'); if (menuButton) { menuButtonClick = openChannelMenu; menuButton.addEventListener('click', menuButtonClick); } const accountTrigger = $('account-trigger'); if (accountTrigger) { accountTriggerClick = openAccountMenu; accountTrigger.addEventListener('click', accountTriggerClick); } menuClick = event => { if (!event.target.closest('#channel-menu, #channel-more-btn')) closeChannelMenu(); if (!event.target.closest('#account')) closeAccountMenu(); }; menuKeydown = event => { if (event.key === 'Escape') { closeChannelMenu(); closeDetails(); closeAccountMenu(); } }; document.addEventListener('click', menuClick); document.addEventListener('keydown', menuKeydown); searchKeydown = onSearchKey; document.addEventListener('keydown', searchKeydown); }
+  function unmount() { workspaceMounted = false; document.removeEventListener('visibilitychange', workspaceVisibility); window.removeEventListener('pagehide', pauseWorkspacePolling); window.removeEventListener('pageshow', resumeWorkspacePolling); pauseWorkspacePolling(); routeFeedClaimed = false; unmountFaceMedia(); closeChannelMenu(); closeDetails(); if (drawerResizeEnd) drawerResizeEnd(); if (refreshInterval) { clearInterval(refreshInterval); refreshInterval = null; } if (agentsInterval) { clearInterval(agentsInterval); agentsInterval = null; } if (unroute) { unroute(); unroute = null; } if (wsl) { Trio.events?.removeEventListener?.('workspace:updated', wsl); wsl = null; } if (preferencesChanged) { Trio.events?.removeEventListener?.('preferences:changed', preferencesChanged); preferencesChanged = null; } Trio.events?.removeEventListener?.('roster', renderFacePile); Trio.events?.removeEventListener?.('roster', refreshDrawerMembers); Trio.events?.removeEventListener?.('message', onMessageForDrawer); Trio.events?.removeEventListener?.('message', onMessageLiveRefresh); clearTimeout(liveRefreshDebounce); liveRefreshDebounce = null; clearTimeout(drawerActivityDebounce); const searchBtn = $('search-btn'); if (searchBtn && openSearch) searchBtn.removeEventListener('click', openSearch); const detailsBtn = $('details-btn'); if (detailsBtn && detailsClick) detailsBtn.removeEventListener('click', detailsClick); const drawerClose = $('channel-drawer-close'); if (drawerClose) drawerClose.removeEventListener('click', closeDetails); const drawerResize = $('channel-drawer-resize'); if (drawerResize) drawerResize.removeEventListener('pointerdown', startDrawerResize); const menuButton = $('channel-more-btn'); if (menuButton && menuButtonClick) menuButton.removeEventListener('click', menuButtonClick); const accountTrigger = $('account-trigger'); if (accountTrigger && accountTriggerClick) accountTrigger.removeEventListener('click', accountTriggerClick); closeAccountMenu(); if (menuClick) document.removeEventListener('click', menuClick); if (menuKeydown) document.removeEventListener('keydown', menuKeydown); if (searchKeydown) document.removeEventListener('keydown', searchKeydown); }
   Trio.workspace = {canPin: () => !!pinState?.can_edit && pinChannel === state.channel, changePin, refreshPin, init: mount, mount, unmount, render: renderRail, renderFacePile, facePileModel,
     channelMetadataSettled, channelMetadataReady, renderChannelMetadataState,
     didClaimRouteFeed: () => routeFeedClaimed, refresh, archive, archiveCurrent, openChannel, openDm, openDmByKey, openDmDialog, dmTargets, groupNavigation, isStaleThread, staleThreadDays, attentionCount, selectors, showView, search: openSearch, doSearch, modal, toast, showDetails, channelStatus, toolSuffix, usageTone, resetLabel, contextBadge, formatTokenEstimate, refreshDrawerActivity, refreshDrawerMembers, messageCountLabel, createChannel, openTaskModal, detailMember, renderSubagentList, subagentsFromResponse, openAccountMenu, closeAccountMenu, dismissQuestion, undismissQuestion, isQuestionDismissed, trendChip, dailyChangeLine, projectionLine};

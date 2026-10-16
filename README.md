@@ -43,6 +43,13 @@ Named viewers can submit reports. Only the authenticated hub operator can read
 until the web process restarts. Diagnostics describe observed events; they do
 not establish the cause of a connection failure.
 
+The dashboard sleeps while hidden: live streams, automatic snapshot/version
+polling and diagnostic timers pause; in-flight automatic reads are cancelled.
+Returning to the app reconnects once and catches up before showing live status.
+Outgoing writes are neither cancelled nor retried by this lifecycle policy.
+Web Push notifications remain independent of the open dashboard. A one-time
+lifecycle diagnostic may be sent as the page hides; this is not ongoing polling.
+
 ## Working as a contributing agent
 
 An agent can handle installation and onboarding from this README. Give it the

@@ -129,9 +129,14 @@
     try { const controller = new AbortController(); setTimeout(() => controller.abort(), ms); return controller.signal; } catch { return undefined; }
   }
   // The build the hub serves now, or null when it cannot be reached in time.
-  async function fetchBuild(ms) {
+  const versionReads = new Set();
+  function pauseVersionReads() { for (const controller of versionReads) controller.abort(); }
+  async function fetchBuild(ms, background = false) {
+    const controller = background ? new AbortController() : null;
+    let timer;
+    if (controller) { versionReads.add(controller); timer = setTimeout(() => controller.abort(), ms); }
     try {
-      const response = await within(fetch('/api/version', { cache: 'no-store', signal: timeoutSignal(ms) }), ms);
+      const response = await within(fetch('/api/version', { cache: 'no-store', signal: controller?.signal || timeoutSignal(ms) }), ms);
       // An older hub may lack this endpoint, or a proxy may require auth.
       // Either 4xx proves reachability, without claiming a build is known.
       if (response?.status >= 400 && response.status < 500) return '';
@@ -139,6 +144,7 @@
       const data = await within(response.json(), ms);
       return typeof data?.build === 'string' ? data.build : null;
     } catch { return null; }
+    finally { if (controller) versionReads.delete(controller); if (timer !== undefined) clearTimeout(timer); }
   }
   // What the page can and cannot refresh about the installed app:
   //   * the bundle: always, by reloading (see the header comment);
@@ -205,7 +211,7 @@
   }
   async function checkForUpdate() {
     lastCheck = Date.now();
-    const build = await fetchBuild(CHECK_TIMEOUT_MS);
+    const build = await fetchBuild(CHECK_TIMEOUT_MS, true);
     if (!build) return false;   // offline: the connection pill already says so
     servedBuild = build;
     renderPill();
@@ -413,6 +419,12 @@
     // Passive everywhere: the gesture never calls preventDefault, so it costs
     // scrolling nothing. The document never scrolls, so there is no native
     // gesture underneath to fight.
+    let timer = null;
+    const stopChecks = () => { clearInterval(timer); timer = null; pauseVersionReads(); };
+    const startChecks = () => { if (!document.hidden && !timer) timer = setInterval(maybeCheck, CHECK_EVERY_MS); };
+    const visibility = () => { if (document.hidden) stopChecks(); else { startChecks(); maybeCheck(); } };
+    const pageShow = event => { startChecks(); onPageShow(event); };
+    const pageHide = () => { stopChecks(); saveDrafts(); };
     const passive = { passive: true };
     const listeners = [
       [document, 'touchstart', start, passive],
@@ -420,10 +432,10 @@
       [document, 'touchend', end, passive],
       [document, 'touchcancel', cancel, passive],
       [document, 'click', swallowClick, true],
-      [document, 'visibilitychange', maybeCheck],
+      [document, 'visibilitychange', visibility],
       [window, 'online', maybeCheck],
-      [window, 'pagehide', saveDrafts],
-      [window, 'pageshow', onPageShow],
+      [window, 'pagehide', pageHide],
+      [window, 'pageshow', pageShow],
     ];
     listeners.forEach(([target, type, fn, opts]) => target.addEventListener?.(type, fn, opts));
     const onConnection = event => {
@@ -431,7 +443,7 @@
       if (now === 'connected' || now === 'workspace:connected') maybeCheck();
     };
     Trio.events?.addEventListener?.('connection', onConnection);
-    const timer = setInterval(maybeCheck, CHECK_EVERY_MS);
+    startChecks();
     ctx?.onUnmount?.(() => {
       listeners.forEach(([target, type, fn, opts]) => target.removeEventListener?.(type, fn, opts));
       Trio.events?.removeEventListener?.('connection', onConnection);

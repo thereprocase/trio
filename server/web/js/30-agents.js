@@ -125,16 +125,21 @@
     catch (e) { Trio.ui.toast(e.message || 'Agent action failed'); }
     finally { pendingAgentActions.delete(key); }
   }
+  document.addEventListener?.('visibilitychange', () => {
+    if (document.hidden) { for (const timer of compactionPolls.values()) clearTimeout(timer); compactionPolls.clear(); }
+  });
+  window.addEventListener?.('pagehide', () => { for (const timer of compactionPolls.values()) clearTimeout(timer); compactionPolls.clear(); });
   function watchCompaction(id) {
     clearTimeout(compactionPolls.get(id));
     const poll = async () => {
+      if (document.hidden || document.visibilityState === 'hidden') { compactionPolls.delete(id); return; }
       await refresh();
       const agent = (state.agents || []).find(candidate => candidate.id === id);
-      if (agent?.state === 'compacting') compactionPolls.set(id, setTimeout(poll, 1500));
+      if (agent?.state === 'compacting' && !document.hidden) compactionPolls.set(id, setTimeout(poll, 1500));
       else compactionPolls.delete(id);
     };
     const agent = (state.agents || []).find(candidate => candidate.id === id);
-    if (agent?.state === 'compacting') compactionPolls.set(id, setTimeout(poll, 1500));
+    if (agent?.state === 'compacting' && !document.hidden) compactionPolls.set(id, setTimeout(poll, 1500));
   }
   function agentCard(vm) {
     const article = document.createElement('article'); article.className = 'agent-card' + (vm.needsAttention ? ' needs-attention' : '') + (vm.archived ? ' is-archived' : '');
@@ -1090,7 +1095,7 @@
     }
     try {
       const archived = isOwner() && state.agentFilter === 'archived';
-      const data = await Trio.api.get('/api/agents' + (archived ? '?archived=1' : ''));
+      const data = await Trio.api.get('/api/agents' + (archived ? '?archived=1' : ''), true, {background:true});
       state.agents = data.agents || [];
       Trio.store.set('agents.list', data.agents || []);
       Trio.store.set('agents.loading', false);
@@ -1104,6 +1109,7 @@
         if (roster && !roster.hidden) renderPage(roster);
       }
     } catch (e) {
+      if (e?.name === 'AbortError') return;
       console.warn(e);
       // Remember WHY the list is empty. A server without the agent supervisor
       // answers 409 for every agent call, and swallowing that left the roster

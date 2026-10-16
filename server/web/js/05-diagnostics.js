@@ -85,14 +85,23 @@
     bind(window, 'error', e => { record('error', { error: errorName(e.error?.name), line: e.lineno || 0 }); void report('error'); });
     bind(window, 'unhandledrejection', e => { record('rejection', { error: errorName(e.reason?.name) }); void report('rejection'); });
     let lastTick = Date.now();
-    timer = setInterval(() => {
+    const stopTimer = () => { clearInterval(timer); timer = null; };
+    const startTimer = () => {
+      if (document.hidden || timer) return;
+      lastTick = Date.now();
+      timer = setInterval(() => {
       const lag = Math.max(0, Date.now() - lastTick - 60000); lastTick = Date.now();
       if (!document.hidden) { record('visible', { lag_ms: lag }); void report('interval'); }
-    }, 60000);
-    timer.unref?.();
+      }, 60000);
+      timer.unref?.();
+    };
+    bind(document, 'visibilitychange', () => document.hidden ? stopTimer() : startTimer());
+    bind(window, 'pagehide', stopTimer);
+    bind(window, 'pageshow', startTimer);
+    startTimer();
     void report('startup');
   }
-  function unmount() { bindings.splice(0).forEach(fn => fn()); clearInterval(timer); mounted = false; }
+  function unmount() { bindings.splice(0).forEach(fn => fn()); clearInterval(timer); timer = null; mounted = false; }
   function show() {
     if (!dialog) {
       dialog = document.createElement('dialog');
