@@ -74,11 +74,13 @@
       else options.signal?.addEventListener('abort', abort, {once:true});
       timer = setTimeout(() => { timedOut = true; controller.abort(); }, 15000);
     }
-    let response, text;
+    const started = Date.now();
+    let response, text, failure;
     try {
       response = await fetch(u, init);
       text = await response.text();
     } catch (error) {
+      failure = timedOut ? "TimeoutError" : error?.name;
       if (timedOut) {
         const timeout = new Error('The server took too long to respond. Try again.');
         timeout.status = 408; timeout.path = path; throw timeout;
@@ -87,6 +89,8 @@
     } finally {
       if (timer !== undefined) clearTimeout(timer);
       options.signal?.removeEventListener('abort', abort);
+      // Diagnostics must never alter the request result. No bodies or queries.
+      try { Trio.diagnostics?.request(method, path, response?.status || 0, Date.now() - started, failure); } catch {}
     }
     let data;
     try { data = text ? JSON.parse(text) : { ok: false }; } catch { data = { ok: false, error: text.trim() || 'Server returned non-JSON' }; }

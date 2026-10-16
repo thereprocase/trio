@@ -165,6 +165,7 @@
   }
   function markChannelFresh() {
     channelLastReceivedAt = Date.now();
+    Trio.diagnostics?.receipt('channel');
     const wasLive = channelLive;
     channelLive = true;
     showLiveWhenAllRequiredFeedsAreFresh();
@@ -176,6 +177,7 @@
   }
   function markWorkspaceFresh() {
     workspaceLastReceivedAt = Date.now();
+    Trio.diagnostics?.receipt('workspace');
     const wasLive = workspaceLive;
     workspaceLive = true;
     showLiveWhenAllRequiredFeedsAreFresh();

@@ -34,6 +34,7 @@ Requires only the Python standard library.
 from __future__ import annotations
 
 import argparse
+from collections import deque
 import getpass
 import gzip
 import hashlib
@@ -96,6 +97,63 @@ WORKSPACE_RECONNECT_LIMIT = 1000  # bounded cross-channel reconnect catch-up
 HUB_IDLE_REAP_S = 300        # retire a channel's EventHub after this long unwatched
 SSE_HEARTBEAT_SEC = 20       # keep-alive comment interval
 SSE_LIVE_BUFFER = 256        # bounded headroom after an atomic history prime
+
+# Browser diagnostics contain only projected connection metadata. Keep them in
+# bounded process memory: no chat bodies, URLs, credentials or database writes.
+CLIENT_DIAGNOSTICS = deque(maxlen=100)
+CLIENT_DIAGNOSTICS_LOCK = threading.Lock()
+_DIAG_STATES = frozenset(("connecting", "connected", "live", "reconnecting",
+    "stale", "offline", "workspace:connecting", "workspace:connected",
+    "workspace:live", "workspace:reconnecting", "workspace:stale", "workspace:offline"))
+_DIAG_KINDS = frozenset(("connection", "online", "offline", "visible", "hidden",
+    "pageshow", "pagehide", "error", "rejection", "request"))
+_DIAG_REASONS = frozenset(("startup", "interval", "connection", "online", "offline",
+    "visible", "hidden", "pageshow", "pagehide", "error", "rejection", "manual"))
+_DIAG_ERRORS = frozenset(("Error", "TypeError", "SyntaxError", "RangeError",
+    "ReferenceError", "AbortError", "TimeoutError", "Other"))
+
+
+def _project_client_diagnostics(data):
+    """Whitelist fields on the server too; never retain arbitrary client text."""
+    if not isinstance(data, dict) or not re.fullmatch(r"[a-f0-9]{16}", str(data.get("session", ""))):
+        raise ValueError("invalid diagnostics session")
+    def number(v):
+        return min(10**15, max(0, int(v))) if isinstance(v, (int, float)) and math.isfinite(v) else None
+    result = {"session": data["session"], "reason": data.get("reason") if data.get("reason") in _DIAG_REASONS else "manual",
+              "build": data.get("build") if re.fullmatch(r"[a-f0-9]{0,64}", str(data.get("build", ""))) else "",
+              "online": data.get("online") is True, "hidden": data.get("hidden") is True,
+              "uptime_ms": number(data.get("uptime_ms")), "events": [], "feeds": {}}
+    for key, allowed in (("browser", {"Chromium", "Firefox", "Safari", "Other"}),
+                         ("platform", {"Android", "iOS", "Desktop", "Other"})):
+        result[key] = data.get(key) if data.get(key) in allowed else "Other"
+    for key in ("width", "height"):
+        result[key] = number(data.get(key))
+    feeds = data.get("feeds")
+    if isinstance(feeds, dict):
+        for key in ("channel", "workspace"):
+            f = feeds.get(key)
+            if isinstance(f, dict):
+                result["feeds"][key] = {"count": number(f.get("count")), "age_ms": number(f.get("age_ms"))}
+    events = data.get("events")
+    for event in events[-60:] if isinstance(events, list) else []:
+        if not isinstance(event, dict) or event.get("kind") not in _DIAG_KINDS:
+            continue
+        e = {"kind": event["kind"], "at_ms": number(event.get("at_ms"))}
+        if event.get("state") in _DIAG_STATES:
+            e["state"] = event["state"]
+        for key in ("duration_ms", "status", "line", "lag_ms"):
+            if key in event:
+                e[key] = number(event[key])
+        if event.get("error") in _DIAG_ERRORS:
+            e["error"] = event["error"]
+        if event.get("method") in ("GET", "POST"):
+            e["method"] = event["method"]
+        # Only the resource category, never queries, IDs, channel names or URLs.
+        if re.fullmatch(r"/api/[a-z-]{1,32}", str(event.get("path", ""))):
+            e["path"] = event["path"]
+        result["events"].append(e)
+    return result
+
 
 # Paths that serve the app shell rather than data. The workspace client routes
 # with history.pushState, so these URLs appear in the address bar and get
@@ -4638,6 +4696,8 @@ class NthWebHandler(BaseHTTPRequestHandler):
             self.send_header("Location", f"/?channel={code}")
             self.send_header("Content-Length", "0")
             self.end_headers()
+        elif path == "/api/client-diagnostics":
+            self._handle_client_diagnostics_read()
         elif path == "/api/health":
             self._handle_health()
         elif path == "/api/usage":
@@ -4783,7 +4843,9 @@ class NthWebHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         if self._reject_cross_site():
             return
-        if parsed.path == "/api/terminals/exchange":
+        if parsed.path == "/api/client-diagnostics":
+            self._handle_client_diagnostics_write()
+        elif parsed.path == "/api/terminals/exchange":
             self._handle_terminal_exchange()
         elif parsed.path == "/api/terminals/action":
             self._handle_terminal_action()
@@ -4971,6 +5033,40 @@ class NthWebHandler(BaseHTTPRequestHandler):
             # recurses); it is not a ValueError subclass, so name it explicitly.
             self._error(400, "invalid JSON")
             return None
+
+    def _handle_client_diagnostics_write(self):
+        _token, ident, _new = self._resolve_identity()
+        if ident.source == "pending":
+            self._error(403, "pick a name before sending diagnostics")
+            return
+        body = self._read_json_body(max_bytes=16384)
+        if body is None:
+            return
+        try:
+            report = _project_client_diagnostics(body)
+        except (ValueError, TypeError, OverflowError):
+            self._error(400, "invalid diagnostics")
+            return
+        now = time.time()
+        with CLIENT_DIAGNOSTICS_LOCK:
+            limited = any(r["member_id"] == ident.member_id and now - r["received_at"] < 10
+                          for r in CLIENT_DIAGNOSTICS)
+            if not limited:
+                report.update(member_id=ident.member_id, received_at=now)
+                CLIENT_DIAGNOSTICS.append(report)
+        if limited:
+            self._error(429, "diagnostics reports are limited to one per ten seconds")
+            return
+        self._json({"ok": True, "session": report["session"]})
+
+    def _handle_client_diagnostics_read(self):
+        _token, ident, _new = self._resolve_identity()
+        if not is_all_seeing(ident.member_id):
+            self._error(403, "only the hub operator can read diagnostics")
+            return
+        with CLIENT_DIAGNOSTICS_LOCK:
+            reports = list(CLIENT_DIAGNOSTICS)
+        self._json({"ok": True, "reports": reports, "retention": "last 100 reports, until web restart"})
 
     def _require_operator(self, verb: str = "manage agents"):
         """Gate the agent control plane to a trusted operator.
@@ -10397,7 +10493,7 @@ WEB_CSS_FILES = (
 # exists only so the Node DOM harness can reach the module registry.
 WEB_JS_FILES = (
     "js/01-store.js", "js/02-api.js", "js/03-router.js", "js/04-events.js",
-    "js/05-loader.js", "js/06-core.js", "js/07-lifecycle.js",
+    "js/05-diagnostics.js", "js/05-loader.js", "js/06-core.js", "js/07-lifecycle.js",
     "js/08-sidebar.js", "js/09-time.js", "js/09-ui.js", "js/10-markdown.js",
     "js/11-conversation.js", "js/12-composer.js", "js/13-file-links.js", "js/13-image-export.js",
     "js/14-lightbox.js", "js/20-workspace.js", "js/30-agents.js",

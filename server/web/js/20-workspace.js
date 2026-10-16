@@ -1613,6 +1613,7 @@
     items.innerHTML = `<div class="account-items-inner"><div class="account-menu-list">`
       + list.map(it => `<button type="button" class="nav-item account-item" data-view="${esc(it.view)}"><span class="nav-hash">${navIcon(it.icon)}</span><span class="nav-label">${esc(it.label)}</span></button>`).join('')
       + reloadItem
+      + (Trio.diagnostics ? `<button type="button" class="nav-item account-action" data-account-action="diagnostics"><span class="nav-hash">${navIcon('activity')}</span><span class="nav-label">Connection diagnostics</span></button>` : '')
       + `</div></div>`;
     items.removeAttribute('inert');
     items.setAttribute('aria-hidden', 'false');
@@ -1635,6 +1636,7 @@
     }));
     items.querySelectorAll('.account-action').forEach(btn => btn.addEventListener('click', () => {
       closeAccountMenu();
+      if (btn.getAttribute('data-account-action') === 'diagnostics') Trio.diagnostics?.show();
       if (btn.getAttribute('data-account-action') === 'reload') Trio.appRefresh?.reloadApp?.();
     }));
   }

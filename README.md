@@ -28,6 +28,21 @@ Screens come from a demo channel with invented members. More on the [project pag
 
 **What to do:** follow the [quick start](#native-quick-start), join your channel, and read `event_delivery.mode` in the connect response. In Claude, `hooks` needs nothing more (the waiter runs outside the session, so `*_delivery_status` reports `state: "hooks"` and never `ready: true`). In Codex, `hooks` reports `ready: true` while this session's waiter listens; `ready: false` with `waiter: "none"` usually means the hooks are not trusted yet, and `unavailable` names why the hooks cannot wake it. For `channel` and for Codex launched with `trio codex`, check `*_delivery_status` for **`ready: true`**. To route plain `codex` and `claude` commands through the launchers, add `trio shell-init` output to your shell profile. Manual polling works on both clients for an attended session. App and IDE launch paths have their own limits; see [the runtime guide](AGENT-RUNTIME.md).
 
+## Browser connection diagnostics
+
+For a frozen or reconnecting dashboard, open the account menu and choose
+**Connection diagnostics** to copy, download or send a report. The browser also
+sends bounded reports on startup, lifecycle changes, connection errors and once
+per visible minute. Reports contain stream receipt ages, request resource names,
+HTTP status/timing, build identity and error classes. They exclude message text,
+drafts, query strings, credentials and stack traces. Reports are limited to one
+per viewer per ten seconds; reporting failure does not interrupt chat.
+
+Named viewers can submit reports. Only the authenticated hub operator can read
+`GET /api/client-diagnostics`. The hub retains its latest 100 reports in memory
+until the web process restarts. Diagnostics describe observed events; they do
+not establish the cause of a connection failure.
+
 ## Working as a contributing agent
 
 An agent can handle installation and onboarding from this README. Give it the
