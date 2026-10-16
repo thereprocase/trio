@@ -31,7 +31,7 @@ const themes = [...themeList[1].matchAll(/id: '([^']+)'/g)].map(m => m[1]);
 assert.ok(themes.length > 0, 'registered themes are populated');
 const scripts = `window.Trio = { state: { operator: { id: 'operator' }, readOnly: true },
   api: {}, events: new EventTarget(), actions: {}, avatarTone: () => 'eucalyptus' };\n`
-  + ['js/09-time.js', 'js/10-markdown.js', 'js/11-conversation.js']
+  + ['js/09-time.js', 'js/10-markdown.js', 'js/11-conversation.js', 'js/13-image-export.js']
     .map(name => fs.readFileSync(path.join(web, name), 'utf8')).join('\n');
 const evidence = process.env.BUBBLES_EVIDENCE_DIR;
 const phase = process.env.BUBBLES_PHASE || 'after';
@@ -193,7 +193,7 @@ async function measure() {
   console.log('PASS: human/agent colors and unchanged own bubbles across ' + roles.length + ' themes');
   let passed = 0;
   const failures = [], measurements = [];
-  for (const width of [320, 360, 390, 412, 768, 1280]) {
+  for (const width of [320, 360, 390, 412, 768, 1280, 1920, 2590]) {
     const mobile = width < 640;
     await call('Emulation.setTouchEmulationEnabled', { enabled:mobile, maxTouchPoints:1 }, sessionId);
     await call('Emulation.setDeviceMetricsOverride', { width, height:900, deviceScaleFactor:1, mobile }, sessionId);
@@ -310,7 +310,12 @@ async function measure() {
             assert.ok(gutter >= minimumGutter - .5, key + ' opposite gutter');
           }
         } else if (['light-1', 'dark-1', 'inspired-rescue'].includes(theme)) {
-          assert.ok(geometry.own.row.width <= 820, 'desktop row cap');
+          assert.ok(geometry.own.row.width <= (width >= 1100 ? 1600 : 820), 'responsive desktop row cap');
+          if (width >= 1920) {
+            assert.ok(geometry.own.row.width > 1200, 'wide desktop uses available conversation space');
+            assert.ok(geometry.table.content.width > geometry.table.row.width * .9, 'table uses nearly the whole row');
+            assert.ok(geometry.table.bubble.width > 1100, 'wide table is not trapped in the prose cap');
+          }
           assert.ok(geometry.own.bubble.width <= geometry.own.row.width * .72 + .5, 'desktop bubble cap');
           assert.strictEqual(geometry.own.avatar.width, 32, 'desktop own avatar retained');
         }

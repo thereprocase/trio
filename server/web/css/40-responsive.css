@@ -349,3 +349,14 @@
 .channel-pin-card img {display:block;max-width:100%;max-height:180px;object-fit:contain;border-radius:8px;margin:10px 0;}
 .channel-pin-meta {font-size:12px;opacity:.7;margin-bottom:8px;}
 .channel-pin-remove {display:block;margin-top:10px;padding:6px 12px;border:1px solid currentColor;border-radius:8px;background:transparent;color:inherit;cursor:pointer;}
+
+/* Wide desktop conversations share their width with the composer and banners.
+   Tables use the row instead of the prose bubble's 72% cap. Their own scroller
+   contains wider data; phone gutters and bubble alignment stay in the rules above. */
+@media (min-width:1100px){
+  :root{ --conversation-width:1600px; --gutter:clamp(24px,3vw,64px); }
+  .message.msg:has(.md-table) .message-content{
+    width:calc(100% - 44px); max-width:calc(100% - 44px);
+  }
+  .message.msg:has(.md-table) .bubble{ width:100%; min-width:0; }
+}
