@@ -406,8 +406,11 @@ try:
 
     web.NthWebHandler._resolve_identity = _guest
     try:
-        st, _ = http(port, "/api/agents")
-        check("guest: GET /api/agents -> 403", st == 403)
+        st, public = http(port, "/api/agents")
+        check("guest: GET /api/agents -> read-only projection", st == 200 and public.get('read_only') is True)
+        check("guest: projection excludes host and credential fields", all(
+            not ({'pid','cwd','session_id','runtime_ref','reclaim_secret'} & set(a))
+            for a in public.get('agents', [])))
         st, _ = http(port, "/api/agents", "POST", {"model": "sonnet"})
         check("guest: POST /api/agents -> 403", st == 403)
         st, _ = http(port, f"/api/agents/{aid}/archive", "POST")

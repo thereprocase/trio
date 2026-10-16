@@ -11,6 +11,7 @@ let failures = 0;
 function check(name, fn) { try { fn(); console.log('PASS: ' + name); } catch (e) { failures++; console.log('FAIL: ' + name + ' — ' + e.message); } }
 
 const agents = H.Trio.agents;
+H.Trio.state.operator = { id: '_op_test', source: 'tailscale' }; // Managed controls are owner-only.
 
 function seed(list) {
   // Same order refresh() writes them in: state.agents first, then the store

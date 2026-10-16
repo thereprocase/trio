@@ -5,6 +5,10 @@
   const api = Trio.api;
   const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const listOf = value => Array.isArray(value) ? value : [];
+  const browserIdentity = () => state.meta?.operator || state.operator || {};
+  const ownsHub = () => ['loopback','tailscale'].includes(browserIdentity().source);
+  const canCreateChannels = () => ownsHub() || browserIdentity().can_create_channels === true;
+
   // state.agents is a flat array once 30-agents.js refresh() has run, but its
   // INITIAL store shape (01-store.js) is { list, selected, loading } — an object.
   // On cold boot, renderFacePile/detailMember run before that refresh, so read
@@ -706,7 +710,7 @@
       navItem('Home', 'home', () => navigateView('home'), '', state.view === 'home'),
       navItem('Attention', 'attention', () => navigateView('attention'), String(selectors.attention() || ''), state.view === 'attention'),
       navItem('Messages', 'messages', () => navigateView('messages'), String(selectors.unreadDms() + selectors.unreadMentions() || ''), state.view === 'messages'),
-      itemWithAdd(navItem('Agent roster', 'roster', () => navigateView('roster'), '', state.view === 'roster'), () => Trio.agents?.create?.(), 'Create agent'),
+      ownsHub() ? itemWithAdd(navItem('Agent roster', 'roster', () => navigateView('roster'), '', state.view === 'roster'), () => Trio.agents?.create?.(), 'Spawn on hub') : navItem('Agent roster', 'roster', () => navigateView('roster'), '', state.view === 'roster'),
       navItem('Tasks', 'tasks', () => navigateView('tasks'), '', state.view === 'tasks'),
       // Preferences moved off the rail into the account menu (sidebar name/avatar).
     ];
@@ -729,15 +733,15 @@
       if (state.staleOpen?.dms) nav.staleDms.forEach(d => dmItems.push(dmItem(d)));
     }
     rail.append(section('Workspace', workspaceItems));
-    rail.append(section('Channels', channelItems, true, createChannel, 'Create channel',
-                        'No channels yet — use + to make one.'));
+    rail.append(section('Channels', channelItems, canCreateChannels(), createChannel, 'Create channel',
+                        canCreateChannels() ? 'No channels yet — use + to make one.' : 'Ask the owner to add you to a channel.'));
     rail.append(section('Direct Messages', dmItems, true, openDmDialog, 'Start direct message',
                         'No direct messages yet.'));
     rail.append(section('Agent-to-Agent', nav.agentAudit.map(d => dmItem(d, true)), false, createChannel, 'Create channel',
                         'No agent-to-agent threads yet.'));
     const operator = state.operator || state.meta?.operator || {}; const opName = operator.name || 'Workspace'; const opAvatar = $('operator-avatar'); const opLabel = $('operator-name'); const opRole = $('operator-role');
     if (opAvatar) { opAvatar.textContent = initials(opName); opAvatar.className = 'operator-avatar tone-' + avatarTone(opName); }
-    if (opLabel) opLabel.textContent = opName; if (opRole) opRole.textContent = operator.name ? 'Workspace owner' : 'Live agent coordination';
+    if (opLabel) opLabel.textContent = opName; if (opRole) opRole.textContent = ownsHub() ? 'Workspace owner' : canCreateChannels() ? 'Member admin' : operator.source === 'member' ? 'Member' : 'Guest';
   }
   function updateTopbar(title, subtitle) {
     Trio.setChannelTitle(title);
@@ -828,7 +832,7 @@
         b.type = 'button'; b.className = 'btn primary';
         b.textContent = 'Create your first channel';
         b.addEventListener('click', createChannel);
-        p.append(b);
+        if (canCreateChannels()) p.append(b); else p.textContent = 'Ask the owner to add you to a channel.';
         recentList.append(p);
       }
       for (const c of chans) { const b = document.createElement('button'); b.type = 'button'; b.className = 'home-channel'; b.innerHTML = `<strong>#${esc(c.code)}</strong><span>${esc(c.topic || 'No topic')}</span><small>${esc(String(c.members?.length || 0))} members${c.unread ? ` · ${esc(String(c.unread))} unread` : ''}</small>`; b.addEventListener('click', () => openChannel(c.code)); recentList.append(b); }
@@ -1364,6 +1368,7 @@
     renderRail();
   }
   function createChannel(prefill = {}) {
+    if (!canCreateChannels()) { toast('Ask the owner to create a channel or grant member-admin permission.'); return; }
     // The create modal is a method="dialog" form: it closes the instant Save
     // is clicked, and this submit handler runs afterward. A failed create
     // would therefore vanish silently ("modal closed, no channel"). To make
@@ -1920,7 +1925,19 @@
     return !!member && member.kind !== 'human' && member.id !== operatorId();
   }
   function controlAgent(member) {
-    return member?.id && member.kind !== 'human' && !String(member.id).startsWith('_op_') && member.id !== operatorId();
+    return ownsHub() && member?.id && member.kind !== 'human' && !String(member.id).startsWith('_op_') && member.id !== operatorId();
+  }
+  async function editMemberAuthority(id) {
+    if (!ownsHub()) return;
+    try {
+      const current = await api.get('/api/member-authority?member_id=' + encodeURIComponent(id));
+      modal('Channel permissions', `<p>Member-admin permits channel creation. Host processes and permission grants remain owner-only.</p><label><input type="checkbox" name="member_admin" ${current.member_admin ? 'checked' : ''}> Member-admin</label>`, async node => {
+        try {
+          await api.post('/api/member-authority', {member_id:id, member_admin:!!node.querySelector('[name="member_admin"]').checked});
+          toast('Channel permission saved');
+        } catch (error) { toast(error.message || 'Could not save permission'); }
+      });
+    } catch (error) { toast(error.message || 'Could not load permission'); }
   }
   function bindDrawerControls() {
     const list = $('channel-drawer-members');
@@ -1948,6 +1965,8 @@
     const hint = toolSuffix(member, status).replace(/^ — /, '');
     const tool = hint ? `<div class="channel-member-tool">${esc(hint)}</div>` : '';
     const removable = editMembersMode && memberIsRemovable(member);
+    const permissionBtn = ownsHub() && member.id !== operatorId()
+      ? `<button type="button" class="btn ghost" data-member-authority="${esc(member.id)}">Channel permissions</button>` : '';
     const removeBtn = removable
       ? `<button type="button" class="icon-btn danger member-remove" data-remove-member="${esc(member.id)}" data-member-name="${esc(name)}" aria-label="Remove ${esc(name)} from channel" title="Remove from channel">${navIcon('x')}</button>`
       : '';
@@ -1957,7 +1976,7 @@
     const opId = state.operator?.id || state.meta?.operator?.id;
     const isAgent = member.kind !== 'human' && member.id !== opId;
     const subagents = isAgent ? `<div class="channel-member-subagents" data-subagents-for="${esc(member.id)}"></div>` : '';
-    return `<div ${controlAgent(member) ? `data-control-member="${esc(member.id)}" ` : ''}class="channel-member${status === 'archived' ? ' is-archived' : ''}">${avatarFor(member, status)}<div class="channel-member-copy"><div class="channel-member-name">${esc(name)}</div><div class="channel-member-status">${esc(statusText)}</div>${delivery}${tool}${subagents}</div>${contextBadge(member)}${channelStatusChip(status)}${removeBtn}</div>`;
+    return `<div ${controlAgent(member) ? `data-control-member="${esc(member.id)}" ` : ''}class="channel-member${status === 'archived' ? ' is-archived' : ''}">${avatarFor(member, status)}<div class="channel-member-copy"><div class="channel-member-name">${esc(name)}</div><div class="channel-member-status">${esc(statusText)}</div>${delivery}${tool}${subagents}</div>${contextBadge(member)}${channelStatusChip(status)}${removeBtn}${permissionBtn}</div>`;
   }
   // Subagent list under an agent's drawer row. "Recent spawns" — tool_events
   // records Task/Agent starts only (no completion), so this is honestly labelled
@@ -2183,13 +2202,13 @@
     const title = dm ? (dm.name || state.dmKey) : '#' + (state.channel || 'nth');
     // Membership editing applies to real channels only (not DMs) and not when
     // archived/read-only. Always start with edit mode off on a fresh open.
-    const canEditMembers = !dm && !archived;
+    const canEditMembers = ownsHub() && !dm && !archived;
     editMembersMode = false;
     const { members, count: memberCount } = drawerMembers();
     const tasks = selectors.taskItems().filter(task => !task.channel || task.channel === state.channel).filter(task => task.status !== 'done' && task.status !== 'cancelled');
     const connection = $('h-conn')?.querySelector('.conn-label')?.textContent || (archived ? 'Archived' : 'Live');
     $('channel-drawer-title').textContent = title;
-    body.innerHTML = `<section class="channel-drawer-section"><h3>Topic</h3><div class="channel-drawer-topic">${esc(channel?.topic || (dm ? 'Private conversation' : 'No topic'))}</div></section><section class="channel-drawer-section channel-members-section"><h3><span id="channel-drawer-members-heading">Members · ${memberCount}</span>${canEditMembers ? `<button type="button" class="icon-btn edit-members-toggle" id="edit-members-toggle" aria-label="Edit members" aria-pressed="false" title="Edit members">${navIcon('edit')}</button>` : ''}</h3><div id="channel-drawer-members">${members.length ? members.map(detailMember).join('') : '<div class="channel-drawer-empty">Waiting for the current roster…</div>'}</div>${canEditMembers ? `<button type="button" class="btn ghost add-member-btn" id="add-member-btn" hidden>${navIcon('plus')}<span>Add member</span></button>` : ''}</section><section class="channel-drawer-section"><h3>Tasks · ${tasks.length}</h3>${tasks.length ? tasks.slice(0, 4).map(detailTask).join('') : '<div class="channel-drawer-empty">No open tasks.</div>'}${tasks.length > 4 ? '<div class="channel-drawer-empty">+' + (tasks.length - 4) + ' more tasks</div>' : ''}<button type="button" class="btn ghost" id="open-channel-tasks">Open tasks view</button></section><section class="channel-drawer-section"><h3>Activity</h3><div class="kv"><span class="k">Messages loaded</span><span class="v" id="channel-drawer-msgcount" title="Capped at the most recent 500 — not literally every message in this conversation's history">${messageCountLabel()}</span></div><div class="kv"><span class="k">${dm ? 'Conversation size' : 'Channel size'}</span><span class="v" id="channel-drawer-size" title="Rough estimate of this ${dm ? 'conversation' : 'channel'}'s message-history size — a different measurement than an individual agent's own context-fullness badge above">…</span></div><div class="kv"><span class="k">Connection</span><span class="v live">${esc(connection)}</span></div></section>${!dm && state.channel ? '<section class="channel-drawer-section push-section" id="channel-drawer-push"></section>' : ''}<section class="channel-drawer-section"><h3>${dm ? 'Conversation' : 'Channel'}</h3><div class="channel-drawer-actions"><button type="button" class="btn" id="edit-channel-objective">${dm ? 'Conversation settings' : 'Edit objective'}</button>${state.channel ? `<button type="button" class="btn danger" id="archive-channel-drawer">${dm ? (archived ? 'Restore conversation' : 'Archive conversation') : (archived ? 'Restore channel' : 'Archive channel')}</button>` : ''}</div></section>`;
+    body.innerHTML = `<section class="channel-drawer-section"><h3>Topic</h3><div class="channel-drawer-topic">${esc(channel?.topic || (dm ? 'Private conversation' : 'No topic'))}</div></section><section class="channel-drawer-section channel-members-section"><h3><span id="channel-drawer-members-heading">Members · ${memberCount}</span>${canEditMembers ? `<button type="button" class="icon-btn edit-members-toggle" id="edit-members-toggle" aria-label="Edit members" aria-pressed="false" title="Edit members">${navIcon('edit')}</button>` : ''}</h3><div id="channel-drawer-members">${members.length ? members.map(detailMember).join('') : '<div class="channel-drawer-empty">Waiting for the current roster…</div>'}</div>${canEditMembers ? `<button type="button" class="btn ghost add-member-btn" id="add-member-btn" hidden>${navIcon('plus')}<span>Add member</span></button>` : ''}</section><section class="channel-drawer-section"><h3>Tasks · ${tasks.length}</h3>${tasks.length ? tasks.slice(0, 4).map(detailTask).join('') : '<div class="channel-drawer-empty">No open tasks.</div>'}${tasks.length > 4 ? '<div class="channel-drawer-empty">+' + (tasks.length - 4) + ' more tasks</div>' : ''}<button type="button" class="btn ghost" id="open-channel-tasks">Open tasks view</button></section><section class="channel-drawer-section"><h3>Activity</h3><div class="kv"><span class="k">Messages loaded</span><span class="v" id="channel-drawer-msgcount" title="Capped at the most recent 500 — not literally every message in this conversation's history">${messageCountLabel()}</span></div><div class="kv"><span class="k">${dm ? 'Conversation size' : 'Channel size'}</span><span class="v" id="channel-drawer-size" title="Rough estimate of this ${dm ? 'conversation' : 'channel'}'s message-history size — a different measurement than an individual agent's own context-fullness badge above">…</span></div><div class="kv"><span class="k">Connection</span><span class="v live">${esc(connection)}</span></div></section>${!dm && state.channel ? '<section class="channel-drawer-section push-section" id="channel-drawer-push"></section>' : ''}<section class="channel-drawer-section"><h3>${dm ? 'Conversation' : 'Channel'}</h3><div class="channel-drawer-actions">${ownsHub() || dm ? `<button type="button" class="btn" id="edit-channel-objective">${dm ? 'Conversation settings' : 'Edit objective'}</button>` : ''}${state.channel && (ownsHub() || dm) ? `<button type="button" class="btn danger" id="archive-channel-drawer">${dm ? (archived ? 'Restore conversation' : 'Archive conversation') : (archived ? 'Restore channel' : 'Archive channel')}</button>` : ''}</div></section>`;
     bindDrawerControls();
     $('app')?.classList.add('channel-details-open'); drawer.classList.add('open'); drawer.setAttribute('aria-hidden', 'false'); $('details-btn')?.classList.add('menu-active'); $('face-pile')?.setAttribute('aria-expanded', 'true');
     if (!refresh) $('channel-drawer-close')?.focus();
@@ -2198,6 +2217,8 @@
     $('add-member-btn')?.addEventListener('click', openAddMember);
     // Delegated so it survives refreshDrawerMembers() repaints of the list.
     $('channel-drawer-members')?.addEventListener('click', event => {
+      const grant = event.target.closest('[data-member-authority]');
+      if (grant) { editMemberAuthority(grant.getAttribute('data-member-authority')); return; }
       const btn = event.target.closest('[data-remove-member]');
       if (!btn) return;
       requestRemoveMember(btn.getAttribute('data-remove-member'), btn.getAttribute('data-member-name') || 'member');

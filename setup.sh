@@ -56,7 +56,7 @@ if [ "${1:-}" = "hub-service" ] || [ "${1:-}" = "upgrade" ]; then
     echo "Deploying server files: repo -> $HUB_DIR (backups: *.bak-$STAMP)"
     for f in nth_server.py nth_monitor.py nth_spoke_monitor.py nth_console.py \
              nth_dashboard.py nth_web.py nth_stt_worker.py quartet_server.py \
-             nth_constants.py nth_doctor.py codex_context_publisher.py \
+             nth_constants.py nth_authority.py nth_doctor.py codex_context_publisher.py \
              nth_supervisor.py nth_request_log.py \
              nth_agent_manager.py \
              nth_terminal.py \
@@ -425,6 +425,7 @@ cp "$SCRIPT_DIR/server/nth_web.py" "$SERVER_DIR/nth_web.py"
 cp "$SCRIPT_DIR/server/nth_stt_worker.py" "$SERVER_DIR/nth_stt_worker.py"
 cp "$SCRIPT_DIR/server/quartet_server.py" "$SERVER_DIR/quartet_server.py"
 cp "$SCRIPT_DIR/server/nth_constants.py" "$SERVER_DIR/nth_constants.py"
+cp "$SCRIPT_DIR/server/nth_authority.py" "$SERVER_DIR/nth_authority.py"
 # The agent supervisor and its per-request token log. nth_web imports both at
 # module scope, so omitting them stops the dashboard importing at all — and
 # only on an installed copy, never from the repo, where every sibling is

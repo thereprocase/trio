@@ -251,6 +251,7 @@ function routeFor(search) {
 // disappear ("modal closed, no channel"). createChannel now surfaces the
 // error and reopens the form pre-filled so the operator can retry.
 (function testCreateChannel() {
+  base.Trio.state.operator = {id:'owner', source:'tailscale'};
   // FormData polyfill: the vm context has none. Backed by a fake form whose
   // fields the test sets to mimic operator input (incl. stray whitespace/case).
   base.FormData = class {

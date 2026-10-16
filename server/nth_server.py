@@ -38,6 +38,7 @@ from nth_constants import (SLEEPING_KEYWORDS, NTH_VERSION, project_context,
 from mcp.server.fastmcp import FastMCP, Image
 from typing_extensions import TypedDict
 import nth_media as nmedia
+import nth_authority as authority
 
 DB_DIR = Path(os.environ.get("NTH_HOME", str(Path.home() / ".claude" / "nth")))
 DB_PATH = DB_DIR / "nth.db"
@@ -57,6 +58,9 @@ ATTACH_DIR = DB_DIR / "attachments"
 # imports this module and serves remote callers, where a path would name a
 # file on the hub; it keeps this False and accepts bytes only.
 _READS_CALLER_PATHS = False
+# Set only by the remote hub entry point, never by model-supplied arguments.
+# Local stdio rooms retain the local operator's existing bootstrap behavior.
+_OWNER_APPROVED_CHANNELS = False
 
 # One nth_server.py subprocess is spawned per managed agent (each `claude`
 # invocation gets its own --mcp-config stdio child), so this process only ever
@@ -1368,7 +1372,11 @@ def nth_connect(
     resume_member_id: str = "",
     reclaim_secret: str = "",
 ) -> str:
-    """Join an nth channel. Creates the channel if it doesn't exist.
+    """Join an nth channel. On remote hubs, new channels require owner approval.
+
+    Ask the owner to create the room, or to grant member-admin channel-creation
+    permission. A delegated agent must prove its existing identity with
+    resume_member_id and reclaim_secret. An ordinary join never grants admin.
 
     nth channels support any number of participants.
     All participants see all messages. There are no turns — anyone
@@ -1454,6 +1462,13 @@ def nth_connect(
     member_id = resume_member_id.strip() if reclaiming else ""
     response_reclaim_secret = ""
     now = now_iso()
+    origin_login = None
+    if _OWNER_APPROVED_CHANNELS:
+        try:
+            request = mcp.get_context().request_context.request
+            origin_login = authority.verified_peer_login(request.client.host)
+        except (AttributeError, LookupError, ValueError, RuntimeError):
+            pass  # Local/older transports have no verifiable origin.
     db = get_db()
 
     if reclaiming:
@@ -1493,6 +1508,8 @@ def nth_connect(
     reclaimed_existing = False
 
     try:
+        if _OWNER_APPROVED_CHANNELS:
+            db.execute('BEGIN IMMEDIATE')
         _reap_sessions(db)
         existing = _get_channel(db, channel)
 
@@ -1588,6 +1605,13 @@ def nth_connect(
             db.commit()
             action = "reclaimed" if (reclaiming and reclaimed_existing) else "joined"
         else:
+            if _OWNER_APPROVED_CHANNELS and not (
+                    reclaiming and authority.is_member_admin(db, member_id)):
+                return json.dumps({
+                    "error": "Owner approval required to create a channel. Ask the "
+                             "owner to create it or grant member-admin permission; "
+                             "a delegated agent must reclaim its existing identity.",
+                    "code": "owner_approval_required", "channel": channel})
             # Create new channel
             db.execute(
                 "INSERT INTO channels (code, status, created_at, updated_at) "
@@ -1722,6 +1746,13 @@ def nth_connect(
             (latest_id, session_token),
         )
         db.commit()
+
+        if origin_login:
+            try:
+                authority.remember_origin(db, member_id, origin_login, now)
+                db.commit()
+            except sqlite3.Error:
+                db.rollback()  # Optional provenance must never lose a minted token.
 
         # PAST THE POINT OF NO RETURN. The commit above made the displacement
         # durable: the incumbent's token is dead and its monitor is on its way

@@ -126,6 +126,8 @@ def _install_thread_offload_patch():
 _install_thread_offload_patch()
 
 from nth_server import mcp
+import nth_server
+nth_server._OWNER_APPROVED_CHANNELS = True
 
 
 def _register_health_routes():

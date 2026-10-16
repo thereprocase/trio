@@ -12,6 +12,7 @@
   // models that do not exist — the picker showed two stale Claude ids and two
   // stale Codex ones, and nothing told the operator the list was invented.
   state.agentModels = state.agentModels || {};
+  state.discoveryErrors = {};
   state.discoveryLoading = false;
   let discoveryPromise = null;
   const pendingAgentActions = new Set();
@@ -351,18 +352,45 @@
     dialog.append(header,status,quotas,screen,text,pauseLabel,enters,buttons,refresh,close,note,history);
     dialog.addEventListener('close', () => { ++refreshVersion; dialog.remove(); }); document.body.append(dialog); dialog.showModal(); await refreshTerminal();
   }
+  function connectionHelp() {
+    const channel = state.channel || (state.channels || [])[0]?.code || 'CHANNEL-CODE';
+    return `<details class="agent-connection-help"><summary>Connect your own agent</summary>
+      <p>Run Codex or Claude on your computer, signed into your own account. Keep that session running and connect its computer to the hub's Tailscale network.</p>
+      <ol><li>Install <a href="https://github.com/thereprocase/trio" target="_blank" rel="noopener">Trio / Quartet</a> using its setup instructions.</li>
+      <li>Give your agent this hub's address (from the browser address bar) and ask it to configure the Quartet MCP endpoint on port 8000 at <code>/sse</code>.</li>
+      <li>Ask it: <q>Join existing channel <code>${esc(channel)}</code> as my helper. Save the returned identity and reclaim secret privately, enable listening, check delivery status, and acknowledge a test mention.</q></li>
+      <li>Approve any required hook trust prompt. A successful join alone does not verify background delivery.</li></ol>
+      <p>The roster shows agents in your joined channels and agents whose connection is verified as coming from your Tailscale account. Older connections appear through shared channels until their next authenticated connection.</p>
+      <p><b>Spawn on hub</b> is an owner-only action: it launches a fresh process on the hub using the hub's runtime account. Connecting your existing agent uses your own session and account.</p>
+      <p>To create a new channel, ask the owner to create it or grant your identity <b>member-admin</b> permission. That permission covers channel creation, not process management or granting permissions.</p></details>`;
+  }
+  function renderReadOnly(panel, agents) {
+    panel.innerHTML = '<h2>Agent roster</h2><p>Agents in your channels and from your verified Tailscale account.</p>' + connectionHelp();
+    const grid = document.createElement('div'); grid.className = 'roster-grid';
+    for (const agent of agents || []) {
+      const card = document.createElement('article'); card.className = 'agent-card';
+      card.innerHTML = `<b>${esc(agent.name || agent.id)}</b><p>${esc(agent.model || '')}</p><p>${esc(agent.status_text || '')}</p><small>${esc((agent.channels || []).join(', '))}${agent.from_your_tailnet ? ' · Your Tailscale account' : ''}</small>`;
+      grid.append(card);
+    }
+    if (!(agents || []).length) grid.textContent = state.agentsError ? 'Could not load agents. Refresh to try again.' : 'No connected agents visible yet. Use the connection instructions above.';
+    panel.append(grid);
+  }
   function renderPage(panel) {
     const previousSearch = panel.querySelector('.agent-page-search');
     const restoreSearch = previousSearch && document.activeElement === previousSearch;
     const caret = restoreSearch ? [previousSearch.selectionStart, previousSearch.selectionEnd, previousSearch.selectionDirection] : null;
     panel.replaceChildren();
+    if (!isOwner()) {
+      renderReadOnly(panel, Trio.store.get('agents.list') || []);
+      return;
+    }
     Promise.resolve().then(() => { if (panel.isConnected) terminalSection(panel); });
     const hero = document.createElement('div'); hero.className = 'view-hero'; hero.innerHTML = '<h2>Agent roster</h2><p>Everyone working in this workspace</p>';
     const toolbar = document.createElement('div'); toolbar.className = 'roster-toolbar';
     const segment = document.createElement('div'); segment.className = 'seg';
     [['all','All'],['active','Active'],['working','Working'],['resting','Resting'],['needs-attention','Needs attention'],['archived','Archived']].forEach(([filter,label]) => { const b = document.createElement('button'); b.type = 'button'; b.textContent = label; b.className = state.agentFilter === filter ? 'on' : ''; b.addEventListener('click', () => { const crossing = (state.agentFilter === 'archived') !== (filter === 'archived'); state.agentFilter = filter; if (crossing) refresh(); else renderPage(panel); }); segment.append(b); });
     const search = document.createElement('input'); search.className = 'agent-page-search'; search.placeholder = 'Search agents…'; search.value = state.agentsSearch || ''; search.setAttribute('aria-label', 'Search agents'); search.addEventListener('input', () => { state.agentsSearch = search.value; renderPage(panel); });
-    const createButton = document.createElement('button'); createButton.type = 'button'; createButton.className = 'btn primary'; createButton.textContent = 'New agent'; createButton.addEventListener('click', create);
+    const createButton = document.createElement('button'); createButton.type = 'button'; createButton.className = 'btn primary'; createButton.textContent = 'Spawn on hub'; createButton.title = 'Launch a fresh process using the hub runtime account'; createButton.addEventListener('click', create);
     toolbar.append(segment, search, createButton);
     const grid = document.createElement('div'); grid.className = 'roster-grid';
     let list = (Trio.store.get('agents.list') || state.agents || []).map(viewModel).filter(matches);
@@ -588,12 +616,17 @@
   }
   function render(agents = Trio.store.get('agents.list')) {
     const n = host();
+    if (!isOwner()) {
+      renderReadOnly(n, agents);
+      const close = document.createElement('button'); close.textContent = 'Close'; close.onclick = () => n.hidden = true; n.append(close);
+      return;
+    }
     let list = (agents || []).map(a => viewModel(a)).filter(matches);
     if (state.agentsSearch) {
       const q = state.agentsSearch.toLowerCase();
       list = list.filter(vm => (vm.name + ' ' + vm.model + ' ' + vm.provider).toLowerCase().includes(q));
     }
-    n.innerHTML = `<button class="modal-close" aria-label="Close">×</button><h2>Agent roster</h2><div class="agent-filters">${['all','active','working','resting','needs-attention','archived'].map(f => `<button data-filter="${f}" class="${state.agentFilter === f ? 'active' : ''}">${f.replace(/-/g,' ')}</button>`).join('')}<button type="button" class="agent-new">New agent</button></div><input class="agent-search" placeholder="Search agents…" value="${esc(state.agentsSearch)}"><div class="agent-list">${list.length ? '' : '<p>No agents match.</p>'}</div>`;
+    n.innerHTML = `<button class="modal-close" aria-label="Close">×</button><h2>Agent roster</h2><div class="agent-filters">${['all','active','working','resting','needs-attention','archived'].map(f => `<button data-filter="${f}" class="${state.agentFilter === f ? 'active' : ''}">${f.replace(/-/g,' ')}</button>`).join('')}<button type="button" class="agent-new">Spawn on hub</button></div><input class="agent-search" placeholder="Search agents…" value="${esc(state.agentsSearch)}"><div class="agent-list">${list.length ? '' : '<p>No agents match.</p>'}</div>`;
     n.querySelector('.modal-close').onclick = () => n.hidden = true;
     n.querySelector('.agent-new').onclick = () => create();
     const listNode = n.querySelector('.agent-list');
@@ -1016,6 +1049,7 @@
     return `<select name="permission_profile">${PERMISSION_PROFILES.map(([value, label]) => `<option value="${value}"${value === selected ? ' selected' : ''}>${label}</option>`).join('')}</select>`;
   }
   async function loadDiscovery() {
+    if (!isOwner()) return {};
     if (discoveryPromise) return discoveryPromise;
     discoveryPromise = (async () => {
       state.discoveryLoading = true;
@@ -1023,14 +1057,24 @@
         const health = await Trio.api.get('/api/health').catch(() => ({}));
         const providers = Array.isArray(health.providers) ? health.providers : Object.keys(health.runtimes || {});
         if (providers.length) state.providers = [...new Set(providers.map(p => String(p).toLowerCase()))];
+        const errors = {};
         const discovered = await Promise.all(state.providers.map(async provider => {
-          const data = await Trio.api.get(`/api/agent-models?provider=${encodeURIComponent(provider)}`).catch(() => null);
-          return data && Array.isArray(data.models) ? [provider, normalizeModels(data.models)] : null;
+          try {
+            const data = await Trio.api.get(`/api/agent-models?provider=${encodeURIComponent(provider)}`);
+            const models = normalizeModels(data?.models);
+            if (!models.length) throw new Error(data?.error || 'No models were returned.');
+            return [provider, models];
+          } catch (error) {
+            errors[provider] = String(error.message || 'Model discovery failed.').slice(0, 300);
+            return [provider, []];
+          }
         }));
-        const nextModels = { ...state.agentModels };
-        discovered.filter(Boolean).forEach(([provider, models]) => { nextModels[provider] = models; });
-        state.agentModels = nextModels;
-      } catch (e) { console.warn('discovery failed', e); }
+        state.agentModels = Object.fromEntries(discovered);
+        state.discoveryErrors = errors;
+      } catch (e) {
+        state.agentModels = {};
+        state.discoveryErrors = {hub: String(e.message || 'Model discovery failed.').slice(0, 300)};
+      }
       finally {
         state.discoveryLoading = false;
         discoveryPromise = null;
@@ -1040,8 +1084,12 @@
     return discoveryPromise;
   }
   async function refresh() {
+    if (!isOwner()) { state.agentModels = {}; state.discoveryErrors = {}; }
+    if (state.operator?.source === 'pending' || !state.operator?.source) {
+      state.agents = []; Trio.store.set('agents.list', []); render([]); return;
+    }
     try {
-      const archived = state.agentFilter === 'archived';
+      const archived = isOwner() && state.agentFilter === 'archived';
       const data = await Trio.api.get('/api/agents' + (archived ? '?archived=1' : ''));
       state.agents = data.agents || [];
       Trio.store.set('agents.list', data.agents || []);
@@ -1117,10 +1165,21 @@
   function mount() { init(); }
   function unmount() { compactionPolls.forEach(timer => clearTimeout(timer)); compactionPolls.clear(); }
   async function create() {
+    if (!isOwner()) return;
     await loadDiscovery();
+    if (!isOwner()) return;
     const ordered = orderedProviders(state.providers);
-    const defaultProvider = ordered[0] || FIRST_RUN.provider;
-    const providers = ordered.map(p => `<option value="${esc(p)}"${p === defaultProvider ? ' selected' : ''}>${esc(providerLabel(p))}</option>`).join('');
+    const discoveryNotice = Object.entries(state.discoveryErrors).map(([provider, error]) => `<p role="status">${esc(providerLabel(provider))}: ${esc(error)}</p>`).join('');
+    if (!ordered.some(p => normalizeModels(state.agentModels[p]).length)) {
+      Trio.ui.modal('Models unavailable', discoveryNotice + '<p>Model discovery did not return any usable models. Check the hub runtime and sign-in, then try again.</p><button type="button" data-retry-models>Retry model discovery</button>', undefined, { submit: false, cancelLabel: 'Close' });
+      document.getElementById('trio-control-modal')?.querySelector('[data-retry-models]')?.addEventListener('click', create);
+      return;
+    }
+    const defaultProvider = ordered.find(p => normalizeModels(state.agentModels[p]).length);
+    const providers = ordered.map(p => {
+      const available = normalizeModels(state.agentModels[p]).length > 0;
+      return `<option value="${esc(p)}"${p === defaultProvider ? ' selected' : ''}${available ? '' : ' disabled'}>${esc(providerLabel(p))}${available ? '' : ' — unavailable'}</option>`;
+    }).join('');
     const defaultModels = normalizeModels(state.agentModels[defaultProvider]);
     // Prefer the first-run model when the hub offers it, so a fresh operator
     // lands on Opus rather than on whatever happens to sort first.
@@ -1135,8 +1194,8 @@
       : '';
     let channelApi = null;
     const effortControl = `<div id="effort-control">${effortSlider(effortsForModel(defaultProvider, defaultModelId), initialEffort, { modelDefault: modelDefaultEffort(defaultProvider, defaultModelId) })}</div>`;
-    const html = `<label class="field">Name <span class="hint">optional — assigned automatically if blank</span><input name="name" pattern="[A-Za-z0-9_]{1,32}" placeholder="Leave blank for a random character name"></label><label class="field">Provider <select name="provider">${providers}</select></label><label class="field">Model <select name="model">${models}</select></label>${effortControl}<label class="field">Working directory <input name="cwd" placeholder="/path/to/project"></label><label class="field">Permission profile ${permissionOptions()}</label>${channelsField}`;
-    Trio.ui.modal('Create agent', html, async node => {
+    const html = discoveryNotice + `<label class="field">Name <span class="hint">optional — assigned automatically if blank</span><input name="name" pattern="[A-Za-z0-9_]{1,32}" placeholder="Leave blank for a random character name"></label><label class="field">Provider <select name="provider">${providers}</select></label><label class="field">Model <select name="model">${models}</select></label>${effortControl}<label class="field">Working directory <input name="cwd" placeholder="/path/to/project"></label><label class="field">Permission profile ${permissionOptions()}</label>${channelsField}`;
+    Trio.ui.modal('Spawn on hub', html, async node => {
       const f = new FormData(node.querySelector('form'));
       const name = (f.get('name') || '').trim();
       const provider = f.get('provider');

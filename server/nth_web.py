@@ -78,6 +78,7 @@ import nth_usage as nusage
 import nth_conversation as nconv
 import nth_webpush as npush
 import nth_media as nmedia
+import nth_authority as authority
 # The attachment rules are shared with nth_server (agents attach too) and the
 # Quartet frontend, so they live in nth_media.
 from nth_media import (ALLOWED_ATTACH_MIME, ALLOWED_IMAGE_MIME, attachment_filename,
@@ -4708,6 +4709,8 @@ class NthWebHandler(BaseHTTPRequestHandler):
             self._handle_terminals()
         elif path == "/api/agents":
             self._handle_agents_list(parsed)
+        elif path == "/api/member-authority":
+            self._handle_member_authority(parsed)
         elif path == "/api/agent-models":
             self._handle_agent_models(parsed)
         elif path == "/api/approvals":
@@ -4760,6 +4763,7 @@ class NthWebHandler(BaseHTTPRequestHandler):
                     "name": ident.display_name,
                     "source": ident.source,
                     "pending": ident.source == IDENTITY_SOURCE_PENDING,
+                    "can_create_channels": self._can_create_channels(ident),
                 },
                 "server_host": socket.gethostname(),
             }, set_cookie_token=token if is_new else None)
@@ -4902,6 +4906,8 @@ class NthWebHandler(BaseHTTPRequestHandler):
             self._handle_channel_pin(parsed, update=True)
         elif parsed.path == "/api/channels":
             self._handle_channel_create()
+        elif parsed.path == "/api/member-authority":
+            self._handle_member_authority(parsed, update=True)
         elif parsed.path == "/api/archives":
             self._handle_archive_update()
         elif parsed.path == "/api/prune":
@@ -5767,7 +5773,11 @@ class NthWebHandler(BaseHTTPRequestHandler):
         """Roster of every managed (and external) agent + placements + live
         process state. Operator-only. Archived agents are excluded by default;
         pass ?archived=1 to list only archived agents."""
-        if self._require_operator() is None or not self._require_agent_control():
+        _token, ident, _new = self._resolve_identity()
+        if ident.source not in LOCAL_PATH_ALLOWED_SOURCES:
+            self._handle_shared_agents(ident)
+            return
+        if not self._require_agent_control():
             return
         archived = (parse_qs(parsed.query).get("archived", ["0"])[0] == "1")
         sup = get_supervisor()
@@ -5848,6 +5858,57 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 except sqlite3.Error:
                     pass
         self._json({"ok": True, "count": len(agents), "agents": agents})
+
+    def _handle_shared_agents(self, ident) -> None:
+        """Public roster fields from active channels the browser has joined.
+
+        Never consult the supervisor or expose host/session/other-placement
+        metadata. A guest's display name cannot select another reader ID.
+        """
+        if ident.source == IDENTITY_SOURCE_PENDING:
+            self._error(403, "pick a name before viewing channel agents")
+            return
+        db = sqlite3.connect(str(self.db_path), timeout=5)
+        db.row_factory = sqlite3.Row
+        try:
+            rows = db.execute("""SELECT m.id,m.name,m.model,m.status_text,
+                m.last_seen,m.channel,a.model AS global_model,a.avatar_name
+                FROM members m JOIN members reader ON reader.channel=m.channel
+                JOIN channels c ON c.code=m.channel LEFT JOIN agents a ON a.id=m.id
+                WHERE reader.id=? AND reader.active=1 AND m.active=1
+                AND m.kind='agent' AND c.status='active' AND c.archived_at IS NULL
+                AND c.code!=? ORDER BY m.last_seen DESC,m.channel""",
+                (ident.member_id, AGENT_INBOX_CHANNEL)).fetchall()
+            agents = {}
+            verified = ident.source in LOCAL_PATH_ALLOWED_SOURCES or ident.source == IDENTITY_SOURCE_MEMBER or ident.tailnet_verified
+            own = authority.owned_agent_ids(db, ident.login) if verified else set()
+            for row in rows:
+                if row['id'] in agents:
+                    agents[row['id']]['channels'].append(row['channel'])
+                    continue
+                status = member_status(row['last_seen'], row['status_text'] or '')
+                agents[row['id']] = {
+                    'id': row['id'], 'name': row['name'],
+                    'model': row['global_model'] or row['model'] or '',
+                    'status_text': row['status_text'] or '', 'state': status,
+                    'live': status in ('active', 'working', 'idle', 'blocked'),
+                    'busy': status == 'working', 'last_active_at': row['last_seen'],
+                    'avatar_url': avatar_url(row['avatar_name']),
+                    'channels': [row['channel']], 'read_only': True,
+                    'from_your_tailnet': row['id'] in own}
+            # Own verified origins are visible without disclosing their private
+            # room names, status text, host process or filesystem details.
+            for aid in own - agents.keys():
+                row = db.execute("SELECT id,name,model,avatar_name FROM agents WHERE id=?", (aid,)).fetchone()
+                if row:
+                    agents[aid] = {'id': aid, 'name': row['name'],
+                        'model': row['model'] or '', 'channels': [],
+                        'avatar_url': avatar_url(row['avatar_name']),
+                        'read_only': True, 'from_your_tailnet': True}
+            self._json({'ok': True, 'count': len(agents),
+                        'agents': list(agents.values()), 'read_only': True})
+        finally:
+            db.close()
 
     def _handle_agent_models(self, parsed) -> None:
         """Discover provider model and reasoning capabilities without a turn."""
@@ -9064,15 +9125,59 @@ class NthWebHandler(BaseHTTPRequestHandler):
                       "can_edit": ident.source in LOCAL_PATH_ALLOWED_SOURCES and row["status"] == "active" and not row["archived_at"]}
         self._json(result)
 
+    def _can_create_channels(self, ident) -> bool:
+        if ident.source in LOCAL_PATH_ALLOWED_SOURCES:
+            return True
+        if ident.source == IDENTITY_SOURCE_PENDING:
+            return False
+        db = sqlite3.connect(str(self.db_path), timeout=5)
+        try:
+            return authority.is_member_admin(db, ident.member_id)
+        finally:
+            db.close()
+
+    def _handle_member_authority(self, parsed, update=False) -> None:
+        """Only the authenticated owner grants/revokes channel delegation."""
+        ident = self._require_operator('grant member-admin permission')
+        if ident is None:
+            return
+        body = self._read_json_body(max_bytes=2048) if update else None
+        if update and body is None:
+            return
+        target = (body.get('member_id') if update else
+                  parse_qs(parsed.query).get('member_id', [''])[0])
+        if not isinstance(target, str) or not target or len(target) > 128:
+            self._error(400, 'member_id is required')
+            return
+        if update and type(body.get('member_admin')) is not bool:
+            self._error(400, 'member_admin must be a boolean')
+            return
+        db = sqlite3.connect(str(self.db_path), timeout=5)
+        try:
+            if not (db.execute('SELECT 1 FROM agents WHERE id=?', (target,)).fetchone()
+                    or db.execute('SELECT 1 FROM members WHERE id=?', (target,)).fetchone()):
+                self._error(404, 'member not found')
+                return
+            if update:
+                with db:
+                    authority.set_member_admin(db, target, body['member_admin'],
+                                               ident.member_id, now_iso())
+            self._json({'ok': True, 'member_id': target,
+                        'member_admin': authority.is_member_admin(db, target),
+                        'scope': 'channel creation; no host controls or role delegation'})
+        finally:
+            db.close()
+
     def _handle_channel_create(self) -> None:
         """Create a channel from the operator console.
 
-        MCP trio_connect still owns agent-created channels; this is the
-        human-facing equivalent. It creates the channel, places the
+        Owner grants are checked here and by remote MCP channel creation.
+        This is the human-facing path. It creates the channel, places the
         authenticated operator in it, and optionally pins a short objective.
         """
-        ident = self._require_operator()
-        if ident is None:
+        _token, ident, _new = self._resolve_identity()
+        if not self._can_create_channels(ident):
+            self._error(403, 'owner approval required to create channels')
             return
         body = self._read_json_body(max_bytes=4096)
         if body is None:
@@ -9120,6 +9225,12 @@ class NthWebHandler(BaseHTTPRequestHandler):
                     return
                 now = now_iso()
                 with db:
+                    # Serialize delegation/revocation with the creation write.
+                    db.execute('BEGIN IMMEDIATE')
+                    if (ident.source not in LOCAL_PATH_ALLOWED_SOURCES
+                            and not authority.is_member_admin(db, ident.member_id)):
+                        self._error(403, 'owner approval required to create channels')
+                        return
                     db.execute(
                         "INSERT INTO channels (code, status, created_at, "
                         "updated_at) VALUES (?, 'active', ?, ?)",

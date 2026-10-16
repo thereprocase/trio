@@ -298,6 +298,7 @@ check(`without one, the button follows the prompt's verb rather than "Save" `
   const realGet = Trio.api.get;
   const panel = document.createElement('div');
   try {
+    Trio.state.operator = {id:'owner', source:'tailscale'};
     const err409 = Object.assign(new Error('That is not enabled on this server.'),
                                  { status: 409 });
     Trio.api.get = () => Promise.reject(err409);

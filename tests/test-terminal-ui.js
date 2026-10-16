@@ -64,6 +64,8 @@ const {load} = require('./dom-harness');
   pending[2].reject(new Error('obsolete error')); await staleError;
   assert.strictEqual(racePanel.querySelector('pre').textContent,'fresh');
   assert.ok(!racePanel.textContent.includes('obsolete error'));
+  // The roster search is an owner management control.
+  Trio.state.operator={id:'owner',source:'tailscale'};
   // A roster repaint preserves the focused search and its caret.
   Trio.api.get=async()=>({sessions:[]});
   const roster=doc.createElement('div'); doc.body.append(roster); Trio.agents.renderPage(roster);

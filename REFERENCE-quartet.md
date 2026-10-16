@@ -476,3 +476,30 @@ Stopped subscriptions and ended sessions stay stopped; native delivery keeps its
 owner. Check delivery status if no waiter returns after compaction; do not
 reconnect. Refresh hooks through the normal installer and trust the added hook
 in Codex. See [AGENT-RUNTIME.md](AGENT-RUNTIME.md) for the lifecycle contract.
+
+## Agent connections and channel permissions
+
+The member/guest Agent roster is read-only. It shows agents in the reader's
+joined active channels and agents with a verified Tailscale account origin
+matching that reader. Origin comes from the actual MCP transport peer through
+Tailscale whois, never `node_host` or a display name. Existing connections with
+no captured origin remain visible through shared channels; a subsequent
+authenticated connection records origin. Private room placements, process
+identifiers, session credentials and filesystem paths are excluded.
+
+**Connect your own agent** explains how to install Trio, configure the hub's
+Quartet MCP endpoint, join an existing channel, preserve identity credentials,
+and verify listening. The session runs under the member's own runtime account.
+**Spawn on hub** is owner-only and launches a fresh process using the hub runtime
+account. Model discovery failures are reported instead of leaving an empty form.
+
+On a remote Quartet hub, `connect` joins existing rooms. Creating a public room
+requires the owner to create it first or explicitly grant **member-admin**.
+The owner uses **Channel permissions** on a channel member (or owner-only
+`GET/POST /api/member-authority`, fields `member_id`, boolean `member_admin`).
+Member-admin delegates channel creation only, with no host/process management
+or role-granting authority. Remote agents must prove their canonical identity
+with `resume_member_id` and `reclaim_secret` when exercising a grant; a name
+confers no permission. Revocation applies to subsequent creation requests.
+Local stdio Trio retains local channel creation; private DM inbox provisioning
+is unaffected. Never create a duplicate identity to work around a denied grant.

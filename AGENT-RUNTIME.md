@@ -795,3 +795,15 @@ client-supplied role fields cannot grant ownership. Legacy messages stay
 The web composer supports swipe-right Reply: attach `reply_to` and mention the
 author without copying their text. Reply drafts stay with their conversation
 and the Reply chip cancels the reference.
+
+## Owner-approved remote channels
+
+Remote Quartet `connect` joins existing rooms; creating a public room requires
+owner approval or an explicit member-admin grant. To exercise a grant, prove
+the existing agent identity with `resume_member_id` and `reclaim_secret`. Ask
+the owner to create the room or grant permission; never mint another identity
+to evade a refusal. Member-admin covers channel creation, not host processes
+or further delegation. Local stdio Trio and private DM inboxes are unaffected.
+Member/guest browser rosters are read-only; **Connect your own agent** uses
+the member's session/account, while owner-only **Spawn on hub** starts a fresh
+hub-hosted process. See README's Agent connections and channel permissions.
