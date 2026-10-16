@@ -203,6 +203,54 @@ try:
     check("archive: archived rows carry their archived_at",
           all(c["archived_at"] for c in arch["channels"]))
 
+    # Listed humans get a switcher for active memberships, never owner access.
+    hidden, _hidden_agent = connect("Hidden fixture", channel="unjoined")
+    member = web.OperatorIdentity("_op_m_fixture", "Listed reader", web.IDENTITY_SOURCE_MEMBER)
+    db = srv.get_db()
+    try:
+        web.ensure_operator_row(db, CH_A, member)
+        web.ensure_operator_row(db, CH_B, member)
+        private_id = db.execute(
+            "INSERT INTO messages (channel,member_id,member_name,content,recipients,created_at) "
+            "VALUES (?,?,?,?,?,?)",
+            (CH_A, alice, "Alice", "PRIVATE_SWITCHER_SENTINEL", json.dumps([bob]),
+             "2099-01-01T00:00:00+00:00")).lastrowid
+        db.execute("UPDATE channels SET pinned_message_id=? WHERE code=?", (private_id, CH_A))
+        db.execute(
+            "INSERT INTO messages (channel,member_id,member_name,content,created_at,retracted_at) "
+            "VALUES (?,?,?,?,?,?)", (CH_A, alice, "Alice", "RETRACTED_SWITCHER_SENTINEL",
+                                     "2099-01-02T00:00:00+00:00", srv.now_iso()))
+        db.commit()
+    finally:
+        db.close()
+    original_identity = web.NthWebHandler._resolve_identity
+    try:
+        web.NthWebHandler._resolve_identity = lambda self: (None, member, False)
+        status, listed = http(port, "/api/channels")
+        check("member: active joined channel appears", status == 200 and
+              [c["code"] for c in listed["channels"]] == [CH_A])
+        check("member: private previews, private topic and withdrawn text excluded",
+              "SWITCHER_SENTINEL" not in json.dumps(listed) and
+              listed["channels"][0]["topic"] == "" and
+              not listed["channels"][0]["last_at"].startswith("2099"))
+        status, archived_list = http(port, "/api/channels?archived=1")
+        check("member: archives scoped to joined rooms", status == 200 and
+              [c["code"] for c in archived_list["channels"]] == [CH_B])
+        db = srv.get_db()
+        db.execute("UPDATE members SET active=0 WHERE id=? AND channel=?", (member.member_id, CH_A))
+        db.commit()
+        db.close()
+        status, removed = http(port, "/api/channels")
+        check("member: inactive membership grants no listing", status == 200 and not removed["channels"])
+        member.source = web.IDENTITY_SOURCE_GUEST
+        check("member: downgraded identity cannot enumerate joined archive",
+              http(port, "/api/channels?archived=1")[0] == 403)
+    finally:
+        web.NthWebHandler._resolve_identity = original_identity
+    status, owner_list = http(port, "/api/channels")
+    check("owner: workspace enumeration preserved", status == 200 and
+          {CH_A, hidden} <= {c["code"] for c in owner_list["channels"]})
+
     # ── the operator gate, asserted behaviourally ───────────────────────────
     _real = web.NthWebHandler._resolve_identity
     try:

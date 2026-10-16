@@ -6848,10 +6848,9 @@ class NthWebHandler(BaseHTTPRequestHandler):
         member count, last activity, a short preview, and the operator's
         unread and unread-mention counts.
 
-        OPERATOR-ONLY. This enumerates every channel in the shared DB, and the
-        previews quote real message bodies — one of which could be from a room
-        the caller is not in. A guest is confined to the channel it was served
-        and does not get a switcher, so there is nothing here it may see.
+        Owners enumerate the workspace. Listed human members see their active
+        memberships, with public-only previews and topics. Unlisted guests
+        cannot enumerate rooms.
 
         Distinct from /api/landing, which is the FLEET view: node check-ins,
         heartbeat liveness, message totals. That answers "what is running";
@@ -6860,13 +6859,18 @@ class NthWebHandler(BaseHTTPRequestHandler):
         workspace client replaces the landing page.
         """
         _token, ident, _is_new = self._resolve_identity()
-        if not is_all_seeing(ident.member_id):
+        owner = is_all_seeing(ident.member_id)
+        if not owner and ident.source != IDENTITY_SOURCE_MEMBER:
             self._error(403, "only the hub operator can see all channels — "
                              "open the dashboard on the hub machine, or "
                              "over Tailscale")
             return
         archived = (parse_qs(parsed.query).get("archived", ["0"])[0] == "1")
         operator_id = ident.member_id
+        member_filter = ("" if owner else
+                         "AND EXISTS (SELECT 1 FROM members participant "
+                         "WHERE participant.channel=c.code AND participant.id=? "
+                         "AND participant.active=1) ")
         db = None
         try:
             db = sqlite3.connect(str(self.db_path), timeout=5)
@@ -6886,7 +6890,9 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 "  (SELECT COUNT(*) FROM members m "
                 "     WHERE m.channel = c.code AND m.active = 1) AS members, "
                 "  (SELECT MAX(created_at) FROM messages msg "
-                "     WHERE msg.channel = c.code) AS last_at, "
+                "     WHERE msg.channel = c.code AND msg.retracted_at IS NULL "
+                "       AND (msg.recipients IS NULL OR msg.recipients='' "
+                "            OR msg.recipients='[]')) AS last_at, "
                 # UNREAD IS COUNTED OVER THE WHOLE CHANNEL, stopping once
                 # the cap is exceeded — NOT over "the newest 500 messages".
                 #
@@ -6933,10 +6939,10 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 "FROM channels c WHERE c.code != ? "
                 + ("AND c.archived_at IS NOT NULL " if archived
                    else "AND c.archived_at IS NULL ") +
-                "ORDER BY last_at DESC",
+                member_filter + "ORDER BY last_at DESC",
                 (operator_id, operator_id, operator_id, operator_id, operator_id,
                  operator_id, f'"{operator_id}"', operator_id,
-                 AGENT_INBOX_CHANNEL)).fetchall()
+                 AGENT_INBOX_CHANNEL) + (() if owner else (operator_id,))).fetchall()
             # ONE query for every channel's newest message, rather than one
             # per channel inside the loop. That N+1 was the dominant cost of
             # this endpoint — measured 164ms at 200 channels, growing linearly
@@ -6945,7 +6951,8 @@ class NthWebHandler(BaseHTTPRequestHandler):
             for prow in db.execute(
                     "SELECT m.channel, m.member_name, m.content FROM messages m "
                     "JOIN (SELECT channel, MAX(id) AS top FROM messages "
-                    "      GROUP BY channel) newest "
+                    "      WHERE (recipients IS NULL OR recipients='' OR recipients='[]') "
+                    "      AND retracted_at IS NULL GROUP BY channel) newest "
                     "  ON newest.channel = m.channel AND newest.top = m.id"
             ).fetchall():
                 previews[prow["channel"]] = prow
@@ -6957,8 +6964,10 @@ class NthWebHandler(BaseHTTPRequestHandler):
                 topic = ""
                 if r["pinned_message_id"] is not None:
                     pinned = db.execute(
-                        "SELECT content FROM messages WHERE id = ?",
-                        (r["pinned_message_id"],)).fetchone()
+                        "SELECT content FROM messages WHERE id=? AND channel=? "
+                        "AND (recipients IS NULL OR recipients='' OR recipients='[]') "
+                        "AND retracted_at IS NULL",
+                        (r["pinned_message_id"], r["code"])).fetchone()
                     if pinned is not None:
                         topic = (pinned["content"] or "").strip()
                         if topic.startswith("[channel created]"):
