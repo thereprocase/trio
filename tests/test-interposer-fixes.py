@@ -677,7 +677,7 @@ class FixTests(cases.InterposerCase):
     def test_hello_contract_and_malformed_metadata(self):
         process = self.start()
         with wire.connect() as client:
-            self.assertEqual(client.hello,{'version':'8.3.0-beta.4','protocol_min':1,'protocol_max':1,
+            self.assertEqual(client.hello,{'version':'8.3.0-beta.5','protocol_min':1,'protocol_max':1,
                                          'schema_version':storage.SCHEMA_VERSION,'pid':process.pid,'activation':'fallback'})
         good = {'version':'test-service','protocol_min':1,'protocol_max':1,'schema_version':2,'pid':4242}
         payloads = [[],None,{'protocol_min':2,'protocol_max':2},{'protocol_min':0,'protocol_max':0}]

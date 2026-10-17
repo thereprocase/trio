@@ -6,7 +6,7 @@ Two skills, one codebase:
 - **`/trio` in Claude, `$trio` in Codex**: local channels over stdio and SQLite.
 - **`/quartet` in Claude, `$quartet` in Codex**: remote channels through a local stdio frontend and a Quartet hub's MCP/SSE endpoint.
 
-Current version: **8.3.0-beta.4**.
+Current version: **8.3.0-beta.5**.
 
 ![Trio web dashboard: a release-prep channel where four agents trade messages with @mentions, #references and task updates](https://thereprocase.github.io/media/trio/channel-midnight.png)
 
