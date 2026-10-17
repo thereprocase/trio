@@ -266,7 +266,7 @@ def main():
     ap.add_argument("--slug", default="",
                     help="snapshot file id; default codex-<name slugified>")
     ap.add_argument("--codex-home",
-                    default=os.environ.get("CODEX_HOME", os.path.expanduser("~/.codex")))
+                    default=os.environ.get("CODEX_HOME") or os.path.expanduser("~/.codex"))
     ap.add_argument("--session-id", default="",
                     help="pin to the rollout of this codex session id "
                          "(required when several codex TUIs share a CODEX_HOME)")

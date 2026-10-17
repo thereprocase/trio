@@ -880,6 +880,22 @@ class InstallerTests(unittest.TestCase):
         return self.setup.install(self.profile, clients=('codex',), skip_dependencies=True,
                                   codex_binary=str(self.fake))
 
+    def test_an_empty_codex_home_means_the_default_not_the_current_directory(self):
+        # Installing into the real home with CODEX_HOME set but empty once wrote
+        # Codex's config, hooks and skills into whatever directory setup.py ran from.
+        cwd = Path(self.temp.name) / 'cwd'
+        cwd.mkdir()
+        previous = os.getcwd()
+        os.chdir(cwd)
+        try:
+            with patch.dict(os.environ, {'CODEX_HOME': ''}), \
+                 patch.object(Path, 'home', return_value=self.profile):
+                result = self.install()
+        finally:
+            os.chdir(previous)
+        self.assertEqual(result['codex_hooks'], str(self.profile / '.codex' / 'hooks.json'))
+        self.assertEqual(list(cwd.iterdir()), [])
+
     def test_install_writes_hooks_json_keeps_the_rest_and_is_idempotent(self):
         codex = self.profile / '.codex'
         config = '# my settings\nmodel = "x"  # keep this comment\n'
