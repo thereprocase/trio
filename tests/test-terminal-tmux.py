@@ -26,7 +26,13 @@ for line in sys.stdin:
             except ValueError:
                 if time.monotonic()>deadline:raise
                 time.sleep(.05)
-        snap=adapter.snapshot(b);assert snap['available']
+        # The fake agent prints its banner after the identity resolves; a snapshot taken
+        # before it appears goes stale and execute() rightly refuses the changed screen.
+        deadline=time.monotonic()+5
+        while True:
+            snap=adapter.snapshot(b);assert snap['available']
+            if 'Isolated agent input' in snap['screen']:break
+            assert time.monotonic()<deadline,'agent banner did not appear';time.sleep(.05)
         job={'id':'test','action':'compact','generation':snap['generation'],'screen_hash':snap['screen_hash']}
         started=time.monotonic();result=adapter.execute(b,job)
         assert result['status']=='sent',result
