@@ -56,9 +56,14 @@ def private_dir(path):
             private_dir(path.parent)
         path.mkdir(mode=0o700, exist_ok=True)
     info = path.lstat()
-    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
-        raise PermissionError('interposer directory must be owned by this user, not a symlink')
-    path.chmod(0o700)
+    if not stat.S_ISDIR(info.st_mode):
+        raise PermissionError('interposer directory must be a directory, not a symlink')
+    # Windows has no POSIX owner or mode bits (st_uid is always 0); the profile's ACL
+    # protects the directory there, so only the symlink check applies.
+    if os.name != 'nt':
+        if info.st_uid != os.getuid():
+            raise PermissionError('interposer directory must be owned by this user, not a symlink')
+        path.chmod(0o700)
     return path
 
 
