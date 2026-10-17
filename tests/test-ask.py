@@ -322,6 +322,21 @@ check("ensure_ask_columns: adds message columns",
 check("ensure_ask_columns: adds members.kind", "kind" in _kcols)
 legacy.close()
 
+# channel_pins is seeded from the single-pin column only when that column exists.
+nopin = sqlite3.connect(":memory:")
+nopin.execute("CREATE TABLE channels (code TEXT PRIMARY KEY)")
+web.ensure_ask_columns(nopin); nopin.commit()
+check("ensure_ask_columns: channels without a pin column is not an error",
+      nopin.execute("SELECT COUNT(*) FROM channel_pins").fetchone()[0] == 0)
+nopin.close()
+seeded = sqlite3.connect(":memory:")
+seeded.execute("CREATE TABLE channels (code TEXT PRIMARY KEY, pinned_message_id INTEGER)")
+seeded.executemany("INSERT INTO channels VALUES (?,?)", [("a", 7), ("b", None)])
+web.ensure_ask_columns(seeded); seeded.commit()
+check("ensure_ask_columns: seeds channel_pins from the old pin column",
+      seeded.execute("SELECT channel, message_id FROM channel_pins").fetchall() == [("a", 7)])
+seeded.close()
+
 mem = sqlite3.connect(":memory:")
 mem.row_factory = sqlite3.Row
 mem.execute(
