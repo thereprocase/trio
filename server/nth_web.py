@@ -2105,7 +2105,9 @@ def ensure_ask_columns(db: sqlite3.Connection) -> None:
     side owns its own forward-compatibility. Each ALTER is idempotent."""
     had_pins = db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='channel_pins'").fetchone()
     db.execute("CREATE TABLE IF NOT EXISTS channel_pins (channel TEXT NOT NULL, message_id INTEGER NOT NULL, PRIMARY KEY(channel,message_id))")
-    if not had_pins:
+    # A database old enough to predate channel_pins may also predate the single-pin
+    # column it is seeded from, or the channels table itself.
+    if not had_pins and 'pinned_message_id' in {r[1] for r in db.execute("PRAGMA table_info(channels)")}:
         db.execute("INSERT OR IGNORE INTO channel_pins SELECT code,pinned_message_id FROM channels WHERE pinned_message_id IS NOT NULL")
     for table, col, defn in (
         ("members",  "kind",      "TEXT NOT NULL DEFAULT 'agent'"),
