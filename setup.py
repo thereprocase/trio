@@ -204,7 +204,9 @@ def install(target_home, *, quartet_url='', clients=('claude', 'codex'),
             claude_binary=None, skip_systemd=False):
     target_home = Path(target_home).resolve()
     claude_home = target_home / '.claude'
-    codex_home = Path(os.environ.get('CODEX_HOME', str(target_home / '.codex')))
+    # An empty CODEX_HOME means unset, as Codex and nth_codex_hook treat it; Path('')
+    # would otherwise be the current directory.
+    codex_home = Path(os.environ.get('CODEX_HOME') or str(target_home / '.codex'))
     # --home staging must never write into the caller's real CODEX_HOME.
     if target_home != Path.home().resolve():
         codex_home = target_home / '.codex'
