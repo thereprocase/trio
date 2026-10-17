@@ -170,11 +170,16 @@ def hooks_dir():
     from nth_event_service import state_dir
     path = state_dir() / 'hooks'
     path.mkdir(mode=0o700, exist_ok=True)
-    if os.name != 'nt':
+    import stat
+    if os.name == 'nt':
+        # No POSIX owner on Windows, but a junction planted here would still redirect
+        # what this session listens to; junctions need no privilege to create.
+        if getattr(os.lstat(path), 'st_file_attributes', 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+            raise PermissionError(f'{path} must be a directory, not a junction or symlink')
+    else:
         # Its files decide what this session listens to: refuse a directory someone else
         # could have planted (a symlink or another owner). Our own directory left open to
         # the group or world, e.g. by a default ACL, is closed rather than refused.
-        import stat
         info = os.lstat(path)
         if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
             raise PermissionError(f'{path} must be a directory owned by this user, not a symlink')

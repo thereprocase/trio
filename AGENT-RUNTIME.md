@@ -657,6 +657,10 @@ membership; culling in an existing channel retains its previous classification.
 The interposer observes hook delivery without waking sessions or acknowledging
 messages. Existing hook waiters remain the live delivery path. Set
 `TRIO_INTERPOSER_SHADOW=0` to disable hook observations and shadow evidence.
+On Windows the interposer service does not run (named pipes are deferred), so the
+hooks' shadow reports are skipped there; delivery through the hook waiters is
+unaffected. The installer still keeps the trust store under `NTH_HOME`; keep
+`NTH_HOME` inside your user profile, whose ACL is what protects it on Windows.
 `trio interposer shadow-diff --since 3600 --json` compares announced IDs and notice
 counts in private, rotated logs; fewer shadow notices are expected from coalescing.
 Neither Claude nor Codex has a hook turn-start signal in this phase. Their
