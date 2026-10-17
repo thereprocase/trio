@@ -59,8 +59,12 @@ def private_dir(path):
     if not stat.S_ISDIR(info.st_mode):
         raise PermissionError('interposer directory must be a directory, not a symlink')
     # Windows has no POSIX owner or mode bits (st_uid is always 0); the profile's ACL
-    # protects the directory there, so only the symlink check applies.
-    if os.name != 'nt':
+    # protects the directory there. A junction reports S_IFDIR and needs no privilege
+    # to create, so refuse every reparse point instead of relying on S_ISDIR.
+    if os.name == 'nt':
+        if getattr(info, 'st_file_attributes', 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT:
+            raise PermissionError('interposer directory must not be a junction or symlink')
+    else:
         if info.st_uid != os.getuid():
             raise PermissionError('interposer directory must be owned by this user, not a symlink')
         path.chmod(0o700)
