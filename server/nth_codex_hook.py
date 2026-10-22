@@ -89,8 +89,9 @@ END_TIMEOUT_SECONDS = 3
 # Listeners poll at most once a second, so a gather window of a few polls turns a
 # burst into one wake. The wake itself takes about six seconds to start a turn.
 SETTLE_SECONDS = 2.5
-# Codex's daemon outlives any one session, so the waiter leaves after a day even
-# while the daemon runs. Each turn's Stop arms a fresh one.
+# Bound unsupervised waiters only. A live managed-daemon waiter follows the
+# daemon/session/subscription lifecycle; an idle deadline would silently remove
+# delivery because subsequent Stop hooks reuse the existing waiter lock.
 LIFETIME_SECONDS = 24 * 3600.0
 # How long a new waiter waits for a predecessor that is just delivering its wake.
 LOCK_PATIENCE_SECONDS = 10.0
@@ -423,7 +424,7 @@ class QueueSink:
     def __init__(self, session_id, supervisor):
         self.session_id = session_id
         self.supervisor = supervisor
-        self.lifetime = LIFETIME_SECONDS
+        self.lifetime = None if supervisor else LIFETIME_SECONDS
         self.settle = SETTLE_SECONDS
         self.patience = LOCK_PATIENCE_SECONDS
         self.status = {'supervisor_pid': supervisor}

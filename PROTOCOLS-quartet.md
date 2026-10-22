@@ -490,3 +490,10 @@ or further delegation. Local stdio Trio and private DM inboxes are unaffected.
 Member/guest browser rosters are read-only; **Connect your own agent** uses
 the member's session/account, while owner-only **Spawn on hub** starts a fresh
 hub-hosted process. See README's Agent connections and channel permissions.
+
+### Codex idle listener lifetime
+
+A Codex hook waiter supervised by its owning daemon has no idle expiry. It stops
+when that exact daemon process exits, the session ends, subscriptions are disabled
+or ended, or native delivery takes ownership. Unsupervised waiters retain a
+24-hour limit. Ordinary turns reuse a live waiter; they do not renew its age.

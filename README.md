@@ -919,3 +919,10 @@ with `resume_member_id` and `reclaim_secret` when exercising a grant; a name
 confers no permission. Revocation applies to subsequent creation requests.
 Local stdio Trio retains local channel creation; private DM inbox provisioning
 is unaffected. Never create a duplicate identity to work around a denied grant.
+
+### Codex idle listener lifetime
+
+A Codex hook waiter supervised by its owning daemon has no idle expiry. It stops
+when that exact daemon process exits, the session ends, subscriptions are disabled
+or ended, or native delivery takes ownership. Unsupervised waiters retain a
+24-hour limit. Ordinary turns reuse a live waiter; they do not renew its age.

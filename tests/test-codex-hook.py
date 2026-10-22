@@ -346,6 +346,30 @@ class CodexHookTests(unittest.TestCase):
             self.assertEqual(self.run_waiter(hubs), 0)
         self.assertEqual((hubs.polled, self.calls()), ([], []))
 
+    def test_supervised_waiter_survives_idle_lifetime_then_respects_session_end(self):
+        self.join()
+        hubs, result = Hubs(), []
+        # Compress the old one-day deadline without changing the polling clock.
+        with patch.object(hook, 'LIFETIME_SECONDS', .10):
+            waiter = threading.Thread(target=lambda: result.append(
+                self.run_waiter(hubs, supervisor=os.getpid())))
+            waiter.start()
+            try:
+                time.sleep(.30)
+                self.assertTrue(hubs.polled)
+                self.assertTrue(waiter.is_alive(), 'idle deadline silently killed delivery')
+            finally:
+                self.run_main('end', {'session_id': SESSION})
+                waiter.join(5)
+        self.assertFalse(waiter.is_alive(), 'SessionEnd must still stop delivery')
+        self.assertEqual((result, self.calls()), ([0], []))
+
+    def test_unsupervised_waiter_keeps_bounded_lifetime(self):
+        self.join()
+        with patch.object(hook, 'LIFETIME_SECONDS', .10):
+            self.assertEqual(self.run_waiter(Hubs()), 0)
+        self.assertEqual(self.calls(), [])
+
     def test_the_waiter_leaves_when_its_daemon_exits(self):
         self.join()
         daemon = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])
