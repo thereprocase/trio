@@ -14,11 +14,13 @@ ANSI = re.compile(r'\x1b\[[0-?]*[ -/]*[@-~]')
 
 def idle_footer(text, client):
     """An empty input, not a prompt quoted in history or text already being typed."""
-    lines = [ANSI.sub('', line).strip() for line in text.splitlines()[-6:]]
+    activity = [ANSI.sub('', line).strip() for line in text.splitlines()[-24:]]
+    lines = activity[-6:]
     marker = '›' if client == 'codex' else '❯'
     # A currently active tool/approval/compact footer always wins over the input.
     busy = re.compile(r'esc to (interrupt|cancel)|thinking|compacting|allow once|allow always|running…', re.I)
-    if any(busy.search(line) for line in lines):
+    spinner = re.compile(r'^[✢✳✶✻✽·*]\s+[^\n]*…\s*\(')
+    if any(busy.search(line) or spinner.match(line) for line in activity):
         return False
     prompts = [line for line in lines if line.startswith(('❯', '›'))]
     return bool(prompts) and prompts[-1] == marker
@@ -91,7 +93,7 @@ class TmuxSink:
             # Pane IDs can be reused after tmux restarts. Bind the exact OS lifetime.
             if int(pid)!=binding['pid'] or process_stamp(int(pid))!=binding['stamp']:return
             if program not in ('claude','codex','opencode','python','python3'):return
-            footer = self.run('capture-pane','-p','-t',pane,'-S','-6')
+            footer = self.run('capture-pane','-p','-t',pane,'-S','-24')
             if not idle_footer(footer,state['client']):return
         except (OSError,ValueError,subprocess.SubprocessError):return
         # Commit an at-most-once claim before any side effect. A crash/timeout after

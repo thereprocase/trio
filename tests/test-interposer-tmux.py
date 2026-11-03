@@ -42,6 +42,14 @@ class SinkTests(unittest.TestCase):
   sends=[c for c in self.calls if c[0]=='send-keys'];self.assertEqual(len(sends),2)
   self.assertEqual(sends[0][:5],('send-keys','-t','%123','-l','--'));self.assertNotIn('DO NOT COPY ME',sends[0][-1]);self.assertEqual(sends[1][-1],'Enter')
   self.sink.drain();self.assertEqual(len([c for c in self.calls if c[0]=='send-keys']),2)
+ def test_current_claude_spinner_above_six_line_prompt_defers(self):
+  self.enqueue()
+  tail='\n'.join(['separator','❯','separator','route','folder','status'])
+  self.footer='✽ Working… (2m 5s · ↓ 2k tokens)\n'+tail
+  self.sink.drain();self.assertEqual(self.state(),'queued')
+  self.assertFalse(any(c[0]=='send-keys' for c in self.calls))
+  self.footer=tail
+  self.sink.drain();self.assertEqual(self.state(),'written')
  def test_nonempty_input_and_shell_never_receive(self):
   self.enqueue();self.footer='❯ do not submit';self.sink.drain();self.assertEqual(self.state(),'queued')
   self.sink.run=lambda *a:f'{os.getpid()} bash';self.sink.drain();self.assertEqual(self.state(),'queued')
