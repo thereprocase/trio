@@ -253,6 +253,8 @@ def validate_request(value):
         'membership.attach': ({'session', 'key', 'server', 'via'}, set()),
         'membership.configure': ({'key'}, {'filter', 'enabled'}),
         'ack.seen': ({'session', 'key', 'through_id'}, set()),
+        'wait': ({'session','host_pid'}, set()),
+        'delivered': ({'session','host_pid','delivery_id','outcome'}, set()),
         'turn': ({'session', 'phase'}, set()), 'session.end': ({'session'}, set()),
     }
     if op not in fields:
@@ -262,7 +264,8 @@ def validate_request(value):
         raise WireError('missing or unknown fields')
     if 'session' in required and value.get('session') is None:
         raise WireError('bad session id')
-    for field, choices in {'client': ('claude', 'codex'), 'sink': ('rewake', 'queue', 'tmux'),
+    for field, choices in {'client': ('claude', 'codex', 'opencode'), 'sink': ('rewake', 'queue', 'tmux', 'opencode'),
+                           'outcome': ('written','uncertain'),
                            'via': ('connect', 'listen', 'ack'), 'filter': ('all', 'about', 'at'),
                            'phase': ('started', 'ended')}.items():
         if field in value and op != 'hello' and value[field] not in choices:
@@ -278,6 +281,12 @@ def validate_request(value):
     if 'host_pid' in value and value['host_pid'] is not None:
         if not valid_id(value['host_pid']) or value['host_pid'] == 0:
             raise WireError('bad host_pid')
+    if op in ('wait','delivered') and not value.get('host_pid'):
+        raise WireError('live host_pid required')
+    if 'delivery_id' in value and not valid_id(value['delivery_id']):
+        raise WireError('bad delivery_id')
+    if value.get('sink') == 'opencode' and (value.get('client') != 'opencode' or not value.get('host_pid')):
+        raise WireError('OpenCode sink needs OpenCode client and host_pid')
     if 'through_id' in value and not valid_id(value['through_id']):
         raise WireError('bad through_id')
     if 'problem' in value and (not isinstance(value['problem'], str)

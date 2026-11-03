@@ -39,7 +39,7 @@ def project_record(side, session, client, sink, ranges, ended, lines):
     try:
         if side not in ('actual', 'would') or not SESSION_ID.fullmatch(session):
             return False
-        if client not in ('claude', 'codex') or sink not in ('rewake', 'queue'):
+        if client not in ('claude', 'codex', 'opencode') or sink not in ('rewake', 'queue', 'opencode'):
             return False
         clean_ranges, clean_ended = [], []
         for row in ranges:
@@ -122,7 +122,7 @@ def append(side, session, client, sink, ranges, ended, lines):
 def valid_record(row, side):
     try:
         if (not isinstance(row,dict) or row['side']!=side or not SESSION_ID.fullmatch(row['session'])
-                or row['client'] not in ('claude','codex') or row['sink'] not in ('rewake','queue')
+                or row['client'] not in ('claude','codex','opencode') or row['sink'] not in ('rewake','queue','opencode')
                 or type(row['t']) not in (int,float) or not math.isfinite(row['t'])
                 or type(row['lines']) is not int or row['lines']<0):
             return False

@@ -65,7 +65,7 @@ if [ "${1:-}" = "hub-service" ] || [ "${1:-}" = "upgrade" ]; then
              nth_cli.py nth_quartet_proxy.py nth_watch.py nth_claude_channel.py nth_claude_hook.py \
              nth_codex_hook.py nth_sse_client.py nth_listener.py nth_notice.py \
              nth_interposer.py nth_interposer_wire.py nth_interposer_store.py \
-             nth_interposer_hubs.py nth_interposer_runtime.py nth_interposer_shadow.py nth_interposer_tmux.py \
+             nth_interposer_hubs.py nth_interposer_runtime.py nth_interposer_shadow.py nth_interposer_tmux.py nth_interposer_opencode.py \
              nth_usage.py nth_conversation.py nth_webpush.py nth_media.py nth_ask_client.js; do
         if [ -f "$HUB_DIR/$f" ] && ! cmp -s "$SCRIPT_DIR/server/$f" "$HUB_DIR/$f"; then
             cp "$HUB_DIR/$f" "$HUB_DIR/$f.bak-$STAMP"
@@ -460,6 +460,7 @@ cp "$SCRIPT_DIR/server/nth_interposer_hubs.py" "$SERVER_DIR/nth_interposer_hubs.
 cp "$SCRIPT_DIR/server/nth_interposer_runtime.py" "$SERVER_DIR/nth_interposer_runtime.py"
 cp "$SCRIPT_DIR/server/nth_interposer_shadow.py" "$SERVER_DIR/nth_interposer_shadow.py"
 cp "$SCRIPT_DIR/server/nth_interposer_tmux.py" "$SERVER_DIR/nth_interposer_tmux.py"
+cp "$SCRIPT_DIR/server/nth_interposer_opencode.py" "$SERVER_DIR/nth_interposer_opencode.py"
 cp "$SCRIPT_DIR/server/nth_agent_manager.py" "$SERVER_DIR/nth_agent_manager.py"
 cp "$SCRIPT_DIR/server/nth_terminal.py" "$SERVER_DIR/nth_terminal.py"
 # Quota-burn series + the arithmetic over it.

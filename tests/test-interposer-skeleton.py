@@ -210,7 +210,7 @@ class SkeletonTests(InterposerCase):
 
     def test_unimplemented_ops_and_identity_validation(self):
         self.start()
-        for op in sorted({'wait', 'subscribe', 'delivered'}):
+        for op in ['subscribe']:
             with wire.connect() as client:
                 with self.assertRaisesRegex(wire.WireError, '^not implemented in this version$'):
                     client.call(op)

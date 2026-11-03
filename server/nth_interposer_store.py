@@ -228,6 +228,11 @@ class Store:
                     query += f' WHERE {column}=?'
                     arguments = (value,)
                 return [dict(row) for row in self.db.execute(query + f' ORDER BY {column}', arguments)]
+            sessions = rows('sessions', 'session', session)
+            for item in sessions:
+                if item.get('sink') == 'opencode':
+                    heartbeat = self.db.execute('SELECT value FROM meta WHERE key=?',('opencode_poll:'+item['session'],)).fetchone()
+                    item['sink_heartbeat'] = json.loads(heartbeat[0]) if heartbeat else 0
             # Delivery bodies/payloads can contain peer text in later PRs; truth ops
             # expose control state only, never those content-bearing columns.
             holdings = rows('holdings', 'session', session)
@@ -235,7 +240,7 @@ class Store:
                 holdings = [row for row in holdings if row['key'] == key]
             return {'hubs': rows('hubs', 'server', None),
                     'memberships': rows('memberships', 'key', key),
-                    'sessions': rows('sessions', 'session', session), 'holdings': holdings,
+                    'sessions': sessions, 'holdings': holdings,
                     'legacy_import_skips': list(self.import_skips),
                     'delivery_states': [dict(r) for r in self.db.execute(
                         'SELECT session,sink,state,COUNT(*) AS count FROM deliveries GROUP BY session,sink,state')
@@ -270,7 +275,7 @@ class Store:
         # Legacy hook observations must not replace an explicitly attached live sink.
         with self.lock:
             active=self.db.execute('SELECT * FROM sessions WHERE session=?',(request['session'],)).fetchone()
-            if active and active['sink']=='tmux' and request['sink']!='tmux' and active['state']!='ended':
+            if active and active['sink'] in ('tmux','opencode') and request['sink']!=active['sink'] and active['state']!='ended':
                 return {'session':request['session'],'state':active['state']}
         if pid is None:
             with self.lock:
@@ -281,6 +286,8 @@ class Store:
             stamp = process_stamp(pid) if pid else None
         except (OverflowError, OSError):
             stamp = None
+        if request['sink']=='opencode' and stamp is None:
+            raise WireError('OpenCode host process is not live', 'dead_host')
         with self.lock, self.db:
             previous = self.db.execute('SELECT registered FROM sessions WHERE session=?',
                                        (request['session'],)).fetchone()
@@ -307,6 +314,8 @@ class Store:
                 self.db.execute('INSERT OR REPLACE INTO meta(key,value) VALUES (?,?)',('tmux:'+request['session'],binding))
             else:
                 self.db.execute('DELETE FROM meta WHERE key=?',('tmux:'+request['session'],))
+            if request['sink']=='opencode':
+                self.db.execute('DELETE FROM meta WHERE key=?',('opencode_poll:'+request['session'],))
             state = self.session(request['session'])['state']
             if state in ('idle','in_turn','waiting'):
                 # Resume alone must restart retained memberships. Recover only

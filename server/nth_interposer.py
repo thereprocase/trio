@@ -143,6 +143,9 @@ def _dispatch(store, request, runtime=None, *, activated=False, log=None):
             result = store.turn(request)
             if runtime and request['phase'] == 'ended':
                 runtime.release(request['session'], force=True)
+        elif op in ('wait','delivered'):
+            from nth_interposer_opencode import dispatch as deliver
+            result = deliver(store, request)
         elif op == 'session.end':
             result = store.end(request['session'])
         else:

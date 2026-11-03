@@ -213,7 +213,7 @@ class Runtime:
             record = self.buffer_record(session)
             if not record:
                 raise ValueError('invalid buffered evidence')
-            self.persist_buffer(session,record,buffered=not self.closing or self.store.session(session)['sink']=='tmux')
+            self.persist_buffer(session,record,buffered=not self.closing or self.store.session(session)['sink'] in ('tmux','opencode'))
         # Write the new owner's snapshot before deleting an old owner's entry.
         for session in list(self.pending_keys):
             if session not in self.buffers:
@@ -258,7 +258,7 @@ class Runtime:
         if not self.store.db.execute('SELECT 1 FROM holdings WHERE session=? AND key=? AND attached=1',(row['owner_session'],row['key'])).fetchone():
             return False
         session = self.store.session(row['owner_session'])
-        if os.environ.get('TRIO_INTERPOSER_SHADOW')=='0' and session['sink']!='tmux':
+        if os.environ.get('TRIO_INTERPOSER_SHADOW')=='0' and session['sink'] not in ('tmux','opencode'):
             return False
         return session['registered'] is not None and session['state'] in ('idle','in_turn','waiting')
 
@@ -359,11 +359,13 @@ class Runtime:
             settle = .3 if state['client']=='claude' else 2.5
             if (state['state']=='in_turn' and state['sink']!='tmux' and not flush) or (not force and time.monotonic()-buffer['at']<settle):
                 return False
-            if state['sink']=='tmux':
+            if state['sink'] in ('tmux','opencode'):
                 # These sessions explicitly opt into real delivery; the other
                 # listeners remain shadow-only. Persist the outbox before clearing.
                 with self.store.db:
-                    if not self.tmux_sink.enqueue(session,list(buffer['members'].values())):
+                    from nth_interposer_opencode import enqueue
+                    queued = self.tmux_sink.enqueue(session,list(buffer['members'].values())) if state['sink']=='tmux' else enqueue(self.store,session,list(buffer['members'].values()))
+                    if not queued:
                         return False
                     if session in self.pending_keys:
                         self.store.db.execute('DELETE FROM meta WHERE key=?',(self.pending_keys[session],))

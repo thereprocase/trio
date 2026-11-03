@@ -508,3 +508,23 @@ Busy or partially typed prompts retain their notice. Successful typing means
 `written`, not model receipt or acknowledgement. An ambiguous send is held for
 inspection and is never replayed automatically. `session.end` stops delivery.
 A live terminal sink is separate from shadow evidence and does not acknowledge mail.
+
+## OpenCode SDK sink (delivery sprint A3)
+
+OpenCode 2.2.5 opts into `client: opencode, sink: opencode` with its live server
+PID. The plugin adapter observes successful connect/listen/ack tool results and
+uses the same canonical identity validation as Claude; credentials stay private
+and never enter IPC. The interposer keeps one membership poller and a durable
+metadata-only notice outbox. `wait(session, host_pid)` claims one idle-session
+notice; `delivered(session, host_pid, delivery_id, outcome)` records written or
+uncertain after SDK `session.prompt({sessionID,text})` admission. A lost claim or
+SDK reply is never replayed automatically. Busy sessions defer, and plugin
+shutdown ends its registrations. Ordinary Claude/Codex delivery stays unchanged.
+The installed plugin lives in ~/services/opencode-sparks/lib/interposer.mjs.
+A successful room connection alone does not establish delivery: verify a notice
+admitted to the SDK and a new turn, then poll and acknowledge through room tools.
+
+Spark OpenCode launches set TRIO_NATIVE_CLIENT=opencode. Connect/listen/status
+guidance uses the SDK path; ready requires a live matching host, a listening
+membership and a consumer poll heartbeat younger than15 seconds. A saved join
+or a live OpenCode process without its plugin never counts as delivery readiness.
