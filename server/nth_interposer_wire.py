@@ -249,7 +249,7 @@ def validate_request(value):
         'hello': ({}, {'client', 'pid', 'version'}),
         'hub.announce': ({'server', 'url'}, set()),
         'list': (set(), set()), 'status': (set(), {'key', 'session', 'host_pid', 'skips'}),
-        'session.register': ({'session', 'client', 'host_pid', 'sink', 'host_ok', 'problem'}, {'resume'}),
+        'session.register': ({'session', 'client', 'host_pid', 'sink', 'host_ok', 'problem'}, {'resume', 'pane'}),
         'membership.attach': ({'session', 'key', 'server', 'via'}, set()),
         'membership.configure': ({'key'}, {'filter', 'enabled'}),
         'ack.seen': ({'session', 'key', 'through_id'}, set()),
@@ -262,11 +262,16 @@ def validate_request(value):
         raise WireError('missing or unknown fields')
     if 'session' in required and value.get('session') is None:
         raise WireError('bad session id')
-    for field, choices in {'client': ('claude', 'codex'), 'sink': ('rewake', 'queue'),
+    for field, choices in {'client': ('claude', 'codex'), 'sink': ('rewake', 'queue', 'tmux'),
                            'via': ('connect', 'listen', 'ack'), 'filter': ('all', 'about', 'at'),
                            'phase': ('started', 'ended')}.items():
         if field in value and op != 'hello' and value[field] not in choices:
             raise WireError('bad ' + field)
+    if value.get('sink') == 'tmux':
+        if not isinstance(value.get('pane'), str) or not re.fullmatch(r'%[0-9]{1,10}',value['pane']) or not value.get('host_pid'):
+            raise WireError('tmux sink needs pane and host_pid')
+    elif 'pane' in value:
+        raise WireError('pane requires tmux sink')
     for field in ('host_ok', 'enabled', 'resume'):
         if field in value and type(value[field]) is not bool:
             raise WireError('bad ' + field)

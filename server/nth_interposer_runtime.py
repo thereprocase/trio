@@ -123,6 +123,8 @@ class Runtime:
         self.startup_slots = threading.BoundedSemaphore(MAX_STARTUPS)
         self.inbox_path = home()/'events'/'inbox'
         self.inbox_thread = None
+        from nth_interposer_tmux import TmuxSink
+        self.tmux_sink = TmuxSink(store, lambda:self.closing)
         self.recover()
 
     def recover(self):
@@ -211,7 +213,7 @@ class Runtime:
             record = self.buffer_record(session)
             if not record:
                 raise ValueError('invalid buffered evidence')
-            self.persist_buffer(session,record,buffered=not self.closing)
+            self.persist_buffer(session,record,buffered=not self.closing or self.store.session(session)['sink']=='tmux')
         # Write the new owner's snapshot before deleting an old owner's entry.
         for session in list(self.pending_keys):
             if session not in self.buffers:
@@ -249,13 +251,15 @@ class Runtime:
             "SELECT 1 FROM hubs WHERE url=? AND trust='setup'",(row['url'],)).fetchone())
 
     def eligible(self, row):
-        if self.closing or os.environ.get('TRIO_INTERPOSER_SHADOW')=='0' or not row:
+        if self.closing or not row:
             return False
         if not row['owner_session'] or not row['enabled'] or row['ended'] or not self.allowed(row):
             return False
         if not self.store.db.execute('SELECT 1 FROM holdings WHERE session=? AND key=? AND attached=1',(row['owner_session'],row['key'])).fetchone():
             return False
         session = self.store.session(row['owner_session'])
+        if os.environ.get('TRIO_INTERPOSER_SHADOW')=='0' and session['sink']!='tmux':
+            return False
         return session['registered'] is not None and session['state'] in ('idle','in_turn','waiting')
 
     def current(self, listener):
@@ -343,7 +347,7 @@ class Runtime:
                 if render:
                     ended_notice(prefix,item['channel'],item['member_id'],item['reason'],server)
                 ended.append({'key':key,'reason':item['reason']})
-        return project_record('would',session,state['client'],state['sink'],ranges,ended,lines)
+        return project_record('would',session,state['client'],'rewake' if state['sink']=='tmux' else state['sink'],ranges,ended,lines)
 
     def release(self, session, force=False, flush=False):
         with self.store.lock:
@@ -353,8 +357,19 @@ class Runtime:
                 return True
             state = self.store.session(session)
             settle = .3 if state['client']=='claude' else 2.5
-            if (state['state']=='in_turn' and not flush) or (not force and time.monotonic()-buffer['at']<settle):
+            if (state['state']=='in_turn' and state['sink']!='tmux' and not flush) or (not force and time.monotonic()-buffer['at']<settle):
                 return False
+            if state['sink']=='tmux':
+                # These sessions explicitly opt into real delivery; the other
+                # listeners remain shadow-only. Persist the outbox before clearing.
+                with self.store.db:
+                    if not self.tmux_sink.enqueue(session,list(buffer['members'].values())):
+                        return False
+                    if session in self.pending_keys:
+                        self.store.db.execute('DELETE FROM meta WHERE key=?',(self.pending_keys[session],))
+                self.buffers.pop(session,None)
+                self.pending_keys.pop(session,None)
+                return True
             record = self.buffer_record(session,render=True)
             if not record:
                 return False
@@ -613,6 +628,7 @@ class Runtime:
                     path.unlink(missing_ok=True)
 
     def tick(self):
+        self.tmux_sink.schedule()
         now = time.monotonic()
         if now-self.last_drain>=5:
             self.last_drain = now
@@ -647,6 +663,8 @@ class Runtime:
             self.pollers.clear()
             for listener in listeners:
                 listener.stop()
+        if self.tmux_sink.thread:
+            self.tmux_sink.thread.join(timeout=10)
         for listener in listeners:
             listener.thread.join(timeout=1)
         with self.store.lock:

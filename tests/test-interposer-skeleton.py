@@ -467,7 +467,7 @@ class SkeletonTests(InterposerCase):
         self.start()
         with wire.connect() as client:
             self.assertEqual(client.call('list'), {'hubs': [], 'memberships': [], 'sessions': [],
-                                                 'holdings': [], 'legacy_import_skips': []})
+                                                 'holdings': [], 'legacy_import_skips': [], 'delivery_states': []})
         def announce(number):
             with wire.connect() as client:
                 return client.call('hub.announce', server='nth-demo', url='https://hub.example/sse')

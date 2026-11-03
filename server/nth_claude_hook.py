@@ -953,7 +953,7 @@ def main(argv=None):
     parser.add_argument('event', choices=['tool', 'stop', 'start', 'end'])
     args = parser.parse_args(argv)
     # A session launched with `trio claude` has listeners inside its frontends.
-    if os.environ.get('TRIO_CLAUDE_CHANNEL') == '1':
+    if os.environ.get('TRIO_CLAUDE_CHANNEL') == '1' or os.environ.get('NTH_DELIVERY_SINK') == 'tmux':
         return 0
     if args.home:
         os.environ['NTH_HOME'] = args.home

@@ -689,3 +689,15 @@ A Codex hook waiter supervised by its owning daemon has no idle expiry. It stops
 when that exact daemon process exits, the session ends, subscriptions are disabled
 or ended, or native delivery takes ownership. Unsupervised waiters retain a
 24-hour limit. Ordinary turns reuse a live waiter; they do not renew its age.
+
+### Explicit tmux delivery sink
+
+An operator-managed crew may register `session.register` with `sink: tmux`, a
+`pane` ID and the pane host PID, then attach its existing membership. Only these
+explicit registrations use real interposer delivery; ordinary hook sessions retain
+their existing path. The sink queues sanitized counts/mention flags, never peer
+bodies, and types only at an empty Claude/Codex prompt in the bound live pane.
+Busy or partially typed prompts retain their notice. Successful typing means
+`written`, not model receipt or acknowledgement. An ambiguous send is held for
+inspection and is never replayed automatically. `session.end` stops delivery.
+A live terminal sink is separate from shadow evidence and does not acknowledge mail.

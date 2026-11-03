@@ -236,7 +236,10 @@ class Store:
             return {'hubs': rows('hubs', 'server', None),
                     'memberships': rows('memberships', 'key', key),
                     'sessions': rows('sessions', 'session', session), 'holdings': holdings,
-                    'legacy_import_skips': list(self.import_skips)}
+                    'legacy_import_skips': list(self.import_skips),
+                    'delivery_states': [dict(r) for r in self.db.execute(
+                        'SELECT session,sink,state,COUNT(*) AS count FROM deliveries GROUP BY session,sink,state')
+                        if session is None or r['session']==session]}
 
     def live_sessions(self):
         with self.lock:
@@ -264,6 +267,11 @@ class Store:
     def register(self, request):
         from nth_claude_hook import process_stamp
         pid = request['host_pid']
+        # Legacy hook observations must not replace an explicitly attached live sink.
+        with self.lock:
+            active=self.db.execute('SELECT * FROM sessions WHERE session=?',(request['session'],)).fetchone()
+            if active and active['sink']=='tmux' and request['sink']!='tmux' and active['state']!='ended':
+                return {'session':request['session'],'state':active['state']}
         if pid is None:
             with self.lock:
                 known=self.db.execute('SELECT host_pid,host_stamp FROM sessions WHERE session=?',(request['session'],)).fetchone()
@@ -292,6 +300,13 @@ class Store:
                 host_ok=excluded.host_ok,problem=excluded.problem,registered=excluded.registered''',
                 (request['session'], request['client'], request['sink'], pid, stamp,
                  int(request['host_ok']), request['problem'], registered, int(request.get('resume',False)), stamp))
+            if request['sink']=='tmux':
+                if stamp is None:
+                    raise WireError('tmux host process is not live', 'dead_host')
+                binding=json.dumps(dict(pane=request['pane'],pid=pid,stamp=stamp))
+                self.db.execute('INSERT OR REPLACE INTO meta(key,value) VALUES (?,?)',('tmux:'+request['session'],binding))
+            else:
+                self.db.execute('DELETE FROM meta WHERE key=?',('tmux:'+request['session'],))
             state = self.session(request['session'])['state']
             if state in ('idle','in_turn','waiting'):
                 # Resume alone must restart retained memberships. Recover only

@@ -72,7 +72,8 @@
         "memberships": [],
         "sessions": [],
         "holdings": [],
-        "legacy_import_skips": []
+        "legacy_import_skips": [],
+        "delivery_states": []
       }
     }
   },
@@ -106,7 +107,8 @@
         "memberships": [],
         "sessions": [],
         "holdings": [],
-        "legacy_import_skips": []
+        "legacy_import_skips": [],
+        "delivery_states": []
       }
     }
   }
