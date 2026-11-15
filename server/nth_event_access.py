@@ -447,6 +447,11 @@ def _listen_through_hooks(channel, member_id, session_token, filter_mode, enable
     return reply
 
 
+# The OpenCode plugin's wait loop refreshes its heartbeat well inside this
+# window; a heartbeat dated in the future (clock step, forged row) is not live.
+OPENCODE_HEARTBEAT_SECONDS = 15
+
+
 def _opencode_status(channel, member_id, session_token, session=None):
     import time
     from nth_claude_hook import identity_key_for, process_stamp
@@ -462,7 +467,7 @@ def _opencode_status(channel, member_id, session_token, session=None):
                   owner['sink']=='opencode' and owner['client']=='opencode' and
                   owner['state']!='ended' and owner.get('host_stamp') is not None and
                   process_stamp(owner['host_pid'])==owner['host_stamp'] and
-                  time.time()-owner.get('sink_heartbeat',0)<15 and not owner.get('problem'))
+                  0<=time.time()-owner.get('sink_heartbeat',0)<OPENCODE_HEARTBEAT_SECONDS and not owner.get('problem'))
         state=(member.get('poll_state') or 'starting') if live else 'not_attached'
         listeners=[dict(provider='opencode',transport='interposer',channel=channel,
                         member_id=member_id,enabled=member['enabled'],status=state)] if member else []
