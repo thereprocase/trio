@@ -227,7 +227,7 @@ that tier decides what the visitor may do.
 
 | Tier | How the hub decides | Shown as | Posts | Operator actions (remove members, reveal local paths) |
 |---|---|---|---|---|
-| Owner | Tailscale login matches `NTH_TAILNET_OWNER` (or the hub's own login), or the visitor is on the hub itself | their Tailscale name | yes | yes |
+| Owner | Tailscale login matches `NTH_TAILNET_OWNER` (or the hub's own login), a tagged device is mapped to that login by `NTH_TAILNET_DEVICE_OWNERS`, or the visitor is on the hub itself | their Tailscale name | yes | yes |
 | Member | Tailscale login is listed in `NTH_TAILNET_MEMBERS` | the name the owner gave them | yes | no |
 | Tailnet guest | any other Tailscale login, e.g. someone you shared the hub with | their Tailscale name plus `-guest` | yes | no |
 | Self-declared guest | no Tailscale identity at all | the name they type at their first post, plus `-guest` | yes | no |
@@ -259,6 +259,54 @@ Environment=NTH_TAILNET_MEMBERS=sam@example.com=Sam,lee@example.net=Lee
 
 Then `systemctl daemon-reload && systemctl restart nth-web`. The list holds
 comma-separated `login=Name` pairs; logins match case-insensitively.
+
+**Supported topology.** Serve the dashboard directly on the tailnet
+(`--tailnet` or `--tailscale-tls`). The hub reads the identity from the socket
+peer address and ignores `X-Forwarded-For` and similar headers. A reverse proxy
+or `tailscale serve` that forwards to loopback reaches the hub as a loopback
+peer, and a loopback peer receives the identity of the OS user running the
+server, with operator powers. Do not put a proxy in front unless everything that
+can reach it is trusted to that level.
+
+**Mapping a tagged device to an account.** A machine joined to the tailnet with
+a tag has no user, and whois reports it as `tagged-devices`. To sign such a
+machine in as an account, list its tailnet address on the hub unit:
+
+```ini
+Environment=NTH_TAILNET_DEVICE_OWNERS=100.64.0.10=you@example.com,100.64.0.11=sam@example.com
+```
+
+| Variable | Meaning |
+|---|---|
+| `NTH_TAILNET_DEVICE_OWNERS` | Comma-separated `ip=login` pairs. IPv4 and IPv6 spellings are compared canonically. |
+| `NTH_TAILNET_DEVICE_OWNER_NAME` | Optional display name for posts from a device mapped to the owner. Without it the name is the login's user part. |
+
+- The mapping applies when whois succeeds, reports the placeholder login
+  `tagged-devices` with at least one tag, and the socket peer address equals the
+  listed address. A user-owned device at a listed address keeps its own login.
+- The mapped login goes through `NTH_TAILNET_OWNER` and `NTH_TAILNET_MEMBERS`
+  like any other login: the owner's login gives the Owner tier, a listed login
+  gives Member, and an unlisted login is a tailnet guest.
+- **Mapping a device to the owner gives owner powers to anything that can send
+  requests from that device**: every user of the machine, every local process,
+  and any proxy or tunnel running on it. Map only machines you trust to that
+  level.
+- The hub checks the whole value at startup and prints each rejected entry to
+  stderr. An entry is dropped when its address is invalid or loopback, it lacks
+  exactly one `=`, its login is empty, contains whitespace or control
+  characters, or is `tagged-devices`, or the same address lists two different
+  logins (both are dropped). A dropped device falls back to the tier whois gives it.
+- A delegated identity stays bound to the mapped address. The browser cookie
+  keeps it only while requests come from that address and the entry exists; a
+  request from anywhere else drops the cookie's identity and starts the normal
+  lookup. The mapping is read when the process starts: edit the variable and
+  restart `nth-web` to add, change or remove a device. A removed entry takes
+  effect on the cookie's next request after the restart. The hub does not
+  re-ask whois for a cached delegated identity, so a node that is removed from
+  the tailnet and whose address is reassigned keeps the delegation until the
+  restart.
+- The roster summary of a delegated identity ends with
+  `[delegated from device tagged-devices node <id>]`.
 
 ### Web dashboard
 

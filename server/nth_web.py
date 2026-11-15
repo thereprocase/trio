@@ -596,6 +596,13 @@ class OperatorIdentity:
     # who is not the hub owner, e.g. someone a node was shared with). The
     # name is verified; the permissions stay those of any other guest.
     tailnet_verified: bool = False
+    # Set only when NTH_TAILNET_DEVICE_OWNERS delegated a tagged node to a
+    # login. The original whois identity, the node id and the canonical peer
+    # address stay on the identity so the audit summary and the cookie cache
+    # can tell a delegated identity from one Tailscale reported directly.
+    delegated_from: str = ""
+    delegated_node: str = ""
+    delegated_peer: str = ""
 
     @property
     def display_name(self) -> str:
@@ -611,6 +618,13 @@ class OperatorIdentity:
 
     @property
     def summary(self) -> str:
+        base = self._base_summary()
+        if self.delegated_from:
+            return (f"{base} [delegated from device {self.delegated_from}"
+                    f" node {self.delegated_node or 'unknown'}]")
+        return base
+
+    def _base_summary(self) -> str:
         if self.source == IDENTITY_SOURCE_TAILSCALE:
             return f"human — tailnet: {self.login or self.name}"
         if self.source == IDENTITY_SOURCE_LOOPBACK:
@@ -760,13 +774,129 @@ def tailscale_whois(remote_ip: str) -> Optional[Dict[str, str]]:
         up = (data.get("UserProfile") or {})
         login = up.get("LoginName") or ""
         display = up.get("DisplayName") or ""
-        node = ((data.get("Node") or {}).get("Name") or "").split(".", 1)[0]
+        node_data = data.get("Node") or {}
+        node = (node_data.get("Name") or "").split(".", 1)[0]
         if not login and not display:
             return None
-        return {"login": login, "display": display, "node": node}
+        # Facts only: the tag and node fields let a caller recognise a tagged
+        # node, but no local policy is applied here.
+        tags = node_data.get("Tags")
+        addrs = node_data.get("Addresses")
+        return {
+            "login": login, "display": display, "node": node,
+            "node_id": str(node_data.get("StableID") or node_data.get("ID") or ""),
+            "tags": [t for t in tags if isinstance(t, str)] if isinstance(tags, list) else [],
+            "addresses": [a for a in addrs if isinstance(a, str)] if isinstance(addrs, list) else [],
+        }
     if not found_cli:
         _warn_tailscale_missing_once()
     return None
+
+
+# Whois reports a tagged node (one brought up with an auth key, no user) under
+# this placeholder login.
+TAGGED_DEVICES_LOGIN = "tagged-devices"
+_device_owner_cache: Optional[Tuple[str, Dict[str, str]]] = None
+
+
+def _canonical_ip(text: str) -> Optional[str]:
+    """One spelling per address, so `::ffff:192.0.2.7` equals `192.0.2.7` and
+    IPv6 compares case- and zero-compression-insensitively. None if invalid."""
+    text = (text or "").strip()
+    if not text or "%" in text:
+        return None
+    try:
+        ip = ipaddress.ip_address(text)
+    except ValueError:
+        return None
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
+        ip = ip.ipv4_mapped
+    return str(ip)
+
+
+def parse_device_owners(raw: str) -> Tuple[Dict[str, str], List[str]]:
+    """Parse NTH_TAILNET_DEVICE_OWNERS (`ip=login,ip=login`).
+
+    Returns ({canonical ip: login}, problems). A bad entry is dropped, so the
+    device falls back to its ordinary tier instead of an unintended one. An
+    address configured with two different logins is dropped entirely: neither
+    login was demonstrably the intended one."""
+    mapping: Dict[str, str] = {}
+    problems: List[str] = []
+    conflicted = set()
+    for entry in (raw or "").split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        shown = entry[:80].encode("unicode_escape").decode("ascii")
+        parts = entry.split("=")
+        if len(parts) != 2:
+            problems.append(f"{shown!r}: expected exactly one '=' (ip=login)")
+            continue
+        ip = _canonical_ip(parts[0])
+        login = parts[1].strip()
+        if ip is None or ipaddress.ip_address(ip).is_loopback \
+                or ipaddress.ip_address(ip).is_unspecified \
+                or ipaddress.ip_address(ip).is_multicast:
+            problems.append(f"{shown!r}: not a usable device IP address")
+            continue
+        if (not login or login == TAGGED_DEVICES_LOGIN
+                or any(c.isspace() or unicodedata.category(c)[0] == "C" for c in login)):
+            problems.append(f"{shown!r}: login is empty, a placeholder, or has "
+                            "whitespace or control characters")
+            continue
+        if ip in conflicted:
+            problems.append(f"{shown!r}: address already mapped to conflicting logins")
+        elif ip in mapping and mapping[ip] != login:
+            problems.append(f"{shown!r}: conflicts with an earlier entry for the "
+                            "same address; neither is used")
+            del mapping[ip]
+            conflicted.add(ip)
+        else:
+            mapping[ip] = login
+    return mapping, problems
+
+
+def device_owners() -> Dict[str, str]:
+    """The parsed mapping, computed once per distinct environment value, with
+    each problem written to stderr when first parsed (also forced at startup)."""
+    global _device_owner_cache
+    raw = os.environ.get("NTH_TAILNET_DEVICE_OWNERS") or ""
+    if _device_owner_cache is not None and _device_owner_cache[0] == raw:
+        return _device_owner_cache[1]
+    mapping, problems = parse_device_owners(raw)
+    for problem in problems:
+        sys.stderr.write(f"[nth_web] NTH_TAILNET_DEVICE_OWNERS ignored entry {problem}\n")
+    _device_owner_cache = (raw, mapping)
+    return mapping
+
+
+def device_owner_login(info: Dict[str, Any], remote_ip: str) -> Optional[str]:
+    """The login a tagged node is delegated to, or None.
+
+    Applies only to a successful whois that reports a tagged node (the
+    placeholder login plus at least one tag) and only on exact canonical
+    equality with the socket peer. A user-owned device never matches, so an
+    ordinary account at a listed address is not overridden."""
+    mapping = device_owners()
+    if not mapping or (info.get("login") or "") != TAGGED_DEVICES_LOGIN:
+        return None
+    peer = _canonical_ip(remote_ip)
+    login = mapping.get(peer or "")
+    if login is None:
+        return None
+    tags = info.get("tags")
+    if not isinstance(tags, list) or not any(isinstance(t, str) and t for t in tags):
+        sys.stderr.write(
+            f"[nth_web] device {peer} is listed in NTH_TAILNET_DEVICE_OWNERS but "
+            "whois did not report a tagged node; not delegating.\n")
+        return None
+    # When whois lists the node's addresses, the peer must be one of them.
+    addresses = info.get("addresses")
+    if isinstance(addresses, list) and addresses and peer not in {
+            _canonical_ip(a.split("/", 1)[0]) for a in addresses if isinstance(a, str)}:
+        return None
+    return login
 
 
 class OperatorRegistry:
@@ -790,6 +920,11 @@ class OperatorRegistry:
         with self._lock:
             self._by_token[token] = ident
             self._evict_locked()
+
+    def drop(self, token: str) -> None:
+        with self._lock:
+            self._by_token.pop(token, None)
+            self._last_retry_at.pop(token, None)
 
     def should_retry_untrusted(self, token: str) -> bool:
         """Reserve a rate-limited retry of a cached non-trusted identity."""
@@ -872,6 +1007,26 @@ class OperatorRegistry:
         info = tailscale_whois(remote_ip)
         if not info:
             return None
+        mapped = device_owner_login(info, remote_ip)
+        if mapped is None:
+            return self._resolve_tailscale_account(token, info)
+        # Delegated: the mapped login goes through the same owner / member /
+        # guest gate as a login whois reported itself, so it gets exactly that
+        # tier. The placeholder display name is dropped; the optional
+        # NTH_TAILNET_DEVICE_OWNER_NAME labels only the owner's own posts.
+        owner = tailnet_owner()
+        label = ""
+        if owner and mapped == owner:
+            label = (os.environ.get("NTH_TAILNET_DEVICE_OWNER_NAME") or "").strip()
+        ident = self._resolve_tailscale_account(
+            token, dict(info, login=mapped, display=label))
+        if ident is not None:
+            ident.delegated_from = info.get("login") or ""
+            ident.delegated_node = info.get("node_id") or info.get("node") or ""
+            ident.delegated_peer = _canonical_ip(remote_ip) or ""
+        return ident
+
+    def _resolve_tailscale_account(self, token: str, info: Dict[str, Any]) -> Optional[OperatorIdentity]:
         login = info.get("login") or ""
         # A tailnet peer is not automatically THIS hub's operator. Without this
         # check, every account the tailnet resolves -- a second person on a
@@ -4595,6 +4750,14 @@ class NthWebHandler(BaseHTTPRequestHandler):
         """
         token, is_new = self._get_or_mint_cookie()
         ident = OPERATOR_REGISTRY.get(token)
+        if ident is not None and ident.delegated_peer:
+            # A delegated identity belongs to one device. The cookie travels
+            # with the browser, so honour it only from the mapped address while
+            # the mapping still lists it; otherwise re-run the ladder.
+            peer = _canonical_ip(self._client_ip())
+            if peer != ident.delegated_peer or device_owners().get(peer) != ident.login:
+                OPERATOR_REGISTRY.drop(token)
+                ident = None
         if ident is not None:
             # A transient Tailscale/whois outage must not turn this browser
             # into a permanent guest until it clears its cookie. Trusted
@@ -11867,6 +12030,7 @@ def main() -> int:
     signal.signal(signal.SIGINT, shutdown)
 
     # Banner
+    device_owners()     # surface bad NTH_TAILNET_DEVICE_OWNERS entries at startup
     ts_ip = get_tailscale_ip()
     print("nth_web serving:")
     print(f"  channel:     {args.channel or '(landing page — all channels at /c/<code>)'}")
