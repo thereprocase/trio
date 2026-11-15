@@ -276,6 +276,34 @@ class Store:
         self.db.execute("UPDATE deliveries SET state='cancelled',done=? WHERE session=? AND state='queued'",
                         (time.time(), session))
 
+    def _outbox_items(self, delivery):
+        """The membership items a queued row announces; [] when unrecorded or damaged."""
+        record = self.db.execute('SELECT value FROM meta WHERE key=?', (OUTBOX_MEMBERS+str(delivery),)).fetchone()
+        try:
+            items = json.loads(record[0]) if record else []
+        except ValueError:
+            items = []
+        return [item for item in items if isinstance(item, dict)] if isinstance(items, list) else []
+
+    def _cancel_acknowledged(self, session):
+        """Caller holds the lock and transaction. Cancel unclaimed notices that
+        announce only messages the session has since acknowledged: it read them
+        through a hook wake or its own poll while the notice waited, and typing
+        the notice now would start a turn with nothing to read. A notice that
+        reports ended delivery, or has no item record, is kept."""
+        for row in self.db.execute("SELECT id FROM deliveries WHERE session=? AND state='queued'", (session,)).fetchall():
+            items = self._outbox_items(row['id'])
+            for item in items:
+                acked = self.db.execute('SELECT shadow_acked_through FROM memberships WHERE key=?',
+                                        (item.get('key'),)).fetchone()
+                if (item.get('reason') or type(item.get('last_id')) is not int
+                        or not acked or acked[0] is None or acked[0] < item['last_id']):
+                    break
+            else:
+                if items:
+                    self.db.execute("UPDATE deliveries SET state='cancelled',done=? WHERE id=?", (time.time(), row['id']))
+                    self.db.execute('DELETE FROM meta WHERE key=?', (OUTBOX_MEMBERS+str(row['id']),))
+
     def _rehome_queued(self, session, ending=False):
         """Move unclaimed notices whose membership now belongs to another live
         session. Claimed rows ('sending'/'uncertain') are never touched: they
@@ -283,14 +311,7 @@ class Store:
         moved = []
         for row in self.db.execute("SELECT id FROM deliveries WHERE session=? AND state='queued' ORDER BY id",
                                    (session,)).fetchall():
-            record = self.db.execute('SELECT value FROM meta WHERE key=?', (OUTBOX_MEMBERS+str(row['id']),)).fetchone()
-            try:
-                items = json.loads(record[0]) if record else []
-            except ValueError:
-                items = []
-            if not isinstance(items, list):
-                items = []
-            items = [item for item in items if isinstance(item, dict)]
+            items = self._outbox_items(row['id'])
             stay, away = [], {}
             for item in items:
                 owner = self.db.execute('SELECT owner_session FROM memberships WHERE key=?',
@@ -304,8 +325,11 @@ class Store:
                 continue
             self.db.execute("UPDATE deliveries SET state='cancelled',done=? WHERE id=?", (time.time(), row['id']))
             self.db.execute('DELETE FROM meta WHERE key=?', (OUTBOX_MEMBERS+str(row['id']),))
-            if stay and not ending:
-                self.queue_notice(session, stay, self._sink_enqueue(self.session(session)['sink']))
+            if stay and not ending and not self.queue_notice(
+                    session, stay, self._sink_enqueue(self.session(session)['sink'])):
+                # The sink refused (its binding is gone): keep the items in the
+                # runtime buffer like the ones that moved away.
+                moved.append((session, stay))
             for owner, owned in away.items():
                 target = self.session(owner)
                 for item in owned:
@@ -432,9 +456,20 @@ class Store:
                 (request['session'], request['client'], request['sink'], pid, stamp,
                  int(request['host_ok']), request['problem'], registered, int(request.get('resume',False)), stamp))
             if request['sink']=='tmux':
-                if stamp is None:
+                # host_pid is the client. pane_pid, when given, is the pane's first
+                # process (often a shell that outlives the client); both lifetimes
+                # must still hold when a notice is typed.
+                pane_pid = request.get('pane_pid') or pid
+                try:
+                    pane_stamp = stamp if pane_pid == pid else process_stamp(pane_pid)
+                except (OverflowError, OSError):
+                    pane_stamp = None
+                if stamp is None or pane_stamp is None:
                     raise WireError('tmux host process is not live', 'dead_host')
-                binding=json.dumps(dict(pane=request['pane'],pid=pid,stamp=stamp))
+                binding = dict(pane=request['pane'], pid=pane_pid, stamp=pane_stamp)
+                if pane_pid != pid:
+                    binding.update(client=pid, client_stamp=stamp)
+                binding=json.dumps(binding)
                 self.db.execute('INSERT OR REPLACE INTO meta(key,value) VALUES (?,?)',('tmux:'+request['session'],binding))
             else:
                 self.db.execute('DELETE FROM meta WHERE key=?',('tmux:'+request['session'],))
@@ -509,6 +544,7 @@ class Store:
             self.session(request['session'])
             self.db.execute('UPDATE memberships SET shadow_acked_through=MAX(shadow_acked_through,?) WHERE key=?',
                             (request['through_id'], request['key']))
+            self._cancel_acknowledged(request['session'])
         return {}
 
     def turn(self, request):

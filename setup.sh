@@ -321,6 +321,9 @@ print(last); sys.exit(1)
     echo ""
     if [ "$UNVERIFIED" -ne 0 ]; then
         echo "=== Hub service deployed but UNVERIFIED (health check failed) ==="
+        if [ -d "$BACKUP_DIR" ]; then
+            echo "The new release is in place. Previous files are in: $BACKUP_DIR"
+        fi
         exit 1
     fi
     echo "=== Hub service deploy complete ==="

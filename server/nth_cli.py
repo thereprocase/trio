@@ -56,7 +56,7 @@ def interposer_control(action, session=None):
             print(json.dumps({'hello': client.hello, **state}, indent=2))
         return 0
     except (OSError, WireError, EOFError, subprocess.SubprocessError) as exc:
-        if 'exceeds 64 KiB' in str(exc):
+        if getattr(exc, 'code', '') == 'frame_too_large':
             print('The interposer holds too many sessions for one reply; '
                   'name one with `trio interposer status --session ID`.', file=sys.stderr)
             return 1
@@ -672,11 +672,24 @@ def _ensure_codex_locked(binary=None):
     raise RuntimeError('Codex server did not become ready; inspect events/codex-server.log')
 
 
+def foreground_pid(pid):
+    """The foreground process group leader on the terminal of process `pid`, or None.
+
+    In a tmux pane that is the client the operator sees, while the pane's own
+    process is often the shell that started it."""
+    try:
+        value = int(subprocess.run(['ps', '-o', 'tpgid=', '-p', str(pid)], capture_output=True,
+                                   text=True, timeout=5, check=True).stdout.strip())
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+    return value if value > 0 else None
+
+
 def bind_tmux(session, client, pane):
     """Register a running Claude or Codex session for tmux notice delivery.
 
-    The pane's own process id and the session id together are the binding the
-    sink checks before it types, so both are read here rather than taken on trust."""
+    The sink checks the pane, the pane's own process and the client process before
+    it types, so all three are read here rather than taken on trust."""
     from nth_interposer_tmux import CLIENT_PROGRAMS, command
     from nth_interposer_wire import connect, WireError
     pane = pane or os.environ.get('TMUX_PANE')
@@ -688,14 +701,16 @@ def bind_tmux(session, client, pane):
         pane_id, pid, program = command(
             'display-message', '-p', '-t', pane,
             '#{pane_id} #{pane_pid} #{pane_current_command}').strip().split(' ', 2)
+        client_pid = foreground_pid(int(pid)) or int(pid)
         with connect() as service:
-            service.call('session.register', session=session, client=client, host_pid=int(pid),
-                         sink='tmux', host_ok=True, problem='', pane=pane_id)
+            service.call('session.register', session=session, client=client, host_pid=client_pid,
+                         sink='tmux', host_ok=True, problem='', pane=pane_id, pane_pid=int(pid))
     except (OSError, ValueError, WireError, EOFError, subprocess.SubprocessError) as exc:
         print('Could not bind the pane: ' + type(exc).__name__ + '; check the pane with '
               '`tmux list-panes -a` and the service with `trio interposer status`.', file=sys.stderr)
         return 1
-    print(json.dumps({'session': session, 'pane': pane_id, 'host_pid': int(pid), 'program': program}))
+    print(json.dumps({'session': session, 'pane': pane_id, 'pane_pid': int(pid), 'client_pid': client_pid,
+                      'program': program}))
     if program not in CLIENT_PROGRAMS:
         print(f'Pane {pane_id} is running {program!r}. Notices are typed only while its '
               'foreground program is one of: ' + ', '.join(CLIENT_PROGRAMS) + '.', file=sys.stderr)

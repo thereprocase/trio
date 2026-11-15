@@ -150,6 +150,40 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(self.states(), ['cancelled', 'cancelled'])
         self.assertIsNone(self.store.db.execute("SELECT 1 FROM meta WHERE key IN ('tmux:session-tmux','opencode_poll:session-sdk')").fetchone())
 
+    # A notice still waiting when the session acknowledges its messages (after a
+    # hook wake or its own poll) is cancelled; one with newer messages is kept.
+    def test_ack_cancels_notice_for_messages_already_read(self):
+        self.register('session-sdk')
+        self.identity(KEY)
+        self.attach(KEY, 'session-sdk')
+        self.queue_from_runtime(KEY, 'session-sdk', ids=(1, 2))
+        self.assertEqual(self.states('session-sdk'), ['queued'])
+        ack = dict(v=1, id=5, op='ack.seen', session='session-sdk', key=KEY, through_id=1)
+        validate_request(ack)
+        self.store.ack(ack)
+        self.assertEqual(self.states('session-sdk'), ['queued'])
+        self.store.ack(dict(ack, through_id=2))
+        self.assertEqual(self.states('session-sdk'), ['cancelled'])
+        self.assertIsNone(self.wait('session-sdk'))
+        self.assertIsNone(self.store.db.execute("SELECT 1 FROM meta WHERE key LIKE 'outbox_members:%'").fetchone())
+
+    def test_ack_keeps_ended_delivery_and_claimed_notices(self):
+        self.register('session-sdk')
+        self.identity(KEY)
+        self.attach(KEY, 'session-sdk')
+        from nth_interposer_opencode import enqueue
+        self.queue_from_runtime(KEY, 'session-sdk', ids=(1,))
+        self.assertIsNotNone(self.wait('session-sdk'))
+        ended = dict(key=KEY, source='local', channel='room', member_id='member', first_id=2, last_id=2,
+                     count=1, reason='channel ended')
+        with self.store.lock, self.store.db:
+            self.store.queue_notice('session-sdk', [ended], lambda session, items: enqueue(self.store, session, items))
+        self.queue_from_runtime(KEY, 'session-sdk', ids=(3,))
+        self.assertEqual(self.states('session-sdk'), ['sending', 'queued', 'queued'])
+        self.store.ack(dict(v=1, id=5, op='ack.seen', session='session-sdk', key=KEY, through_id=9))
+        # The claimed row may be on screen and the ended notice is news; only the read one goes.
+        self.assertEqual(self.states('session-sdk'), ['sending', 'queued', 'cancelled'])
+
     # Finding 2: eviction at the session cap cancels the victim's queue, so the
     # tmux drain keeps working instead of failing on an unknown session.
     def test_eviction_cancels_queue_and_drain_survives(self):

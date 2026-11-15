@@ -193,18 +193,34 @@ class TmuxSink:
             self.store.db.execute("UPDATE deliveries SET state='cancelled',done=? WHERE id=? AND state='queued'",(time.time(),row['id']))
 
     def admissible(self, row):
-        """Session, sink and binding still match the row. Caller holds the store lock.
-        Raises WireError when the session no longer exists."""
+        """Whether the row may be typed now. Caller holds the store lock.
+
+        'send': session, sink and binding still match the row. 'rebound': the session
+        was bound to another pane since the row was read; the row is moved to the new
+        binding and the next drain inspects that pane. 'cancel': the session ended or
+        left the tmux sink. Raises WireError when the session no longer exists."""
         state = self.store.session(row['session'])
         current = self.store.db.execute('SELECT value FROM meta WHERE key=?',('tmux:'+row['session'],)).fetchone()
-        ok = state['state']!='ended' and state['sink']=='tmux' and current is not None and current[0]==row['ranges']
-        return ok, state
+        if state['state']=='ended' or state['sink']!='tmux' or current is None:
+            self.cancel(row)
+            return 'cancel', state
+        if current[0]!=row['ranges']:
+            with self.store.db:
+                self.store.db.execute("UPDATE deliveries SET ranges=? WHERE id=? AND state='queued'",(current[0],row['id']))
+            return 'rebound', state
+        return 'send', state
 
     def identity(self, pane, binding):
         """The pane still runs the bound host process lifetime and a client program."""
         pid, program = self.run('display-message','-p','-t',pane,'#{pane_pid} #{pane_current_command}').strip().split(' ',1)
         # Pane IDs can be reused after tmux restarts. Bind the exact OS lifetime.
-        return int(pid)==binding['pid'] and process_stamp(int(pid))==binding['stamp'] and program in CLIENT_PROGRAMS
+        if int(pid)!=binding['pid'] or process_stamp(int(pid))!=binding['stamp'] or program not in CLIENT_PROGRAMS:
+            return False
+        # A pane's shell outlives a client that crashed without ending its session;
+        # the bound client must itself be alive, or a new client in the pane would
+        # receive the old session's notices.
+        client = binding.get('client')
+        return client is None or process_stamp(client)==binding.get('client_stamp')
 
     def deliver(self, row):
         try:
@@ -216,9 +232,8 @@ class TmuxSink:
             return self.cancel(row)
         with self.store.lock:
             if self.closing():return
-            ok, state = self.admissible(row)
-            if not ok:
-                return self.cancel(row)
+            verdict, state = self.admissible(row)
+            if verdict!='send':return
         # Unlocked inspection: a busy pane is the common case and must not hold the lock.
         try:
             if not self.identity(pane,binding):return
@@ -231,9 +246,8 @@ class TmuxSink:
         # Hold time is bounded by three TMUX_TIMEOUT_S calls.
         with self.store.lock:
             if self.closing():return
-            ok, _ = self.admissible(row)
-            if not ok:
-                return self.cancel(row)
+            verdict, _ = self.admissible(row)
+            if verdict!='send':return
             try:
                 if not self.identity(pane,binding):return
             except (OSError,ValueError,subprocess.SubprocessError):return

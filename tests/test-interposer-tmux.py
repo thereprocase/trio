@@ -209,14 +209,17 @@ class FixesTests(SinkCase):
   def connect():yield Service()
   out,err=io.StringIO(),io.StringIO()
   with patch('nth_interposer_tmux.command',return_value='%7 4242 bash\n') as tmux,patch.object(nth_interposer_wire,'connect',connect),\
+    patch.object(nth_cli,'foreground_pid',return_value=4343) as foreground,\
     contextlib.redirect_stdout(out),contextlib.redirect_stderr(err):
    self.assertEqual(nth_cli.bind_tmux('session-test','codex','work:1.0'),0)
    self.assertEqual(nth_cli.bind_tmux('session-test','opencode','%7'),1)
    self.assertEqual(nth_cli.bind_tmux('','claude','%7'),1)
   self.assertEqual(tmux.call_args[0][3],'work:1.0')
   self.assertEqual(len(sent),1)
-  self.assertEqual({k:sent[0][k] for k in ('session','client','sink','pane','host_pid')},
-   dict(session='session-test',client='codex',sink='tmux',pane='%7',host_pid=4242))
+  # The client is the pane's foreground process; the pane's own process is recorded beside it.
+  self.assertEqual({k:sent[0][k] for k in ('session','client','sink','pane','host_pid','pane_pid')},
+   dict(session='session-test',client='codex',sink='tmux',pane='%7',host_pid=4343,pane_pid=4242))
+  foreground.assert_called_with(4242)
   self.assertIn("running 'bash'",err.getvalue())
  def test_cli_status_names_one_session(self):
   # A store with hundreds of sessions overflows one reply frame; the CLI asks for one session.
@@ -226,7 +229,7 @@ class FixesTests(SinkCase):
    hello={'version':'test'}
    def call(self,op,**fields):
     asked.append((op,fields))
-    if op=='list':raise nth_interposer_wire.ServiceRefused('response exceeds 64 KiB; use status with a key or session')
+    if op=='list':raise nth_interposer_wire.refusal({'code':'frame_too_large','message':'response exceeds 64 KiB'})
     return {'sessions':[{'session':fields['session'],'sink':'tmux'}]}
   @contextlib.contextmanager
   def connect(**_):yield Service()
@@ -262,13 +265,34 @@ class FixesTests(SinkCase):
    return self.footer if args[0]=='capture-pane' else ''
   self.enqueue();self.sink.run=run;self.sink.drain()
   self.assertEqual(self.state(),'queued');self.assertFalse(any(c[0]=='send-keys' for c in self.calls))
- def test_rebind_during_inspection_cancels(self):
-  # Finding 3: a rebind before the fence cancels the row instead of typing into the old pane.
+ def test_rebind_during_inspection_follows_new_pane(self):
+  # A rebind before the fence never types into the old pane; the notice moves to the new one.
   def run(*args):
-   if args[0]=='capture-pane':self.register('session-test','%456')
+   if args[0]=='capture-pane' and not self.rebound:self.rebound=True;self.register('session-test','%456')
    return self.run_tmux(*args)
+  self.rebound=False
   self.enqueue();self.sink.run=run;self.sink.drain()
-  self.assertEqual(self.state(),'cancelled');self.assertFalse(any(c[0]=='send-keys' for c in self.calls))
+  self.assertEqual(self.state(),'queued');self.assertFalse(any(c[0]=='send-keys' for c in self.calls))
+  self.sink.drain()
+  self.assertEqual(self.state(),'written')
+  self.assertEqual({c[2] for c in self.calls if c[0]=='send-keys'},{'%456'})
+ def test_dead_client_in_live_pane_gets_nothing(self):
+  # The pane's shell is alive but the bound client is gone: a new client there must not be typed into.
+  child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(30)'])
+  try:
+   request=dict(self.req,host_pid=child.pid,pane_pid=os.getpid());validate_request(request);self.store.register(request)
+   binding=self.store.db.execute("SELECT value FROM meta WHERE key='tmux:session-test'").fetchone()[0]
+   self.assertIn('"client"',binding)
+   self.enqueue();self.sink.drain();self.assertEqual(self.state(),'written')
+   self.enqueue()
+  finally:
+   child.kill();child.wait()
+  self.sink.drain()
+  self.assertEqual(self.states('session-test'),['written','queued'])
+  self.assertEqual(len([c for c in self.calls if c[0]=='send-keys']),2)
+ def test_pane_pid_needs_tmux_sink(self):
+  with self.assertRaises(WireError):validate_request(dict(self.req,sink='rewake',pane_pid=5))
+  with self.assertRaises(WireError):validate_request(dict(self.req,pane_pid=0))
  def test_orphan_row_does_not_abort_drain(self):
   # Finding 5: a row whose session was evicted is cancelled; other sessions still deliver.
   with self.store.db:

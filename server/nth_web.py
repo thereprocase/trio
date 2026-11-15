@@ -831,7 +831,11 @@ def parse_device_owners(raw: str) -> Tuple[Dict[str, str], List[str]]:
         shown = entry[:80].encode("unicode_escape").decode("ascii")
         parts = entry.split("=")
         if len(parts) != 2:
-            problems.append(f"{shown!r}: expected exactly one '=' (ip=login)")
+            # Text with no ip=login shape may be something pasted by mistake;
+            # show only enough of it to find the entry.
+            start = entry[:6].encode("unicode_escape").decode("ascii")
+            problems.append(f"{start!r}… ({len(entry)} characters): "
+                            "expected exactly one '=' (ip=login)")
             continue
         ip = _canonical_ip(parts[0])
         login = parts[1].strip()
