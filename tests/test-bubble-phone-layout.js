@@ -274,10 +274,16 @@ async function measure() {
             assert.strictEqual(g.copy.width, 0, key + ' outside copy affordance hidden on phone');
             assert.strictEqual(g.copy.height, 0, key + ' copy spends no row');
             assert.ok(g.head.left >= g.content.left - .5 && g.head.right <= g.content.right + .5, key + ' header fits content');
+            // Every phone head parks the actions button in the gutter beside the
+            // bubble: inside the row, outside the content box, a 44px target that
+            // covers no bubble text. A button back in the head row fails here.
+            const more = g.headerChildren.filter(child => child.className === 'message-more');
+            assert.strictEqual(more.length, 1, key + ' has one visible actions button');
+            assert.strictEqual(more[0].position, 'absolute', key + ' actions button is out of the head row');
+            assert.ok(more[0].width >= 44 && more[0].height >= 44, key + ' actions button 44px target: ' + JSON.stringify(more[0]));
+            assert.ok(more[0].top >= g.row.top - .5 && more[0].bottom <= g.row.bottom + .5, key + ' actions button stays in its row: ' + JSON.stringify(more[0]));
             for (const child of g.headerChildren) {
-              // An empty head parks the actions button in the gutter beside the
-              // bubble: inside the row, outside the content box by design.
-              if (child.className === 'message-more' && child.position === 'absolute') {
+              if (child.className === 'message-more') {
                 assert.ok(child.left >= g.row.left - .5 && child.right <= g.row.right + .5,
                   key + ' gutter actions button fits the row: ' + JSON.stringify(child));
                 assert.ok(child.right <= g.bubble.left + .5 || child.left >= g.bubble.right - .5,

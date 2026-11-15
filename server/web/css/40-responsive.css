@@ -240,19 +240,22 @@
   }
   :root[data-theme] .message.msg.message-grouped .message-avatar{ visibility:hidden; }
   :root[data-theme] .message.msg.has-bubble-time .message-head .header-time{ display:none; }
+  /* A head with nothing else to show must stay zero-height, or every own and
+     repeated message gains a 24px row for the actions button alone.
+     The :has() list names every head child that can be visible on an own or
+     repeated message; a new visible head child must be added here, or its
+     head collapses onto the bubble (tests/test-header-phone-layout.js checks). */
   :root[data-theme] .message.msg.me .message-head:not(:has(.reply-context,.target-chip,.confidence,.private-badge,.task-chip)),
   :root[data-theme] .message.msg.message-grouped .message-head:not(:has(.reply-context,.target-chip,.confidence,.private-badge,.task-chip)){ margin:0; }
-  /* A head with nothing else to show must stay zero-height, or every own and
-     repeated message gains a 24px row for the actions button alone. In that
-     case the button sits in the gutter opposite the bubble (48px or wider),
-     positioned against .message-content, level with the 48px minimum bubble. */
-  :root[data-theme] .message.msg.me .message-head:not(:has(.reply-context,.target-chip,.confidence,.private-badge,.task-chip)),
-  :root[data-theme] .message.msg.message-grouped .message-head:not(:has(.reply-context,.target-chip,.confidence,.private-badge,.task-chip)){ position:static; }
-  :root[data-theme] .message.msg.me .message-head:not(:has(.reply-context,.target-chip,.confidence,.private-badge,.task-chip)) .message-more,
-  :root[data-theme] .message.msg.message-grouped .message-head:not(:has(.reply-context,.target-chip,.confidence,.private-badge,.task-chip)) .message-more{
+  /* Every phone actions button sits in the gutter opposite the bubble (48px
+     or wider), positioned against .message-content and level with its top.
+     That gives a 44px target without a head row of its own and without the
+     target covering bubble text, which must stay selectable. */
+  :root[data-theme] .message.msg:not(.system-message):not(.retracted) .message-head{ position:static; }
+  :root[data-theme] .message.msg:not(.system-message):not(.retracted) .message-more{
     position:absolute; top:2px; left:100%; width:44px; height:44px;
   }
-  :root[data-theme] .message.msg.me .message-head:not(:has(.reply-context,.target-chip,.confidence,.private-badge,.task-chip)) .message-more{
+  :root[data-theme] .message.msg.me:not(.system-message):not(.retracted) .message-more{
     left:auto; right:100%;
   }
   :root[data-theme] .message.msg .message-targets:not(.targets-expanded) .extra-target{ display:none; }
