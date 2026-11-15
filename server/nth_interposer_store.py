@@ -22,6 +22,17 @@ ANNOUNCED_TTL = 86400
 MAX_SESSIONS = 256
 HOOKS_IMPORT_CUTOVER = 'hooks_import_cutover'  # Only the eventual cutover PR may set this.
 HOOKS_IMPORT_INTERVAL = 60
+# Terminal outbox rows are history only; bound them by age and count so queue
+# lookups and status aggregation stay proportional to live work. Claimed rows
+# ('sending', 'uncertain') are never pruned: an operator must inspect them.
+DELIVERY_RETENTION = 7 * 86400
+MAX_TERMINAL_DELIVERIES = 4096
+TERMINAL_DELIVERY_STATES = ('written', 'cancelled')
+DELIVERY_SINKS = ('tmux', 'opencode')
+# meta key prefix + delivery id: the membership items behind an unclaimed
+# notice, so an ownership change can move it. Kept in meta so the schema and
+# a rollback to an older build are unaffected.
+OUTBOX_MEMBERS = 'outbox_members:'
 SCHEMA = '''
 CREATE TABLE hubs(server TEXT PRIMARY KEY, url TEXT, announced_at REAL,
                   state TEXT, since REAL, error TEXT, pending_url TEXT DEFAULT '',
@@ -116,6 +127,13 @@ class Store:
                     for column, definition in additions.items():
                         if column not in columns:
                             self.db.execute(f'ALTER TABLE {table} ADD COLUMN {column} {definition}')
+                # Serves the sink/state/session queue lookups and status counts.
+                self.db.execute('CREATE INDEX IF NOT EXISTS deliveries_queue ON deliveries(sink,state,session,id)')
+                # Earlier builds evicted sessions without touching their outbox;
+                # such queued rows can never be delivered and break the drain.
+                self.db.execute("""UPDATE deliveries SET state='cancelled',done=? WHERE state='queued'
+                    AND session NOT IN (SELECT session FROM sessions)""", (time.time(),))
+                self._prune_deliveries()
                 self.db.execute(f'PRAGMA user_version={SCHEMA_VERSION}')
         except BaseException:
             self.db.close()
@@ -219,7 +237,95 @@ class Store:
             self.db.execute("UPDATE hubs SET url=?,pending_url='',config_pending_url='',trust='setup',state='announced',approved=1 WHERE server=?", (url,server))
         return {'server': server, 'url': url, 'approved': True}
 
-    def snapshot(self, key=None, session=None):
+    def _prune_deliveries(self):
+        states = TERMINAL_DELIVERY_STATES
+        self.db.execute(f'DELETE FROM deliveries WHERE state IN ({",".join("?"*len(states))}) AND COALESCE(done,created)<?',
+                        (*states, time.time()-DELIVERY_RETENTION))
+        self.db.execute(f'''DELETE FROM deliveries WHERE state IN ({",".join("?"*len(states))}) AND id<=(
+            SELECT id FROM deliveries WHERE state IN ({",".join("?"*len(states))}) ORDER BY id DESC LIMIT 1 OFFSET ?)''',
+                        (*states, *states, MAX_TERMINAL_DELIVERIES))
+        # Claimed rows are never moved, so their membership record is dead weight.
+        self.db.execute(f'''DELETE FROM meta WHERE substr(key,1,{len(OUTBOX_MEMBERS)})=? AND NOT EXISTS(
+            SELECT 1 FROM deliveries d WHERE d.state='queued' AND d.id=CAST(substr(meta.key,{len(OUTBOX_MEMBERS)+1}) AS INTEGER))''',
+                        (OUTBOX_MEMBERS,))
+
+    def prune_deliveries(self):
+        with self.lock, self.db:
+            self._prune_deliveries()
+
+    def queue_notice(self, session, items, enqueue):
+        """Caller holds the lock and transaction. Record which memberships a
+        queued row carries so a later ownership change can move it."""
+        if not enqueue(session, items):
+            return False
+        delivery = self.db.execute('SELECT last_insert_rowid()').fetchone()[0]
+        self.db.execute('INSERT OR REPLACE INTO meta(key,value) VALUES (?,?)',
+                        (OUTBOX_MEMBERS+str(delivery), json.dumps([dict(item) for item in items], allow_nan=False)))
+        return True
+
+    def _sink_enqueue(self, sink):
+        if sink == 'tmux':
+            from nth_interposer_tmux import TmuxSink
+            return TmuxSink(self).enqueue
+        from nth_interposer_opencode import enqueue
+        return lambda session, items: enqueue(self, session, items)
+
+    def _cancel_queued(self, session):
+        for row in self.db.execute("SELECT id FROM deliveries WHERE session=? AND state='queued'", (session,)).fetchall():
+            self.db.execute('DELETE FROM meta WHERE key=?', (OUTBOX_MEMBERS+str(row[0]),))
+        self.db.execute("UPDATE deliveries SET state='cancelled',done=? WHERE session=? AND state='queued'",
+                        (time.time(), session))
+
+    def _rehome_queued(self, session, ending=False):
+        """Move unclaimed notices whose membership now belongs to another live
+        session. Claimed rows ('sending'/'uncertain') are never touched: they
+        may already be on screen, and a replay would duplicate them."""
+        moved = []
+        for row in self.db.execute("SELECT id FROM deliveries WHERE session=? AND state='queued' ORDER BY id",
+                                   (session,)).fetchall():
+            record = self.db.execute('SELECT value FROM meta WHERE key=?', (OUTBOX_MEMBERS+str(row['id']),)).fetchone()
+            try:
+                items = json.loads(record[0]) if record else []
+            except ValueError:
+                items = []
+            if not isinstance(items, list):
+                items = []
+            items = [item for item in items if isinstance(item, dict)]
+            stay, away = [], {}
+            for item in items:
+                owner = self.db.execute('SELECT owner_session FROM memberships WHERE key=?',
+                                        (item.get('key'),)).fetchone()
+                owner = owner[0] if owner else None
+                if owner == session:
+                    stay.append(item)
+                elif owner:
+                    away.setdefault(owner, []).append(item)
+            if not away and not ending:
+                continue
+            self.db.execute("UPDATE deliveries SET state='cancelled',done=? WHERE id=?", (time.time(), row['id']))
+            self.db.execute('DELETE FROM meta WHERE key=?', (OUTBOX_MEMBERS+str(row['id']),))
+            if stay and not ending:
+                self.queue_notice(session, stay, self._sink_enqueue(self.session(session)['sink']))
+            for owner, owned in away.items():
+                target = self.session(owner)
+                for item in owned:
+                    item['owner_session'] = owner
+                if target['sink'] in DELIVERY_SINKS and self.queue_notice(owner, owned, self._sink_enqueue(target['sink'])):
+                    continue
+                # A shadow or currently unbound owner takes the notice through the
+                # runtime buffer, whose release path retries and journals it.
+                moved.append((owner, owned))
+        for owner, owned in moved:
+            buffer = self.pending_buffers.setdefault(owner, {'at': time.monotonic(), 'members': {}})
+            for item in owned:
+                buffer['members'].setdefault(item['key'], item)
+        if ending:
+            self._cancel_queued(session)
+
+    def _forget_sinks(self, session):
+        self.db.execute('DELETE FROM meta WHERE key IN (?,?)', ('tmux:'+session, 'opencode_poll:'+session))
+
+    def snapshot(self, key=None, session=None, ledger=True):
         with self.lock:
             def rows(table, column, value):
                 query = f'SELECT * FROM {table}'
@@ -232,19 +338,32 @@ class Store:
             for item in sessions:
                 if item.get('sink') == 'opencode':
                     heartbeat = self.db.execute('SELECT value FROM meta WHERE key=?',('opencode_poll:'+item['session'],)).fetchone()
-                    item['sink_heartbeat'] = json.loads(heartbeat[0]) if heartbeat else 0
+                    try:
+                        value = json.loads(heartbeat[0]) if heartbeat else 0
+                    except ValueError:
+                        value = 0
+                    # A damaged heartbeat reads as never seen, not as a crash.
+                    item['sink_heartbeat'] = value if type(value) in (int, float) and math.isfinite(value) else 0
             # Delivery bodies/payloads can contain peer text in later PRs; truth ops
             # expose control state only, never those content-bearing columns.
             holdings = rows('holdings', 'session', session)
             if key is not None:
                 holdings = [row for row in holdings if row['key'] == key]
-            return {'hubs': rows('hubs', 'server', None),
+            result = {'hubs': rows('hubs', 'server', None),
                     'memberships': rows('memberships', 'key', key),
                     'sessions': sessions, 'holdings': holdings,
-                    'legacy_import_skips': list(self.import_skips),
-                    'delivery_states': [dict(r) for r in self.db.execute(
-                        'SELECT session,sink,state,COUNT(*) AS count FROM deliveries GROUP BY session,sink,state')
-                        if session is None or r['session']==session]}
+                    'legacy_import_skips': list(self.import_skips)}
+            if ledger:
+                # Callers inside the service (reconcile, death sweep) pass
+                # ledger=False: they never read these counts.
+                query = 'SELECT session,sink,state,COUNT(*) AS count FROM deliveries'
+                arguments = ()
+                if session is not None:
+                    query += ' WHERE session=?'
+                    arguments = (session,)
+                result['delivery_states'] = [dict(r) for r in self.db.execute(
+                    query + ' GROUP BY session,sink,state', arguments)]
+            return result
 
     def live_sessions(self):
         with self.lock:
@@ -266,6 +385,10 @@ class Store:
                 ('shadow_pending:'+row[0]+':','shadow_pending:'+row[0]+':')).fetchone()), None)
         if victim is None:
             raise WireError('session limit reached', 'session_limit')
+        # Queued work for a deleted session can never be admitted; claimed rows
+        # stay as evidence. Sink bindings go with the session they describe.
+        self._cancel_queued(victim[0])
+        self._forget_sinks(victim[0])
         self.db.execute('DELETE FROM holdings WHERE session=?', (victim[0],))
         self.db.execute('DELETE FROM sessions WHERE session=?', (victim[0],))
 
@@ -302,7 +425,8 @@ class Store:
                 host_ok,problem,registered,wakes_hour) VALUES (?,?,?,?,?,'idle',?,?,?,0)
                 ON CONFLICT(session) DO UPDATE SET client=excluded.client,sink=excluded.sink,
                 host_pid=excluded.host_pid,host_stamp=excluded.host_stamp,
-                state=CASE WHEN sessions.state='in_turn' THEN 'in_turn'
+                state=CASE WHEN sessions.state='in_turn' AND sessions.host_pid IS excluded.host_pid
+                    AND sessions.host_stamp IS excluded.host_stamp THEN 'in_turn'
                 WHEN sessions.state='ended' AND ?=0 AND ? IS NULL THEN 'ended' ELSE 'idle' END,
                 host_ok=excluded.host_ok,problem=excluded.problem,registered=excluded.registered''',
                 (request['session'], request['client'], request['sink'], pid, stamp,
@@ -351,6 +475,7 @@ class Store:
                 raise WireError('identity is missing or malformed', 'bad_identity') from None
             if source != 'local' and not self.db.execute("SELECT 1 FROM hubs WHERE url=? AND trust='setup'", (url,)).fetchone():
                 raise WireError('identity hub is not announced', 'hub_not_allowed')
+            previous = self.db.execute('SELECT owner_session FROM memberships WHERE key=?', (key,)).fetchone()
             self.db.execute("UPDATE memberships SET shadow_ended='membership replaced',owner_session=NULL,poll_state='ended' WHERE key!=? AND source=? AND url=? AND channel=? AND member_id=?",(key,source,url,channel,member))
             self.db.execute('''INSERT INTO memberships(key,source,url,channel,member_id,owner_session)
                 VALUES (?,?,?,?,?,?) ON CONFLICT(key) DO UPDATE SET source=excluded.source,
@@ -360,6 +485,9 @@ class Store:
                 DO UPDATE SET server=excluded.server,joined=excluded.joined,attached=1''',
                 (session, key, request['server'], time.time()))
             self.db.execute('UPDATE memberships SET shadow_filter=COALESCE(shadow_filter,filter),shadow_enabled=COALESCE(shadow_enabled,enabled),shadow_ended=COALESCE(shadow_ended,ended) WHERE key=?',(key,))
+            if previous and previous[0] and previous[0] != session and self.db.execute(
+                    'SELECT 1 FROM sessions WHERE session=?', (previous[0],)).fetchone():
+                self._rehome_queued(previous[0])
             return {'key': key, 'owner': session}
 
     def configure(self, request):
@@ -402,6 +530,8 @@ class Store:
                     ORDER BY h.joined DESC,h.session DESC LIMIT 1''', (row['key'], session)).fetchone()
                 self.db.execute('UPDATE memberships SET owner_session=? WHERE key=?',
                                 (owner[0] if owner else None, row['key']))
+            self._rehome_queued(session, ending=True)
+            self._forget_sinks(session)
         return {}
 
     def skip_status(self):
