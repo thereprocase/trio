@@ -21,6 +21,12 @@ FINAL_FLUSH_ATTEMPTS = 3
 MAX_STARTUPS = 4
 START_RETRY_SECONDS = .5
 START_RETRY_MAX = 30
+# Seconds a buffer settles before release: Claude coalesces bursts quickly,
+# other clients receive fewer, larger notices.
+CLAUDE_SETTLE_SECONDS = .3
+OTHER_SETTLE_SECONDS = 2.5
+DEATH_SWEEP_SECONDS = 60
+INBOX_DRAIN_SECONDS = 5
 START_FIELDS = ('source','url','channel','member_id','owner_session','filter','enabled','ended')
 
 
@@ -356,7 +362,7 @@ class Runtime:
             if not buffer:
                 return True
             state = self.store.session(session)
-            settle = .3 if state['client']=='claude' else 2.5
+            settle = CLAUDE_SETTLE_SECONDS if state['client']=='claude' else OTHER_SETTLE_SECONDS
             if (state['state']=='in_turn' and state['sink']!='tmux' and not flush) or (not force and time.monotonic()-buffer['at']<settle):
                 return False
             if state['sink'] in ('tmux','opencode'):
@@ -364,7 +370,8 @@ class Runtime:
                 # listeners remain shadow-only. Persist the outbox before clearing.
                 with self.store.db:
                     from nth_interposer_opencode import enqueue
-                    queued = self.tmux_sink.enqueue(session,list(buffer['members'].values())) if state['sink']=='tmux' else enqueue(self.store,session,list(buffer['members'].values()))
+                    sink = self.tmux_sink.enqueue if state['sink']=='tmux' else (lambda target,items:enqueue(self.store,target,items))
+                    queued = self.store.queue_notice(session,list(buffer['members'].values()),sink)
                     if not queued:
                         return False
                     if session in self.pending_keys:
@@ -518,7 +525,7 @@ class Runtime:
                 return
             self.recover()
             self.transfer_buffers()
-            wanted = {r['key']:r for raw in self.store.snapshot()['memberships']
+            wanted = {r['key']:r for raw in self.store.snapshot(ledger=False)['memberships']
                       if self.eligible(r:=shadow_row(raw))}
             for key,job in list(self.startups.items()):
                 row = wanted.get(key)
@@ -632,12 +639,13 @@ class Runtime:
     def tick(self):
         self.tmux_sink.schedule()
         now = time.monotonic()
-        if now-self.last_drain>=5:
+        if now-self.last_drain>=INBOX_DRAIN_SECONDS:
             self.last_drain = now
             self.drain()
-        if now-self.last_death>=60:
+        if now-self.last_death>=DEATH_SWEEP_SECONDS:
             self.last_death = now
-            for session in self.store.snapshot()['sessions']:
+            self.store.prune_deliveries()
+            for session in self.store.snapshot(ledger=False)['sessions']:
                 if session['state']=='ended' or not session['host_pid']:
                     continue
                 try:

@@ -895,8 +895,13 @@ class InstallerTests(unittest.TestCase):
         spec = importlib.util.spec_from_file_location('native_setup_codex', ROOT / 'setup.py')
         self.setup = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(self.setup)
+        # `systemctl --user` reaches the developer's own user manager whatever HOME
+        # says, so an unpatched install restarts their running interposer service.
+        self.units = patch.object(self.setup, 'install_interposer_units', return_value=False)
+        self.units.start()
 
     def tearDown(self):
+        self.units.stop()
         self.env.stop()
         self.temp.cleanup()
 

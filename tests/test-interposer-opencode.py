@@ -19,7 +19,7 @@ class SDKTests(base.SinkTests):
   validate_request(req)
   with self.store.lock:return dispatch(self.store,req)
  def enqueue(self):
-  with self.store.lock,self.store.db:enqueue(self.store,'session-test',[dict(source='quartet',channel='room',member_id='m',count=2,addressed=True,content='PRIVATE BODY')])
+  with self.store.lock,self.store.db:enqueue(self.store,'session-test',[dict(source='quartet',channel='room',member_id='m',first_id=4,last_id=5,count=2,addressed=True,content='PRIVATE BODY')])
  def test_sdk_busy_idle_admission_is_at_most_once(self):
   self.enqueue();self.store.turn(dict(session='session-test',phase='started'))
   self.assertIsNone(self.claim()['delivery'])
@@ -45,7 +45,7 @@ class SDKTests(base.SinkTests):
   runtime.release('session-test',force=True)
   self.assertEqual(self.state(),'queued');self.assertNotIn('session-test',runtime.buffers)
   runtime.close()
-  self.assertIn('1 unread in room',self.claim()['delivery']['notice'])
+  self.assertRegex(self.claim()['delivery']['notice'],r'1 new trio message .* in channel room\.')
  def test_ready_requires_live_sdk_consumer_and_listener(self):
   import nth_event_access as access
   import time

@@ -427,11 +427,14 @@ function collectMatches(root, group, out) {
 // another static element.
 const SKELETON_CHILDREN = new Set(['channel-pins-button']);
 let _skeleton = null;
+// Returns the element's tag and inner markup. HTML allows either quote style
+// around an attribute value, and the id is matched literally, not as a pattern.
 function skeletonInner(id) {
   if (_skeleton == null) {
     _skeleton = fs.readFileSync(path.resolve(__dirname, '..', 'server', 'web', 'index.html'), 'utf8');
   }
-  const open = new RegExp('<([a-zA-Z][\\w-]*)\\b[^>]*\\bid="' + id + '"[^>]*>').exec(_skeleton);
+  const literal = String(id).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const open = new RegExp('<([a-zA-Z][\\w-]*)\\b[^>]*\\sid=(["\'])' + literal + '\\2[^>]*>').exec(_skeleton);
   if (!open) throw new Error('no element with id "' + id + '" in server/web/index.html');
   const tag = open[1], start = open.index + open[0].length;
   const tags = new RegExp('<(/?)' + tag + '\\b[^>]*>', 'g');
@@ -439,7 +442,7 @@ function skeletonInner(id) {
   let depth = 1, m;
   while ((m = tags.exec(_skeleton))) {
     depth += m[1] ? -1 : 1;
-    if (depth === 0) return _skeleton.slice(start, m.index);
+    if (depth === 0) return { tag, inner: _skeleton.slice(start, m.index) };
   }
   throw new Error('element "' + id + '" in server/web/index.html is never closed');
 }
@@ -457,8 +460,26 @@ function makeDocument() {
     createTreeWalker: (root, whatToShow) => createTreeWalker(root, whatToShow),
     getElementById(id) {
       if (!byId.has(id)) {
-        const el = new FakeElement('div'); el.id = id; byId.set(id, el);
-        if (SKELETON_CHILDREN.has(id)) el.innerHTML = skeletonInner(id);
+        // Build the element completely before caching it: a skeleton lookup
+        // that throws must throw again next time, not return a stand-in div.
+        let el;
+        if (SKELETON_CHILDREN.has(id)) {
+          const { tag, inner } = skeletonInner(id);
+          el = new FakeElement(tag); el.innerHTML = inner;
+        } else {
+          el = new FakeElement('div');
+        }
+        el.id = id; byId.set(id, el);
+        // Static descendants with ids are the same nodes a page lookup returns.
+        const register = node => {
+          for (const child of node.children) {
+            if (child.nodeType !== 1) continue;
+            const childId = child.id || child.getAttribute?.('id');
+            if (childId && !byId.has(childId)) byId.set(childId, child);
+            register(child);
+          }
+        };
+        register(el);
       }
       return byId.get(id);
     },
@@ -636,4 +657,11 @@ function load({ setup } = {}) {
   return { hooks, context, document: sandbox.document, window: sandbox, bootError };
 }
 
-module.exports = { load, FakeElement, textNode };
+// Lets the harness's own test swap in a skeleton with missing or odd markup.
+const skeletonForTest = {
+  ids: SKELETON_CHILDREN,
+  use(html) { _skeleton = html; },
+  reset() { _skeleton = null; },
+};
+
+module.exports = { load, FakeElement, textNode, skeletonForTest };

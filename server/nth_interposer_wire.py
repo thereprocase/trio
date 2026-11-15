@@ -44,6 +44,14 @@ class ServiceRefused(WireError):
     """A definitive response; retrying this operation could apply it twice."""
 
 
+def refusal(error):
+    """The service's error object as an exception that keeps its code."""
+    if not isinstance(error, dict):
+        return ServiceRefused(str(error), 'service_error')
+    code = error.get('code')
+    return ServiceRefused(error.get('message', 'service error'), code if isinstance(code, str) else 'service_error')
+
+
 def home():
     return Path(os.environ.get('NTH_HOME', str(Path.home() / '.claude' / 'nth')))
 
@@ -249,7 +257,7 @@ def validate_request(value):
         'hello': ({}, {'client', 'pid', 'version'}),
         'hub.announce': ({'server', 'url'}, set()),
         'list': (set(), set()), 'status': (set(), {'key', 'session', 'host_pid', 'skips'}),
-        'session.register': ({'session', 'client', 'host_pid', 'sink', 'host_ok', 'problem'}, {'resume', 'pane'}),
+        'session.register': ({'session', 'client', 'host_pid', 'sink', 'host_ok', 'problem'}, {'resume', 'pane', 'pane_pid'}),
         'membership.attach': ({'session', 'key', 'server', 'via'}, set()),
         'membership.configure': ({'key'}, {'filter', 'enabled'}),
         'ack.seen': ({'session', 'key', 'through_id'}, set()),
@@ -273,7 +281,9 @@ def validate_request(value):
     if value.get('sink') == 'tmux':
         if not isinstance(value.get('pane'), str) or not re.fullmatch(r'%[0-9]{1,10}',value['pane']) or not value.get('host_pid'):
             raise WireError('tmux sink needs pane and host_pid')
-    elif 'pane' in value:
+        if 'pane_pid' in value and (not valid_id(value['pane_pid']) or value['pane_pid'] == 0):
+            raise WireError('bad pane_pid')
+    elif 'pane' in value or 'pane_pid' in value:
         raise WireError('pane requires tmux sink')
     for field in ('host_ok', 'enabled', 'resume'):
         if field in value and type(value[field]) is not bool:
@@ -347,15 +357,14 @@ class Client:
         reply = deadline_frame(self.socket, self.deadline) if hasattr(self, 'deadline') else read_frame(self.reader)
         if (reply.get('id') is None and 'error' in reply and 'ok' not in reply
                 and type(reply.get('v')) is int and reply['v'] == PROTOCOL_VERSION):
-            raise ServiceRefused(reply['error'].get('message', 'service error') if isinstance(reply['error'], dict) else str(reply['error']))
+            raise refusal(reply['error'])
         if (reply.get('v') != PROTOCOL_VERSION or type(reply.get('v')) is not int
                 or not valid_id(reply.get('id')) or reply['id'] != request_id):
             raise WireError('invalid reply id or protocol version; restart trio-interposer')
         if ('ok' in reply) == ('error' in reply):
             raise WireError('reply must contain exactly one of ok or error')
         if 'error' in reply:
-            raise ServiceRefused(reply['error'].get('message', 'service error') if isinstance(reply['error'], dict)
-                            else str(reply['error']))
+            raise refusal(reply['error'])
         return reply['ok']
 
     def close(self):

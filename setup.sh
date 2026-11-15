@@ -31,15 +31,29 @@ echo ""
 # bash setup.sh hub-service     first install AND upgrade (alias: upgrade)
 #
 # Owns the whole hub deployment so it can never drift from the repo again:
-# repo -> /opt/quartet-hub (with .bak-YYYYMMDD backups), a dedicated venv,
-# and canonical systemd units for quartet-hub (SSE MCP, :8000) and nth-web
-# (landing page + channel dashboards, :8765). Compile + import checks run
-# BEFORE the restart so a bad deploy never takes the hub down.
+# repo -> /opt/quartet-hub, a dedicated venv, and canonical systemd units for
+# quartet-hub (SSE MCP, :8000) and nth-web (landing page + channel dashboards,
+# :8765). The release is staged beside the live tree, checked (pinned
+# dependency versions, byte-compile, import of the service entry points under
+# a scratch HOME) and only then swapped in, so a bad deploy leaves the running
+# install untouched. Replaced files and web/ are kept under
+# $HUB_DIR/backups/<timestamp>/ (newest HUB_KEEP_BACKUPS kept, default 5).
+# The final health check always runs and a deploy it cannot verify exits 1.
+#
+# Test hooks (unused in production): TRIO_HUB_ROOT prefixes every path this
+# mode writes; HUB_HEALTH_URL / HUB_WEB_URL / HUB_HEALTH_TRIES override the
+# health probe.
 
 if [ "${1:-}" = "hub-service" ] || [ "${1:-}" = "upgrade" ]; then
-    HUB_DIR="/opt/quartet-hub"
-    HUB_HOME="/var/lib/quartet-hub"
-    STAMP="$(date +%Y%m%d)"
+    HUB_ROOT="${TRIO_HUB_ROOT:-}"
+    HUB_DIR="$HUB_ROOT/opt/quartet-hub"
+    HUB_HOME="$HUB_ROOT/var/lib/quartet-hub"
+    UNIT_DIR="$HUB_ROOT/etc/systemd/system"
+    # Seconds plus PID: two deploys in the same second still get distinct
+    # names, and a date-only stamp let the second deploy of a day overwrite
+    # the first backup.
+    STAMP="$(date +%Y%m%d-%H%M%S)-$$"
+    KEEP_BACKUPS="${HUB_KEEP_BACKUPS:-5}"
     SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
     if [ "$(id -u)" != "0" ]; then
@@ -51,9 +65,14 @@ if [ "${1:-}" = "hub-service" ] || [ "${1:-}" = "upgrade" ]; then
         exit 1
     fi
 
-    mkdir -p "$HUB_DIR" "$HUB_HOME"
+    mkdir -p "$HUB_DIR" "$HUB_HOME" "$UNIT_DIR"
 
-    echo "Deploying server files: repo -> $HUB_DIR (backups: *.bak-$STAMP)"
+    # Stage inside $HUB_DIR so the final moves are same-filesystem renames.
+    STAGE="$(mktemp -d "$HUB_DIR/.stage.XXXXXX")"
+    SCRATCH_HOME="$(mktemp -d "${TMPDIR:-/tmp}/trio-hub-check.XXXXXX")"
+    trap 'rm -rf "$STAGE" "$SCRATCH_HOME"' EXIT
+
+    echo "Staging server files: repo -> $STAGE"
     for f in nth_server.py nth_monitor.py nth_spoke_monitor.py nth_console.py \
              nth_dashboard.py nth_web.py nth_stt_worker.py quartet_server.py \
              nth_constants.py nth_authority.py nth_doctor.py codex_context_publisher.py \
@@ -67,10 +86,8 @@ if [ "${1:-}" = "hub-service" ] || [ "${1:-}" = "upgrade" ]; then
              nth_interposer.py nth_interposer_wire.py nth_interposer_store.py \
              nth_interposer_hubs.py nth_interposer_runtime.py nth_interposer_shadow.py nth_interposer_tmux.py nth_interposer_opencode.py \
              nth_usage.py nth_conversation.py nth_webpush.py nth_media.py nth_ask_client.js; do
-        if [ -f "$HUB_DIR/$f" ] && ! cmp -s "$SCRIPT_DIR/server/$f" "$HUB_DIR/$f"; then
-            cp "$HUB_DIR/$f" "$HUB_DIR/$f.bak-$STAMP"
-        fi
-        cp "$SCRIPT_DIR/server/$f" "$HUB_DIR/$f"
+        cp "$SCRIPT_DIR/server/$f" "$STAGE/$f"
+        STAGED_FILES="${STAGED_FILES:-} $f"
     done
 
     # The browser bundle. nth_web.py composes its page from these files at
@@ -78,34 +95,111 @@ if [ "${1:-}" = "hub-service" ] || [ "${1:-}" = "upgrade" ]; then
     # raises before it can serve or log a thing. Copied as a DIRECTORY rather
     # than as named files so that adding a CSS layer never requires an edit
     # here; a named list is exactly what drifted for the Python modules above.
-    rm -rf "${HUB_DIR:?}/web"
-    cp -R "$SCRIPT_DIR/server/web" "$HUB_DIR/web"
+    cp -R "$SCRIPT_DIR/server/web" "$STAGE/web"
 
     # Dedicated venv — same rationale and pin as spoke mode (mcp 2.0 removed
     # FastMCP; OS python upgrades orphan site-packages). Wheels only.
     HUB_VENV="$HUB_DIR/venv"
+    # Import gate plus the declared pins. Importability alone let an older
+    # uvicorn or an mcp 2.x-shaped install pass; the distribution versions are
+    # what the pip line below promises. Prints one line per mismatch.
+    HUB_PIN_CHECK='
+import sys
+from importlib import metadata
+bad = []
+def ver(name):
+    try:
+        return metadata.version(name)
+    except metadata.PackageNotFoundError:
+        bad.append(name + " is not installed"); return None
+def parts(v):
+    return tuple(int(p) for p in v.split(".")[:2])
+v = ver("mcp")
+if v is not None and parts(v)[0] >= 2:
+    bad.append("mcp " + v + " (need <2)")
+v = ver("uvicorn")
+if v is not None and v != "0.52.1":
+    bad.append("uvicorn " + v + " (need ==0.52.1)")
+v = ver("Pillow")
+if v is not None and not ((12, 3) <= parts(v) < (13, 0)):
+    bad.append("Pillow " + v + " (need >=12.3,<13)")
+try:
+    from mcp.server.fastmcp import FastMCP
+    import uvicorn, PIL
+except Exception as e:
+    bad.append("import failed: " + type(e).__name__ + ": " + str(e))
+print("\n".join(bad))
+sys.exit(1 if bad else 0)
+'
     if ! "$HUB_VENV/bin/python" -c "import sys" &>/dev/null; then
         echo "Creating hub venv: $HUB_VENV"
         rm -rf "$HUB_VENV"
         python3 -m venv "$HUB_VENV"
     fi
-    if ! "$HUB_VENV/bin/python" -c "from mcp.server.fastmcp import FastMCP; import uvicorn; import PIL; assert (12, 3) <= tuple(map(int, PIL.__version__.split('.')[:2])) < (13, 0)" &>/dev/null; then
+    if ! "$HUB_VENV/bin/python" -c "$HUB_PIN_CHECK" &>/dev/null; then
         echo "Installing into hub venv: mcp<2 uvicorn==0.52.1 Pillow>=12.3,<13"
         "$HUB_VENV/bin/python" -m pip install --quiet --upgrade pip
         "$HUB_VENV/bin/python" -m pip install --quiet --only-binary :all: "mcp<2" "uvicorn==0.52.1" "Pillow>=12.3,<13"
     fi
-    if ! "$HUB_VENV/bin/python" -c "from mcp.server.fastmcp import FastMCP; import uvicorn; import PIL; assert (12, 3) <= tuple(map(int, PIL.__version__.split('.')[:2])) < (13, 0)" &>/dev/null; then
-        echo "ERROR: hub venv cannot import FastMCP + uvicorn + supported Pillow. Hub NOT restarted."
+    if ! PIN_PROBLEMS="$("$HUB_VENV/bin/python" -c "$HUB_PIN_CHECK" 2>&1)"; then
+        echo "ERROR: hub venv does not satisfy the pinned dependencies:"
+        printf '%s\n' "$PIN_PROBLEMS" | sed 's/^/         /'
+        echo "       Hub NOT restarted; the installed tree is unchanged."
         exit 1
     fi
 
-    echo "Compile check..."
-    if ! "$HUB_VENV/bin/python" -m py_compile "$HUB_DIR"/*.py; then
-        echo "ERROR: py_compile failed. Hub NOT restarted (old process still serving)."
+    echo "Validating staged release (compile + import)..."
+    if ! "$HUB_VENV/bin/python" -m py_compile "$STAGE"/*.py; then
+        echo "ERROR: py_compile failed. Hub NOT restarted; the installed tree is unchanged."
+        exit 1
+    fi
+    # py_compile accepts a missing import. Import the two service entry points
+    # (and through them most modules) from the staged tree with HOME pointing
+    # at a scratch directory, so nothing touches the live database. The
+    # optional console modules (nth_dashboard needs rich) are not imported.
+    if ! IMPORT_OUT="$(cd "$SCRATCH_HOME" && HOME="$SCRATCH_HOME" NTH_HOME="$SCRATCH_HOME" \
+            PYTHONDONTWRITEBYTECODE=1 "$HUB_VENV/bin/python" -I -c '
+import sys
+sys.path.insert(0, sys.argv[1])
+import quartet_server, nth_web
+' "$STAGE" 2>&1)"; then
+        echo "ERROR: staged release failed to import. Hub NOT restarted; the installed tree is unchanged."
+        printf '%s\n' "$IMPORT_OUT" | tail -15 | sed 's/^/         /'
         exit 1
     fi
 
-    cat > /etc/systemd/system/quartet-hub.service <<UNIT
+    # Swap: every check passed. Keep what is replaced (changed files and the
+    # whole web/ tree) in one directory per deploy.
+    BACKUP_DIR="$HUB_DIR/backups/$STAMP"
+    mkdir -p "$HUB_DIR/backups"
+    mkdir "$BACKUP_DIR"
+    echo "Installing release -> $HUB_DIR (previous files: $BACKUP_DIR)"
+    for f in $STAGED_FILES; do
+        if [ -f "$HUB_DIR/$f" ] && ! cmp -s "$STAGE/$f" "$HUB_DIR/$f"; then
+            cp -p "$HUB_DIR/$f" "$BACKUP_DIR/$f"
+        fi
+        mv -f "$STAGE/$f" "$HUB_DIR/$f"
+    done
+    if [ -d "$HUB_DIR/web" ]; then
+        mv "$HUB_DIR/web" "$BACKUP_DIR/web"
+    fi
+    mv "$STAGE/web" "$HUB_DIR/web"
+    rmdir "$BACKUP_DIR" 2>/dev/null || true
+
+    # Bounded retention: newest $KEEP_BACKUPS directories. Glob order is
+    # alphabetical and the names start with the timestamp, so oldest come first.
+    if [ "$KEEP_BACKUPS" -ge 1 ] 2>/dev/null; then
+        total=0
+        for d in "$HUB_DIR"/backups/*; do [ -d "$d" ] && total=$((total + 1)); done
+        for d in "$HUB_DIR"/backups/*; do
+            [ -d "$d" ] || continue
+            [ "$total" -gt "$KEEP_BACKUPS" ] || break
+            rm -rf "${d:?}"
+            total=$((total - 1))
+        done
+    fi
+
+    cat > "$UNIT_DIR/quartet-hub.service" <<UNIT
 # Managed by trio/setup.sh hub-service — edit the repo, not this file.
 [Unit]
 Description=nth quartet hub (SSE MCP server for /quartet spokes)
@@ -139,7 +233,7 @@ RestrictSUIDSGID=yes
 WantedBy=multi-user.target
 UNIT
 
-    cat > /etc/systemd/system/nth-web.service <<UNIT
+    cat > "$UNIT_DIR/nth-web.service" <<UNIT
 # Managed by trio/setup.sh hub-service — edit the repo, not this file.
 [Unit]
 Description=nth web landing page (fleet health + channel dashboards)
@@ -175,7 +269,7 @@ UNIT
 
     # The unit files written above are canonical now — retire drop-ins from
     # the hand-managed era so there is exactly one source of ExecStart truth.
-    rm -rf /etc/systemd/system/quartet-hub.service.d
+    rm -rf "$UNIT_DIR/quartet-hub.service.d"
 
     systemctl daemon-reload
     systemctl enable quartet-hub.service nth-web.service >/dev/null 2>&1 || true
@@ -183,22 +277,55 @@ UNIT
     systemctl restart quartet-hub.service
     systemctl restart nth-web.service
 
+    # Health probe through the venv's Python: the hub container may have no
+    # curl, and the venv is already proven to run. Retries cover service
+    # start-up. https on loopback skips certificate verification only here,
+    # because the certificate names the MagicDNS host, not 127.0.0.1.
+    # Prints "ok" / the reason; exit 0 only for an HTTP 2xx.
+    HUB_PROBE='
+import ssl, sys, time, urllib.request
+url, tries = sys.argv[1], int(sys.argv[2])
+ctx = ssl.create_default_context()
+ctx.check_hostname = False
+ctx.verify_mode = ssl.CERT_NONE
+last = "no attempt"
+for i in range(tries):
+    try:
+        with urllib.request.urlopen(url, timeout=5, context=ctx) as r:
+            if 200 <= r.status < 300:
+                print("HTTP " + str(r.status)); sys.exit(0)
+            last = "HTTP " + str(r.status)
+    except Exception as e:
+        last = type(e).__name__ + ": " + str(e)
+    time.sleep(1)
+print(last); sys.exit(1)
+'
+    HEALTH_TRIES="${HUB_HEALTH_TRIES:-10}"
+    HEALTH_URL="${HUB_HEALTH_URL:-http://127.0.0.1:8000/healthz}"
+    WEB_URL="${HUB_WEB_URL:-https://127.0.0.1:8765/}"
+    UNVERIFIED=0
     sleep 2
     echo ""
-    if curl -fsS -m 5 http://127.0.0.1:8000/healthz; then
-        echo ""
-        echo "quartet-hub: /healthz OK"
+    if out="$("$HUB_VENV/bin/python" -I -c "$HUB_PROBE" "$HEALTH_URL" "$HEALTH_TRIES" 2>&1)"; then
+        echo "quartet-hub: /healthz OK ($out)"
     else
-        echo "WARNING: /healthz not answering yet — check: journalctl -u quartet-hub -n 30"
+        echo "ERROR: quartet-hub /healthz not answering ($out) — check: journalctl -u quartet-hub -n 30"
+        UNVERIFIED=1
     fi
-    # The unit serves https only (--tailscale-tls); -k because the certificate
-    # names the MagicDNS host, not the loopback address.
-    if curl -fsSk -m 5 -o /dev/null https://127.0.0.1:8765/; then
-        echo "nth-web:     landing page OK (port 8765)"
+    if out="$("$HUB_VENV/bin/python" -I -c "$HUB_PROBE" "$WEB_URL" "$HEALTH_TRIES" 2>&1)"; then
+        echo "nth-web:     landing page OK ($out)"
     else
-        echo "WARNING: nth-web not answering — check: journalctl -u nth-web -n 30"
+        echo "ERROR: nth-web not answering ($out) — check: journalctl -u nth-web -n 30"
+        UNVERIFIED=1
     fi
     echo ""
+    if [ "$UNVERIFIED" -ne 0 ]; then
+        echo "=== Hub service deployed but UNVERIFIED (health check failed) ==="
+        if [ -d "$BACKUP_DIR" ]; then
+            echo "The new release is in place. Previous files are in: $BACKUP_DIR"
+        fi
+        exit 1
+    fi
     echo "=== Hub service deploy complete ==="
     exit 0
 fi

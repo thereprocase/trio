@@ -5,10 +5,11 @@
 # are deliberately not importable as modules, and this project adds no test
 # dependencies). Each exits non-zero on failure.
 #
-# Some tests import nth_server, which needs the `mcp` SDK. Point PY at the
-# nth venv to include those:
-#     PY=~/.claude/nth/venv/bin/python bash tests/run-all.sh
-# Without it, tests requiring mcp are reported as skipped, not failed.
+# Some tests import nth_server, which needs the `mcp` SDK. The interpreter is
+# chosen in this order: an explicit PY, the nth venv
+# (~/.claude/nth/venv/bin/python) when it exists, then system python3. The
+# chosen interpreter is printed. With a python3 that lacks mcp, tests requiring
+# it are reported as skipped, not failed.
 #
 # SOAK holds the v5-era manual scripts that sleep for minutes to hours by
 # design (timeout-ceiling and restart-durability probes). They are not unit
@@ -18,7 +19,18 @@
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")" || exit 1
 
-PY="${PY:-python3}"
+# The system python3 has no mcp on the machines this runs on, so a bare run
+# used to skip the mcp tests without saying why. Exported so the Node tests
+# that spawn the server (process.env.PY) use the same interpreter.
+if [ -z "${PY:-}" ]; then
+    if [ -x "$HOME/.claude/nth/venv/bin/python" ]; then
+        PY="$HOME/.claude/nth/venv/bin/python"
+    else
+        PY=python3
+    fi
+fi
+export PY
+printf '  python: %s\n' "$PY"
 TIMEOUT="${TIMEOUT:-60}"
 
 # timeout(1) is GNU coreutils and is NOT on a stock macOS, where this suite is
