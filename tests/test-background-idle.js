@@ -11,7 +11,6 @@ const cx = load({setup:w=>{
 const T=cx.hooks.Trio,d=cx.document,w=cx.window;
 const show=hidden=>{d.hidden=hidden;d.visibilityState=hidden?'hidden':'visible';d.dispatchEvent(new Event('visibilitychange'));};
 const live=()=>w.EventSource.instances.filter(s=>!s.closed);
-function fixture(){d.getElementById('channel-pins-button').innerHTML='<span class="channel-pin-count"></span>';}
 (async()=>{
   T.state.channel='example'; T.state.dmKey='';
   T.startWorkspaceEvents();T.startEvents('example');
@@ -53,7 +52,7 @@ function fixture(){d.getElementById('channel-pins-button').innerHTML='<span clas
   show(false);
   // Workspace periodic timers stop, rather than waking and doing a no-op.
   w.fetch=async()=>({ok:true,status:200,text:async()=>'{"ok":true}',json:async()=>({ok:true,build:'synthetic'})});
-  fixture();T.state.operator={source:'tailscale'};T.state.workspaceLoading=false;
+  T.state.operator={source:'tailscale'};T.state.workspaceLoading=false;
   T.api.get=async()=>({channels:[],dms:[],tasks:[],approvals:[],questions:[],mentions:[],agents:[]});T.agents.refresh=async()=>{};
   T.workspace.mount();assert.ok([...intervals.values()].some(t=>t.ms===5000));
   T.diagnostics.mount();T.appRefresh.mount({onUnmount:fn=>w.cleanupRefresh=fn});

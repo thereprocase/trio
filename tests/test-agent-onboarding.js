@@ -41,7 +41,6 @@ async function main() {
     const cx = load(), T = cx.hooks.Trio;
     T.state.view = 'roster'; T.state.channels = []; T.state.dms = {};
     const rail = cx.document.getElementById('workspace-rail');
-    cx.document.getElementById('channel-pins-button').innerHTML='<span class="channel-pin-count"></span>';
     for (const [source, granted, spawn, channels] of [
       ['member', false, 0, 0], ['guest', false, 0, 0],
       ['member', true, 0, 1], ['tailscale', false, 1, 1]]) {

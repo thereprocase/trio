@@ -127,7 +127,11 @@ async function measure() {
       {...base,id:9,member_id:'long',content:'A long sender name remains available.'},
       {...base,id:10,member_id:'agent',content:'A long recipient name still fits.',mentions:['long'],reply_to:9},
       {...base,id:11,member_id:'peer',content:'[joined] Peer'},
-      {...base,id:12,member_id:'agent',content:'Code example:\n\n\`\`\`text\nhello world\n\`\`\`'}
+      {...base,id:12,member_id:'agent',content:'Code example:\n\n\`\`\`text\nhello world\n\`\`\`'},
+      // Repeated and own messages whose heads carry metadata: they must keep
+      // the populated-head placement, never the collapsed empty one.
+      {...base,id:13,member_id:'agent',content:'Grouped reply.',reply_to:7},
+      {...base,id:14,member_id:'operator',content:'Own reply.',reply_to:8}
     ];
     window.paintSynthetic=()=>{const list=document.getElementById('messages');list.replaceChildren(...window.syntheticMessages.map(m=>Trio.conversation.cardFor(m)));Trio.conversation.syncMessageGroups?.(list);list.scrollTop=0;};
     window.paintSynthetic(); window.copies=[];
@@ -153,7 +157,10 @@ async function measure() {
             time:rect(c.querySelector('.bubble-time')||c.querySelector('time')),bubble:rect(c.querySelector('.bubble')),more:rect(c.querySelector('.message-more'))})),
           own:{author:rect(own.querySelector('.message-head strong')),head:rect(own.querySelector('.message-head')),
             avatar:rect(own.querySelector('.message-avatar')),time:rect(own.querySelector('.bubble-time')||own.querySelector('time')),bubble:rect(own.querySelector('.bubble')),more:rect(own.querySelector('.message-more'))},
-          topbar:rect(document.querySelector('.conversation-header'))};
+          topbar:rect(document.querySelector('.conversation-header')),
+          actions:cards.filter(c=>c.querySelector('.message-more')).map(c=>({id:Number(c.dataset.messageId),row:rect(c),head:rect(c.querySelector('.message-head')),
+            bubble:rect(c.querySelector('.bubble')),more:rect(c.querySelector('.message-more')),grouped:c.classList.contains('message-grouped'),
+            reply:c.querySelector('.message-head .reply-context')?rect(c.querySelector('.message-head .reply-context')):null}))};
       })()`);
       measurements.push(geometry);
       try {
@@ -180,6 +187,24 @@ async function measure() {
             assert.ok(geometry.own.more.right<=geometry.own.bubble.left,'own actions button left of the bubble');
             for(const i of [1,2,4,5])assert.ok(geometry.grouped[i].more.left>=geometry.grouped[i].bubble.right,'incoming actions button right of the bubble');
             for(const g of [...geometry.grouped,geometry.own]) assert.ok(g.time.left>=g.bubble.left && g.time.right<=g.bubble.right && g.time.top>=g.bubble.top && g.time.bottom<=g.bubble.bottom,'clock inside bubble');
+            // Every actions button, empty head or populated, is a 44px target in
+            // the gutter: in its row and beside the bubble, so it covers no text.
+            assert.strictEqual(geometry.actions.length,13,'every authored message has an actions button');
+            for(const a of geometry.actions) {
+              assert.ok(a.more.width>=44 && a.more.height>=44,a.id+' actions button 44px target: '+JSON.stringify(a.more));
+              assert.ok(a.more.left>=0 && a.more.right<=width,a.id+' actions button inside the viewport');
+              assert.ok(a.more.top>=a.row.top-.5 && a.more.bottom<=a.row.bottom+.5,a.id+' actions button stays in its row');
+              assert.ok(a.more.right<=a.bubble.left+.5 || a.more.left>=a.bubble.right-.5,a.id+' actions button clears the bubble text');
+            }
+            // A head with visible metadata keeps its row and spacing even on a
+            // repeated or own message; the empty-head rule must not catch it.
+            const byId=id=>geometry.actions.find(a=>a.id===id),reference=byId(8);
+            assert.ok(byId(13).grouped,'grouped metadata fixture');
+            for(const id of [13,14]) {
+              const a=byId(id);
+              assert.ok(a.reply && a.reply.height>0 && a.head.height>0,id+' metadata head stays visible');
+              assert.strictEqual(a.bubble.top-a.head.bottom,reference.bubble.top-reference.head.bottom,id+' metadata head keeps populated spacing');
+            }
             assert.ok(geometry.topbar.height<=64,'phone app bar stays compact');
             if(width===390 && ['light-1','dark-1','inspired-rescue'].includes(theme)) assert.ok(geometry.ackHeight<=BASELINE_ACK_HEIGHT[theme]*.60,'ack cluster <=60% of measured pre-change height: '+geometry.ackHeight);
           }else for(const i of [1,2,4,5])assert.ok(geometry.grouped[i].author.width>1,'desktop repeated names remain');
@@ -193,7 +218,7 @@ async function measure() {
             const before=[...list.querySelectorAll('[data-message-id="8"] .target-chip')].filter(el=>el.getClientRects().length).length;
             more.click();const after=[...list.querySelectorAll('[data-message-id="8"] .target-chip')].filter(el=>el.getClientRects().length).length;
             const expanded=more.getAttribute('aria-expanded');more.click();
-            const hitTargets=[...list.querySelectorAll('time[datetime],.reply-context,.targets-toggle,.code-copy')].filter(el=>el.getClientRects().length);
+            const hitTargets=[...list.querySelectorAll('time[datetime],.reply-context,.targets-toggle,.code-copy,.message-more')].filter(el=>el.getClientRects().length);
             const targets=hitTargets.map(el=>{
               el.scrollIntoView({block:'center'});const box=el.getBoundingClientRect(),p=getComputedStyle(el,'::after');
               const r={left:box.left+(parseFloat(p.left)||0),right:box.right-(parseFloat(p.right)||0),top:box.top+(parseFloat(p.top)||0),bottom:box.bottom-(parseFloat(p.bottom)||0)};
@@ -202,9 +227,21 @@ async function measure() {
               return {id:el.closest('.message').dataset.messageId,cls:el.className,width,height,hits,label:el.getAttribute('aria-label')||el.title};
             });
             // The bubble keeps native text selection on a long press, so the
-            // actions button is the menu path.
+            // actions button is the menu path. Tap it where a finger lands, its
+            // centre, for a populated head (1) and an empty one (2 and own 7).
+            const tap=card=>{
+              const button=card.querySelector('.message-more');button.scrollIntoView({block:'center'});
+              const box=button.getBoundingClientRect(),hit=document.elementFromPoint(box.left+box.width/2,box.top+box.height/2);
+              if(!button.contains(hit))return false;hit.click();return true;
+            };
+            const tapped={};
+            for(const id of ['2','7']){
+              const card=list.querySelector('[data-message-id="'+id+'"]');
+              tapped[id]=tap(card)&&!card.querySelector('.message-actions-menu').classList.contains('hidden');
+              Trio.conversation.closeMessageActions?.();
+            }
             const incoming=list.querySelector('[data-message-id="1"]');
-            incoming.querySelector('.message-more').click();
+            tapped['1']=tap(incoming);
             const menu=incoming.querySelector('.message-actions-menu'),copy=menu?.querySelector('.menu-copy');
             const copyRect=copy?.getBoundingClientRect();if(copy && ${mobile})copy.click();await Promise.resolve();
             list.querySelector('[data-message-id="12"] .code-copy').click();await Promise.resolve();
@@ -213,7 +250,7 @@ async function measure() {
             const focused=document.activeElement===replyTarget;
             const clock=list.querySelector('[data-message-id="1"] time[datetime]'+(${mobile}?'.bubble-time':'.header-time'));
             clock.click();await Promise.resolve();
-            return {hidden,visible,before,after,expanded,targets,jumped,focused,
+            return {hidden,visible,before,after,expanded,targets,jumped,focused,tapped,
               copySize:copyRect?{width:copyRect.width,height:copyRect.height}:null,
               incomingCopied:window.copies.at(-3),codeCopied:window.copies.at(-2),timeCopied:window.copies.at(-1),
               externalCopies:[...list.querySelectorAll('.message-tools')].filter(el=>el.getClientRects().length).length,
@@ -227,6 +264,7 @@ async function measure() {
           if(mobile){
             assert.strictEqual(behavior.before,3,'three recipients before expansion');assert.strictEqual(behavior.after,4,'all recipients after expansion');assert.strictEqual(behavior.expanded,'true');
             assert.strictEqual(behavior.externalCopies,0,'no outside copy row on phone');
+            assert.deepStrictEqual(behavior.tapped,{1:true,2:true,7:true},'actions button centre receives the tap and opens the menu');
             assert.strictEqual(behavior.incomingCopied,'Ready.','incoming message copies from the actions menu');
             assert.ok(behavior.copySize.width>=44 && behavior.copySize.height>=44,'menu copy target 44px');
             for(const t of behavior.targets){assert.ok(t.width>=44&&t.height>=44,t.cls+' 44px target');assert.ok(t.hits.every(Boolean),JSON.stringify(t)+' actual hit edges');}
