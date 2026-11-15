@@ -69,6 +69,27 @@ def ended_notice(prefix, channel, member_id, reason, server=None):
             f'{server_clause(server)}: {shown}. No further wake will come for it. {advice}')
 
 
+def batch_notice_lines(items):
+    """The notice lines for one released buffer: one sentence per membership.
+
+    `items` are the interposer's buffered memberships (source, channel, member_id,
+    first_id, last_id, count, addressed, reason, server). A batch can mix local Trio
+    and Quartet memberships on different servers, so each line carries its own tool
+    prefix, member id and server rather than one instruction for the whole batch."""
+    lines = []
+    for item in items:
+        prefix = 'trio' if item.get('source') == 'local' else 'quartet'
+        server = item.get('server') or None
+        if item.get('count') and not item.get('reason'):
+            lines.append(message_notice(prefix, item.get('channel'), item.get('member_id'),
+                                        item.get('first_id'), item.get('last_id'), item['count'],
+                                        bool(item.get('addressed')), server))
+        if item.get('reason'):
+            lines.append(ended_notice(prefix, item.get('channel'), item.get('member_id'),
+                                      item['reason'], server))
+    return lines
+
+
 class Notice(NamedTuple):
     line: str
     # The shown reason when this notice ends delivery for its membership, else ''.
