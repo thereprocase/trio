@@ -242,6 +242,19 @@
   :root[data-theme] .message.msg.has-bubble-time .message-head .header-time{ display:none; }
   :root[data-theme] .message.msg.me .message-head:not(:has(.reply-context,.target-chip,.confidence,.private-badge,.task-chip)),
   :root[data-theme] .message.msg.message-grouped .message-head:not(:has(.reply-context,.target-chip,.confidence,.private-badge,.task-chip)){ margin:0; }
+  /* A head with nothing else to show must stay zero-height, or every own and
+     repeated message gains a 24px row for the actions button alone. In that
+     case the button sits in the gutter opposite the bubble (48px or wider),
+     positioned against .message-content, level with the 48px minimum bubble. */
+  :root[data-theme] .message.msg.me .message-head:not(:has(.reply-context,.target-chip,.confidence,.private-badge,.task-chip)),
+  :root[data-theme] .message.msg.message-grouped .message-head:not(:has(.reply-context,.target-chip,.confidence,.private-badge,.task-chip)){ position:static; }
+  :root[data-theme] .message.msg.me .message-head:not(:has(.reply-context,.target-chip,.confidence,.private-badge,.task-chip)) .message-more,
+  :root[data-theme] .message.msg.message-grouped .message-head:not(:has(.reply-context,.target-chip,.confidence,.private-badge,.task-chip)) .message-more{
+    position:absolute; top:2px; left:100%; width:44px; height:44px;
+  }
+  :root[data-theme] .message.msg.me .message-head:not(:has(.reply-context,.target-chip,.confidence,.private-badge,.task-chip)) .message-more{
+    left:auto; right:100%;
+  }
   :root[data-theme] .message.msg .message-targets:not(.targets-expanded) .extra-target{ display:none; }
   :root[data-theme] .message.msg .bubble{ position:relative; padding:6px 10px; min-height:48px; }
   :root[data-theme] .message.msg .bubble-time-space{

@@ -150,9 +150,9 @@ async function measure() {
           rows:cards.map(c=>({id:Number(c.dataset.messageId),...rect(c)})),
           grouped:ack.map(c=>({grouped:c.classList.contains('message-grouped'),avatar:getComputedStyle(c.querySelector('.header-avatar')||c.querySelector('.message-avatar')).display,
             author:rect(c.querySelector('.message-head strong')),authorText:c.querySelector('.message-head strong').textContent,
-            time:rect(c.querySelector('.bubble-time')||c.querySelector('time')),bubble:rect(c.querySelector('.bubble'))})),
+            time:rect(c.querySelector('.bubble-time')||c.querySelector('time')),bubble:rect(c.querySelector('.bubble')),more:rect(c.querySelector('.message-more'))})),
           own:{author:rect(own.querySelector('.message-head strong')),head:rect(own.querySelector('.message-head')),
-            avatar:rect(own.querySelector('.message-avatar')),time:rect(own.querySelector('.bubble-time')||own.querySelector('time')),bubble:rect(own.querySelector('.bubble'))},
+            avatar:rect(own.querySelector('.message-avatar')),time:rect(own.querySelector('.bubble-time')||own.querySelector('time')),bubble:rect(own.querySelector('.bubble')),more:rect(own.querySelector('.message-more'))},
           topbar:rect(document.querySelector('.conversation-header'))};
       })()`);
       measurements.push(geometry);
@@ -170,6 +170,15 @@ async function measure() {
             }
             assert.ok(geometry.own.author.width<=1 && geometry.own.head.height===0,'own message has no name header');
             assert.strictEqual(geometry.own.avatar.width,0,'own avatar absent');
+            // Own and repeated messages have an empty head, so their actions button
+            // sits beside the bubble, in the gutter, instead of adding a row above it.
+            for(const g of [geometry.own,...[1,2,4,5].map(i=>geometry.grouped[i])]) {
+              assert.ok(g.more.width>=44 && g.more.height>=44,'gutter actions button 44px target');
+              assert.ok(g.more.left>=0 && g.more.right<=width,'gutter actions button inside the viewport');
+              assert.ok(g.more.top>=g.bubble.top && g.more.bottom<=g.bubble.bottom,'gutter actions button level with its bubble');
+            }
+            assert.ok(geometry.own.more.right<=geometry.own.bubble.left,'own actions button left of the bubble');
+            for(const i of [1,2,4,5])assert.ok(geometry.grouped[i].more.left>=geometry.grouped[i].bubble.right,'incoming actions button right of the bubble');
             for(const g of [...geometry.grouped,geometry.own]) assert.ok(g.time.left>=g.bubble.left && g.time.right<=g.bubble.right && g.time.top>=g.bubble.top && g.time.bottom<=g.bubble.bottom,'clock inside bubble');
             assert.ok(geometry.topbar.height<=64,'phone app bar stays compact');
             if(width===390 && ['light-1','dark-1','inspired-rescue'].includes(theme)) assert.ok(geometry.ackHeight<=BASELINE_ACK_HEIGHT[theme]*.60,'ack cluster <=60% of measured pre-change height: '+geometry.ackHeight);
@@ -192,13 +201,10 @@ async function measure() {
               const hits=[[r.left+1,(r.top+r.bottom)/2],[r.right-1,(r.top+r.bottom)/2],[(r.left+r.right)/2,r.top+1],[(r.left+r.right)/2,r.bottom-1]].map(([x,y])=>el.contains(document.elementFromPoint(x,y)));
               return {id:el.closest('.message').dataset.messageId,cls:el.className,width,height,hits,label:el.getAttribute('aria-label')||el.title};
             });
-            // Contextmenu is the same menu path opened by a touch long press.
-            const incoming=list.querySelector('[data-message-id="1"]'),bubble=incoming.querySelector('.bubble');
-            if (${mobile} && ${width} === 390 && ['light-1','dark-1','inspired-rescue'].includes(${JSON.stringify(theme)})) {
-              bubble.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true,pointerType:'touch',isPrimary:true,clientX:100,clientY:100}));
-              await new Promise(resolve=>setTimeout(resolve,520));
-              bubble.dispatchEvent(new PointerEvent('pointerup',{bubbles:true,pointerType:'touch'}));
-            } else bubble.dispatchEvent(new MouseEvent('contextmenu',{bubbles:true,cancelable:true}));
+            // The bubble keeps native text selection on a long press, so the
+            // actions button is the menu path.
+            const incoming=list.querySelector('[data-message-id="1"]');
+            incoming.querySelector('.message-more').click();
             const menu=incoming.querySelector('.message-actions-menu'),copy=menu?.querySelector('.menu-copy');
             const copyRect=copy?.getBoundingClientRect();if(copy && ${mobile})copy.click();await Promise.resolve();
             list.querySelector('[data-message-id="12"] .code-copy').click();await Promise.resolve();
@@ -221,7 +227,7 @@ async function measure() {
           if(mobile){
             assert.strictEqual(behavior.before,3,'three recipients before expansion');assert.strictEqual(behavior.after,4,'all recipients after expansion');assert.strictEqual(behavior.expanded,'true');
             assert.strictEqual(behavior.externalCopies,0,'no outside copy row on phone');
-            assert.strictEqual(behavior.incomingCopied,'Ready.','incoming message copies from long-press menu');
+            assert.strictEqual(behavior.incomingCopied,'Ready.','incoming message copies from the actions menu');
             assert.ok(behavior.copySize.width>=44 && behavior.copySize.height>=44,'menu copy target 44px');
             for(const t of behavior.targets){assert.ok(t.width>=44&&t.height>=44,t.cls+' 44px target');assert.ok(t.hits.every(Boolean),JSON.stringify(t)+' actual hit edges');}
             assert.ok(!behavior.system.bubble && behavior.system.font==='11px','system line has no bubble and dim small text');

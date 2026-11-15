@@ -212,7 +212,7 @@ async function measure() {
           return { bubble:r, row:rect(c), content:rect(c.querySelector('.message-content')), leftGap:r.left-l.left, rightGap:l.right-r.right,
             avatar:rect((${mobile} && c.querySelector('.header-avatar')) || c.querySelector('.message-avatar')),
             head:rect(c.querySelector('.message-head')), targets:c.querySelector('.message-targets') ? rect(c.querySelector('.message-targets')) : null,
-            headerChildren:[...c.querySelector('.message-head').children].filter(el => el.getClientRects().length && getComputedStyle(el).clipPath !== 'inset(50%)').map(el => ({ tag:el.tagName, className:el.className, ...rect(el), whiteSpace:getComputedStyle(el).whiteSpace })),
+            headerChildren:[...c.querySelector('.message-head').children].filter(el => el.getClientRects().length && getComputedStyle(el).clipPath !== 'inset(50%)').map(el => ({ tag:el.tagName, className:el.className, ...rect(el), whiteSpace:getComputedStyle(el).whiteSpace, position:getComputedStyle(el).position })),
             chips:[...c.querySelectorAll('.target-chip')].filter(el => el.getClientRects().length).map(el => rect(el)),
             rowInsets:{ left:parseFloat(getComputedStyle(c).paddingLeft) + parseFloat(getComputedStyle(c).borderLeftWidth), right:parseFloat(getComputedStyle(c).paddingRight) + parseFloat(getComputedStyle(c).borderRightWidth) },
             copy:rect(copy), copyHitWidth:copy.offsetWidth + (parseFloat(target.left) || 0)*-1 + (parseFloat(target.right) || 0)*-1 };
@@ -275,6 +275,15 @@ async function measure() {
             assert.strictEqual(g.copy.height, 0, key + ' copy spends no row');
             assert.ok(g.head.left >= g.content.left - .5 && g.head.right <= g.content.right + .5, key + ' header fits content');
             for (const child of g.headerChildren) {
+              // An empty head parks the actions button in the gutter beside the
+              // bubble: inside the row, outside the content box by design.
+              if (child.className === 'message-more' && child.position === 'absolute') {
+                assert.ok(child.left >= g.row.left - .5 && child.right <= g.row.right + .5,
+                  key + ' gutter actions button fits the row: ' + JSON.stringify(child));
+                assert.ok(child.right <= g.bubble.left + .5 || child.left >= g.bubble.right - .5,
+                  key + ' gutter actions button clears the bubble: ' + JSON.stringify(child));
+                continue;
+              }
               assert.ok(child.left >= g.content.left - .5 && child.right <= g.content.right + .5,
                 key + ' header child fits content: ' + JSON.stringify(child));
               if (child.tag === 'TIME') assert.strictEqual(child.whiteSpace, 'nowrap', 'timestamp stays together');
