@@ -34,6 +34,8 @@
 // NOT SUPPORTED (deliberate gaps — do not trust a test that leans on these):
 //   • document.getElementById AUTO-CREATES a <div> on miss and never returns
 //     null; document.querySelector at the DOCUMENT level always returns null.
+//     The created <div> is empty except for the ids in SKELETON_CHILDREN,
+//     which take their children from server/web/index.html.
 //     So `if (!document.getElementById(x))` / document-level queries are NOT
 //     faithfully exercised — test such logic by extracting a pure helper
 //     (the nth_ask_client.js pattern) instead.
@@ -416,6 +418,32 @@ function collectMatches(root, group, out) {
   scan(root, scoped || childOnly);
 }
 
+// Skeleton elements whose static children the client reads with querySelector.
+// An auto-created element is empty, so a client call such as
+// button.querySelector('.channel-pin-count').textContent = … would throw here
+// while working in a browser. The ids named below get their children from
+// server/web/index.html, read from the file so the markup cannot drift from
+// what production serves. Add an id when client code starts querying inside
+// another static element.
+const SKELETON_CHILDREN = new Set(['channel-pins-button']);
+let _skeleton = null;
+function skeletonInner(id) {
+  if (_skeleton == null) {
+    _skeleton = fs.readFileSync(path.resolve(__dirname, '..', 'server', 'web', 'index.html'), 'utf8');
+  }
+  const open = new RegExp('<([a-zA-Z][\\w-]*)\\b[^>]*\\bid="' + id + '"[^>]*>').exec(_skeleton);
+  if (!open) throw new Error('no element with id "' + id + '" in server/web/index.html');
+  const tag = open[1], start = open.index + open[0].length;
+  const tags = new RegExp('<(/?)' + tag + '\\b[^>]*>', 'g');
+  tags.lastIndex = start;
+  let depth = 1, m;
+  while ((m = tags.exec(_skeleton))) {
+    depth += m[1] ? -1 : 1;
+    if (depth === 0) return _skeleton.slice(start, m.index);
+  }
+  throw new Error('element "' + id + '" in server/web/index.html is never closed');
+}
+
 // ── document / window ───────────────────────────────────────────────────────
 function makeDocument() {
   const byId = new Map();
@@ -428,7 +456,10 @@ function makeDocument() {
     createTextNode: (t) => textNode(t),
     createTreeWalker: (root, whatToShow) => createTreeWalker(root, whatToShow),
     getElementById(id) {
-      if (!byId.has(id)) { const el = new FakeElement('div'); el.id = id; byId.set(id, el); }
+      if (!byId.has(id)) {
+        const el = new FakeElement('div'); el.id = id; byId.set(id, el);
+        if (SKELETON_CHILDREN.has(id)) el.innerHTML = skeletonInner(id);
+      }
       return byId.get(id);
     },
     querySelector() { return null; },

@@ -1,5 +1,5 @@
 // Regression proofs for density review: native touch, identity rows, responsive
-// keyboard navigation and exact desktop geometry against main cb03d20.
+// keyboard navigation and exact desktop geometry against DESKTOP_BASELINE.
 // Usage: node tests/test-header-review-fixes.js (skips if Chromium is absent).
 // HEADER_EVIDENCE_DIR saves measurements outside the repo.
 // HEADER_REVIEW_SOURCE/CHECK select a scratch mutation and its regression proof.
@@ -66,8 +66,12 @@ const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'nth-headers-chromium-')
 const fixture = path.join(temporary, 'headers.html');
 // Load the actual main markup, scripts and CSS; a cap or a screenshot cannot
 // detect a shifted timestamp or a downstream timeline position.
+// DESKTOP_BASELINE is the last commit that changed the 1280px message layout
+// on purpose (wider conversation rows; the actions button joined the tab
+// order in 014f7c2). Move it only together with a deliberate desktop change.
+const DESKTOP_BASELINE = '08b667d';
 const baseRead = name => {
-  const result = spawnSync('git', ['show', 'cb03d20:server/' + name], {cwd:path.join(__dirname,'..'),encoding:'utf8'});
+  const result = spawnSync('git', ['show', DESKTOP_BASELINE + ':server/' + name], {cwd:path.join(__dirname,'..'),encoding:'utf8'});
   assert.strictEqual(result.status,0,'main baseline is available: '+name);
   return result.stdout;
 };
