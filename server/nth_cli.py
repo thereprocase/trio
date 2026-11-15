@@ -27,7 +27,7 @@ def settings():
     return json.loads(path.read_text(encoding='utf-8-sig')) if path.exists() else {}
 
 
-def interposer_control(action):
+def interposer_control(action, session=None):
     from nth_interposer_wire import connect, home as interposer_home, WireError, stop_fallback
     try:
         if action == 'logs':
@@ -51,9 +51,15 @@ def interposer_control(action):
                 print(json.dumps({'restarted': True, 'hello': client.hello}, indent=2))
             return 0
         with connect() as client:
-            print(json.dumps({'hello': client.hello, **client.call('list')}, indent=2))
+            # One session's rows fit a reply frame however many sessions the store holds.
+            state = client.call('status', session=session) if session else client.call('list')
+            print(json.dumps({'hello': client.hello, **state}, indent=2))
         return 0
     except (OSError, WireError, EOFError, subprocess.SubprocessError) as exc:
+        if 'exceeds 64 KiB' in str(exc):
+            print('The interposer holds too many sessions for one reply; '
+                  'name one with `trio interposer status --session ID`.', file=sys.stderr)
+            return 1
         print('Interposer unavailable: ' + type(exc).__name__ + '; see trio interposer logs', file=sys.stderr)
         return 1
 
@@ -666,6 +672,36 @@ def _ensure_codex_locked(binary=None):
     raise RuntimeError('Codex server did not become ready; inspect events/codex-server.log')
 
 
+def bind_tmux(session, client, pane):
+    """Register a running Claude or Codex session for tmux notice delivery.
+
+    The pane's own process id and the session id together are the binding the
+    sink checks before it types, so both are read here rather than taken on trust."""
+    from nth_interposer_tmux import CLIENT_PROGRAMS, command
+    from nth_interposer_wire import connect, WireError
+    pane = pane or os.environ.get('TMUX_PANE')
+    if not session or client not in ('claude', 'codex') or not pane:
+        print('bind-tmux needs --session ID, --client claude|codex and a pane '
+              '(--pane %N, or run it inside the tmux pane).', file=sys.stderr)
+        return 1
+    try:
+        pane_id, pid, program = command(
+            'display-message', '-p', '-t', pane,
+            '#{pane_id} #{pane_pid} #{pane_current_command}').strip().split(' ', 2)
+        with connect() as service:
+            service.call('session.register', session=session, client=client, host_pid=int(pid),
+                         sink='tmux', host_ok=True, problem='', pane=pane_id)
+    except (OSError, ValueError, WireError, EOFError, subprocess.SubprocessError) as exc:
+        print('Could not bind the pane: ' + type(exc).__name__ + '; check the pane with '
+              '`tmux list-panes -a` and the service with `trio interposer status`.', file=sys.stderr)
+        return 1
+    print(json.dumps({'session': session, 'pane': pane_id, 'host_pid': int(pid), 'program': program}))
+    if program not in CLIENT_PROGRAMS:
+        print(f'Pane {pane_id} is running {program!r}. Notices are typed only while its '
+              'foreground program is one of: ' + ', '.join(CLIENT_PROGRAMS) + '.', file=sys.stderr)
+    return 0
+
+
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv[:1] == ['terminal']:
@@ -700,7 +736,10 @@ def main(argv=None):
     interposer = sub.add_parser('interposer', help='Inspect and control the spoke interposer')
     interposer.add_argument('--since', type=float)
     interposer.add_argument('--json', action='store_true', dest='as_json')
-    interposer.add_argument('action', choices=['status', 'restart', 'logs', 'shadow-diff', 'approve'])
+    interposer.add_argument('--session', help='bind-tmux, status: the session id the client reports')
+    interposer.add_argument('--client', choices=['claude', 'codex'], help='bind-tmux: the client in the pane')
+    interposer.add_argument('--pane', help='bind-tmux: tmux pane id such as %%12 (default: $TMUX_PANE)')
+    interposer.add_argument('action', choices=['status', 'restart', 'logs', 'shadow-diff', 'approve', 'bind-tmux'])
     interposer.add_argument('server', nargs='?')
     interposer.add_argument('url', nargs='?')
     sub.add_parser('start', help='Start the local event service')
@@ -770,7 +809,9 @@ def main(argv=None):
                 print('Notice counts: '+json.dumps(result['sessions']))
                 print('Median release delay: '+str(result['median_release_delay']))
             return int(bool(result['missing_in_would'] or result['missing_in_actual'] or result['errors']))
-        return interposer_control(args.action)
+        if args.action == 'bind-tmux':
+            return bind_tmux(args.session, args.client, args.pane)
+        return interposer_control(args.action, args.session)
     elif args.command == 'status':
         print(json.dumps({'listeners': public_status(),
                           'claude_channels': 'not shown here: a channel listener lives inside the Claude '

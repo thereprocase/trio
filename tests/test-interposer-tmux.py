@@ -198,6 +198,45 @@ class FixesTests(SinkCase):
  def test_capture_requests_escapes(self):
   self.enqueue();self.sink.drain()
   self.assertIn('-e',[c for c in self.calls if c[0]=='capture-pane'][0])
+ def test_cli_binds_the_pane_it_inspected(self):
+  # The CLI reads the pane id and pane process from tmux and registers exactly those.
+  import contextlib, io, nth_cli, nth_interposer_wire
+  sent=[]
+  class Service:
+   def call(self,op,**fields):
+    request=dict(fields,v=1,id=1,op=op);validate_request(request);sent.append(request)
+  @contextlib.contextmanager
+  def connect():yield Service()
+  out,err=io.StringIO(),io.StringIO()
+  with patch('nth_interposer_tmux.command',return_value='%7 4242 bash\n') as tmux,patch.object(nth_interposer_wire,'connect',connect),\
+    contextlib.redirect_stdout(out),contextlib.redirect_stderr(err):
+   self.assertEqual(nth_cli.bind_tmux('session-test','codex','work:1.0'),0)
+   self.assertEqual(nth_cli.bind_tmux('session-test','opencode','%7'),1)
+   self.assertEqual(nth_cli.bind_tmux('','claude','%7'),1)
+  self.assertEqual(tmux.call_args[0][3],'work:1.0')
+  self.assertEqual(len(sent),1)
+  self.assertEqual({k:sent[0][k] for k in ('session','client','sink','pane','host_pid')},
+   dict(session='session-test',client='codex',sink='tmux',pane='%7',host_pid=4242))
+  self.assertIn("running 'bash'",err.getvalue())
+ def test_cli_status_names_one_session(self):
+  # A store with hundreds of sessions overflows one reply frame; the CLI asks for one session.
+  import contextlib, io, nth_cli, nth_interposer_wire
+  asked=[]
+  class Service:
+   hello={'version':'test'}
+   def call(self,op,**fields):
+    asked.append((op,fields))
+    if op=='list':raise nth_interposer_wire.ServiceRefused('response exceeds 64 KiB; use status with a key or session')
+    return {'sessions':[{'session':fields['session'],'sink':'tmux'}]}
+  @contextlib.contextmanager
+  def connect(**_):yield Service()
+  out,err=io.StringIO(),io.StringIO()
+  with patch.object(nth_interposer_wire,'connect',connect),contextlib.redirect_stdout(out),contextlib.redirect_stderr(err):
+   self.assertEqual(nth_cli.interposer_control('status','session-test'),0)
+   self.assertEqual(nth_cli.interposer_control('status'),1)
+  self.assertEqual(asked,[('status',{'session':'session-test'}),('list',{})])
+  self.assertIn('"sink": "tmux"',out.getvalue())
+  self.assertIn('trio interposer status --session ID',err.getvalue())
  def test_multiline_unfinished_prompt_defers(self):
   # Finding 4: an empty first input line with continuation lines is not empty input.
   self.assertFalse(idle_footer(CLAUDE_MULTILINE,'claude'));self.assertFalse(idle_footer(CODEX_MULTILINE,'codex'))
