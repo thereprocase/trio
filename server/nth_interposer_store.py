@@ -294,8 +294,10 @@ class Store:
         for row in self.db.execute("SELECT id FROM deliveries WHERE session=? AND state='queued'", (session,)).fetchall():
             items = self._outbox_items(row['id'])
             for item in items:
-                acked = self.db.execute('SELECT shadow_acked_through FROM memberships WHERE key=?',
-                                        (item.get('key'),)).fetchone()
+                # A hook's ack.seen is best-effort and can be lost while the service
+                # restarts; the hook's own state file carries the same watermark.
+                acked = self.db.execute('SELECT MAX(COALESCE(shadow_acked_through,0),COALESCE(acked_through,0)) '
+                                        'FROM memberships WHERE key=?', (item.get('key'),)).fetchone()
                 if (item.get('reason') or type(item.get('last_id')) is not int
                         or not acked or acked[0] is None or acked[0] < item['last_id']):
                     break
@@ -683,3 +685,4 @@ class Store:
                     ON CONFLICT(session,key) DO UPDATE SET
                     server=CASE WHEN holdings.attached=1 THEN holdings.server ELSE COALESCE(NULLIF(excluded.server,''),holdings.server) END,
                     joined=CASE WHEN holdings.attached=1 THEN holdings.joined ELSE MAX(holdings.joined,excluded.joined) END''', (session, key, server, stamp))
+        self._cancel_acknowledged(session)

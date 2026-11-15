@@ -167,6 +167,23 @@ class LifecycleTests(unittest.TestCase):
         self.assertIsNone(self.wait('session-sdk'))
         self.assertIsNone(self.store.db.execute("SELECT 1 FROM meta WHERE key LIKE 'outbox_members:%'").fetchone())
 
+    def test_hook_state_ack_cancels_notice_when_ack_seen_was_lost(self):
+        self.register('session-sdk')
+        self.identity(KEY)
+        self.attach(KEY, 'session-sdk')
+        self.queue_from_runtime(KEY, 'session-sdk', ids=(1, 2))
+        hooks = self.store.path.parent / 'hooks'
+        hooks.mkdir(exist_ok=True)
+        state = {'client': 'claude', 'memberships': {KEY: {'source': 'local', 'channel': 'room', 'member_id': 'member'}},
+                 'high_water': {KEY: 2}, 'acked': {KEY: 1}}
+        (hooks / 'session-session-sdk.json').write_text(json.dumps(state))
+        self.store.import_hooks()
+        self.assertEqual(self.states('session-sdk'), ['queued'])
+        state['acked'][KEY] = 2
+        (hooks / 'session-session-sdk.json').write_text(json.dumps(state))
+        self.store.import_hooks()
+        self.assertEqual(self.states('session-sdk'), ['cancelled'])
+
     def test_ack_keeps_ended_delivery_and_claimed_notices(self):
         self.register('session-sdk')
         self.identity(KEY)
