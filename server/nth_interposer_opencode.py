@@ -2,13 +2,13 @@
 import json
 import time
 from nth_claude_hook import process_stamp
-from nth_interposer_tmux import notice
+from nth_notice import batch_notice_lines
 from nth_interposer_wire import WireError
 
 
 def enqueue(store, session, items):
     store.db.execute('INSERT INTO deliveries(session,sink,body,ranges,state,created) VALUES (?,?,?,?,?,?)',
-                     (session,'opencode',notice(items),'{}','queued',time.time()))
+                     (session,'opencode','\n'.join(batch_notice_lines(items)),'{}','queued',time.time()))
     return True
 
 

@@ -93,7 +93,7 @@ class LifecycleTests(unittest.TestCase):
         self.store.end('session-old')
         delivery = self.wait('session-new')
         self.assertIsNotNone(delivery)
-        self.assertIn('2 unread in room', delivery['notice'])
+        self.assertRegex(delivery['notice'], r'2 new trio messages .* in channel room\.')
         self.assertEqual(self.states('session-old'), ['cancelled'])
 
     # Finding 1: a claimed notice stays with its claim and is never replayed.
@@ -110,7 +110,7 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(self.states('session-old'), ['sending', 'cancelled'])
         moved = self.wait('session-new')
         self.assertNotEqual(moved['id'], claimed['id'])
-        self.assertIn('1 unread in room', moved['notice'])
+        self.assertRegex(moved['notice'], r'1 new trio message .* in channel room\.')
         self.assertIsNone(self.wait('session-new'))
 
     # Finding 1: only the departing membership moves out of a shared notice.
@@ -129,10 +129,10 @@ class LifecycleTests(unittest.TestCase):
         runtime.close()
         self.attach(KEY, 'session-new')
         old = self.wait('session-old')['notice']
-        self.assertIn('2 unread in hall', old)
+        self.assertRegex(old, r'2 new trio messages .* in channel hall\.')
         self.assertNotIn('room', old)
         new = self.wait('session-new')['notice']
-        self.assertIn('1 unread in room', new)
+        self.assertRegex(new, r'1 new trio message .* in channel room\.')
         self.assertNotIn('hall', new)
 
     # Finding 2: end cancels queued work and removes sink bindings.
@@ -143,8 +143,8 @@ class LifecycleTests(unittest.TestCase):
         sink = TmuxSink(self.store, run=lambda *a: '')
         from nth_interposer_opencode import enqueue
         with self.store.lock, self.store.db:
-            sink.enqueue('session-tmux', [dict(source='local', channel='room', member_id='m', count=1)])
-            enqueue(self.store, 'session-sdk', [dict(source='local', channel='room', member_id='m', count=1)])
+            sink.enqueue('session-tmux', [dict(source='local', channel='room', member_id='m', first_id=1, last_id=1, count=1)])
+            enqueue(self.store, 'session-sdk', [dict(source='local', channel='room', member_id='m', first_id=1, last_id=1, count=1)])
         self.store.end('session-tmux')
         self.store.end('session-sdk')
         self.assertEqual(self.states(), ['cancelled', 'cancelled'])
@@ -157,9 +157,9 @@ class LifecycleTests(unittest.TestCase):
             self.register('session-a', sink='tmux')
             sink = TmuxSink(self.store, run=lambda *a: '')
             with self.store.lock, self.store.db:
-                sink.enqueue('session-a', [dict(source='local', channel='room', member_id='m', count=1)])
+                sink.enqueue('session-a', [dict(source='local', channel='room', member_id='m', first_id=1, last_id=1, count=1)])
                 # Simulate a row claimed before the end: kept for inspection.
-                sink.enqueue('session-a', [dict(source='local', channel='room', member_id='m', count=1)])
+                sink.enqueue('session-a', [dict(source='local', channel='room', member_id='m', first_id=1, last_id=1, count=1)])
                 self.store.db.execute("UPDATE deliveries SET state='uncertain' WHERE id=(SELECT MAX(id) FROM deliveries)")
                 self.store.db.execute("UPDATE sessions SET state='ended' WHERE session='session-a'")
             self.register('session-b')
@@ -183,7 +183,7 @@ class LifecycleTests(unittest.TestCase):
         self.register('session-sdk')
         from nth_interposer_opencode import enqueue
         with self.store.lock, self.store.db:
-            enqueue(self.store, 'session-sdk', [dict(source='local', channel='room', member_id='m', count=1)])
+            enqueue(self.store, 'session-sdk', [dict(source='local', channel='room', member_id='m', first_id=1, last_id=1, count=1)])
         self.store.turn(dict(session='session-sdk', phase='started'))
         child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])
         self.children.append(child)
@@ -283,7 +283,7 @@ class LifecycleTests(unittest.TestCase):
         self.attach(KEY, 'session-new')
         self.store.end('session-old')
         moved = self.wait('session-new')
-        self.assertIn('2 unread in room', moved['notice'])
+        self.assertRegex(moved['notice'], r'2 new trio messages .* in channel room\.')
         self.assertIsNone(self.wait('session-new'))
         self.assertEqual(self.store.db.execute('SELECT state FROM deliveries WHERE id=?', (claimed['id'],)).fetchone()[0], 'sending')
 
@@ -292,9 +292,9 @@ class LifecycleTests(unittest.TestCase):
         self.register('session-sdk')
         from nth_interposer_opencode import enqueue
         with self.store.lock, self.store.db:
-            enqueue(self.store, 'session-sdk', [dict(source='local', channel='room', member_id='m', count=4)])
+            enqueue(self.store, 'session-sdk', [dict(source='local', channel='room', member_id='m', first_id=1, last_id=4, count=4)])
         delivery = self.wait('session-sdk')
-        self.assertIn('4 unread in room', delivery['notice'])
+        self.assertRegex(delivery['notice'], r'4 new trio messages .* in channel room\.')
         self.assertEqual(self.delivered('session-sdk', delivery['id']), {'recorded': True})
         self.assertEqual(self.states(), ['written'])
         for bad in (dict(op='delivered', session='session-sdk', host_pid=os.getpid(), delivery_id=delivery['id'], outcome='maybe'),
