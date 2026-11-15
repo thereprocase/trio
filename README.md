@@ -213,7 +213,7 @@ For a persistent hub that survives reboots, use systemd:
 sudo bash setup.sh hub-service
 ```
 
-`hub-service` deploys to `/opt/quartet-hub` with systemd units for the MCP server (`:8000`) and the web dashboard (`:8765`), starts them, and handles upgrades with timestamped backups and pre-restart compile checks.
+`hub-service` deploys to `/opt/quartet-hub` with systemd units for the MCP server (`:8000`) and the web dashboard (`:8765`), and starts them. An upgrade is staged and checked first (pinned dependency versions, byte-compile, an import of both servers); a failed check exits 1 and leaves the running release in place. The files an upgrade replaces, including the old `web/`, are kept in `/opt/quartet-hub/backups/<timestamp>/` (newest 5; `HUB_KEEP_BACKUPS` changes the count). After the restart it probes both services and prints `UNVERIFIED` with exit 1 when a probe fails.
 
 > ⚠️ `hub-service` runs `nth_web.py --tailscale-tls`, which binds `0.0.0.0:8765`
 > with **no authentication**. Anyone who can reach that port can read every
@@ -287,6 +287,9 @@ Environment=NTH_TAILNET_DEVICE_OWNERS=100.64.0.10=you@example.com,100.64.0.11=sa
 - The mapped login goes through `NTH_TAILNET_OWNER` and `NTH_TAILNET_MEMBERS`
   like any other login: the owner's login gives the Owner tier, a listed login
   gives Member, and an unlisted login is a tailnet guest.
+- A hub that is itself a tagged node has no login of its own, so set
+  `NTH_TAILNET_OWNER` on it; without that variable no login, mapped or signed
+  in, reaches the Owner tier.
 - **Mapping a device to the owner gives owner powers to anything that can send
   requests from that device**: every user of the machine, every local process,
   and any proxy or tunnel running on it. Map only machines you trust to that
@@ -977,32 +980,58 @@ or ended, or native delivery takes ownership. Unsupervised waiters retain a
 
 ### Explicit tmux delivery sink
 
-An operator-managed crew may register `session.register` with `sink: tmux`, a
-`pane` ID and the pane host PID, then attach its existing membership. Only these
-explicit registrations use real interposer delivery; ordinary hook sessions retain
-their existing path. The sink queues sanitized counts/mention flags, never peer
-bodies, and types only at an empty Claude/Codex prompt in the bound live pane.
-Busy or partially typed prompts retain their notice. Successful typing means
-`written`, not model receipt or acknowledgement. An ambiguous send is held for
-inspection and is never replayed automatically. `session.end` stops delivery.
-A live terminal sink is separate from shadow evidence and does not acknowledge mail.
+An operator can have room notices typed into a tmux pane that runs Claude Code
+or Codex. Run this once per session, while the client is running in the pane:
 
-## OpenCode SDK sink (delivery sprint A3)
+```bash
+trio interposer bind-tmux --session ID --client claude|codex [--pane %N]
+```
 
-OpenCode 2.2.5 opts into `client: opencode, sink: opencode` with its live server
-PID. The plugin adapter observes successful connect/listen/ack tool results and
-uses the same canonical identity validation as Claude; credentials stay private
-and never enter IPC. The interposer keeps one membership poller and a durable
-metadata-only notice outbox. `wait(session, host_pid)` claims one idle-session
-notice; `delivered(session, host_pid, delivery_id, outcome)` records written or
-uncertain after SDK `session.prompt({sessionID,text})` admission. A lost claim or
-SDK reply is never replayed automatically. Busy sessions defer, and plugin
-shutdown ends its registrations. Ordinary Claude/Codex delivery stays unchanged.
-The installed plugin lives in ~/services/opencode-sparks/lib/interposer.mjs.
-A successful room connection alone does not establish delivery: verify a notice
-admitted to the SDK and a new turn, then poll and acknowledge through room tools.
+- `ID` is the session id the client prints for `/status`. `--pane` defaults to
+  `$TMUX_PANE`; give `--pane %N` when binding from another pane.
+- The pane must be on the tmux server that the interposer's user reaches with a
+  bare `tmux` command. A pane on a private `tmux -L` server is out of reach.
+- The pane's foreground program must be one of `claude`, `codex`, `opencode`,
+  `python` or `python3`. A client that tmux reports as `node` gets no notices.
+- Binding works before or after the session joins a channel. Confirm it with
+  `trio interposer status --session ID`, which shows `"sink": "tmux"`.
 
-Spark OpenCode launches set TRIO_NATIVE_CLIENT=opencode. Connect/listen/status
-guidance uses the SDK path; ready requires a live matching host, a listening
-membership and a consumer poll heartbeat younger than15 seconds. A saved join
-or a live OpenCode process without its plugin never counts as delivery readiness.
+The binding records the pane, the pane's own process and the client process.
+Before each notice the sink checks that both processes are the ones it recorded;
+when the client exits, or another program takes over the pane, typing stops. Binding
+the session to a different pane moves its queued notices to that pane.
+
+A notice is one line with a message count, a message id, the member, the
+channel, the MCP server to poll and whether the member was addressed directly.
+It carries no message text. The sink types it only at an empty, idle input box.
+A notice waits while the client is working or a draft is in the box, and it is
+cancelled when the session acknowledges those messages first. A session that
+also has Trio's hooks installed keeps its hook wake, so either path can start
+the turn; once the session acknowledges, the notice still queued is cancelled.
+
+`written` in the status output means the line was typed and submitted; the agent
+still has to poll and acknowledge. A send whose outcome is unknown is held as
+`uncertain` for inspection and is never typed a second time. Ending the session
+cancels its queued notices and removes the binding.
+
+### OpenCode sink
+
+The interposer service accepts OpenCode sessions; the OpenCode plugin that talks
+to it is a separate adapter and is absent from this repository. An adapter uses
+these service calls:
+
+- `session.register` with `client: opencode`, `sink: opencode` and the live
+  OpenCode server PID as `host_pid`.
+- `wait(session, host_pid)` claims one notice for an idle session.
+- `delivered(session, host_pid, delivery_id, outcome)` records `written` or
+  `uncertain` after the adapter hands the notice to the OpenCode SDK.
+- `turn` with phase `started` or `ended` marks the session busy or idle; a
+  busy session's notices wait.
+
+The adapter also reports successful connect, listen and ack tool results, which
+pass the same identity validation as Claude's. Credentials stay out of IPC. A
+claim or SDK reply that is lost is never replayed. An OpenCode launch sets
+`TRIO_NATIVE_CLIENT=opencode`; status reports the session ready when it has a
+live matching host, a listening membership and a `wait` heartbeat younger than
+15 seconds. A saved join alone, or an OpenCode process without an adapter,
+reports as not ready.
